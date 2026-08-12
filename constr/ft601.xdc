@@ -261,15 +261,27 @@ set_output_delay -clock [get_clocks ft_clk_12] -min [expr {-$FT601_TH}] -add_del
 # Table 4.2 for the other direction:
 #   T1 Slave Drive Data Set Up Time    3.0 ns min
 #   T2 Slave Drive Data Hold Time      3.5 ns min
-# i.e. the chip's data is valid from 3.0 ns before our capture edge until 3.5 ns
-# after it.  Expressed the standard centre-aligned source-synchronous way: latest
-# arrival is -T1, earliest is -(period - T2).
+#
+# The chip's data is valid from T1 before our capture edge until T2 after it, so
+# it straddles the edge and was therefore launched by the PREVIOUS one.  Say that
+# directly, with positive delays measured from that previous edge:
+#
+#   -max = period - T1 = 7.0   latest the data can settle
+#   -min = T2          = 3.5   earliest it can start changing
+#
+# Written the other way round - negative delays relative to the capture edge,
+# -max -3.0 / -min -6.5 - the arithmetic is equivalent but the hold check is not:
+# it launches from the SAME edge and reads -6.5 as data arriving 6.5 ns early,
+# reporting -5.729 ns on ft_txe and ft_rxf.  Those were phantom violations on a
+# link that was byte-perfect, and a report that cries wolf is nearly as harmful
+# as one that stays silent.
 set FT601_T1 3.0
 set FT601_T2 3.5
+set FT601_PERIOD 10.0
 
 set ft601_ins [get_ports {ft_rxf ft_txe}]
-set_input_delay -clock [get_clocks ft_clk_12] -max [expr {-$FT601_T1}] -add_delay $ft601_ins
-set_input_delay -clock [get_clocks ft_clk_12] -min [expr {$FT601_T2 - 10.0}] -add_delay $ft601_ins
+set_input_delay -clock [get_clocks ft_clk_12] -max [expr {$FT601_PERIOD - $FT601_T1}] -add_delay $ft601_ins
+set_input_delay -clock [get_clocks ft_clk_12] -min $FT601_T2 -add_delay $ft601_ins
 
 # Pack the FT601 interface registers into the IOBs.
 #
