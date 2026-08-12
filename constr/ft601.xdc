@@ -247,13 +247,18 @@ set_property IOSTANDARD LVCMOS33 [get_ports {ft_data[31]}]
 # DS_FT600Q-FT601Q Table 4.2, measured values - no longer estimates.
 #   T3 Master Drive Data Set Up Time   1.0 ns min
 #   T4 Master Drive Data Hold Time     4.8 ns min
-# The hold requirement is the demanding one and drives NEG_PHASE in ft_clk_gen.v.
+#
+# T4 goes to -min as a POSITIVE value, matching pcileech-fpga.  That is what
+# actually enforces the chip's hold window: our data must not change until 4.8 ns
+# after the sampling edge, and the IOB clock-to-out (~5 ns) is what satisfies it.
+# Written as -min -4.8 the check is vacuous - it passes whatever the design does,
+# which is how output hold went unverified here for several builds.
 set FT601_TSU 1.0
 set FT601_TH  4.8
 
 set ft601_outs [get_ports {ft_data[*] ft_be[*] ft_wr ft_rd ft_oe}]
 set_output_delay -clock [get_clocks ft_clk_12] -max  $FT601_TSU -add_delay $ft601_outs
-set_output_delay -clock [get_clocks ft_clk_12] -min [expr {-$FT601_TH}] -add_delay $ft601_outs
+set_output_delay -clock [get_clocks ft_clk_12] -min $FT601_TH -add_delay $ft601_outs
 
 # Inputs from the chip: clock-to-out of the FT601 relative to the same clock.
 # Likewise for the chip's own clock-to-out: skew relative to the clock that
@@ -267,7 +272,10 @@ set_output_delay -clock [get_clocks ft_clk_12] -min [expr {-$FT601_TH}] -add_del
 # directly, with positive delays measured from that previous edge:
 #
 #   -max = period - T1 = 7.0   latest the data can settle
-#   -min = T2          = 3.5   earliest it can start changing
+#   -min = period - T2 = 6.5   earliest it can start changing
+#
+# Both measured from the previous edge.  These are pcileech-fpga's exact numbers
+# (-min 6.5 / -max 7.0), which is a useful corroboration of the datasheet reading.
 #
 # Written the other way round - negative delays relative to the capture edge,
 # -max -3.0 / -min -6.5 - the arithmetic is equivalent but the hold check is not:
@@ -281,7 +289,7 @@ set FT601_PERIOD 10.0
 
 set ft601_ins [get_ports {ft_rxf ft_txe}]
 set_input_delay -clock [get_clocks ft_clk_12] -max [expr {$FT601_PERIOD - $FT601_T1}] -add_delay $ft601_ins
-set_input_delay -clock [get_clocks ft_clk_12] -min $FT601_T2 -add_delay $ft601_ins
+set_input_delay -clock [get_clocks ft_clk_12] -min [expr {$FT601_PERIOD - $FT601_T2}] -add_delay $ft601_ins
 
 # Pack the FT601 interface registers into the IOBs.
 #
@@ -295,53 +303,27 @@ set_input_delay -clock [get_clocks ft_clk_12] -min $FT601_T2 -add_delay $ft601_i
 # no register for Vivado to pull in here and this does nothing for it yet.
 # Registering the outbound bus in the IOB - data plus the OBUFT enable, which
 # must be packed together or they skew apart - is the remaining half of the fix.
-set_property IOB TRUE [get_ports ft_txe]
-set_property IOB TRUE [get_ports ft_rxf]
+# IOB packing and the tristate multicycle, matching the reference cell-for-cell
+# (PCIeSquirrel/src/pcileech_squirrel.xdc):
+#
+#   IOB TRUE on FT601_OE_N_reg, FT601_RD_N_reg, FT601_WR_N_reg,
+#              FT601_DATA_OUT_reg[0][*]
+#   set_multicycle_path 2 -from OE_reg/C -to the data and be ports
+#
+# The head of the output queue is what drives the pins, so only slot 0 is packed.
+# The tristate enable is deliberately NOT packed - an IOB's output and tristate
+# flops share a control set and cannot both be satisfied, and forcing it makes
+# placement infeasible.  The multicycle is what takes it off the critical path,
+# and it is sound because OE changes once per burst while the data changes every
+# cycle.
+#
+# There is no IOB property on ft_txe / ft_rxf: the controller reads those pins
+# combinationally, as the reference does, so there are no input registers to pack.
+set_property IOB TRUE [get_cells -hier -filter {NAME =~ *u_ft/DATA_OUT_reg[0][*]}]
+set_property IOB TRUE [get_cells -hier -filter {NAME =~ *u_ft/ft_oe_reg}]
+set_property IOB TRUE [get_cells -hier -filter {NAME =~ *u_ft/ft_rd_reg}]
+set_property IOB TRUE [get_cells -hier -filter {NAME =~ *u_ft/ft_wr_reg}]
 
-# Every OUTBOUND signal too.  ft601_fifo.sv now registers all of them on one
-# edge; packing those flops into the IOBs gives the whole bus a single, identical
-# clock-to-out.  That is the point - not to make any one path fast, but to stop
-# ft_data and ft_wr drifting apart from each other and from the clock.
-#
-# ft_data and ft_be are tristate, so the OBUFT's T flop packs alongside the data
-# flop.  Both halves must pack or they skew apart and the fix is only half done.
-set_property IOB TRUE [get_ports {ft_data[*]}]
-set_property IOB TRUE [get_ports {ft_be[*]}]
-set_property IOB TRUE [get_ports ft_wr]
-set_property IOB TRUE [get_ports ft_rd]
-set_property IOB TRUE [get_ports ft_oe]
-
-# Fast slew on the outbound bus.
-#
-# LVCMOS33 defaults to SLOW slew, and the resulting OBUFT delay was measured at
-# 3.727 ns - by far the largest single term in clock-to-out, and the reason setup
-# does not close.  This is a 100 MHz 32-bit bus over a short board-to-board
-# connector; fast edges are appropriate for it, and the usual objections (ringing,
-# EMI, ground bounce) are about long or lightly-terminated traces, which this is
-# not.
-#
-# Applied only to the FT601 outputs.  Nothing else on the board needs it, and
-# slew is not something to change globally by reflex.
 set_property SLEW FAST [get_ports {ft_data[*] ft_be[*] ft_wr ft_rd ft_oe}]
 
-# Multicycle the tristate enable, rather than trying to pack it into an IOB.
-#
-# Taken from ufrisk/pcileech-fpga, which drives an FT601 at 100 MHz in a shipped
-# design (PCIeSquirrel/src/pcileech_squirrel.xdc):
-#
-#   set_multicycle_path 2 -from [get_pins .../OE_reg/C] -to [get_ports {ft601_data[*]}]
-#
-# It is safe because of WHAT the signal is, not as a way to silence a report:
-# the enable changes once per burst, when the bus turns around, while the data
-# changes every cycle.  Giving the rarely-changing signal two periods is
-# functionally correct; giving the data two would not be, and is not done here.
-#
-# This replaces the approach of forcing ft_dq_t into the IOBs, which cannot work:
-# an IOB's output and tristate flops share a control set, and the data flop needs
-# a clock enable the tristate flop must not have.  Attempting it makes placement
-# infeasible outright.  The reference design does not try - it IOB-packs the data
-# and control flops and multicycles the enable instead.
-set_multicycle_path 2 -setup -from [get_pins -hier -filter {NAME =~ *ft_dq_t_reg*/C}] -to [get_ports {ft_data[*]}]
-set_multicycle_path 1 -hold  -from [get_pins -hier -filter {NAME =~ *ft_dq_t_reg*/C}] -to [get_ports {ft_data[*]}]
-set_multicycle_path 2 -setup -from [get_pins -hier -filter {NAME =~ *ft_be_t_reg*/C}] -to [get_ports {ft_be[*]}]
-set_multicycle_path 1 -hold  -from [get_pins -hier -filter {NAME =~ *ft_be_t_reg*/C}] -to [get_ports {ft_be[*]}]
+set_multicycle_path 2 -from [get_pins -hier -filter {NAME =~ *u_ft/OE_reg/C}] -to [get_ports {ft_data[*] ft_be[*]}]

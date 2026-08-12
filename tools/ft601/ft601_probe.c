@@ -391,6 +391,7 @@ struct bench {
     //          unambiguous at depth 1.
     bool                  verify;
     bool                  have_prev;
+    uint64_t              markers;
     uint32_t              prev_word;
     uint64_t              intra_errors;
     uint64_t              inter_errors;
@@ -405,30 +406,49 @@ static void verify_buffer(struct bench *b, const unsigned char *buf, int len)
     int words = len / 4;
     if(words <= 0) { return; }
 
-    const uint32_t *w = (const uint32_t *)(const void *)buf;
+    // The gateware byte-swaps each word on the way out, exactly as the reference
+    // controller does (pcileech_ft601.sv reverses the four bytes of every word in
+    // both directions).  Swap back here so the counter is comparable; the swap is
+    // a property of the reference's wire format, not of this test.
+    const uint8_t *p = (const uint8_t *)buf;
+    #define WORD_AT(i) ((uint32_t)p[(i)*4+0] << 24 | (uint32_t)p[(i)*4+1] << 16 | \
+                        (uint32_t)p[(i)*4+2] <<  8 | (uint32_t)p[(i)*4+3])
 
-    if(b->have_prev && w[0] != b->prev_word + 1) {
+    // The gateware emits 0x66665555 as an idle/preload marker - five of them,
+    // filling the output queue, after reset and after 15 idle cycles.  That is
+    // the reference controller's behaviour, deliberately kept, so it is expected
+    // traffic rather than corruption.  Count them, and let the next real word
+    // re-seed the sequence instead of reporting a break against a marker.
+    #define MARKER 0x66665555u
+
+    if(b->have_prev && WORD_AT(0) != b->prev_word + 1 && WORD_AT(0) != MARKER) {
         b->inter_errors++;
         if(!b->have_first_bad) {
             b->first_bad_expect = b->prev_word + 1;
-            b->first_bad_got    = w[0];
+            b->first_bad_got    = WORD_AT(0);
             b->have_first_bad   = true;
         }
     }
 
     for(int i = 1; i < words; i++) {
-        if(w[i] != w[i - 1] + 1) {
+        if(WORD_AT(i) == MARKER || WORD_AT(i - 1) == MARKER) {
+            if(WORD_AT(i) == MARKER) { b->markers++; }
+            continue;
+        }
+        if(WORD_AT(i) != WORD_AT(i - 1) + 1) {
             b->intra_errors++;
             if(!b->have_first_bad) {
-                b->first_bad_expect = w[i - 1] + 1;
-                b->first_bad_got    = w[i];
+                b->first_bad_expect = WORD_AT(i - 1) + 1;
+                b->first_bad_got    = WORD_AT(i);
                 b->have_first_bad   = true;
             }
         }
     }
 
-    b->prev_word = w[words - 1];
-    b->have_prev = true;
+    b->prev_word = WORD_AT(words - 1);
+    b->have_prev = (WORD_AT(words - 1) != MARKER);
+    #undef MARKER
+    #undef WORD_AT
 }
 
 // Announce an upcoming read.  Synchronous by nature -- it is a serialisation
@@ -544,6 +564,7 @@ struct result {
     double   mean_latency_ms;
     uint64_t intra_errors;
     uint64_t inter_errors;
+    uint64_t markers;
     uint32_t first_bad_expect;
     uint32_t first_bad_got;
     bool     have_first_bad;
@@ -643,6 +664,7 @@ static int run_once(libusb_device_handle *h, const struct opts *o, int depth,
     out->mbps        = wall > 0 ? (double)b.bytes / wall / (1024.0 * 1024.0) : 0.0;
     out->mean_latency_ms = b.completions
         ? (b.latency_sum / (double)b.completions) * 1000.0 : 0.0;
+    out->markers          = b.markers;
     out->intra_errors     = b.intra_errors;
     out->inter_errors     = b.inter_errors;
     out->first_bad_expect = b.first_bad_expect;
@@ -673,7 +695,7 @@ static int cmd_bench(libusb_device_handle *h, const struct opts *o)
         o->session ? "on" : "off", o->verify ? "on" : "off");
     printf("%6s %10s %10s %8s %10s %8s %8s",
         "depth", "MB/s", "lat(ms)", "CPU%", "xfers", "t/outs", "errs");
-    if(o->verify) { printf(" %8s %8s", "intra", "inter"); }
+    if(o->verify) { printf(" %8s %8s %8s", "intra", "inter", "idlemk"); }
     printf("\n");
 
     int depths[] = { 1, 2, 4, 8, 16 };
@@ -693,7 +715,7 @@ static int cmd_bench(libusb_device_handle *h, const struct opts *o)
             r.wall > 0 ? 100.0 * r.cpu / r.wall : 0.0,
             r.completions, r.timeouts, r.errors);
         if(o->verify) {
-            printf(" %8" PRIu64 " %8" PRIu64, r.intra_errors, r.inter_errors);
+            printf(" %8" PRIu64 " %8" PRIu64 " %8" PRIu64, r.intra_errors, r.inter_errors, r.markers);
         }
         printf("\n");
         if(o->verify && r.have_first_bad && !shown_first_bad) {

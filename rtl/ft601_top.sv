@@ -6,66 +6,39 @@
 //
 // Streams a 32-bit incrementing counter at the host as fast as the FT601 will
 // take it, and discards anything the host sends back.  A counter rather than a
-// constant, because it makes both failure modes visible from the host side:
+// constant, because it makes both failure modes visible from the host:
 //
 //   tools/ft601/ft601_probe bench --sweep   measures how fast it arrives
 //   a gap in the sequence                   proves words were dropped
 //   a repeat                                proves words were duplicated
 //
-// Throughput alone cannot tell you the link is CORRECT - a design that drops
-// every other word looks fast.  Measured: 335 MB/s, sequence intact.
+// Throughput alone certifies nothing - every broken revision of this design still
+// ran at 335 MB/s while corrupting data.  The sequence check is what distinguishes
+// a working link from a fast broken one.
 //
-// Ceiling worth knowing: the FT601 runs a 100 MHz FIFO clock over a 32-bit bus,
-// so the gateware tops out at 400 MB/s, and USB 3.0 bulk lands near 400-450.
-// Those are close enough to trade places, and every FIFO stall comes off the top.
+// STRUCTURE follows ufrisk/pcileech-fpga.  This module is the equivalent of their
+// pcileech_com.sv: it owns the clock-domain crossing and hands the FT601
+// controller a plain din/dout interface in the FT601's own clock domain.  The
+// controller (ft601_fifo.sv) contains no FIFO and no CDC.
 //
-// ---------------------------------------------------------------------------
-// RECOVERY
+// RESET, also theirs (pcileech_squirrel_top.sv):
 //
-// This board has a history of wedging in ways that needed the power pulled.  Two
-// mechanisms here exist to make that unnecessary, and to make it visible when it
-// happens rather than leaving it a mystery:
+//   assign rst = ~user_sw2_n || ((tickcount64 < 64) ? 1'b1 : 1'b0);
+//   assign ft601_rst_n = ~rst;
 //
-//   1. ft_clk_gen runs a lock watchdog.  ft_clk is not free-running - it exists
-//      only while the FT601 is out of reset with its PLL up - so it is absent at
-//      power-on and can vanish later.  The watchdog kicks the MMCM until it
-//      locks.  Separately it COUNTS every loss of lock after the first good
-//      one - a growing count is hard proof the FT601's clock is dropping out,
-//      which is otherwise completely invisible.  Counting is free; kicking is
-//      not, so the watchdog waits 50 ms before intervening.  At 1 ms it fired
-//      often enough to put 336k sequence breaks into a byte-perfect stream.
+// A power-on tick counter and a button - here, a tick counter and the host's 'R'
+// command.  No clock-presence gating, no lock signal, no watchdog.  The same
+// reset drives the FT601's RESET# pin, so chip and fabric leave reset together.
 //
-//   2. The FT601 can be reset from the host by sending 'R' on the Au's UART.
-//      That path runs over the Au's own serial bridge, which is independent of
-//      the FT601 - so it still works precisely when the FT601 is the thing that
-//      is stuck.  RESET# is held for a full millisecond, not the few hundred
-//      nanoseconds an lock-gated reset would give.
+// The async FIFOs need their far clock alive to complete their own reset, and
+// that is handled the way the reference handles it - see fifo_rst - not by making
+// the design's reset depend on the clock.
 //
-// Deliberately NOT automatic: nothing here resets the FT601 on a heuristic.  The
-// obvious candidate - "tx FIFO full and TXE# high for a while" - is also the
-// normal idle state whenever the host simply is not reading, so an automatic
-// reset would fire during healthy idling and cause the very re-enumeration
-// storms it was meant to prevent.  Recovery is explicit.
-//
-// ---------------------------------------------------------------------------
-//   led[0]     clk_gen locked (Au oscillator domain)
-//   led[1]     ft_clk_gen locked (FT601 is driving its clock at us)
+//   led[0]     clk_gen locked
+//   led[1]     TX activity, stretched to be visible
 //   led[2]     heartbeat, ~1 Hz - the user domain is running
-//   led[3]     TX activity, stretched to be visible
-//   led[4]     FIFO reset still busy - MUST go dark shortly after led[0]/led[1]
-//   led[5]     RX activity, sticky once the host has ever sent us anything
-//   led[6]     FT601 held in reset right now
-//   led[7]     STICKY: ft_clk has been LOST at least once since power-on
-//
-// Failures worth naming, because all of them look like a healthy board:
-//
-//   led[1] dark        no usable clock from the FT601.  Cable, power or chip
-//                      configuration, not a problem in here.
-//   led[4] stuck lit   the FIFOs never finished resetting, so ui_din_full is
-//                      jammed and not one word will ever be sent.
-//   led[7] lit         the clock HAS dropped out at some point.  The link may
-//                      look fine now; this is the evidence it was not.  M= in
-//                      the UART status frame gives the count.
+//   led[3]     RX activity, sticky once the host has ever sent us anything
+//   led[7:4]   bits 27:24 of the words-sent counter - a coarse rate display
 //////////////////////////////////////////////////////////////////////////////////
 
 module ft601_top (
@@ -92,9 +65,6 @@ module ft601_top (
     wire clk_ctrl, clk_ddr3_unused, clk_ddr3_90_unused, clk_ref_unused;
     wire clk_locked;
 
-    // Same clk_gen as au_top/diag_top.  Only clk_ctrl is used; the DDR3 outputs
-    // are left dangling deliberately so this build exercises the identical MMCM
-    // configuration rather than a second, differently-parameterised one.
     clk_gen u_clk (
         .clk_in      (clk_pin),
         .rst         (~rst_n),
@@ -105,162 +75,158 @@ module ft601_top (
         .locked      (clk_locked)
     );
 
-    // ---- FT601 chip reset -------------------------------------------------
-    // Driven from the Au oscillator domain ALONE.  It must never depend on
-    // anything derived from ft_clk - including the ft_clk MMCM's locked flag -
-    // because the chip does not drive ft_clk until it is out of reset.  Gating
-    // this on that lock is a deadlock: no clock, no lock, no release, no clock.
-    // The chip then drops off USB entirely until the FPGA is reprogrammed.
-    //
-    // clk_locked already folds in rst_n, since clk_gen takes ~rst_n as its reset.
+    wire ft_clk_i;
+    ft_clk_buf u_ft_clk (.ft_clk_pin(ft_clk), .ft_clk(ft_clk_i));
+
+    // ---- reset ------------------------------------------------------------
+    localparam integer RST_TICKS = 64;
+
     wire      cmd_reset;
-    reg [3:0] chip_rst_sync = 4'b0000;
-    always @(posedge clk_ctrl or negedge clk_locked) begin
-        if (!clk_locked)     chip_rst_sync <= 4'b0000;
-        else if (cmd_reset)  chip_rst_sync <= 4'b0000;   // restart the pulse
-        else                 chip_rst_sync <= {chip_rst_sync[2:0], 1'b1};
+    reg [7:0] tickcount = 8'd0;
+
+    always @(posedge clk_ctrl) begin
+        if (!clk_locked)                tickcount <= 8'd0;
+        else if (tickcount < RST_TICKS) tickcount <= tickcount + 8'd1;
     end
 
-    wire ft_chip_rst_n = chip_rst_sync[3];
+    wire rst = ~clk_locked | (tickcount < RST_TICKS) | cmd_reset;
 
-    // Counts host-requested resets, so ft601_reset.sh can prove its command
-    // actually landed rather than assuming it did.
+    // The chip's RESET# from the same signal, as the reference does.
+    assign ft_reset = ~rst;
+
+    // Async-FIFO reset, qualified by a counter in the FT601's OWN clock domain -
+    // the reference's `rst | (tickcount64_com < 2)`.  That counter cannot advance
+    // until ft_clk runs, so the FIFOs are held in reset until their far domain is
+    // alive and released a couple of cycles later, with no clock detection
+    // anywhere.  16 rather than 2 because XPM documents a 5-cycle minimum where
+    // the FIFO Generator core the reference uses does not.
+    reg [4:0] tickcount_ft = 5'd0;
+    always @(posedge ft_clk_i) begin
+        if (tickcount_ft != 5'd16) tickcount_ft <= tickcount_ft + 5'd1;
+    end
+
+    wire fifo_rst = rst | (tickcount_ft != 5'd16);
+
+    // ---- FT601 controller -------------------------------------------------
+    wire [31:0] ft_dout;
+    wire        ft_dout_valid;
+    wire [31:0] ft_din;
+    wire        ft_din_wr_en;
+    wire        ft_din_req_data;
+
+    ft601_fifo u_ft (
+        .clk          (ft_clk_i),
+        .rst          (rst),
+        .ft_be        (ft_be),
+        .ft_data      (ft_data),
+        .ft_rxf       (ft_rxf),
+        .ft_txe       (ft_txe),
+        .ft_oe        (ft_oe),
+        .ft_rd        (ft_rd),
+        .ft_wr        (ft_wr),
+        .ft_wakeup    (ft_wakeup),
+        .dout         (ft_dout),
+        .dout_valid   (ft_dout_valid),
+        .din          (ft_din),
+        .din_wr_en    (ft_din_wr_en),
+        .din_req_data (ft_din_req_data)
+    );
+
+    // ---- FPGA -> host crossing --------------------------------------------
+    // Written in the user domain, read out in the FT601's.  The controller pulls
+    // with din_req_data; a word is delivered whenever it asks and one is ready.
+    wire [31:0] txc_dout;
+    wire        txc_empty, txc_full;
+    wire        txc_rd_en;
+    wire [31:0] tx_count_w;
+    wire        tx_push;
+
+    assign txc_rd_en    = ft_din_req_data & ~txc_empty;
+    assign ft_din       = txc_dout;
+    assign ft_din_wr_en = txc_rd_en;
+
+    xpm_fifo_async #(
+        .FIFO_MEMORY_TYPE ("block"), .FIFO_WRITE_DEPTH (1024),
+        .WRITE_DATA_WIDTH (32),      .READ_DATA_WIDTH  (32),
+        .READ_MODE ("fwft"), .FIFO_READ_LATENCY (0),
+        .USE_ADV_FEATURES ("0000"), .CDC_SYNC_STAGES (2),
+        .RELATED_CLOCKS (0), .ECC_MODE ("no_ecc"), .WAKEUP_TIME (0)
+    ) tx_fifo (
+        .rst (fifo_rst),
+        .wr_clk (clk_ctrl), .wr_en (tx_push), .din (tx_count_w), .full (txc_full),
+        .rd_clk (ft_clk_i), .rd_en (txc_rd_en), .dout (txc_dout), .empty (txc_empty),
+        .sleep (1'b0), .injectdbiterr (1'b0), .injectsbiterr (1'b0),
+        .almost_empty (), .almost_full (), .data_valid (), .dbiterr (), .overflow (),
+        .prog_empty (), .prog_full (), .rd_data_count (), .rd_rst_busy (),
+        .sbiterr (), .underflow (), .wr_ack (), .wr_data_count (), .wr_rst_busy ()
+    );
+
+    // ---- host -> FPGA crossing --------------------------------------------
+    wire [31:0] rxc_dout;
+    wire        rxc_empty;
+
+    xpm_fifo_async #(
+        .FIFO_MEMORY_TYPE ("block"), .FIFO_WRITE_DEPTH (1024),
+        .WRITE_DATA_WIDTH (32),      .READ_DATA_WIDTH  (32),
+        .READ_MODE ("fwft"), .FIFO_READ_LATENCY (0),
+        .USE_ADV_FEATURES ("0000"), .CDC_SYNC_STAGES (2),
+        .RELATED_CLOCKS (0), .ECC_MODE ("no_ecc"), .WAKEUP_TIME (0)
+    ) rx_fifo (
+        .rst (fifo_rst),
+        .wr_clk (ft_clk_i), .wr_en (ft_dout_valid), .din (ft_dout), .full (),
+        .rd_clk (clk_ctrl), .rd_en (~rxc_empty), .dout (rxc_dout), .empty (rxc_empty),
+        .sleep (1'b0), .injectdbiterr (1'b0), .injectsbiterr (1'b0),
+        .almost_empty (), .almost_full (), .data_valid (), .dbiterr (), .overflow (),
+        .prog_empty (), .prog_full (), .rd_data_count (), .rd_rst_busy (),
+        .sbiterr (), .underflow (), .wr_ack (), .wr_data_count (), .wr_rst_busy ()
+    );
+
+    wire unused_rxc = |rxc_dout;   // drained and discarded
+
+    // ---- pattern source ---------------------------------------------------
+    reg [31:0] tx_count = 32'd0;
+    assign tx_count_w = tx_count;
+    assign tx_push    = ~txc_full;
+
+    always @(posedge clk_ctrl) begin
+        if (rst)          tx_count <= 32'd0;
+        else if (tx_push) tx_count <= tx_count + 32'd1;
+    end
+
+    // ---- host command channel ---------------------------------------------
+    // 'R' resets the FT601.  Runs over the Au's own serial bridge, a separate USB
+    // device from the FT601, so it is reachable exactly when the FT601 is not.
+    wire [7:0] urx_data;
+    wire       urx_valid;
+
+    uart_rx #(.CLK_HZ(100_000_000), .BAUD(115_200)) u_uart_rx (
+        .clk (clk_ctrl), .rst (~clk_locked),
+        .rx (usb_rx), .rx_data (urx_data), .rx_valid (urx_valid)
+    );
+
+    assign cmd_reset = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
+
     reg [7:0] chip_resets = 8'd0;
     always @(posedge clk_ctrl) begin
         if (cmd_reset && chip_resets != 8'hFF) chip_resets <= chip_resets + 8'd1;
     end
 
-    // ---- FT601 clock ------------------------------------------------------
-    wire       ft_clk_pos, ft_clk_neg, ft_locked;
-    wire [7:0] ft_unlocks;
-
-    ft_clk_gen u_ft_clk (
-        .ft_clk_pin (ft_clk),
-        .ref_clk    (clk_ctrl),
-        .rst        (~rst_n),
-        .ft_clk_pos (ft_clk_pos),
-        .ft_clk_neg (ft_clk_neg),
-        .locked     (ft_locked),
-        .unlocks    (ft_unlocks)
-    );
-
-    // ---- fabric reset -----------------------------------------------------
-    wire plls_locked = clk_locked & ft_locked;
-
-    // Reset must be applied only once BOTH clocks are live, and held long enough
-    // for each to clock the assertion through.
-    //
-    // This is what ft_clk not being free-running actually costs us.
-    // xpm_fifo_async runs its reset across both clock domains and only lowers
-    // wr_rst_busy / rd_rst_busy once each side has clocked it through.  A reset
-    // asserted at configuration lands in a window where the ft_clk domain is
-    // dead, so the FIFO's reset never completes, wr_rst_busy stays high forever,
-    // ui_din_full is stuck, and not one word is ever written.  Nothing recovers
-    // it either.  Symptom: link silent, both MMCMs locked, heartbeat running -
-    // everything looks healthy and nothing moves.
-    //
-    // So: wait for lock, THEN hold reset with both clocks running, THEN release.
-    // The counter restarts if lock is ever lost, which also gives clean recovery
-    // when ft_clk stops mid-run instead of wedging.
-    localparam integer RST_HOLD = 256;   // ~2.6 us, both domains
-
-    reg [8:0] rst_cnt = 9'd0;
-    reg       rst_r   = 1'b1;
-
-    always @(posedge clk_ctrl) begin
-        if (!plls_locked) begin
-            rst_cnt <= 9'd0;
-            rst_r   <= 1'b1;
-        end else if (rst_cnt != RST_HOLD) begin
-            rst_cnt <= rst_cnt + 9'd1;
-            rst_r   <= 1'b1;
-        end else begin
-            rst_r   <= 1'b0;
-        end
-    end
-
-    wire rst = rst_r;
-
-    // ---- FT601 link -------------------------------------------------------
-    wire [31:0] ui_din;
-    wire        ui_din_en;
-    wire        ui_din_full;
-    wire [31:0] ui_dout;
-    wire        ui_dout_en;
-    wire        ui_dout_empty;
-    wire        fifo_rst_busy;
-    wire [15:0] dbg;
-
-    // Declared here rather than beside its always block below, because the UART
-    // reporter references it first and Vivado will not take a forward reference.
-    reg [31:0]  tx_count = 32'd0;
-
-    ft601_fifo u_ft (
-        .clk           (clk_ctrl),
-        .rst           (rst),
-        .ft_clk_pos    (ft_clk_pos),
-        .ft_clk_neg    (ft_clk_neg),
-        .ft_data       (ft_data),
-        .ft_be         (ft_be),
-        .ft_rxf        (ft_rxf),
-        .ft_txe        (ft_txe),
-        .ft_rd         (ft_rd),
-        .ft_wr         (ft_wr),
-        .ft_oe         (ft_oe),
-        .ft_chip_rst_n (ft_chip_rst_n),
-        .ft_reset      (ft_reset),
-        .ft_wakeup     (ft_wakeup),
-        .ui_din        (ui_din),
-        .ui_din_en     (ui_din_en),
-        .ui_din_full   (ui_din_full),
-        .ui_dout       (ui_dout),
-        .ui_dout_en    (ui_dout_en),
-        .ui_dout_empty (ui_dout_empty),
-        .fifo_rst_busy (fifo_rst_busy),
-        .dbg           (dbg)
-    );
-
-    // ---- host command channel ---------------------------------------------
-    // 'R' (or 'r') resets the FT601.  This runs over the Au's OWN serial bridge,
-    // a separate USB device from the FT601 - so it is reachable exactly when the
-    // FT601 is the thing that is stuck, which is the entire point.  Never gated
-    // on ft_locked: that would reintroduce the deadlock where the chip cannot be
-    // reset because it is not clocking because it is in reset.
-    wire [7:0] urx_data;
-    wire       urx_valid;
-
-    uart_rx #(.CLK_HZ(100_000_000), .BAUD(115_200)) u_uart_rx (
-        .clk      (clk_ctrl),
-        .rst      (~clk_locked),
-        .rx       (usb_rx),
-        .rx_data  (urx_data),
-        .rx_valid (urx_valid)
-    );
-
-    assign cmd_reset = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
-
     // ---- status over UART -------------------------------------------------
-    // Emits "S=xxxx C=xxxxxxxx M=xx F=xx" about ten times a second, 115200 8N1.
-    // M is the MMCM kick count and F the FT601 reset count - the two numbers that
-    // turn "it flaked out again" into something with evidence attached.
-    // Decoded by build/ft601_status.sh.
-    localparam [7:0] CH_S  = 8'h53, CH_C = 8'h43, CH_M = 8'h4D, CH_F = 8'h46;
-    localparam [7:0] CH_EQ = 8'h3D;
+    // "C=xxxxxxxx F=xx" - words sent, and host-requested chip resets.  The clock
+    // and FIFO-state fields are gone along with the logic that produced them.
+    localparam [7:0] CH_C = 8'h43, CH_F = 8'h46, CH_EQ = 8'h3D;
     localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
-    localparam [4:0] RPT_LAST = 5'd28;   // last byte index
-    localparam [4:0] RPT_IDLE = 5'd29;
+    localparam [4:0] RPT_LAST = 5'd16;
+    localparam [4:0] RPT_IDLE = 5'd17;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
 
-    reg [21:0] rpt_div     = 22'd0;
-    reg [4:0]  rpt_idx     = RPT_IDLE;
-    reg [31:0] rpt_cnt     = 32'd0;
-    reg [15:0] rpt_dbg     = 16'd0;
-    reg [7:0]  rpt_unlocks = 8'd0;
-    reg [7:0]  rpt_resets  = 8'd0;
-
+    reg [21:0] rpt_div    = 22'd0;
+    reg [4:0]  rpt_idx    = RPT_IDLE;
+    reg [31:0] rpt_cnt    = 32'd0;
+    reg [7:0]  rpt_resets = 8'd0;
 
     always @(posedge clk_ctrl) begin
         if (!clk_locked) begin
@@ -269,13 +235,9 @@ module ft601_top (
         end else begin
             rpt_div <= rpt_div + 22'd1;
             if (rpt_div == 22'd0 && rpt_idx == RPT_IDLE) begin
-                // Latch everything at the start of a frame so the printed values
-                // all describe the same instant.
-                rpt_dbg     <= dbg;
-                rpt_cnt     <= tx_count;
-                rpt_unlocks <= ft_unlocks;
-                rpt_resets  <= chip_resets;
-                rpt_idx     <= 5'd0;
+                rpt_cnt    <= tx_count;
+                rpt_resets <= chip_resets;
+                rpt_idx    <= 5'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
                 else                     rpt_idx <= rpt_idx + 5'd1;
@@ -286,22 +248,16 @@ module ft601_top (
     reg [3:0] nib;
     always @(*) begin
         case (rpt_idx)
-            5'd2:  nib = rpt_dbg[15:12];
-            5'd3:  nib = rpt_dbg[11:8];
-            5'd4:  nib = rpt_dbg[7:4];
-            5'd5:  nib = rpt_dbg[3:0];
-            5'd9:  nib = rpt_cnt[31:28];
-            5'd10: nib = rpt_cnt[27:24];
-            5'd11: nib = rpt_cnt[23:20];
-            5'd12: nib = rpt_cnt[19:16];
-            5'd13: nib = rpt_cnt[15:12];
-            5'd14: nib = rpt_cnt[11:8];
-            5'd15: nib = rpt_cnt[7:4];
-            5'd16: nib = rpt_cnt[3:0];
-            5'd20: nib = rpt_unlocks[7:4];
-            5'd21: nib = rpt_unlocks[3:0];
-            5'd25: nib = rpt_resets[7:4];
-            5'd26: nib = rpt_resets[3:0];
+            5'd2:  nib = rpt_cnt[31:28];
+            5'd3:  nib = rpt_cnt[27:24];
+            5'd4:  nib = rpt_cnt[23:20];
+            5'd5:  nib = rpt_cnt[19:16];
+            5'd6:  nib = rpt_cnt[15:12];
+            5'd7:  nib = rpt_cnt[11:8];
+            5'd8:  nib = rpt_cnt[7:4];
+            5'd9:  nib = rpt_cnt[3:0];
+            5'd13: nib = rpt_resets[7:4];
+            5'd14: nib = rpt_resets[3:0];
             default: nib = 4'd0;
         endcase
     end
@@ -312,19 +268,13 @@ module ft601_top (
     reg [7:0] ch;
     always @(*) begin
         case (rpt_idx)
-            5'd0:  ch = CH_S;
+            5'd0:  ch = CH_C;
             5'd1:  ch = CH_EQ;
-            5'd6:  ch = CH_SP;
-            5'd7:  ch = CH_C;
-            5'd8:  ch = CH_EQ;
-            5'd17: ch = CH_SP;
-            5'd18: ch = CH_M;
-            5'd19: ch = CH_EQ;
-            5'd22: ch = CH_SP;
-            5'd23: ch = CH_F;
-            5'd24: ch = CH_EQ;
-            5'd27: ch = CH_CR;
-            5'd28: ch = CH_LF;
+            5'd10: ch = CH_SP;
+            5'd11: ch = CH_F;
+            5'd12: ch = CH_EQ;
+            5'd15: ch = CH_CR;
+            5'd16: ch = CH_LF;
             default: ch = hex;
         endcase
     end
@@ -333,30 +283,9 @@ module ft601_top (
     assign uart_valid = (rpt_idx != RPT_IDLE);
 
     uart_tx #(.CLK_HZ(100_000_000), .BAUD(115_200)) u_uart_tx (
-        .clk      (clk_ctrl),
-        .rst      (~clk_locked),
-        .tx_data  (uart_data),
-        .tx_valid (uart_valid),
-        .tx_ready (uart_ready),
-        .tx       (usb_tx)
+        .clk (clk_ctrl), .rst (~clk_locked),
+        .tx_data (uart_data), .tx_valid (uart_valid), .tx_ready (uart_ready), .tx (usb_tx)
     );
-
-    // ---- pattern source ---------------------------------------------------
-    // Push whenever there is room.  Backpressure propagates from the host all
-    // the way here: the FT601 deasserts ft_txe, the FSM leaves TX, the FIFO
-    // fills, ui_din_full rises and the counter simply stops.  Nothing is lost,
-    // so a gap seen by the host is always a real bug and never just a stall.
-    assign ui_din    = tx_count;
-    assign ui_din_en = ~ui_din_full;
-
-    always @(posedge clk_ctrl) begin
-        if (rst) tx_count <= 32'd0;
-        else if (ui_din_en) tx_count <= tx_count + 32'd1;
-    end
-
-    // Drain the host->FPGA direction so it cannot back up and wedge the bus
-    // turnaround.  The data is discarded; this build only measures one way.
-    assign ui_dout_en = ~ui_dout_empty;
 
     // ---- status -----------------------------------------------------------
     reg [25:0] heartbeat = 26'd0;
@@ -365,23 +294,20 @@ module ft601_top (
     reg [21:0] tx_blink = 22'd0;
     always @(posedge clk_ctrl) begin
         if (rst)            tx_blink <= 22'd0;
-        else if (ui_din_en) tx_blink <= 22'h3FFFFF;
+        else if (tx_push)   tx_blink <= 22'h3FFFFF;
         else if (|tx_blink) tx_blink <= tx_blink - 22'd1;
     end
 
     reg rx_seen = 1'b0;
     always @(posedge clk_ctrl) begin
         if (rst)             rx_seen <= 1'b0;
-        else if (ui_dout_en) rx_seen <= 1'b1;
+        else if (~rxc_empty) rx_seen <= 1'b1;
     end
 
-    assign led[0] = clk_locked;
-    assign led[1] = ft_locked;
-    assign led[2] = heartbeat[25];
-    assign led[3] = |tx_blink;
-    assign led[4] = fifo_rst_busy;
-    assign led[5] = rx_seen;
-    assign led[6] = tx_count[24];
-    assign led[7] = (ft_unlocks != 8'd0); // STICKY: ft_clk has been lost
+    assign led[0]   = clk_locked;
+    assign led[1]   = |tx_blink;
+    assign led[2]   = heartbeat[25];
+    assign led[3]   = rx_seen;
+    assign led[7:4] = tx_count[27:24];
 
 endmodule

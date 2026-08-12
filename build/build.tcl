@@ -86,11 +86,11 @@ add_files -norecurse [list \
 
 if {$ft601} {
     # FT601 link bring-up: no DDR3 and no Apple bus, so only alchitry_au.xdc and
-    # ft601.xdc apply.  No .xci here either - ft_clk_gen.v replaces v5's
+    # ft601.xdc apply.  No .xci here either - the FT601 clock is used directly (ft_clk_buf.v) and v5.s
     # clk_wiz_0 and ft601_fifo.sv uses xpm_fifo_async in place of fifo_ft600.
     add_files -norecurse [list \
         [file join $root rtl clk_gen.v] \
-        [file join $root rtl ft_clk_gen.v] \
+        [file join $root rtl ft_clk_buf.v] \
         [file join $root rtl ft601_fifo.sv] \
         [file join $root rtl uart_tx.v] \
         [file join $root rtl uart_rx.v] \

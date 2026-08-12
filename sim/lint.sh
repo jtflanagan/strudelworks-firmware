@@ -40,13 +40,15 @@ run bin_to_bcd    rtl/bin_to_bcd.v
 run report_tx     rtl/report_tx.sv rtl/bin_to_bcd.v
 run latency_probe rtl/latency_probe.sv
 
-# ft601_fifo needs a stand-in for xpm_fifo_async, which lives in Vivado's library
-# and not here.  sim/xpm_fifo_async_stub.sv is ports-only - see its header - but
-# that is enough for Verilator to check the bus state machine, which is the part
-# worth checking.  PINCONNECTEMPTY is off because the XPM has a dozen outputs
-# this design has no use for, and naming them explicitly as unconnected is the
-# clearer way to say so.
-run ft601_fifo    rtl/ft601_fifo.sv sim/xpm_fifo_async_stub.sv -Wno-PINCONNECTEMPTY
+# ft601_fifo is now pure logic - the FIFOs moved out to ft601_top, mirroring the
+# reference, which keeps its clock-domain crossing outside the FT601 controller.
+# So it lints standalone, with no stand-in for xpm_fifo_async needed.
+# INITIALDLY is off because the reference initialises its output registers with
+# non-blocking assignments inside an initial block, and this is a faithful port.
+# For FPGA power-on values the distinction has no effect; Verilator is objecting
+# to simulation semantics we do not rely on.  Diverging from the source to quiet
+# a lint message is not worth it.
+run ft601_fifo    rtl/ft601_fifo.sv -Wno-INITIALDLY
 
 # Not linted, deliberately:
 #   clk_gen.v      - nothing but IBUF/BUFG/MMCME2_BASE instantiation.  Verilator
@@ -56,11 +58,9 @@ run ft601_fifo    rtl/ft601_fifo.sv sim/xpm_fifo_async_stub.sv -Wno-PINCONNECTEM
 #                    tool that knows the VCO limits anyway.
 #   ddr3_wrapper / au_top - structural, and both instantiate UberDDR3 or
 #                    primitives.  Vivado elaboration covers them.
-#   ft_clk_gen.v   - same case as clk_gen.v: IBUF/BUFG/MMCME2_BASE and nothing
-#                    else.
-#   ft601_top.sv   - structural; instantiates clk_gen and ft_clk_gen, so it
-#                    inherits their unresolvable primitives.  The logic worth
-#                    linting in that build is in ft601_fifo, which is linted
-#                    above.
+#   ft_clk_buf.v   - IBUF and BUFG, nothing else.
+#   ft601_top.sv   - structural; instantiates clk_gen, ft_clk_buf and the XPM
+#                    FIFOs, none of which Verilator can resolve.  The logic worth
+#                    linting in that build is in ft601_fifo, linted above.
 
 exit $fail
