@@ -637,8 +637,50 @@ in internal-memory mode this design is the only writer, so the line buffer needs
 no external invalidation and no snooping — only self-invalidation on our own
 writes. That is a few comparators, not a cache-coherency protocol.
 
-**3. FT601 + host path.** Port `ft600_fifo.sv` and `tini_bus_arbiter.sv` from
-v5. Unchanged hardware, so this is a port, not a design.
+**3. FT601 + host path.** ~~Port `ft600_fifo.sv` and `tini_bus_arbiter.sv` from
+v5. Unchanged hardware, so this is a port, not a design.~~ **Link closed on
+hardware: 335.4 MB/s, sequence verified.** The "port, not a design" expectation
+was wrong, and how it was wrong is the useful part.
+
+*Measured.* 335.4 MB/s sustained FPGA→host, every word of a 32-bit counter
+arriving in order, 0 timeouts and 0 errors, repeatable run to run. Throughput
+scales 172→335 MB/s from queue depth 1→4 and then flattens while latency grows
+linearly, so the host link is **latency-bound, not per-byte-bound**: a
+single-outstanding driver caps near 175 MB/s, a multi-URB ring reaches 335. That
+is measured through WSL's USB/IP tunnel, i.e. a floor, not a ceiling — within 7%
+of what apertus report natively for the same chip.
+
+*The host side needs no FTDI code.* `tools/ft601/ft601_probe` does enumeration,
+chip configuration (vendor request `0xCF`) and streaming over plain libusb.
+D3XX has no supported ARM Linux build, and linking a proprietary blob into a
+GPL-3 work is a licence problem, so this removes a dependency the Pi 5 target
+could not have carried anyway. Note `OptionalFeatureSupport = 0x0000` does NOT
+mean the session request is optional — the FT601 only offers the fabric write
+space once the host has announced a pending read on endpoint `0x01`. Without it
+TXE# never asserts and the link moves exactly zero bytes.
+
+*Why the board was flaky, finally.* `constr/ft601.xdc` assigned pins and never
+constrained I/O timing — the delay constraints were auto-generated with
+placeholder values, commented out, and false-pathed as well. Vivado never
+checked when data reached the chip, so placement decided whether the FT601
+sampled the current word or the previous one. Real constraints exposed **−5.216
+ns of setup violation on 50 endpoints**, worst path `ft_txe` crossing the state
+machine combinationally into a FIFO pop within a half cycle. This is why the
+link would work, then stop working after an unrelated edit, with throughput
+unchanged and nothing to point at. It was never run-to-run randomness; it was
+build-to-build placement roulette on an untimed interface.
+
+*Still open.* Output clock-to-out is not closed (WNS −2.030 ns, worst on
+`ft_rd`, an RX control signal the TX benchmark does not exercise). The remaining
+fix is registering the outbound bus in the IOBs — data and the `OBUFT` enable
+packed together, or they skew apart — which needs the FSM re-derived for the
+extra cycle. The I/O delay values in `constr/ft601.xdc` are estimates and must
+be checked against `DS_FT600Q-FT601Q`. `tini_bus_arbiter.sv` is not yet ported;
+this milestone covered the link, not the bus.
+
+*Method note worth keeping.* Throughput alone certifies nothing — every corrupt
+build above still ran at 335 MB/s. The sequence check is what distinguished a
+working link from a fast broken one, and it should stay in any future test.
 
 **4. CPU-socket carrier.** The only new PCB. Reuse the connector part and the
 pin map already worked out in appletini-mega
