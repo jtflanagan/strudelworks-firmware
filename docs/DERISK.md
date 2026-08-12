@@ -715,16 +715,36 @@ padding every stream by 20 bytes, relying on payloads being a multiple of 32
 bytes so 20 is always enough - is therefore load-bearing, not decoration, and is
 inherited correctly by matching their controller.
 
-*Intended approach once framing exists.* The padding does not have to be
-unconditional, and an in-band magic constant is a poor fit for a framed protocol
-carrying arbitrary payload - real data can be `0x66665555`. Once the TX path
-knows message boundaries it can pad only when it would actually hang: track the
-transmitted byte count modulo 1024, and when sitting exactly on a boundary,
-between messages, with no next message ready, emit a heartbeat message to move
-off it. That is a real framed message the receiver already understands rather
-than a magic word it has to filter, and it costs nothing when traffic is flowing
-- unlike the reference's idle path, which re-pads every 16 idle cycles and would
-put roughly 80 MB/s of filler on an idle link.
+*Why posting exact-length reads is not the answer, though it works.* The failure
+needs the host to be expecting more than arrives, so a read posted for exactly
+the announced length is always satisfied by length and never asks the chip to
+terminate anything. That is measured, not theoretical - every 335 MB/s run in
+this milestone posted exact-length reads of 262,144 bytes, which is 256 x 1024,
+and never tripped the errata. The multiple-of-1024 property is irrelevant unless
+the read is longer than the data.
+
+So a strict request/response protocol could sidestep this entirely at full speed.
+This design is not going to be strict request/response: it wants to post large
+speculative buffers as well, which structurally puts the host back in the
+"asking for more than arrives" case. Exact-length reads therefore remain useful
+where they apply, but cannot be relied on.
+
+Posting 1024-byte reads instead - so a read can never outrun the data - also
+works and also cannot be relied on: measured at 2.8 to 4.5 MB/s across queue
+depths, about 75x below the link, because per-transfer cost dominates. Fine for a
+control path, useless for bulk.
+
+*Intended approach.* Insert a payload-free frame when the transmitter finds
+itself idle at a 1024-byte boundary: no next message ready, nothing in flight,
+and the byte count sitting exactly on the boundary. That shifts the boundary
+without padding anything that is carrying data, costs nothing while traffic
+flows, and unlike the reference's magic DWORDs it is a real frame the receiver
+already parses rather than an in-band constant it must filter by value - which
+matters because real payload can legitimately BE 0x66665555.
+
+The framing protocol itself is deliberately not designed yet. What is settled is
+that the errata is real, is in the silicon, and that the transmitter - not the
+host, and not a padding constant - is where it gets handled.
 
 *Method note worth keeping.* Throughput alone certifies nothing — every corrupt
 build above still ran at 335 MB/s. The sequence check is what distinguished a
