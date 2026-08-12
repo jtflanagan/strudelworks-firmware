@@ -1,0 +1,147 @@
+# strudelworks
+
+Apple II accelerator / peripheral built on the **Alchitry Au** (Xilinx Artix-7
+XC7A35T) plus the **Alchitry Ft+** (FTDI FT601 USB 3.0), interfacing to the host
+through the **6502/65816 CPU socket**.
+
+This is the low-risk sibling of [appletini-mega](../appletini-mega): same CPU-socket
+idea, but on hardware that already exists and has already been brought up
+(see [AppleTini v5](../AppleTini/v5)), so the only new PCB is the carrier. The
+DDR3 controller is [UberDDR3](https://github.com/AngeloJacobo/UberDDR3) rather
+than the Xilinx MIG, trading throughput for latency and for control over refresh.
+
+**Start with [docs/DERISK.md](docs/DERISK.md)** — it covers what is reused, what
+UberDDR3 does and does not provide (the refresh assumption needs revising), the
+Apple II latency budget, and the milestone order.
+
+## Layout
+
+```
+constr/     XDC. ddr3.xdc is generated; the rest are carried over from v5.
+rtl/        Design sources. Milestone 1 is DDR3 bring-up + latency measurement.
+sim/        iverilog testbenches. Latency measurement + a derived-timing dump.
+third_party/UberDDR3, fetched at a pinned commit (GPL-3.0-or-later, not vendored).
+ref/        The MIG project + generated XDC from v5, kept as the pinout ground truth.
+tools/      gen_ddr3_xdc.py - regenerates and verifies constr/ddr3.xdc.
+build/      Headless Vivado build (build.sh drives the Windows-side Vivado from WSL).
+hw/         The carrier board (milestone 4). Licensed separately - see hw/README.md.
+docs/       DERISK.md.
+```
+
+## Build
+
+```sh
+third_party/fetch_uberddr3.sh     # once
+python3 tools/gen_ddr3_xdc.py --check
+build/build.sh                    # -> build/work/au_top.bit
+```
+
+No IP cores: no MIG, and `rtl/clk_gen.v` instantiates `MMCME2_BASE` directly
+instead of using `clk_wiz`. A fresh clone plus the fetch script is a complete
+build with nothing to regenerate by hand.
+
+Vivado lives on the Windows host (`C:\Xilinx\2025.1\Vivado`, with 2024.2 also
+installed); `build/build.sh` handles the WSL path conversion. Override with
+`VIVADO=/path/to/vivado.bat`.
+
+## Simulate
+
+```sh
+sim/lint.sh                # Verilator lint, ~1 s - run before any build
+sim/run_params_dump.sh     # derived DDR3 timing for this configuration
+sim/run_latency_tb.sh      # read latency vs the Micron DDR3 model, ~2 min
+sim/run_report_tb.sh       # UART report formatting + framing, ~5 s
+```
+
+iverilog and Verilator only — no Vivado, no hardware.
+
+`sim/lint.sh` earns its place: iverilog and Vivado disagree about what is legal,
+and the gap is where the bugs hide. An out-of-range part-select
+(`sum_x10[16 +: 32]` on a 40-bit value) elaborated fine under iverilog and was a
+hard synthesis ERROR in Vivado — found after a ten-minute build. Verilator catches
+that class in about a second.
+
+## Reading results from the board
+
+Two outputs. The **LEDs** show the cumulative worst case: a single LED lit means
+calibration is still running, all eight lit means a read returned wrong data, and
+otherwise `led[7]` tags the frame (dark = sequential, lit = random) while
+`led[6:0]` is worst-case latency in controller clocks at 10 ns each.
+
+The **USB serial port** (115200 8N1, no flow control, nothing to send) prints a
+full summary once a second:
+
+```
+-- strudelworks latency  win=00000042  1 cy = 10 ns --
+SEQ min=010 mean=010.4 max=037 gt18=000071 gt49=000000
+RND min=012 mean=012.1 max=037 gt18=000069 gt49=000000
+errors=0
+```
+
+`gt18` and `gt49` count accesses over the IIgs (~180 ns) and legacy (~490 ns)
+windows, using the same thresholds as the simulation so the two are directly
+comparable. Statistics are per window of 65536 accesses of one pattern, not
+cumulative — so unlike the LEDs, the mean does not get swallowed by the worst
+case.
+
+## Status
+
+**Latency measured in simulation**: random read = 12 controller clocks = 120 ns,
+sequential = 100 ns, zero data errors. Fits both the ~490 ns legacy window and the
+~180 ns IIgs window. A refresh collision costs 30–37 cycles (300–370 ns), which
+still fits the legacy window — 0 of 500 reads over budget — but overruns the IIgs
+window by 2× on roughly 1 access in 70. So refresh control is required for the
+IIgs, and only the IIgs.
+
+**Timing closed at DDR3-800** (Vivado 2025.1, `xc7a35tftg256-2`): setup WNS
++2.285 ns, hold WHS +0.080 ns, 0 failing endpoints, bitstream builds. The DDR3-667
+fallback is not needed. 16% LUT, 0% BRAM, 60/170 IOB.
+
+**Measured on hardware. Milestone 1 is closed.**
+
+```
+-- strudelworks latency  win=00001878  1 cy = 10 ns --
+SEQ min=009 mean=009.2 max=036 gt18=000993 gt49=000000
+RND min=009 mean=011.0 max=037 gt18=001142 gt49=000000
+errors=0
+```
+
+**Random access: 110 ns typical, 90 ns best, 370 ns worst** — over 123 million
+accesses with zero data errors. Hardware came in one controller clock *faster*
+than simulation on every figure (calibration chose a smaller `added_read_pipe`
+than the behavioural models needed), so the model errs pessimistic.
+
+DDR3 calibration converges at 400 MHz on an HR bank with no ODELAYE2 — the
+project's largest single risk, and one static timing could not answer.
+
+`gt49 = 0` in every window: **legacy machines never miss their ~490 ns deadline**,
+refresh included. The IIgs' 180 ns window is met with 70 ns to spare in the
+typical case and missed only on the 1.7 % of accesses that collide with refresh —
+which is precisely what milestone 2 (refresh control) removes.
+
+**Milestone 2 (refresh control) is confirmed on hardware too.** With the refresh
+gate driven, the worst case falls from 370 ns to **120 ns** and *no access in
+27.8 million* exceeds the IIgs' 180 ns window:
+
+```
+SEQ min=009 mean=009.0 max=010 gt18=000000 gt49=000000
+RND min=009 mean=009.7 max=012 gt18=000000 gt49=000000
+errors=0
+```
+
+See [docs/DERISK.md](docs/DERISK.md).
+
+## License
+
+**Gateware: GPL-3.0-or-later** — [UberDDR3](https://github.com/AngeloJacobo/UberDDR3)
+is GPL-3.0-or-later, and a bitstream containing it is a derivative work. Files
+that stand alone (the clock generator, the latency probe, the tooling, the
+constraints) are **BSD-2-Clause** so they can be reused outside a GPL project;
+the combination is GPL-3. Every file carries an SPDX header, which is
+authoritative.
+
+The carrier board will be licensed separately under CERN-OHL — a PCB layout is
+not a derivative of a Verilog DDR3 controller. See [hw/](hw/README.md).
+
+Full reasoning, the per-file table, the Vivado and anti-tivoization consequences,
+and two third-party licence traps waiting in the v5 port: [LICENSING.md](LICENSING.md).

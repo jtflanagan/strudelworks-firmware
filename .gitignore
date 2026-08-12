@@ -1,0 +1,22 @@
+# Fetched at a pinned SHA by third_party/fetch_uberddr3.sh, not vendored, so
+# upstream's GPL-3.0-or-later code stays visibly upstream's.  See LICENSING.md.
+/third_party/UberDDR3/
+
+# Vivado
+/build/work/
+/build/vivado.log
+/build/vivado.jou
+*.jou
+*.log
+*.str
+.Xil/
+vivado_*.backup.jou
+vivado_*.backup.log
+
+__pycache__/
+*.pyc
+
+# simulation build products
+/sim/*.out
+
+/build/results/

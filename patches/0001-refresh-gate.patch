@@ -1,0 +1,107 @@
+diff --git a/rtl/ddr3_controller.v b/rtl/ddr3_controller.v
+index 3922481..5ae4115 100644
+--- a/rtl/ddr3_controller.v
++++ b/rtl/ddr3_controller.v
+@@ -101,7 +101,11 @@ module ddr3_controller #(
+                 cmd_len = 4 + 3 + BA_BITS + ROW_BITS + 2*DUAL_RANK_DIMM,
+                 lanes_clog2 = $clog2(LANES) == 0? 1: $clog2(LANES),
+     parameter[1:0] row_bank_col = (ECC_ENABLE == 3)? 2 : 1, // memory address mapping: 0 {bank, row, col} , 1 = {row, bank, col} , 2 = {bank[2:1]. row, bank[0], col} FOR ECC
+-    parameter[0:0] ECC_TEST = 0
++    parameter[0:0] ECC_TEST = 0,
++    // strudelworks: 1 = honour i_refresh_ok and pull refreshes in early.
++    // 0 = upstream behaviour exactly (i_refresh_ok ignored), which is the
++    // default so the unpatched formal properties still hold.
++    parameter[0:0] REFRESH_GATE = 0
+     ) 
+     (
+         input wire i_controller_clk, //i_controller_clk has period of CONTROLLER_CLK_PERIOD 
+@@ -162,6 +166,11 @@ module ddr3_controller #(
+ //        output	wire	[31:0]	o_debug3
+         // User enabled self-refresh
+         input wire i_user_self_refresh,
++        // strudelworks: high = the caller knows the next bus cycle needs no
++        // memory, so a refresh may be taken NOW.  Advisory only - the tREFI
++        // deadline still fires on its own if this never asserts, so refresh
++        // can never be starved.  Ignored unless REFRESH_GATE = 1.
++        input wire i_refresh_ok,
+         // Display debug messages via UART
+         output wire uart_tx
+     );
+@@ -307,6 +316,13 @@ module ddr3_controller #(
+ 
+     /* verilator lint_on WIDTHEXPAND */
+     localparam PRE_REFRESH_DELAY = WRITE_TO_PRECHARGE_DELAY + 1; 
++    // strudelworks: an early refresh is only taken once at least half of
++    // tREFI has elapsed, i.e. while the countdown still has less than half
++    // to go.  Without a floor, an always-idle bus would refresh continuously;
++    // with it the worst case is twice the nominal refresh rate, which costs
++    // about 4 % of bandwidth (2 x tRFC per tREFI) and buys a refresh that is
++    // essentially always already done before its deadline.
++    localparam REFRESH_EARLY_THRESHOLD = ps_to_cycles(tREFI) / 2;
+     `ifdef FORMAL 
+         (*keep*) wire[3:0] f_PRECHARGE_TO_ACTIVATE_DELAY, f_ACTIVATE_TO_PRECHARGE_DELAY, f_ACTIVATE_TO_WRITE_DELAY, f_ACTIVATE_TO_READ_DELAY, f_ACTIVATE_TO_ACTIVATE_DELAY,
+                     f_READ_TO_WRITE_DELAY, f_READ_TO_READ_DELAY, f_READ_TO_PRECHARGE_DELAY, f_WRITE_TO_WRITE_DELAY, 
+@@ -907,6 +923,26 @@ module ddr3_controller #(
+         else if(instruction[USE_TIMER] /*&& delay_counter != {(DELAY_COUNTER_WIDTH){1'b1}}*/ && !pause_counter && delay_counter != 0) begin
+             delay_counter_d = delay_counter - 1; 
+         end
++
++        // ---- strudelworks: pull the refresh in early -------------------------
++        // instruction_address == 22 means the CURRENTLY EXECUTING instruction is
++        // ROM[21], the tREFI countdown - the one state where the bus is open and
++        // no refresh is in flight.  (While executing ROM[N] the address register
++        // already points at N+1; upstream's own assume() at "write-then-read
++        // calibration will not take more than tREFI" reads the same way.)
++        //
++        // Cutting the countdown short here hands the refresh to a window the
++        // caller has declared free, instead of letting it land wherever tREFI
++        // happens to expire.  It only ever moves a refresh EARLIER: if
++        // i_refresh_ok never asserts, the timer expires exactly as before, so
++        // this cannot starve refresh or violate retention.  That is why the
++        // account runs in credit and needs no deadline backstop of its own.
++        if(REFRESH_GATE[0] && i_refresh_ok && final_calibration_done
++           && instruction_address == 5'd22 && instruction[USE_TIMER]
++           && !pause_counter && delay_counter > 1
++           && delay_counter <= REFRESH_EARLY_THRESHOLD[DELAY_COUNTER_WIDTH-1:0]) begin
++            delay_counter_d = 1; // advance fires on the next cycle
++        end
+         
+         //delay_counter of 1 means we will need to update the delay_counter next clock cycle (delay_counter of zero) so we need to retrieve 
+         //now the next instruction. The same thing needs to be done when current instruction does not need the timer delay.
+diff --git a/rtl/ddr3_top.v b/rtl/ddr3_top.v
+index 73fa755..6c2b1c1 100644
+--- a/rtl/ddr3_top.v
++++ b/rtl/ddr3_top.v
+@@ -57,6 +57,7 @@ module ddr3_top #(
+     parameter[1:0] ECC_ENABLE = 0, // set to 1 or 2 to add ECC (1 = Side-band ECC per burst, 2 = Side-band ECC per 8 bursts , 3 = Inline ECC ) 
+     parameter[1:0] DIC = 2'b00, //Output Driver Impedance Control (2'b00 = RZQ/6, 2'b01 = RZQ/7, RZQ = 240ohms) (only change when you know what you are doing)
+     parameter[2:0] RTT_NOM = 3'b011, //RTT Nominal (3'b000 = disabled, 3'b001 = RZQ/4, 3'b010 = RZQ/2 , 3'b011 = RZQ/6, RZQ = 240ohms)  (only change when you know what you are doing)
++    parameter[0:0] REFRESH_GATE = 0, // strudelworks: see ddr3_controller.v
+     parameter[1:0] SELF_REFRESH = 2'b00, // 0 = use i_user_self_refresh input, 1 = Self-refresh mode is enabled after 64 controller clock cycles of no requests, 2 = 128 cycles, 3 = 256 cycles
+     parameter // The next parameters act more like a localparam (since user does not have to set this manually) but was added here to simplify port declaration
+                 DQ_BITS = 8,  //device width (fixed to 8, if DDR3 is x16 then BYTE_LANES will be 2 while )
+@@ -126,6 +127,8 @@ module ddr3_top #(
+         // 
+         // User enabled self-refresh
+         input wire i_user_self_refresh,
++        // strudelworks: a refresh may be taken now (see ddr3_controller.v)
++        input wire i_refresh_ok,
+         output wire uart_tx
+     );
+     
+@@ -268,6 +271,7 @@ ddr3_top #(
+             .DIC(DIC), //Output Driver Impedance Control (2'b00 = RZQ/6, 2'b01 = RZQ/7, RZQ = 240ohms)
+             .RTT_NOM(RTT_NOM), //RTT Nominal (3'b000 = disabled, 3'b001 = RZQ/4, 3'b010 = RZQ/2 , 3'b011 = RZQ/6, RZQ = 240ohms)
+             .DUAL_RANK_DIMM(DUAL_RANK_DIMM), // enable dual rank DIMM (1 =  enable, 0 = disable)
++            .REFRESH_GATE(REFRESH_GATE),
+             .SPEED_BIN(SPEED_BIN), // 0 = Use top-level parameters , 1 = DDR3-1066 (7-7-7) , 2 = DR3-1333 (9-9-9) , 3 = DDR3-1600 (11-11-11)
+             .SDRAM_CAPACITY(SDRAM_CAPACITY), // 0 = 256Mb, 1 = 512Mb, 2 = 1Gb, 3 = 2Gb, 4 = 4Gb, 5 = 8Gb, 6 = 16Gb
+             .TRCD(TRCD), // ps Active to Read/Write command time (only used if SPEED_BIN = 0)
+@@ -332,6 +336,7 @@ ddr3_top #(
+ //            .o_debug3(o_debug3)
+             // User enabled self-refresh
+             .i_user_self_refresh(user_self_refresh),
++            .i_refresh_ok(i_refresh_ok),
+             .uart_tx(uart_tx)
+         );
+     `ifndef LATTICE_ECP5_PHY // XILINX PHY
