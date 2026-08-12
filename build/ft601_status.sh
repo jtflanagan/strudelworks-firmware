@@ -58,7 +58,7 @@ FLAGS = [
     ("ui_din_full",    13, False),
 ]
 
-pat = re.compile(r"S=([0-9A-Fa-f]{4}) C=([0-9A-Fa-f]{8}) M=([0-9A-Fa-f]{2}) F=([0-9A-Fa-f]{2})")
+pat = re.compile(r"S=([0-9A-Fa-f]{4}) C=([0-9A-Fa-f]{8})(?: M=([0-9A-Fa-f]{2}) F=([0-9A-Fa-f]{2}))?")
 seen = 0
 with serial.Serial(port, 115200, timeout=2) as ser:
     ser.reset_input_buffer()
@@ -70,7 +70,8 @@ with serial.Serial(port, 115200, timeout=2) as ser:
         buf += chunk
         for m in pat.finditer(buf):
             s, c = int(m.group(1), 16), int(m.group(2), 16)
-            mmcm, resets = int(m.group(3), 16), int(m.group(4), 16)
+            mmcm   = int(m.group(3), 16) if m.group(3) else 0
+            resets = int(m.group(4), 16) if m.group(4) else 0
             state = STATES.get(s & 7, "?%d" % (s & 7))
             bits = []
             for name, bit, active_low in FLAGS:

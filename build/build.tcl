@@ -93,7 +93,6 @@ if {$ft601} {
         [file join $root rtl ft_clk_gen.v] \
         [file join $root rtl ft601_fifo.sv] \
         [file join $root rtl uart_tx.v] \
-        [file join $root rtl uart_rx.v] \
         [file join $root rtl ft601_top.sv] \
     ]
 } elseif {$diag} {

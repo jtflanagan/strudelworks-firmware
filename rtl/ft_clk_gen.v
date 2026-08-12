@@ -2,40 +2,42 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
-// ft_clk_gen - the two phases of the FT601's 100 MHz FIFO clock, with a lock
-// watchdog so a clock that stops and restarts recovers by itself.
+// ft_clk_gen - the two phases of the FT601's 100 MHz FIFO clock.
+//
+// BASELINE VERSION.  Deliberately the simplest thing that works, and the
+// configuration in which the link measured byte-perfect at 335 MB/s.  Hardening
+// (clock-loss detection, MMCM recovery) goes on top of this in later commits,
+// ONE change at a time with an integrity run between each.  An earlier attempt
+// landed several at once and regressed the link to a reproducible 1/3 word
+// duplication rate that a long bisect could not even attribute - at unchanged
+// throughput, so only the sequence check saw it.
 //
 // Separate from clk_gen.v because this is a different clock SOURCE: clk_gen runs
 // off the Au's own 100 MHz oscillator (clk_pin, N14), while this runs off the
 // clock the FT601 drives back at us (ft_clk, D4).  The two are unrelated, hence
 // the set_clock_groups -asynchronous in constr/ft601.xdc.
 //
-// Why two phases:
+// Why two phases rather than one clock:
 //
 //   Signals FROM the FT601 are sampled on the ft_clk rising edge - easy.
 //   Signals TO the FT601 must be STABLE at that same rising edge - not easy,
 //   because a register clocked on the rising edge only starts changing then.
 //
 // So outbound registers are clocked 180 degrees away, giving the combinational
-// logic a half period to settle before the FT601 looks.
+// logic a half period to settle before the FT601 looks.  That is the whole
+// reason this module exists, and it is the fix v5 arrived at: the earlier
+// single-clock ft600_fifo in v5_1_3 does not do this, and the later ft601_test
+// project does.  We port the later one.
 //
-// WHY THE WATCHDOG.  ft_clk is not free-running.  The FT601 drives it only once
-// it is out of reset with its PLL up, so it is absent at power-on, absent
-// whenever the chip is reset, and can stop again later.  An MMCM must be held in
-// reset until its reference is stable; one whose RST was released before the
-// reference existed may simply never lock.  MMCME2_BASE cannot tell us that
-// happened - CLKINSTOPPED exists only on MMCME2_ADV - so nothing would notice
-// and nothing would recover.
+// MMCME2_BASE rather than clk_wiz, for the reason build.tcl gives: no .xci in
+// this project, so a fresh clone builds with nothing to regenerate.
 //
-// Rather than detect the clock directly, watch the outcome: if LOCKED has been
-// low for longer than a lock could plausibly take, kick RST and try again,
-// forever.  That covers "reference arrived late", "reference went away and came
-// back" and "MMCM came up in a bad state" with one mechanism and no extra clock
-// domain.  While the reference really is absent it just retries harmlessly.
-//
-// retries counts the kicks.  It is the number worth looking at when the board
-// has been flaky: a non-zero, growing count is proof the FT601's clock is
-// dropping out, which is otherwise invisible from outside.
+// NOTE ON ft_clk NOT BEING FREE-RUNNING.  The FT601 drives this clock only once
+// it is out of reset with its PLL up, so it is absent at power-on.  An MMCM whose
+// RST is released before its reference exists is not guaranteed to lock, and
+// MMCME2_BASE cannot report that having happened - CLKINSTOPPED exists only on
+// MMCME2_ADV.  In practice it locks here.  Making that guaranteed is exactly the
+// hardening deferred to a later commit.
 //
 //   VCO = 100 MHz * 10 / 1 = 1000 MHz  (inside the Artix-7 -2 range)
 //   ft_clk_pos = 1000/10 = 100 MHz @   0 deg  -> sample inbound, run the FSM
@@ -47,131 +49,18 @@ module ft_clk_gen #(
     parameter real    MULT            = 10.000,  // -> VCO 1000 MHz
     parameter integer DIV_IN          = 1,
     parameter integer DIV_OUT         = 10,      // -> 100 MHz
-    // Phase at which outbound registers launch, relative to the FT601's own
-    // sampling edge at 0 deg.  Launching at 180 leaves half a period (5 ns) for
-    // data to settle before the chip looks.
-    //
-    // This is the design's real timing knob, and it is NOT comfortably centred.
-    // A duplicated word - the chip reading the same value twice - is the
-    // signature of data arriving AFTER the sampling edge, so the chip latches
-    // the previous one.  Launching earlier buys settling time.  Sweep this if
-    // the link duplicates, and see docs/DERISK.md for the measured window.
-    parameter real    NEG_PHASE       = 180.000,
-    // How long LOCKED must stay low before the watchdog intervenes.
-    //
-    // Set FAR longer than a lock takes (an MMCM locks in well under a
-    // millisecond) because intervening is not free: resetting the MMCM glitches
-    // ft_clk_pos/neg, and doing that while the link is streaming corrupts data
-    // in flight.  Measured the hard way - at 1 ms this fired often enough to put
-    // 336k sequence breaks into an otherwise byte-perfect 335 MB/s stream.
-    //
-    // The watchdog exists for the case where the clock is GONE and would never
-    // come back on its own.  It is not a lock-quality improver, and it must stay
-    // out of the way of a working link.
-    parameter integer LOCK_TIMEOUT    = 5_000_000,  // 50 ms at 100 MHz
-    parameter integer RST_CYCLES      = 64,         // MMCM RST needs >= 5 ns
-    // 0 = never touch the MMCM (counters still work).  Bisect switch: see
-    // the WATCHDOG_ENABLE branch below.
-    parameter integer WATCHDOG_ENABLE = 0
+    parameter real    NEG_PHASE       = 180.000
 ) (
-    input  wire ft_clk_pin,  // straight off the pin; may be absent
-    input  wire ref_clk,     // ALWAYS running - the Au oscillator domain
+    input  wire ft_clk_pin,  // straight off the pin; absent until the chip runs
     input  wire rst,         // active high, asynchronous
     output wire ft_clk_pos,  // 0 deg
     output wire ft_clk_neg,  // 180 deg
-    output wire locked,
-    // Diagnosis, not intervention: how many times the clock has been LOST after
-    // having once been good.  Counts every unlock event whether or not the
-    // watchdog had to act, and ignores the startup period before the first lock
-    // (where being unlocked is simply normal).  This is the number that answers
-    // "did the FT601's clock drop out?" without perturbing anything.
-    output reg [7:0] unlocks,
-    output reg [7:0] kicks    // times the watchdog actually reset the MMCM
+    output wire locked
 );
 
     wire ft_clk_buf;
     wire clkfb, clkfb_buf;
     wire pos_raw, neg_raw;
-    wire mmcm_locked;
-
-    assign locked = mmcm_locked;
-
-    // ---- lock watchdog, in the always-running reference domain --------------
-    reg        mmcm_rst    = (WATCHDOG_ENABLE != 0);
-    reg [22:0] wd_cnt      = 23'd0;
-    reg [1:0]  lock_sync   = 2'b00;
-    reg        have_locked = 1'b0;   // has it EVER locked since reset?
-    reg        locked_prev = 1'b0;
-
-    always @(posedge ref_clk) lock_sync <= {lock_sync[0], mmcm_locked};
-    wire locked_s = lock_sync[1];
-
-    always @(posedge ref_clk) begin
-        if (rst) begin
-            mmcm_rst    <= (WATCHDOG_ENABLE != 0);
-            wd_cnt      <= 23'd0;
-            kicks       <= 8'd0;
-            unlocks     <= 8'd0;
-            have_locked <= 1'b0;
-            locked_prev <= 1'b0;
-        end else begin
-            locked_prev <= locked_s;
-            if (locked_s) have_locked <= 1'b1;
-
-            // Count losing lock, but only once we had it.  Before the first
-            // lock, "not locked" just means the FT601 has not started clocking
-            // yet, which is the normal state at every power-on and says nothing
-            // about reliability.
-            if (have_locked && locked_prev && !locked_s && unlocks != 8'hFF) begin
-                unlocks <= unlocks + 8'd1;
-            end
-
-            if (WATCHDOG_ENABLE == 0) begin
-                // Bisect switch.  With the watchdog disabled this module behaves
-                // exactly as the byte-perfect build did - MMCM RST driven only by
-                // the module reset - while still counting unlock events, so the
-                // diagnosis stays available even when the intervention does not.
-                mmcm_rst <= 1'b0;
-                wd_cnt   <= 23'd0;
-            end else if (mmcm_rst) begin
-                if (wd_cnt >= RST_CYCLES[22:0]) begin
-                    mmcm_rst <= 1'b0;
-                    wd_cnt   <= 23'd0;
-                end else begin
-                    wd_cnt <= wd_cnt + 23'd1;
-                end
-            end else if (locked_s || have_locked) begin
-                // Locked, or has been locked at some point.  Do nothing, ever.
-                //
-                // The watchdog's job is ACQUIRING the first lock when the
-                // reference shows up late - that is the failure this module
-                // exists to fix.  Once the MMCM has proved it can lock to this
-                // reference, resetting it again is all cost and no benefit: it
-                // re-locks at a different sampling phase relative to the FT601,
-                // and the FT601 then samples the write bus at the wrong instant.
-                //
-                // That is not theoretical.  Kicking a working link produced a
-                // steady ~34% duplicated words - the same value arriving twice -
-                // in a stream that was byte-perfect before and after.  Throughput
-                // was unchanged at 335 MB/s, so it was invisible to every metric
-                // except the sequence check.
-                //
-                // If the reference disappears later, plls_locked drops and the
-                // fabric resets cleanly; when it returns the MMCM re-locks by
-                // itself, having already demonstrated it can.
-                wd_cnt <= 23'd0;
-            end else begin
-                // Never locked yet.  Keep kicking until the reference appears.
-                if (wd_cnt >= LOCK_TIMEOUT[22:0]) begin
-                    mmcm_rst <= 1'b1;
-                    wd_cnt   <= 23'd0;
-                    if (kicks != 8'hFF) kicks <= kicks + 8'd1;
-                end else begin
-                    wd_cnt <= wd_cnt + 23'd1;
-                end
-            end
-        end
-    end
 
     IBUF ibuf_ft_clk (.I(ft_clk_pin), .O(ft_clk_buf));
 
@@ -204,9 +93,9 @@ module ft_clk_gen #(
         .CLKOUT4  (),
         .CLKOUT5  (),
         .CLKOUT6  (),
-        .LOCKED   (mmcm_locked),
+        .LOCKED   (locked),
         .PWRDWN   (1'b0),
-        .RST      (mmcm_rst)
+        .RST      (rst)
     );
 
     BUFG bufg_fb  (.I(clkfb),   .O(clkfb_buf));

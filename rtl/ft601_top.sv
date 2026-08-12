@@ -113,43 +113,23 @@ module ft601_top (
     // The chip then drops off USB entirely until the FPGA is reprogrammed.
     //
     // clk_locked already folds in rst_n, since clk_gen takes ~rst_n as its reset.
-    localparam integer CHIP_RST_CYCLES = 4;   // BISECT: was 100_000 (1 ms)
-
-    wire       cmd_reset;
-    reg [17:0] chip_rst_cnt = 18'd0;
-    reg        chip_rst_n   = 1'b0;
-    reg [7:0]  chip_resets  = 8'd0;
-
-    always @(posedge clk_ctrl) begin
-        if (!clk_locked) begin
-            chip_rst_cnt <= 18'd0;
-            chip_rst_n   <= 1'b0;
-        end else if (cmd_reset) begin
-            // Host asked for it.  Restart the pulse from zero.
-            chip_rst_cnt <= 18'd0;
-            chip_rst_n   <= 1'b0;
-            if (chip_resets != 8'hFF) chip_resets <= chip_resets + 8'd1;
-        end else if (chip_rst_cnt != CHIP_RST_CYCLES[17:0]) begin
-            chip_rst_cnt <= chip_rst_cnt + 18'd1;
-            chip_rst_n   <= 1'b0;
-        end else begin
-            chip_rst_n   <= 1'b1;
-        end
+    reg [3:0] chip_rst_sync = 4'b0000;
+    always @(posedge clk_ctrl or negedge clk_locked) begin
+        if (!clk_locked) chip_rst_sync <= 4'b0000;
+        else             chip_rst_sync <= {chip_rst_sync[2:0], 1'b1};
     end
 
-    // ---- FT601 clock, with recovery ---------------------------------------
-    wire       ft_clk_pos, ft_clk_neg, ft_locked;
-    wire [7:0] ft_unlocks, ft_kicks;
+    wire ft_chip_rst_n = chip_rst_sync[3];
+
+    // ---- FT601 clock ------------------------------------------------------
+    wire ft_clk_pos, ft_clk_neg, ft_locked;
 
     ft_clk_gen u_ft_clk (
         .ft_clk_pin (ft_clk),
-        .ref_clk    (clk_ctrl),
         .rst        (~rst_n),
         .ft_clk_pos (ft_clk_pos),
         .ft_clk_neg (ft_clk_neg),
-        .locked     (ft_locked),
-        .unlocks    (ft_unlocks),
-        .kicks      (ft_kicks)
+        .locked     (ft_locked)
     );
 
     // ---- fabric reset -----------------------------------------------------
@@ -215,7 +195,7 @@ module ft601_top (
         .ft_rd         (ft_rd),
         .ft_wr         (ft_wr),
         .ft_oe         (ft_oe),
-        .ft_chip_rst_n (chip_rst_n),
+        .ft_chip_rst_n (ft_chip_rst_n),
         .ft_reset      (ft_reset),
         .ft_wakeup     (ft_wakeup),
         .ui_din        (ui_din),
@@ -228,34 +208,18 @@ module ft601_top (
         .dbg           (dbg)
     );
 
-    // ---- host command channel ---------------------------------------------
-    // 'R' (or 'r') resets the FT601.  Runs over the Au's serial bridge, which is
-    // a separate device from the FT601 - so this is reachable exactly when the
-    // FT601 is not.  Held in the Au domain and never gated on ft_locked, for the
-    // deadlock reason above.
-    wire [7:0] urx_data;
-    wire       urx_valid;
-
-    uart_rx #(.CLK_HZ(100_000_000), .BAUD(115_200)) u_uart_rx (
-        .clk      (clk_ctrl),
-        .rst      (~clk_locked),
-        .rx       (usb_rx),
-        .rx_data  (urx_data),
-        .rx_valid (urx_valid)
-    );
-
-    assign cmd_reset = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
+    wire unused_rx = usb_rx;
 
     // ---- status over UART -------------------------------------------------
     // Emits "S=xxxx C=xxxxxxxx M=xx F=xx" about ten times a second, 115200 8N1.
     // M is the MMCM kick count and F the FT601 reset count - the two numbers that
     // turn "it flaked out again" into something with evidence attached.
     // Decoded by build/ft601_status.sh.
-    localparam [7:0] CH_S  = 8'h53, CH_C = 8'h43, CH_M = 8'h4D, CH_F = 8'h46;
-    localparam [7:0] CH_EQ = 8'h3D, CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
+    localparam [7:0] CH_S  = 8'h53, CH_C = 8'h43, CH_EQ = 8'h3D;
+    localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
-    localparam [4:0] RPT_LAST = 5'd28;   // last byte index
-    localparam [4:0] RPT_IDLE = 5'd29;
+    localparam [4:0] RPT_LAST = 5'd18;   // last byte index
+    localparam [4:0] RPT_IDLE = 5'd19;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
@@ -264,8 +228,7 @@ module ft601_top (
     reg [4:0]  rpt_idx     = RPT_IDLE;
     reg [31:0] rpt_cnt     = 32'd0;
     reg [15:0] rpt_dbg     = 16'd0;
-    reg [7:0]  rpt_unlocks = 8'd0;
-    reg [7:0]  rpt_resets  = 8'd0;
+
 
     always @(posedge clk_ctrl) begin
         if (!clk_locked) begin
@@ -278,8 +241,6 @@ module ft601_top (
                 // all describe the same instant.
                 rpt_dbg     <= dbg;
                 rpt_cnt     <= tx_count;
-                rpt_unlocks <= ft_unlocks;
-                rpt_resets  <= chip_resets;
                 rpt_idx     <= 5'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
@@ -303,10 +264,6 @@ module ft601_top (
             5'd14: nib = rpt_cnt[11:8];
             5'd15: nib = rpt_cnt[7:4];
             5'd16: nib = rpt_cnt[3:0];
-            5'd20: nib = rpt_unlocks[7:4];
-            5'd21: nib = rpt_unlocks[3:0];
-            5'd25: nib = rpt_resets[7:4];
-            5'd26: nib = rpt_resets[3:0];
             default: nib = 4'd0;
         endcase
     end
@@ -322,14 +279,8 @@ module ft601_top (
             5'd6:  ch = CH_SP;
             5'd7:  ch = CH_C;
             5'd8:  ch = CH_EQ;
-            5'd17: ch = CH_SP;
-            5'd18: ch = CH_M;
-            5'd19: ch = CH_EQ;
-            5'd22: ch = CH_SP;
-            5'd23: ch = CH_F;
-            5'd24: ch = CH_EQ;
-            5'd27: ch = CH_CR;
-            5'd28: ch = CH_LF;
+            5'd17: ch = CH_CR;
+            5'd18: ch = CH_LF;
             default: ch = hex;
         endcase
     end
@@ -386,7 +337,6 @@ module ft601_top (
     assign led[3] = |tx_blink;
     assign led[4] = fifo_rst_busy;
     assign led[5] = rx_seen;
-    assign led[6] = ~chip_rst_n;          // FT601 held in reset right now
-    assign led[7] = (ft_unlocks != 8'd0);   // sticky: clock HAS dropped out
+    assign led[7:6] = tx_count[25:24];
 
 endmodule
