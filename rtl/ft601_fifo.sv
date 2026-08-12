@@ -278,25 +278,39 @@ module ft601_fifo (
     // The old code decided speculatively, in the same instant, from a pin that
     // had not finished arriving.  Getting that wrong in one direction duplicates
     // a word and in the other drops one, which is precisely the corruption seen.
-    assign tx_dout_en = tx_enabled_q & ~txe_q;
+    // tx_load advances the pipeline: it pops the FIFO AND loads the output
+    // register, in step, so the word on the pins and the FIFO head never drift
+    // apart.  Asserted when starting a burst, or when the word we were
+    // presenting was acknowledged.
+    // tx_held: ft_data_q currently holds a word that has been presented but NOT
+    // yet acknowledged.  Needed because the output register is a pipeline stage
+    // the FIFO does not know about.
+    //
+    // Without it, leaving TX un-acknowledged and re-entering overwrites the held
+    // word with the next one and silently DROPS it - one lost word per burst,
+    // which measured as ~1 sequence break per 1024 words (the FIFO depth, i.e.
+    // one per burst).  Fast, plausible, and wrong.
+    logic tx_load;
+    logic tx_held = 1'b0;
+    assign tx_dout_en = tx_load;
     assign rx_din_en  = rx_enabled_q & ~rxf_q;
     assign rx_din     = ft_data;
 
     always_comb begin
+        tx_load      = 1'b0;
         ft_state_d   = ft_state_q;
         tx_enabled_d = tx_enabled_q;
         rx_enabled_d = rx_enabled_q;
         oe_enabled_d = oe_enabled_q;
 
-        ft_wr     = ~tx_enabled_q;
-        ft_rd     = ~rx_enabled_q;
-        ft_oe     = ~oe_enabled_q;
-        ft_wakeup = 1'b1;
 
         case (ft_state_q)
             IDLE: begin
-                if (!tx_empty && !txe_q) begin
+                if ((!tx_empty || tx_held) && !txe_q) begin
                     tx_enabled_d = 1'b1;
+                    // Load only if we are NOT already holding an unacknowledged
+                    // word; otherwise re-present the one we still owe.
+                    tx_load      = ~tx_held;
                     ft_state_d   = TX;
                 end else if (!rxf_q && !rx_full) begin
                     // Turn the bus around first: OE# one cycle before RD#.
@@ -316,10 +330,15 @@ module ft601_fifo (
                 // ignores the bus while TXE# is high, and tx_dout_en above will
                 // not pop anything it did not take.
                 if (txe_q || tx_almost_empty) begin
+                    // Not acknowledged, so do NOT advance: the output register
+                    // keeps the word and the FIFO keeps its head.  Re-entering
+                    // TX presents the same word again, which is correct - the
+                    // chip never took it.
                     tx_enabled_d = 1'b0;
                     ft_state_d   = TURNAROUND;
                 end else begin
                     tx_enabled_d = 1'b1;
+                    tx_load      = 1'b1;   // acknowledged; advance
                 end
             end
 
@@ -362,10 +381,69 @@ module ft601_fifo (
         end
     end
 
+    // ---- output stage -----------------------------------------------------
+    // EVERY outbound signal is registered here, on one edge, and packed into the
+    // IOBs by constr/ft601.xdc.  This interface is source-synchronous: CLKOUT
+    // travels with the signals, so the board's flight time is common-mode and
+    // cancels.  What does NOT cancel is skew - between each signal and the clock,
+    // and between the signals themselves.
+    //
+    // That is what was broken.  ft_wr came from a flop and an inverter while
+    // ft_data came combinationally out of block RAM through a tristate mux, so
+    // the two had completely different clock-to-out and drifted apart by
+    // nanoseconds that varied with placement.  Registering them all identically
+    // makes clock-to-out one number for the whole bus, by construction rather
+    // than by the placer's goodwill.
+    //
+    // ft_data_q holds the word currently on the pins.  It advances only with
+    // tx_load, i.e. only when the previous word was acknowledged, so a burst that
+    // stops mid-flight resumes with the same word rather than skipping it.
+    logic [31:0] ft_data_q = 32'd0;
+    logic        ft_wr_q   = 1'b1;
+    logic        ft_rd_q   = 1'b1;
+    logic        ft_oe_q   = 1'b1;
+
+    // Separate register for the DATA BUS tristate control, carrying the same
+    // value as ft_wr_q but nothing else.
+    //
+    // It has to be its own flop.  ft_wr_q drives the ft_wr pad AND all 32 OBUFT
+    // enables, and a register with that fanout cannot pack into any single IOB -
+    // Vivado replicates it into the fabric instead, and the replica driving the
+    // T pins became the critical path at -1.953 ns.  Giving the tristates a
+    // dedicated register lets Vivado replicate it per OBUFT and pack each copy
+    // into its own IOB, which is the whole point: data and enable launching from
+    // identical flops so they cannot skew apart.
+    logic        ft_dq_t   = 1'b1;
+
+    always_ff @(posedge ft_clk_neg) begin
+        if (rst) begin
+            ft_wr_q <= 1'b1;
+            ft_rd_q <= 1'b1;
+            ft_oe_q <= 1'b1;
+            ft_dq_t <= 1'b1;
+        end else begin
+            ft_wr_q <= ~tx_enabled_d;
+            ft_rd_q <= ~rx_enabled_d;
+            ft_oe_q <= ~oe_enabled_d;
+            ft_dq_t <= ~tx_enabled_d;
+        end
+        if (tx_load) ft_data_q <= tx_dout;
+        if (rst)          tx_held <= 1'b0;
+        else if (tx_load) tx_held <= 1'b1;
+    end
+
+    assign ft_wr     = ft_wr_q;
+    assign ft_rd     = ft_rd_q;
+    assign ft_oe     = ft_oe_q;
+    assign ft_wakeup = 1'b1;
+
     // Drive the bus only while writing.  `inout wire` rather than v5's `inout
     // logic`: a net driven by a continuous assignment has to be a net type.
-    assign ft_data = ft_wr ? 32'hzzzz_zzzz : tx_dout;
-    assign ft_be   = ft_wr ? 4'hz          : 4'hf;
+    // Tristate control comes from a register too, so the OBUFT's T flop packs
+    // into the IOB alongside the data.  If the data flops were packed and the
+    // enable were not, they would skew apart and the fix would be half-done.
+    assign ft_data = ft_dq_t ? 32'hzzzz_zzzz : ft_data_q;
+    assign ft_be   = ft_dq_t ? 4'hz          : 4'hf;
 
     // Straight through from the top level - see the port comment.
     assign ft_reset = ft_chip_rst_n;

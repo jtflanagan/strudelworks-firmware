@@ -239,20 +239,37 @@ set_property IOSTANDARD LVCMOS33 [get_ports {ft_data[31]}]
 # Launch is on ft_clk_neg (180 deg), so nominally 5 ns is available.
 ##############################################################################
 
-set FT601_TSU 2.0
-set FT601_TH  1.0
+# This interface is SOURCE-SYNCHRONOUS in both directions: the FT601 drives
+# CLKOUT alongside the signals, over the same board-to-board connector, so flight
+# time is common-mode and cancels.  These numbers therefore model the chip's
+# setup/hold window plus SKEW - not absolute propagation delay.  An earlier
+# revision budgeted absolute flight time and over-constrained the inputs badly.
+# DS_FT600Q-FT601Q Table 4.2, measured values - no longer estimates.
+#   T3 Master Drive Data Set Up Time   1.0 ns min
+#   T4 Master Drive Data Hold Time     4.8 ns min
+# The hold requirement is the demanding one and drives NEG_PHASE in ft_clk_gen.v.
+set FT601_TSU 1.0
+set FT601_TH  4.8
 
 set ft601_outs [get_ports {ft_data[*] ft_be[*] ft_wr ft_rd ft_oe}]
 set_output_delay -clock [get_clocks ft_clk_12] -max  $FT601_TSU -add_delay $ft601_outs
 set_output_delay -clock [get_clocks ft_clk_12] -min [expr {-$FT601_TH}] -add_delay $ft601_outs
 
 # Inputs from the chip: clock-to-out of the FT601 relative to the same clock.
-set FT601_TCO_MAX 5.0
-set FT601_TCO_MIN 1.0
+# Likewise for the chip's own clock-to-out: skew relative to the clock that
+# accompanies the data, not flight time across the connector.
+# Table 4.2 for the other direction:
+#   T1 Slave Drive Data Set Up Time    3.0 ns min
+#   T2 Slave Drive Data Hold Time      3.5 ns min
+# i.e. the chip's data is valid from 3.0 ns before our capture edge until 3.5 ns
+# after it.  Expressed the standard centre-aligned source-synchronous way: latest
+# arrival is -T1, earliest is -(period - T2).
+set FT601_T1 3.0
+set FT601_T2 3.5
 
 set ft601_ins [get_ports {ft_rxf ft_txe}]
-set_input_delay -clock [get_clocks ft_clk_12] -max $FT601_TCO_MAX -add_delay $ft601_ins
-set_input_delay -clock [get_clocks ft_clk_12] -min $FT601_TCO_MIN -add_delay $ft601_ins
+set_input_delay -clock [get_clocks ft_clk_12] -max [expr {-$FT601_T1}] -add_delay $ft601_ins
+set_input_delay -clock [get_clocks ft_clk_12] -min [expr {$FT601_T2 - 10.0}] -add_delay $ft601_ins
 
 # Pack the FT601 interface registers into the IOBs.
 #
@@ -268,3 +285,16 @@ set_input_delay -clock [get_clocks ft_clk_12] -min $FT601_TCO_MIN -add_delay $ft
 # must be packed together or they skew apart - is the remaining half of the fix.
 set_property IOB TRUE [get_ports ft_txe]
 set_property IOB TRUE [get_ports ft_rxf]
+
+# Every OUTBOUND signal too.  ft601_fifo.sv now registers all of them on one
+# edge; packing those flops into the IOBs gives the whole bus a single, identical
+# clock-to-out.  That is the point - not to make any one path fast, but to stop
+# ft_data and ft_wr drifting apart from each other and from the clock.
+#
+# ft_data and ft_be are tristate, so the OBUFT's T flop packs alongside the data
+# flop.  Both halves must pack or they skew apart and the fix is only half done.
+set_property IOB TRUE [get_ports {ft_data[*]}]
+set_property IOB TRUE [get_ports {ft_be[*]}]
+set_property IOB TRUE [get_ports ft_wr]
+set_property IOB TRUE [get_ports ft_rd]
+set_property IOB TRUE [get_ports ft_oe]

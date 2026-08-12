@@ -49,6 +49,21 @@ module ft_clk_gen #(
     parameter real    MULT            = 10.000,  // -> VCO 1000 MHz
     parameter integer DIV_IN          = 1,
     parameter integer DIV_OUT         = 10,      // -> 100 MHz
+    // Launch phase for outbound signals, relative to the FT601's sampling edge
+    // at 0 deg.  180 deg: data changes on ft_clk's falling edge, so transitions
+    // land midway between the chip's sampling edges.
+    //
+    // This is NOT a timing tuning knob, and must not be used as one.  Closing
+    // the interface is the job of the I/O delay constraints in constr/ft601.xdc,
+    // which state the chip's real setup/hold requirement and let the tools
+    // account for clock insertion delay, buffer delay, skew, jitter and PVT -
+    // every one of which they model better than hand arithmetic does.
+    //
+    // Two attempts at deriving this analytically (248 deg from the chip's timing
+    // window alone; then 58 deg after adding output-buffer delay) were both
+    // wrong, each accounting for some delay terms while silently dropping
+    // others - most obviously the clock's own launch delay.  If the interface
+    // does not close, fix the constraints or the RTL, not this number.
     parameter real    NEG_PHASE       = 180.000
 ) (
     input  wire ft_clk_pin,  // straight off the pin; absent until the chip runs
