@@ -323,3 +323,25 @@ set_property IOB TRUE [get_ports ft_oe]
 # Applied only to the FT601 outputs.  Nothing else on the board needs it, and
 # slew is not something to change globally by reflex.
 set_property SLEW FAST [get_ports {ft_data[*] ft_be[*] ft_wr ft_rd ft_oe}]
+
+# Multicycle the tristate enable, rather than trying to pack it into an IOB.
+#
+# Taken from ufrisk/pcileech-fpga, which drives an FT601 at 100 MHz in a shipped
+# design (PCIeSquirrel/src/pcileech_squirrel.xdc):
+#
+#   set_multicycle_path 2 -from [get_pins .../OE_reg/C] -to [get_ports {ft601_data[*]}]
+#
+# It is safe because of WHAT the signal is, not as a way to silence a report:
+# the enable changes once per burst, when the bus turns around, while the data
+# changes every cycle.  Giving the rarely-changing signal two periods is
+# functionally correct; giving the data two would not be, and is not done here.
+#
+# This replaces the approach of forcing ft_dq_t into the IOBs, which cannot work:
+# an IOB's output and tristate flops share a control set, and the data flop needs
+# a clock enable the tristate flop must not have.  Attempting it makes placement
+# infeasible outright.  The reference design does not try - it IOB-packs the data
+# and control flops and multicycles the enable instead.
+set_multicycle_path 2 -setup -from [get_pins -hier -filter {NAME =~ *ft_dq_t_reg*/C}] -to [get_ports {ft_data[*]}]
+set_multicycle_path 1 -hold  -from [get_pins -hier -filter {NAME =~ *ft_dq_t_reg*/C}] -to [get_ports {ft_data[*]}]
+set_multicycle_path 2 -setup -from [get_pins -hier -filter {NAME =~ *ft_be_t_reg*/C}] -to [get_ports {ft_be[*]}]
+set_multicycle_path 1 -hold  -from [get_pins -hier -filter {NAME =~ *ft_be_t_reg*/C}] -to [get_ports {ft_be[*]}]
