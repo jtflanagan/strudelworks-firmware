@@ -81,7 +81,31 @@ module ft601_top (
     // ---- reset ------------------------------------------------------------
     localparam integer RST_TICKS = 64;
 
-    wire      cmd_reset;
+    // The reference's reset trigger is a BUTTON - `~user_sw2_n` - which a human
+    // holds for milliseconds.  Ours is a UART byte, and uart_rx signals that with
+    // a ONE-CYCLE strobe.  Dropping a 10 ns pulse into a slot shaped for a button
+    // press is not equivalent: it is far too short to reset the FT601 (measured -
+    // a ~40 ns pulse left the chip untouched, 1 ms made it re-enumerate), and it
+    // gives the XPM FIFOs a single-cycle reset where they document a five-cycle
+    // minimum, which is worse than not resetting them at all.
+    //
+    // So stretch the strobe to the width a button would have supplied for free.
+    // The FT601 datasheet does not specify a minimum RESET# width anywhere - the
+    // Reset Generator section and the pin table describe the pin and stop - so
+    // 1 ms is chosen for margin against the value we measured, not from a spec.
+    localparam integer CMD_RST_CYCLES = 100_000;   // 1 ms at 100 MHz
+
+    wire       cmd_reset_strobe;
+    reg [16:0] cmd_rst_cnt = 17'd0;
+
+    always @(posedge clk_ctrl) begin
+        if (!clk_locked)              cmd_rst_cnt <= 17'd0;
+        else if (cmd_reset_strobe)    cmd_rst_cnt <= CMD_RST_CYCLES[16:0];
+        else if (cmd_rst_cnt != 17'd0) cmd_rst_cnt <= cmd_rst_cnt - 17'd1;
+    end
+
+    wire cmd_reset = (cmd_rst_cnt != 17'd0);
+
     reg [7:0] tickcount = 8'd0;
 
     always @(posedge clk_ctrl) begin
@@ -204,11 +228,12 @@ module ft601_top (
         .rx (usb_rx), .rx_data (urx_data), .rx_valid (urx_valid)
     );
 
-    assign cmd_reset = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
+    assign cmd_reset_strobe = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
 
     reg [7:0] chip_resets = 8'd0;
     always @(posedge clk_ctrl) begin
-        if (cmd_reset && chip_resets != 8'hFF) chip_resets <= chip_resets + 8'd1;
+        // Count the strobe, not the stretched pulse, or it counts every cycle.
+        if (cmd_reset_strobe && chip_resets != 8'hFF) chip_resets <= chip_resets + 8'd1;
     end
 
     // ---- status over UART -------------------------------------------------
