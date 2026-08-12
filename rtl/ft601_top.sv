@@ -113,13 +113,22 @@ module ft601_top (
     // The chip then drops off USB entirely until the FPGA is reprogrammed.
     //
     // clk_locked already folds in rst_n, since clk_gen takes ~rst_n as its reset.
+    wire      cmd_reset;
     reg [3:0] chip_rst_sync = 4'b0000;
     always @(posedge clk_ctrl or negedge clk_locked) begin
-        if (!clk_locked) chip_rst_sync <= 4'b0000;
-        else             chip_rst_sync <= {chip_rst_sync[2:0], 1'b1};
+        if (!clk_locked)     chip_rst_sync <= 4'b0000;
+        else if (cmd_reset)  chip_rst_sync <= 4'b0000;   // restart the pulse
+        else                 chip_rst_sync <= {chip_rst_sync[2:0], 1'b1};
     end
 
     wire ft_chip_rst_n = chip_rst_sync[3];
+
+    // Counts host-requested resets, so ft601_reset.sh can prove its command
+    // actually landed rather than assuming it did.
+    reg [7:0] chip_resets = 8'd0;
+    always @(posedge clk_ctrl) begin
+        if (cmd_reset && chip_resets != 8'hFF) chip_resets <= chip_resets + 8'd1;
+    end
 
     // ---- FT601 clock ------------------------------------------------------
     wire       ft_clk_pos, ft_clk_neg, ft_locked;
@@ -211,18 +220,36 @@ module ft601_top (
         .dbg           (dbg)
     );
 
-    wire unused_rx = usb_rx;
+    // ---- host command channel ---------------------------------------------
+    // 'R' (or 'r') resets the FT601.  This runs over the Au's OWN serial bridge,
+    // a separate USB device from the FT601 - so it is reachable exactly when the
+    // FT601 is the thing that is stuck, which is the entire point.  Never gated
+    // on ft_locked: that would reintroduce the deadlock where the chip cannot be
+    // reset because it is not clocking because it is in reset.
+    wire [7:0] urx_data;
+    wire       urx_valid;
+
+    uart_rx #(.CLK_HZ(100_000_000), .BAUD(115_200)) u_uart_rx (
+        .clk      (clk_ctrl),
+        .rst      (~clk_locked),
+        .rx       (usb_rx),
+        .rx_data  (urx_data),
+        .rx_valid (urx_valid)
+    );
+
+    assign cmd_reset = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
 
     // ---- status over UART -------------------------------------------------
     // Emits "S=xxxx C=xxxxxxxx M=xx F=xx" about ten times a second, 115200 8N1.
     // M is the MMCM kick count and F the FT601 reset count - the two numbers that
     // turn "it flaked out again" into something with evidence attached.
     // Decoded by build/ft601_status.sh.
-    localparam [7:0] CH_S  = 8'h53, CH_C = 8'h43, CH_M = 8'h4D, CH_EQ = 8'h3D;
+    localparam [7:0] CH_S  = 8'h53, CH_C = 8'h43, CH_M = 8'h4D, CH_F = 8'h46;
+    localparam [7:0] CH_EQ = 8'h3D;
     localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
-    localparam [4:0] RPT_LAST = 5'd23;   // last byte index
-    localparam [4:0] RPT_IDLE = 5'd24;
+    localparam [4:0] RPT_LAST = 5'd28;   // last byte index
+    localparam [4:0] RPT_IDLE = 5'd29;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
@@ -232,6 +259,7 @@ module ft601_top (
     reg [31:0] rpt_cnt     = 32'd0;
     reg [15:0] rpt_dbg     = 16'd0;
     reg [7:0]  rpt_unlocks = 8'd0;
+    reg [7:0]  rpt_resets  = 8'd0;
 
 
     always @(posedge clk_ctrl) begin
@@ -246,6 +274,7 @@ module ft601_top (
                 rpt_dbg     <= dbg;
                 rpt_cnt     <= tx_count;
                 rpt_unlocks <= ft_unlocks;
+                rpt_resets  <= chip_resets;
                 rpt_idx     <= 5'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
@@ -271,6 +300,8 @@ module ft601_top (
             5'd16: nib = rpt_cnt[3:0];
             5'd20: nib = rpt_unlocks[7:4];
             5'd21: nib = rpt_unlocks[3:0];
+            5'd25: nib = rpt_resets[7:4];
+            5'd26: nib = rpt_resets[3:0];
             default: nib = 4'd0;
         endcase
     end
@@ -289,8 +320,11 @@ module ft601_top (
             5'd17: ch = CH_SP;
             5'd18: ch = CH_M;
             5'd19: ch = CH_EQ;
-            5'd22: ch = CH_CR;
-            5'd23: ch = CH_LF;
+            5'd22: ch = CH_SP;
+            5'd23: ch = CH_F;
+            5'd24: ch = CH_EQ;
+            5'd27: ch = CH_CR;
+            5'd28: ch = CH_LF;
             default: ch = hex;
         endcase
     end

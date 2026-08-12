@@ -93,6 +93,7 @@ if {$ft601} {
         [file join $root rtl ft_clk_gen.v] \
         [file join $root rtl ft601_fifo.sv] \
         [file join $root rtl uart_tx.v] \
+        [file join $root rtl uart_rx.v] \
         [file join $root rtl ft601_top.sv] \
     ]
 } elseif {$diag} {
@@ -102,6 +103,7 @@ if {$ft601} {
     add_files -norecurse [list \
         [file join $root rtl clk_gen.v] \
         [file join $root rtl uart_tx.v] \
+        [file join $root rtl uart_rx.v] \
         [file join $root rtl diag_top.sv] \
     ]
 } else {
@@ -110,6 +112,7 @@ if {$ft601} {
         [file join $root rtl ddr3_wrapper.sv] \
         [file join $root rtl latency_probe.sv] \
         [file join $root rtl uart_tx.v] \
+        [file join $root rtl uart_rx.v] \
         [file join $root rtl bin_to_bcd.v] \
         [file join $root rtl report_tx.sv] \
         [file join $root rtl au_top.sv] \

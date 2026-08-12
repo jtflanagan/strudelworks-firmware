@@ -221,8 +221,8 @@ module ft601_fifo (
         dbg_raw[4]       = tx_rd_rst_busy;
         dbg_raw[5]       = rx_wr_rst_busy;
         dbg_raw[6]       = rx_rd_rst_busy;
-        dbg_raw[7]       = ft_txe;
-        dbg_raw[8]       = ft_rxf;
+        dbg_raw[7]       = txe_q;
+        dbg_raw[8]       = rxf_q;
         dbg_raw[9]       = tx_empty_raw;
         dbg_raw[10]      = tx_full_raw;
         dbg_raw[11]      = rx_empty_raw;
@@ -236,9 +236,29 @@ module ft601_fifo (
     end
 
     // ---- bus master -------------------------------------------------------
-    // The state machine samples the FT601 and so runs on the posedge phase.
-    // The output enables it computes are registered on the negedge phase, half
-    // a period earlier than the FT601 will look at them.
+    // INPUT REGISTERS AT THE PINS.  ft_txe / ft_rxf are captured by flops that
+    // constr/ft601.xdc packs into the IOBs, and the FSM only ever looks at the
+    // registered copies.
+    //
+    // This is the fix for the defect that made this link a coin flip.  Reading
+    // the raw pins combinationally put the chip's clock-to-out, the board delay,
+    // the whole state machine and a FIFO read-enable into a single half cycle -
+    // measured at -5.216 ns of setup slack once the interface was finally
+    // constrained, on 50 endpoints.  Placement decided whether it worked, so
+    // unrelated edits flipped the link between byte-perfect and duplicating
+    // every word, at identical throughput.
+    //
+    // Registering at the pin absorbs the external delay into an IOB flop's
+    // setup - which it has enormous margin for - and leaves only short internal
+    // paths behind it.  v5_1_3, the committed "working register interface"
+    // version, registers this signal too; the untracked ft601_test project this
+    // was ported from does not, and that regression came along for the ride.
+    logic txe_q, rxf_q;
+    always_ff @(posedge ft_clk_pos) begin
+        txe_q <= ft_txe;
+        rxf_q <= ft_rxf;
+    end
+
     typedef enum logic [2:0] {IDLE, TX, RX, TURNAROUND} ft601sm;
 
     ft601sm ft_state_d, ft_state_q = IDLE;
@@ -246,6 +266,21 @@ module ft601_fifo (
     logic tx_enabled_d, tx_enabled_q = 1'b0;
     logic rx_enabled_d, rx_enabled_q = 1'b0;
     logic oe_enabled_d, oe_enabled_q = 1'b0;
+
+    // POP WHAT WAS ACKNOWLEDGED, never what was merely offered.
+    //
+    // The FT601 samples the bus on its rising edge only when both WR# and TXE#
+    // are low there.  tx_enabled_q says we were driving across that edge, and
+    // txe_q is TXE# captured AT it - so together they are an exact record of
+    // whether the word was taken, available half a cycle before the FIFO's read
+    // clock needs it.
+    //
+    // The old code decided speculatively, in the same instant, from a pin that
+    // had not finished arriving.  Getting that wrong in one direction duplicates
+    // a word and in the other drops one, which is precisely the corruption seen.
+    assign tx_dout_en = tx_enabled_q & ~txe_q;
+    assign rx_din_en  = rx_enabled_q & ~rxf_q;
+    assign rx_din     = ft_data;
 
     always_comb begin
         ft_state_d   = ft_state_q;
@@ -258,55 +293,44 @@ module ft601_fifo (
         ft_oe     = ~oe_enabled_q;
         ft_wakeup = 1'b1;
 
-        tx_dout_en = 1'b0;
-        rx_din     = ft_data;
-        rx_din_en  = 1'b0;
-
         case (ft_state_q)
             IDLE: begin
-                if (!tx_empty && !ft_txe) begin
-                    // data to send and the FT601 has room.  Assert ft_wr via
-                    // the negedge flop so it is stable at the next posedge.
+                if (!tx_empty && !txe_q) begin
                     tx_enabled_d = 1'b1;
                     ft_state_d   = TX;
-                end else if (!ft_rxf && !rx_full) begin
-                    // data waiting and we have somewhere to put it.  Turn the
-                    // bus around first: oe one cycle before rd.
+                end else if (!rxf_q && !rx_full) begin
+                    // Turn the bus around first: OE# one cycle before RD#.
                     oe_enabled_d = 1'b1;
                     ft_state_d   = RX;
                 end
             end
 
             TX: begin
-                if (ft_txe || tx_empty) begin
-                    // Out of room or out of data.  The word currently on
-                    // ft_data is NOT sampled by the FT601 and stays in the
-                    // FIFO, because we do not pop it here.
+                // Stop on TXE#, or BEFORE the FIFO runs dry.  Leaving on
+                // almost_empty rather than empty matters: with first-word
+                // fall-through, an empty FIFO still presents its last word, and
+                // the chip would sample that stale value as a duplicate.  One
+                // word of margin means we always stop with real data on the bus.
+                //
+                // Driving one cycle longer than necessary is harmless - the chip
+                // ignores the bus while TXE# is high, and tx_dout_en above will
+                // not pop anything it did not take.
+                if (txe_q || tx_almost_empty) begin
                     tx_enabled_d = 1'b0;
                     ft_state_d   = TURNAROUND;
                 end else begin
-                    // This word is sampled at the coming posedge, so pop it and
-                    // present the next one.
                     tx_enabled_d = 1'b1;
-                    tx_dout_en   = 1'b1;
                 end
             end
 
             RX: begin
-                if (ft_rxf) begin
+                if (rxf_q || rx_almost_full) begin
                     oe_enabled_d = 1'b0;
                     rx_enabled_d = 1'b0;
                     ft_state_d   = TURNAROUND;
-                end else if (rx_almost_full) begin
-                    // Room for exactly one more.  Take it, then stop.
-                    oe_enabled_d = 1'b0;
-                    rx_enabled_d = 1'b0;
-                    ft_state_d   = TURNAROUND;
-                    rx_din_en    = 1'b1;
                 end else begin
                     oe_enabled_d = 1'b1;
                     rx_enabled_d = 1'b1;
-                    rx_din_en    = 1'b1;
                 end
             end
 

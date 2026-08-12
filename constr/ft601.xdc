@@ -209,3 +209,62 @@ set_property IOSTANDARD LVCMOS33 [get_ports {ft_data[31]}]
 # set_output_delay -clock [get_clocks ft_clk_0] -min -add_delay 0.000 [get_ports {ft_wr}]
 # set_output_delay -clock [get_clocks ft_clk_0] -max -add_delay 0.001 [get_ports {ft_wr}]
 # set_false_path -to [get_ports {ft_wr}]
+##############################################################################
+# FT601 interface timing.
+#
+# WHY THIS SECTION EXISTS.  Everything above only assigns pins.  Until this was
+# added, Vivado reported "34 input ports with no input delay specified (HIGH)"
+# and "40 ports with no output delay specified (HIGH)" - meaning the entire
+# FT601 bus was placed with no check on when data actually reaches the chip.
+#
+# That is not a cosmetic omission.  With the interface unconstrained, whether the
+# FT601 samples the new word or the previous one is decided by placement, so the
+# link flips between byte-perfect and duplicating a third (or all) of its words
+# depending on what else happens to be in the design.  Adding an unrelated UART
+# receiver was enough to flip it, at completely unchanged throughput.  This is
+# the mechanism behind the board's long history of unexplained flakiness.
+#
+# The commented-out block further up is a v5 artefact: auto-generated with
+# placeholder 0.000/0.001 values and then defeated anyway by set_false_path on
+# the same ports.  Do not re-enable it.
+#
+# VALUES ARE ESTIMATES AND MUST BE CONFIRMED against DS_FT600Q-FT601Q before
+# this is trusted.  They are deliberately conservative: an approximately right
+# constraint makes the tool optimise and report, which is strictly better than no
+# constraint at all, but a wrong one closes timing against the wrong target.
+#
+#   FT601_TSU  data/control setup before the FT601's sampling edge
+#   FT601_TH   hold after it
+#
+# Launch is on ft_clk_neg (180 deg), so nominally 5 ns is available.
+##############################################################################
+
+set FT601_TSU 2.0
+set FT601_TH  1.0
+
+set ft601_outs [get_ports {ft_data[*] ft_be[*] ft_wr ft_rd ft_oe}]
+set_output_delay -clock [get_clocks ft_clk_12] -max  $FT601_TSU -add_delay $ft601_outs
+set_output_delay -clock [get_clocks ft_clk_12] -min [expr {-$FT601_TH}] -add_delay $ft601_outs
+
+# Inputs from the chip: clock-to-out of the FT601 relative to the same clock.
+set FT601_TCO_MAX 5.0
+set FT601_TCO_MIN 1.0
+
+set ft601_ins [get_ports {ft_rxf ft_txe}]
+set_input_delay -clock [get_clocks ft_clk_12] -max $FT601_TCO_MAX -add_delay $ft601_ins
+set_input_delay -clock [get_clocks ft_clk_12] -min $FT601_TCO_MIN -add_delay $ft601_ins
+
+# Pack the FT601 interface registers into the IOBs.
+#
+# For ft_txe / ft_rxf this is the point of the input registers added in
+# ft601_fifo.sv: an IOB flop sits at the pad, so the chip's clock-to-out and the
+# board delay are absorbed by a setup check with large margin, instead of being
+# prepended to a combinational path through the state machine.  Without the
+# packing the flop can be placed in the fabric and most of the benefit is lost.
+#
+# ft_data is a tristate driven combinationally from the FIFO output, so there is
+# no register for Vivado to pull in here and this does nothing for it yet.
+# Registering the outbound bus in the IOB - data plus the OBUFT enable, which
+# must be packed together or they skew apart - is the remaining half of the fix.
+set_property IOB TRUE [get_ports ft_txe]
+set_property IOB TRUE [get_ports ft_rxf]
