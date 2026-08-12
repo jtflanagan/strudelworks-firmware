@@ -826,11 +826,103 @@ static int cmd_write(libusb_device_handle *h, const struct opts *o)
 }
 
 // ---------------------------------------------------------------------------
+// zlp - does a transfer ending on a 1024-byte boundary terminate?
+// ---------------------------------------------------------------------------
+
+// pcileech-fpga inserts five magic DWORDs into every stream with this comment:
+//
+//   "FTDI have a bug ( in chip or driver ) which doesn't terminate transfer if
+//    even multiple of 1024 bytes are transmitted."
+//
+// 1024 is wMaxPacketSize for SuperSpeed bulk, so a transfer of exactly N*1024
+// has no short packet to end it and needs a zero-length packet instead.  Their
+// workaround pads the stream by 20 bytes so the total is never a clean multiple.
+//
+// But that comment says "chip OR driver", and we replaced the driver - this is
+// libusb, not FTDI's D3XX.  So the premise is worth testing rather than
+// inheriting.
+//
+// The test: announce a read of N bytes on the session endpoint, then read into a
+// buffer LARGER than N.  The chip should deliver N and terminate.  If it
+// terminates we get a short transfer back promptly; if the bug bites, the read
+// sits waiting for bytes that never come and times out.  Non-multiples of 1024
+// are included as controls - those have a short packet and must always work.
+static int cmd_zlp(libusb_device_handle *h, const struct opts *o)
+{
+    static const int lens[] = { 1024, 2048, 4096, 8192, 1020, 1028, 3000, 5120 };
+    const int n = (int)(sizeof(lens) / sizeof(lens[0]));
+
+    int err = libusb_claim_interface(h, IFACE_COMMS);
+    if(err) { fprintf(stderr, "claim %d: %s\n", IFACE_COMMS, libusb_strerror(err)); return 1; }
+    err = libusb_claim_interface(h, IFACE_DATA);
+    if(err) { fprintf(stderr, "claim %d: %s\n", IFACE_DATA, libusb_strerror(err));
+              libusb_release_interface(h, IFACE_COMMS); return 1; }
+
+    size_t bufsz = 16384 + 8192;
+    unsigned char *buf = malloc(bufsz);
+    if(!buf) { fprintf(stderr, "out of memory\n"); return 1; }
+
+    printf("announce N bytes, read into a larger buffer, see if it terminates\n\n");
+    printf("%8s %10s %10s %8s  %s\n", "N", "mult1024", "got", "ms", "result");
+
+    struct bench b;
+    memset(&b, 0, sizeof(b));
+    b.h = h; b.timeout_ms = o->timeout_ms;
+
+    int failures = 0;
+    for(int i = 0; i < n; i++) {
+        flush_pipe(h, 65536);
+
+        int want = lens[i];
+        b.xfer_size = (size_t)want;
+        if(send_session_request(&b, (size_t)want)) {
+            printf("%8d %10s %10s %8s  session request failed\n",
+                want, (want % 1024) ? "no" : "YES", "-", "-");
+            failures++;
+            continue;
+        }
+
+        int got = 0;
+        double t0 = now_sec();
+        // Deliberately ask for more than was announced.
+        int rc = libusb_bulk_transfer(h, EP_DATA_IN, buf, want + 4096, &got, 1000);
+        double ms = (now_sec() - t0) * 1000.0;
+
+        const char *verdict;
+        if(rc == 0)                            { verdict = "terminated cleanly"; }
+        else if(rc == LIBUSB_ERROR_TIMEOUT && got == want) {
+            verdict = "timed out, but all N arrived - NO ZLP";  failures++;
+        } else if(rc == LIBUSB_ERROR_TIMEOUT)  { verdict = "TIMED OUT";  failures++; }
+        else                                   { verdict = libusb_strerror(rc); failures++; }
+
+        printf("%8d %10s %10d %8.1f  %s\n",
+            want, (want % 1024) ? "no" : "YES", got, ms, verdict);
+        fflush(stdout);
+    }
+
+    printf("\n");
+    if(failures == 0) {
+        printf("Every length terminated, including exact multiples of 1024.  The\n"
+               "termination bug the reference works around does not reproduce through\n"
+               "this libusb path, so it is a D3XX driver behaviour rather than silicon.\n");
+    } else {
+        printf("%d length(s) did not terminate cleanly.  If those are the multiples of\n"
+               "1024, the bug is in the chip and the reference's padding is required\n"
+               "here too.\n", failures);
+    }
+
+    free(buf);
+    libusb_release_interface(h, IFACE_DATA);
+    libusb_release_interface(h, IFACE_COMMS);
+    return failures ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
 
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-        "usage: %s <info|config|bench|write> [options]\n"
+        "usage: %s <info|config|bench|write|zlp> [options]\n"
         "\n"
         "  --pid <hex>     match this product id instead of 601e/601f\n"
         "  --depth <n>     in-flight transfers for bench (default 4, max %d)\n"
@@ -915,6 +1007,8 @@ int main(int argc, char **argv)
         rc = cmd_bench(h, &o);
     } else if(!strcmp(mode, "write")) {
         rc = cmd_write(h, &o);
+    } else if(!strcmp(mode, "zlp")) {
+        rc = cmd_zlp(h, &o);
     } else {
         usage(argv[0]);
         rc = 2;

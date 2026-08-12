@@ -678,6 +678,54 @@ extra cycle. The I/O delay values in `constr/ft601.xdc` are estimates and must
 be checked against `DS_FT600Q-FT601Q`. `tini_bus_arbiter.sv` is not yet ported;
 this milestone covered the link, not the bus.
 
+*FT601 silicon errata: transfers ending on a 1024-byte boundary do not
+terminate.* Measured here, not inherited on faith. `tools/ft601/ft601_probe zlp`
+announces N bytes on the session endpoint and then reads into a larger buffer:
+
+    N        multiple of 1024?   got     result
+    1024     yes                 0       timed out
+    2048     yes                 0       timed out
+    4096     yes                 0       timed out
+    8192     yes                 0       timed out
+    5120     yes                 0       timed out
+    1020     no                  1020    terminated in 0.2 ms
+    1028     no                  1028    terminated in 0.2 ms
+    3000     no                  3000    terminated in 0.2 ms
+
+Perfect correlation, with the non-multiples as a control group proving the method
+sound. 1024 is wMaxPacketSize for SuperSpeed bulk, so a transfer of exactly
+N*1024 has no short packet to end it and requires a zero-length packet the chip
+never sends. Note the chip delivers **nothing at all**, not "the data without a
+terminator".
+
+The exact failure condition needs BOTH halves:
+
+  - announce N and read exactly N        -> always works, multiples included
+  - announce N and read MORE than N      -> works only if N is not a 1024 multiple
+
+That is why the streaming benchmark never trips it: the source is continuous, so
+the chip always holds more than the announced amount and the host's buffer fills
+by length. It is precisely the bounded request/response case this milestone still
+has to build.
+
+**This is silicon, not driver.** ufrisk/pcileech-fpga documents it as "a bug (in
+chip or driver)"; we reproduce it through our own libusb with no FTDI code
+anywhere, which settles which. Their workaround - five magic `0x66665555` DWORDs
+padding every stream by 20 bytes, relying on payloads being a multiple of 32
+bytes so 20 is always enough - is therefore load-bearing, not decoration, and is
+inherited correctly by matching their controller.
+
+*Intended approach once framing exists.* The padding does not have to be
+unconditional, and an in-band magic constant is a poor fit for a framed protocol
+carrying arbitrary payload - real data can be `0x66665555`. Once the TX path
+knows message boundaries it can pad only when it would actually hang: track the
+transmitted byte count modulo 1024, and when sitting exactly on a boundary,
+between messages, with no next message ready, emit a heartbeat message to move
+off it. That is a real framed message the receiver already understands rather
+than a magic word it has to filter, and it costs nothing when traffic is flowing
+- unlike the reference's idle path, which re-pads every 16 idle cycles and would
+put roughly 80 MB/s of filler on an idle link.
+
 *Method note worth keeping.* Throughput alone certifies nothing — every corrupt
 build above still ran at 335 MB/s. The sequence check is what distinguished a
 working link from a fast broken one, and it should stay in any future test.
