@@ -413,19 +413,29 @@ module ft601_fifo (
     // dedicated register lets Vivado replicate it per OBUFT and pack each copy
     // into its own IOB, which is the whole point: data and enable launching from
     // identical flops so they cannot skew apart.
-    logic        ft_dq_t   = 1'b1;
+    //
+    // Declared as a VECTOR, one bit per driven pin, all carrying the same value.
+    // A single scalar has to fan out to 36 OBUFT enables; Vivado then replicates
+    // it in the fabric rather than into the IOBs, leaving 1.5 ns of route delay
+    // on what should be a zero-route path.  Explicit per-bit registers give each
+    // buffer its own flop to pack, which is the only way the enable gets the same
+    // clock-to-out as the data it gates.
+    logic [31:0] ft_dq_t = 32'hFFFFFFFF;
+    logic [3:0]  ft_be_t = 4'hF;
 
     always_ff @(posedge ft_clk_neg) begin
         if (rst) begin
             ft_wr_q <= 1'b1;
             ft_rd_q <= 1'b1;
             ft_oe_q <= 1'b1;
-            ft_dq_t <= 1'b1;
+            ft_dq_t <= 32'hFFFFFFFF;
+            ft_be_t <= 4'hF;
         end else begin
             ft_wr_q <= ~tx_enabled_d;
             ft_rd_q <= ~rx_enabled_d;
             ft_oe_q <= ~oe_enabled_d;
-            ft_dq_t <= ~tx_enabled_d;
+            ft_dq_t <= {32{~tx_enabled_d}};
+            ft_be_t <= {4{~tx_enabled_d}};
         end
         if (tx_load) ft_data_q <= tx_dout;
         if (rst)          tx_held <= 1'b0;
@@ -442,8 +452,15 @@ module ft601_fifo (
     // Tristate control comes from a register too, so the OBUFT's T flop packs
     // into the IOB alongside the data.  If the data flops were packed and the
     // enable were not, they would skew apart and the fix would be half-done.
-    assign ft_data = ft_dq_t ? 32'hzzzz_zzzz : ft_data_q;
-    assign ft_be   = ft_dq_t ? 4'hz          : 4'hf;
+    genvar gi;
+    generate
+        for (gi = 0; gi < 32; gi = gi + 1) begin : g_dq
+            assign ft_data[gi] = ft_dq_t[gi] ? 1'bz : ft_data_q[gi];
+        end
+        for (gi = 0; gi < 4; gi = gi + 1) begin : g_be
+            assign ft_be[gi] = ft_be_t[gi] ? 1'bz : 1'b1;
+        end
+    endgenerate
 
     // Straight through from the top level - see the port comment.
     assign ft_reset = ft_chip_rst_n;

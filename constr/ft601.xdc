@@ -310,3 +310,16 @@ set_property IOB TRUE [get_ports {ft_be[*]}]
 set_property IOB TRUE [get_ports ft_wr]
 set_property IOB TRUE [get_ports ft_rd]
 set_property IOB TRUE [get_ports ft_oe]
+
+# Fast slew on the outbound bus.
+#
+# LVCMOS33 defaults to SLOW slew, and the resulting OBUFT delay was measured at
+# 3.727 ns - by far the largest single term in clock-to-out, and the reason setup
+# does not close.  This is a 100 MHz 32-bit bus over a short board-to-board
+# connector; fast edges are appropriate for it, and the usual objections (ringing,
+# EMI, ground bounce) are about long or lightly-terminated traces, which this is
+# not.
+#
+# Applied only to the FT601 outputs.  Nothing else on the board needs it, and
+# slew is not something to change globally by reflex.
+set_property SLEW FAST [get_ports {ft_data[*] ft_be[*] ft_wr ft_rd ft_oe}]
