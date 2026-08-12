@@ -122,14 +122,17 @@ module ft601_top (
     wire ft_chip_rst_n = chip_rst_sync[3];
 
     // ---- FT601 clock ------------------------------------------------------
-    wire ft_clk_pos, ft_clk_neg, ft_locked;
+    wire       ft_clk_pos, ft_clk_neg, ft_locked;
+    wire [7:0] ft_unlocks;
 
     ft_clk_gen u_ft_clk (
         .ft_clk_pin (ft_clk),
+        .ref_clk    (clk_ctrl),
         .rst        (~rst_n),
         .ft_clk_pos (ft_clk_pos),
         .ft_clk_neg (ft_clk_neg),
-        .locked     (ft_locked)
+        .locked     (ft_locked),
+        .unlocks    (ft_unlocks)
     );
 
     // ---- fabric reset -----------------------------------------------------
@@ -215,11 +218,11 @@ module ft601_top (
     // M is the MMCM kick count and F the FT601 reset count - the two numbers that
     // turn "it flaked out again" into something with evidence attached.
     // Decoded by build/ft601_status.sh.
-    localparam [7:0] CH_S  = 8'h53, CH_C = 8'h43, CH_EQ = 8'h3D;
+    localparam [7:0] CH_S  = 8'h53, CH_C = 8'h43, CH_M = 8'h4D, CH_EQ = 8'h3D;
     localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
-    localparam [4:0] RPT_LAST = 5'd18;   // last byte index
-    localparam [4:0] RPT_IDLE = 5'd19;
+    localparam [4:0] RPT_LAST = 5'd23;   // last byte index
+    localparam [4:0] RPT_IDLE = 5'd24;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
@@ -228,6 +231,7 @@ module ft601_top (
     reg [4:0]  rpt_idx     = RPT_IDLE;
     reg [31:0] rpt_cnt     = 32'd0;
     reg [15:0] rpt_dbg     = 16'd0;
+    reg [7:0]  rpt_unlocks = 8'd0;
 
 
     always @(posedge clk_ctrl) begin
@@ -241,6 +245,7 @@ module ft601_top (
                 // all describe the same instant.
                 rpt_dbg     <= dbg;
                 rpt_cnt     <= tx_count;
+                rpt_unlocks <= ft_unlocks;
                 rpt_idx     <= 5'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
@@ -264,6 +269,8 @@ module ft601_top (
             5'd14: nib = rpt_cnt[11:8];
             5'd15: nib = rpt_cnt[7:4];
             5'd16: nib = rpt_cnt[3:0];
+            5'd20: nib = rpt_unlocks[7:4];
+            5'd21: nib = rpt_unlocks[3:0];
             default: nib = 4'd0;
         endcase
     end
@@ -279,8 +286,11 @@ module ft601_top (
             5'd6:  ch = CH_SP;
             5'd7:  ch = CH_C;
             5'd8:  ch = CH_EQ;
-            5'd17: ch = CH_CR;
-            5'd18: ch = CH_LF;
+            5'd17: ch = CH_SP;
+            5'd18: ch = CH_M;
+            5'd19: ch = CH_EQ;
+            5'd22: ch = CH_CR;
+            5'd23: ch = CH_LF;
             default: ch = hex;
         endcase
     end
@@ -337,6 +347,7 @@ module ft601_top (
     assign led[3] = |tx_blink;
     assign led[4] = fifo_rst_busy;
     assign led[5] = rx_seen;
-    assign led[7:6] = tx_count[25:24];
+    assign led[6] = tx_count[24];
+    assign led[7] = (ft_unlocks != 8'd0); // STICKY: ft_clk has been lost
 
 endmodule

@@ -58,7 +58,7 @@ FLAGS = [
     ("ui_din_full",    13, False),
 ]
 
-pat = re.compile(r"S=([0-9A-Fa-f]{4}) C=([0-9A-Fa-f]{8})(?: M=([0-9A-Fa-f]{2}) F=([0-9A-Fa-f]{2}))?")
+pat = re.compile(r"S=([0-9A-Fa-f]{4}) C=([0-9A-Fa-f]{8})(?: M=([0-9A-Fa-f]{2}))?(?: F=([0-9A-Fa-f]{2}))?")
 seen = 0
 with serial.Serial(port, 115200, timeout=2) as ser:
     ser.reset_input_buffer()

@@ -52,15 +52,47 @@ module ft_clk_gen #(
     parameter real    NEG_PHASE       = 180.000
 ) (
     input  wire ft_clk_pin,  // straight off the pin; absent until the chip runs
+    input  wire ref_clk,     // ALWAYS running - the Au oscillator domain
     input  wire rst,         // active high, asynchronous
     output wire ft_clk_pos,  // 0 deg
     output wire ft_clk_neg,  // 180 deg
-    output wire locked
+    output wire locked,
+    // DIAGNOSIS ONLY.  How many times the clock has been lost AFTER having once
+    // been good.  Nothing acts on this - it does not touch the MMCM's reset and
+    // cannot perturb the link.  It exists because a dropped ft_clk is otherwise
+    // completely invisible from outside the chip, which is what made this board's
+    // historical flakiness impossible to characterise.
+    //
+    // Loss before the first lock is NOT counted: at every power-on the FT601 is
+    // still in reset and not clocking yet, which is normal and says nothing.
+    output reg [7:0] unlocks
 );
 
     wire ft_clk_buf;
     wire clkfb, clkfb_buf;
     wire pos_raw, neg_raw;
+
+    // ---- lock-loss counter, in the always-running reference domain ----------
+    reg [1:0] lock_sync   = 2'b00;
+    reg       have_locked = 1'b0;
+    reg       locked_prev = 1'b0;
+
+    always @(posedge ref_clk) lock_sync <= {lock_sync[0], locked};
+    wire locked_s = lock_sync[1];
+
+    always @(posedge ref_clk) begin
+        if (rst) begin
+            unlocks     <= 8'd0;
+            have_locked <= 1'b0;
+            locked_prev <= 1'b0;
+        end else begin
+            locked_prev <= locked_s;
+            if (locked_s) have_locked <= 1'b1;
+            if (have_locked && locked_prev && !locked_s && unlocks != 8'hFF) begin
+                unlocks <= unlocks + 8'd1;
+            end
+        end
+    end
 
     IBUF ibuf_ft_clk (.I(ft_clk_pin), .O(ft_clk_buf));
 
