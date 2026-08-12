@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Non-root access to the FT601 for libusb.  Needed on the Pi 5 deployment target
+# and convenient under WSL; without it every ft601_probe run wants sudo.
+#
+#   sudo cp 99-ft601.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# 601f is the FT601's default product id; 601e appears on differently programmed
+# boards.  Both are matched because the id lives in a writable EEPROM and so
+# describes the board's programming rather than the silicon.
+#
+# TAG+="uaccess" hands the device to the locally logged-in user under systemd.
+# The plugdev fallback covers the headless case, which is what the Pi will be.
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="601f", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="601e", MODE="0660", GROUP="plugdev", TAG+="uaccess"

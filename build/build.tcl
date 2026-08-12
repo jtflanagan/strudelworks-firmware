@@ -22,6 +22,8 @@ set part      xc7a35tftg256-2
 set jobs      4
 set keep_open 0
 set outdir    [file join $root build work]
+set diag      0
+set ft601     0
 
 for {set i 0} {$i < $argc} {incr i} {
     switch -- [lindex $argv $i] {
@@ -29,9 +31,22 @@ for {set i 0} {$i < $argc} {incr i} {
         -part   { incr i; set part [lindex $argv $i] }
         -outdir { incr i; set outdir [lindex $argv $i] }
         -open   { set keep_open 1 }
+        -diag   -
+        --diag  { set diag 1 }
+        -ft601  -
+        --ft601 { set ft601 1 }
         default { puts "WARNING: ignoring unknown argument [lindex $argv $i]" }
     }
 }
+
+if {$diag && $ft601} {
+    puts "ERROR: -diag and -ft601 select different top levels; pick one."
+    exit 1
+}
+
+# One place decides the top level, so the source list, the constraint list and
+# the bitstream name below cannot drift apart.
+set topname [expr {$ft601 ? {ft601_top} : ($diag ? {diag_top} : {au_top})}]
 
 set uber [file join $root third_party UberDDR3]
 if {![file isdirectory [file join $uber rtl]]} {
@@ -69,27 +84,62 @@ add_files -norecurse [list \
     [file join $uber rtl ddr3_phy.v] \
 ]
 
-add_files -norecurse [list \
-    [file join $root rtl clk_gen.v] \
-    [file join $root rtl ddr3_wrapper.sv] \
-    [file join $root rtl latency_probe.sv] \
-    [file join $root rtl uart_tx.v] \
-    [file join $root rtl bin_to_bcd.v] \
-    [file join $root rtl report_tx.sv] \
-    [file join $root rtl au_top.sv] \
-]
+if {$ft601} {
+    # FT601 link bring-up: no DDR3 and no Apple bus, so only alchitry_au.xdc and
+    # ft601.xdc apply.  No .xci here either - ft_clk_gen.v replaces v5's
+    # clk_wiz_0 and ft601_fifo.sv uses xpm_fifo_async in place of fifo_ft600.
+    add_files -norecurse [list \
+        [file join $root rtl clk_gen.v] \
+        [file join $root rtl ft_clk_gen.v] \
+        [file join $root rtl ft601_fifo.sv] \
+        [file join $root rtl uart_tx.v] \
+        [file join $root rtl uart_rx.v] \
+        [file join $root rtl ft601_top.sv] \
+    ]
+} elseif {$diag} {
+    # Diagnostic build: no DDR3, so ddr3.xdc must be left out too - its ports do
+    # not exist in diag_top and an XDC naming a missing port is only a warning,
+    # which the unmatched-constraint guard below would (correctly) turn fatal.
+    add_files -norecurse [list \
+        [file join $root rtl clk_gen.v] \
+        [file join $root rtl uart_tx.v] \
+        [file join $root rtl diag_top.sv] \
+    ]
+} else {
+    add_files -norecurse [list \
+        [file join $root rtl clk_gen.v] \
+        [file join $root rtl ddr3_wrapper.sv] \
+        [file join $root rtl latency_probe.sv] \
+        [file join $root rtl uart_tx.v] \
+        [file join $root rtl bin_to_bcd.v] \
+        [file join $root rtl report_tx.sv] \
+        [file join $root rtl au_top.sv] \
+    ]
+}
 
 set_property file_type {Verilog}        [get_files *.v]
 set_property file_type {SystemVerilog}  [get_files *.sv]
-set_property top au_top [current_fileset]
+set_property top $topname [current_fileset]
 
 # ---- constraints ---------------------------------------------------------
-# apple_bus.xdc and ft601.xdc are NOT added yet - milestone 1 has no ports for
-# them, and an XDC naming a port that does not exist is an error, not a warning.
-add_files -fileset constrs_1 -norecurse [list \
-    [file join $root constr alchitry_au.xdc] \
-    [file join $root constr ddr3.xdc] \
-]
+# apple_bus.xdc is NOT added yet - no build has ports for it, and an XDC naming a
+# port that does not exist is an error, not a warning.  ft601.xdc applies only to
+# the -ft601 build, which is the only top level that declares the ft_* ports.
+if {$ft601} {
+    add_files -fileset constrs_1 -norecurse [list \
+        [file join $root constr alchitry_au.xdc] \
+        [file join $root constr ft601.xdc] \
+    ]
+} elseif {$diag} {
+    add_files -fileset constrs_1 -norecurse [list \
+        [file join $root constr alchitry_au.xdc] \
+    ]
+} else {
+    add_files -fileset constrs_1 -norecurse [list \
+        [file join $root constr alchitry_au.xdc] \
+        [file join $root constr ddr3.xdc] \
+    ]
+}
 
 # ---- run -----------------------------------------------------------------
 set_property strategy Flow_PerfOptimized_high [get_runs synth_1]
@@ -162,10 +212,10 @@ report_utilization    -file [file join $outdir utilization.rpt]
 # directory on the Windows side that nothing else will look in.
 set results [file join $root build results]
 file mkdir $results
-set bit [file join $outdir strudelworks.runs impl_1 au_top.bit]
+set bit [file join $outdir strudelworks.runs impl_1 $topname.bit]
 if {[file exists $bit]} {
-    file copy -force $bit [file join $results au_top.bit]
-    puts "bitstream: [file join $results au_top.bit]"
+    file copy -force $bit [file join $results $topname.bit]
+    puts "bitstream: [file join $results $topname.bit]"
 }
 foreach r {timing_summary.rpt utilization.rpt} {
     if {[file exists [file join $outdir $r]]} {

@@ -35,9 +35,18 @@ run() {
 }
 
 run uart_tx       rtl/uart_tx.v
+run uart_rx       rtl/uart_rx.v
 run bin_to_bcd    rtl/bin_to_bcd.v
 run report_tx     rtl/report_tx.sv rtl/bin_to_bcd.v
 run latency_probe rtl/latency_probe.sv
+
+# ft601_fifo needs a stand-in for xpm_fifo_async, which lives in Vivado's library
+# and not here.  sim/xpm_fifo_async_stub.sv is ports-only - see its header - but
+# that is enough for Verilator to check the bus state machine, which is the part
+# worth checking.  PINCONNECTEMPTY is off because the XPM has a dozen outputs
+# this design has no use for, and naming them explicitly as unconnected is the
+# clearer way to say so.
+run ft601_fifo    rtl/ft601_fifo.sv sim/xpm_fifo_async_stub.sv -Wno-PINCONNECTEMPTY
 
 # Not linted, deliberately:
 #   clk_gen.v      - nothing but IBUF/BUFG/MMCME2_BASE instantiation.  Verilator
@@ -47,5 +56,11 @@ run latency_probe rtl/latency_probe.sv
 #                    tool that knows the VCO limits anyway.
 #   ddr3_wrapper / au_top - structural, and both instantiate UberDDR3 or
 #                    primitives.  Vivado elaboration covers them.
+#   ft_clk_gen.v   - same case as clk_gen.v: IBUF/BUFG/MMCME2_BASE and nothing
+#                    else.
+#   ft601_top.sv   - structural; instantiates clk_gen and ft_clk_gen, so it
+#                    inherits their unresolvable primitives.  The logic worth
+#                    linting in that build is in ft601_fifo, which is linted
+#                    above.
 
 exit $fail

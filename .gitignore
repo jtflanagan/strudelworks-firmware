@@ -20,3 +20,6 @@ __pycache__/
 /sim/*.out
 
 /build/results/
+
+# host-side build products
+/tools/ft601/ft601_probe

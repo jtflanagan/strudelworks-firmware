@@ -804,6 +804,72 @@ on the worst case. No fabric speed-up buys back a quarter-microsecond stall.
   machine's own DMA mechanism disconnects us from the bus, so there is nothing to
   guard against electrically.
 
+## Programming the board without Vivado
+
+`build/load.sh` (openFPGALoader, SRAM) + `build/report.sh` (UART) is the working
+loop: a few seconds per iteration, entirely in WSL, no GUI. Getting there turned
+up several things that cost hours and would cost them again.
+
+### ⚠ Flash the board once before SRAM loading will work
+
+**A JTAG SRAM load could not bring the DDR3 up from cold.** With a flash image
+that never touched the DRAM, every openFPGALoader SRAM load stalled in read DQS
+training - `state_calibrate` oscillating between 2 (`MPR_READ`) and 4
+(`ANALYZE_DQS`) - while Vivado's load of the *identical bitstream* reached 23
+(`DONE_CALIBRATE`). Once the design was written to flash with
+`openFPGALoader -b alchitry_au -f <bit>`, so that power-on boots a design that
+initialises the DRAM, SRAM loading began working every time (6/6).
+
+This is an **empirical correlation, not a proven mechanism** - why a cold DRAM
+defeats a JTAG-loaded init when flash-boot manages it is not established. If SRAM
+loads ever start failing this way again (single lit LED, no UART), the first move
+is one flash write.
+
+Evidence that narrowed it, in the order that mattered:
+
+- `rtl/diag_top.sv` - MMCM + LED blink + unconditional UART, **no DDR3**. It ran
+  perfectly under openFPGALoader, which ruled out "held in reset" and "clocks not
+  running". Needed because in `au_top` a single lit LED is ambiguous: `led = 0x01`
+  is both the "calibrating" indicator and the reset value of `calib_complete`.
+- Reporting `ddr3_debug` (= `state_calibrate`) over the UART unconditionally. That
+  turned "calibration fails" into "read DQS training retries forever", which is a
+  different and much smaller problem.
+- Reading openFPGALoader's `src/xilinx.cpp`: it does issue `JSHUTDOWN`+`JPROGRAM`
+  before loading and `toggleClk(2000)` after `JSTART`, so neither a missing config
+  clear nor a starved startup sequence explains it.
+- JTAG frequency is not a factor (1, 3 and 6 MHz all behave identically).
+
+### The USB plumbing
+
+The Au's FT2232H (`0403:6010`) carries JTAG on channel A and the UART on channel
+B, so usbipd moves both at once. While attached to WSL, Windows has neither.
+
+- One-time, as Administrator: `usbipd bind --busid <id>`. **`Shared` does not take
+  the device from Windows** - only `Attached` does, so binding is safe to leave.
+- `ftdi_sio` claims BOTH channels on attach. openFPGALoader detaches the kernel
+  driver itself, so this is not fatal, but `/etc/udev/rules.d/98-ft2232-jtag-noserial.rules`
+  keeps it off interface 0 anyway.
+- **The board re-enumerates for a few seconds after any programming session.**
+  Two "the board has vanished" incidents were attaches issued inside that window.
+
+### Reading the UART: use pyserial, not stty+cat
+
+Two independent ways to get silence from a board that is transmitting perfectly,
+both hit here:
+
+- `stty -F PORT ...` applies settings then **closes the port, reverting them**;
+  the following `cat` opens fresh at the default baud.
+- Setting termios by hand and zeroing `c_cflag` leaves the baud bits at **B0**,
+  which on Linux means *hang up the line*: DTR drops and the receiver is disabled.
+
+`build/report.sh` uses pyserial, which gets both right.
+
+### Fallback: headless Vivado
+
+`build/program.tcl` programs via `open_hw_manager` **without opening the project**,
+so it does not take the lock that breaks `build/build.sh`. Useful as a control
+when comparing loaders, and as a fallback.
+
 ## Open questions
 
 **None.** Milestone 1 is closed end to end. Typical, best and worst case latency

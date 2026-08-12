@@ -61,6 +61,32 @@ and the gap is where the bugs hide. An out-of-range part-select
 hard synthesis ERROR in Vivado — found after a ten-minute build. Verilator catches
 that class in about a second.
 
+## Program and read the board (no Vivado)
+
+```sh
+build/load.sh              # openFPGALoader, SRAM (volatile), a few seconds
+build/report.sh            # read the UART report
+build/load.sh --detach     # hand USB back to Windows
+```
+
+One-time setup, in an **Administrator** PowerShell:
+
+```powershell
+usbipd bind --busid <id>        # find it with: usbipd list  (0403:6010)
+```
+
+`Shared` does not take the device from Windows - only `Attached` does - so the
+bind is safe to leave in place.
+
+⚠ **Flash the board once before SRAM loading will work.** A JTAG SRAM load could
+not bring the DDR3 up from cold; it stalled in read DQS training while Vivado's
+load of the same bitstream succeeded. After one `openFPGALoader -b alchitry_au -f
+build/results/au_top.bit`, so that power-on boots a design which initialises the
+DRAM, SRAM loading works every time. See [docs/DERISK.md](docs/DERISK.md).
+
+`build/program.tcl` is a headless-Vivado fallback that programs without opening
+the project, so it does not take the lock that breaks `build/build.sh`.
+
 ## Reading results from the board
 
 Two outputs. The **LEDs** show the cumulative worst case: a single LED lit means

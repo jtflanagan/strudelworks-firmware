@@ -62,6 +62,13 @@ python3 "$root/tools/gen_ddr3_xdc.py" --check
 # because the GUI had not been opened yet at that moment - it was, later, to flash
 # the board.  Testing the directory itself is the check that stays true.)
 WORKDIR="${WORKDIR:-/mnt/c/temp/strudelworks-build}"
+# Each top level gets its own work directory.  Sharing one means a -ft601 build
+# silently reuses the previous au_top project state, which is exactly the kind of
+# stale-results confusion the comment above is about.
+case "${1:-}" in
+  --diag)  WORKDIR="${WORKDIR}-diag"  ;;
+  --ft601) WORKDIR="${WORKDIR}-ft601" ;;
+esac
 if [ -e "$WORKDIR" ] && ! rm -rf "$WORKDIR" 2>/dev/null; then
   cat >&2 <<EOF
 
