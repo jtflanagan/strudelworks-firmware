@@ -757,7 +757,48 @@ DIP-perimeter pad numbering there deleted a whole breakout board and should not
 be re-derived.
 
 **5. Apple bus logic.** Port from v5, retargeted from the slot edge to the CPU
-socket.
+socket. **Bus SNOOPING is closed on hardware** — see below; the write side and
+the CPU-socket retarget are what remain.
+
+### Bus snooping closed on hardware ✅
+
+`snoop_top` captures every bus cycle and streams it to a host process over the
+FT601 link, framed as BUS_EVENTS messages (`docs/PROTOCOL.md`). Measured in a
+running Apple II: **2,035,230 events in 2.00 s = 1,017,361/s**, the card's own
+event count matching the host's exactly, and a dump that decodes as coherent
+6502 execution:
+
+    c27d:  E6 4E        INC $4E      read 37, read 37, write 38
+    c27f:  D0 0A        BNE +10      -> c281+0x0A = c28b
+    c28b:  AD 00 C0     LDA $C000    keyboard: 1B, bit 7 clear, no key
+    c28e:  10 ED        BPL -19      -> c290-19 = c27d
+
+Both branch targets compute exactly, `$4E` (RNDL, the monitor's random seed)
+increments monotonically across iterations, and the read at `c290` is the 6502
+speculatively fetching past the branch operand. Three independent numbers agree:
+the loop is 15 cycles and writes are **6.7%** of events (1 in 15); the rate is
+0.3% under the 1.0205 MHz nominal, which is the stretched long cycle every 65;
+and the read-read-write at `$004E` is the **65C02** RMW signature, so the capture
+identifies the CPU variant.
+
+*Only the sampling half was ported.* `apple_bus_read.sv` takes the synchronisers
+and the two sample taps from v5's `apple_bus_wrapper.sv` and leaves behind
+driving data/addr/RW, asserting INH/IRQ/RDY/DMA/NMI/RES, the bus_emit state
+machine and the soft-switch strobe. The Apple pins are declared **input**, not
+inout, so a snooper cannot drive the bus by construction rather than by
+discipline.
+
+*The taps are empirical and clock-dependent.* Address and control are sampled 20
+cycles after phi0 falling, data 45 cycles after phi0 rising, counted at 100 MHz
+against a ~1.023 MHz phi0. A IIgs at 2.8 MHz needs them re-derived.
+
+*A trap worth recording.* An early capture looked broken: nothing in pages 1–B
+or D–F, everything collapsed into `0x0xxx` and `0xCxxx`, which is exactly the
+signature of A12/A13 stuck at 0 — ROM at `$D000+` aliasing down into `$C000`.
+The pins were fine. The machine was executing from `$C2xx` with its variables in
+zero page, so those pages genuinely never appear. **A page histogram cannot tell
+a stuck address bit from a program that does not use those pages; only decoding
+the instruction stream can.** Check the sequence before blaming the wiring.
 
 ## Two memory modes, and the DMA decision
 
