@@ -34,8 +34,18 @@ docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRA
 ```sh
 third_party/fetch_uberddr3.sh     # once
 python3 tools/gen_ddr3_xdc.py --check
-build/build.sh                    # -> build/work/au_top.bit
+build/build.sh                    # au_top   - DDR3 latency probe (default)
+build/build.sh --ft601            # ft601_top - link regression vehicle
+build/build.sh --snoop            # snoop_top - Apple bus snooper
+build/build.sh --diag             # diag_top  - minimal diagnostic
 ```
+
+Each top gets its own Vivado work directory, so a `--snoop` build cannot quietly
+reuse a stale `au_top` project. Artefacts land in `build/results/<top>.bit`.
+
+Note the Vivado path below is stale on this machine; the live install is
+`C:\AMDDesignTools\2026.1`, so builds need
+`VIVADO=/mnt/c/AMDDesignTools/2026.1/Vivado/bin/vivado.bat`.
 
 No IP cores: no MIG, and `rtl/clk_gen.v` instantiates `MMCME2_BASE` directly
 instead of using `clk_wiz`. A fresh clone plus the fetch script is a complete
@@ -54,6 +64,8 @@ sim/run_latency_tb.sh      # read latency vs the Micron DDR3 model, ~2 min
 sim/run_report_tb.sh       # UART report formatting + framing, ~5 s
 sim/run_ft601_fifo_tb.sh   # FT601 controller moves data from a cold start, ~1 s
 sim/run_ft601_msg_tb.sh    # FT601 heartbeat insertion, per stop-condition, ~2 s
+sim/run_ft601_msg_rx_tb.sh # host->card framing + the 1 s link watchdog, ~1 s
+sim/run_bus_snoop_tb.sh    # bus event capture, framing, overflow, ~1 s
 ```
 
 iverilog and Verilator only — no Vivado, no hardware.

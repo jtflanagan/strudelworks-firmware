@@ -26,8 +26,17 @@
 // Those constants are empirical - they come from a design that ran in real
 // machines - and they are only meaningful at a 100 MHz clock and an Apple II
 // phi0 of roughly 1.023 MHz (~98 cycles).  Changing the clock, the synchroniser
-// depth, or the taps changes where on the bus cycle the sample lands.  A IIgs at
-// 2.8 MHz would need them re-derived.
+// depth, or the taps changes where on the bus cycle the sample lands.
+//
+// They are CORRECT for the hardware in scope, not a known gap: this is a slot
+// card in a legacy Apple II, and that is the only target until a new hardware
+// spin exists.  A IIgs at 2.8 MHz would need them re-derived, but the IIgs and
+// the 65816 are out of scope until then - see docs/DERISK.md.  Do not "fix"
+// these for a machine this card cannot be plugged into.
+//
+// They also describe when the CPU PRESENTS its signals.  Driving the bus during
+// DMA needs the setup and hold the rest of the machine expects, which is a
+// different figure and is not derivable from these.
 //
 // One event is produced per phi0 cycle, at the data sample, in the v5 wire
 // format so existing analysis tooling reads these dumps:

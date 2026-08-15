@@ -800,6 +800,62 @@ zero page, so those pages genuinely never appear. **A page histogram cannot tell
 a stuck address bit from a program that does not use those pages; only decoding
 the instruction stream can.** Check the sequence before blaming the wiring.
 
+### ⬜ Next: taking the bus by DMA — a fresh bring-up
+
+**This has never been attempted on this hardware.** Treat it as bring-up, not as
+a port.
+
+*Why from a slot at all.* The card in hand is from a prior project and samples
+the **slot** bus; it is not the CPU-socket approach of milestone 4. On a legacy
+Apple II a slot card can pull the **DMA line**, after which it can drive address
+and data on every cycle and stand in for the CPU — similar to, but not identical
+to, sitting in the socket. The IIgs and the 65816 are **out of scope** until a
+new hardware spin, which is weeks away at least. Nothing here should be
+generalised to them.
+
+*The mechanism, as understood from the hardware.* Asserting DMA′ is what
+deactivates the 6502: there is circuitry on the Apple II motherboard that
+explicitly shuts off the transceivers connecting the CPU to the bus. The CPU is
+disconnected, not merely out-voted.
+
+That has a useful consequence for the bring-up ladder. **Contention is not a
+hazard to tiptoe around**, so the first experiment can assert DMA′ and drive in
+one step; there is no need for a separate "assert DMA′ and drive nothing" rung
+to prove it is safe to drive.
+
+*What v5 does NOT give us.* The DMA path there is scaffolding:
+
+  - `apple_addr_rw_enable` in `apple_bus_wrapper.sv` is declared, wired into the
+    address and R/W tristates, assigned `0`, and never set anywhere else. v5
+    never drove the address bus.
+  - `apple_dma_pin` is `inout` and feeds the read synchroniser, but has **no
+    driver at all**.
+  - `ab_write.assert_dma` and `wr_addr_rw_en` are aggregated in
+    `apple_bus_write_arbiter.sv` and consumed by nothing.
+
+So the structs and the arbiter are shaped for it and the wrapper stops short.
+Budget this as design work.
+
+*What the board DOES give us.* `tini_addr_dir_pin` is in the pinout, so the
+address-bus level shifters are bidirectional with direction control — the
+capability is in the hardware, v5 simply never exercised it. Note the card
+brings out DMA′ but **not the DMA daisy-chain pins**: single-card DMA is fine,
+priority arbitration against another DMA card is not expressible.
+
+*The one number we cannot derive ourselves.* The DMA timings are documented and
+need looking up before the first attempt. The sampler's taps (address at +20,
+data at +45 cycles from a phi0 edge) describe when the **CPU** presents its
+signals; driving requires the setup and hold the rest of the machine expects,
+which is a different figure and is not recoverable from a capture of someone
+else driving.
+
+*The instrument already exists.* Unusually for a bring-up, the bus can be
+watched while it is interfered with — `snoop_top` is validated against a running
+machine (above), so every driven cycle is checkable against a capture rather
+than inferred. Keep `rtl/apple_bus_read.sv` **input-only**; put driving in a
+separate module so the instrument can never become a participant. The `--snoop`
+build's Apple pins would become `inout` only in a master top.
+
 ## Two memory modes, and the DMA decision
 
 The design has two distinct modes, and nearly every question about caching,
