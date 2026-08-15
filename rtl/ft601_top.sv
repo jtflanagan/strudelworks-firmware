@@ -138,6 +138,8 @@ module ft601_top (
     wire        ft_din_wr_en;
     wire        ft_din_req_data;
 
+    wire ft_fwd, ft_q_empty, ft_in_rx;
+
     ft601_fifo u_ft (
         .clk          (ft_clk_i),
         .rst          (rst),
@@ -153,31 +155,62 @@ module ft601_top (
         .dout_valid   (ft_dout_valid),
         .din          (ft_din),
         .din_wr_en    (ft_din_wr_en),
-        .din_req_data (ft_din_req_data)
+        .din_req_data (ft_din_req_data),
+        .fwd          (ft_fwd),
+        .q_empty      (ft_q_empty),
+        .in_rx        (ft_in_rx)
     );
 
     // ---- FPGA -> host crossing --------------------------------------------
     // Written in the user domain, read out in the FT601's.  The controller pulls
     // with din_req_data; a word is delivered whenever it asks and one is ready.
+    //
+    // TX runs deep on purpose.  The heartbeat rule reads the chip's buffer fill
+    // level from our own FWD stream, and that reading is only unambiguous if our
+    // gaps are unambiguous: either sustained idle (chip dispatched) or TXE#
+    // backpressure (it did not).  A micro-gap from the source momentarily
+    // starving is neither, and mis-reads the fill level.  A deep TX FIFO keeps
+    // the source from starving mid-message, so the gaps stay clean.  4096 words
+    // is 16 messages of maximum size; RX has no such constraint and stays at
+    // 1024.  Utilisation before this was 2 of 50 BRAMs, so the extra tiles are
+    // free.
+    localparam integer TX_FIFO_DEPTH = 4096;
+    localparam integer RX_FIFO_DEPTH = 1024;
+
     wire [31:0] txc_dout;
     wire        txc_empty, txc_full;
     wire        txc_rd_en;
-    wire [31:0] tx_count_w;
+    wire [31:0] tx_word;
     wire        tx_push;
+    wire        hb_sent;
 
-    assign txc_rd_en    = ft_din_req_data & ~txc_empty;
-    assign ft_din       = txc_dout;
-    assign ft_din_wr_en = txc_rd_en;
+    // The message layer sits between the FIFO and the controller: it passes
+    // blocks through untouched and inserts a heartbeat frame when leaving the
+    // link idle would hang the host's read.  docs/PROTOCOL.md.
+    ft601_msg_tx u_msg (
+        .clk          (ft_clk_i),
+        .rst          (rst),
+        .fifo_dout    (txc_dout),
+        .fifo_empty   (txc_empty),
+        .fifo_rd_en   (txc_rd_en),
+        .din          (ft_din),
+        .din_wr_en    (ft_din_wr_en),
+        .din_req_data (ft_din_req_data),
+        .fwd          (ft_fwd),
+        .q_empty      (ft_q_empty),
+        .in_rx        (ft_in_rx),
+        .hb_sent      (hb_sent)
+    );
 
     xpm_fifo_async #(
-        .FIFO_MEMORY_TYPE ("block"), .FIFO_WRITE_DEPTH (1024),
+        .FIFO_MEMORY_TYPE ("block"), .FIFO_WRITE_DEPTH (TX_FIFO_DEPTH),
         .WRITE_DATA_WIDTH (32),      .READ_DATA_WIDTH  (32),
         .READ_MODE ("fwft"), .FIFO_READ_LATENCY (0),
         .USE_ADV_FEATURES ("0000"), .CDC_SYNC_STAGES (2),
         .RELATED_CLOCKS (0), .ECC_MODE ("no_ecc"), .WAKEUP_TIME (0)
     ) tx_fifo (
         .rst (fifo_rst),
-        .wr_clk (clk_ctrl), .wr_en (tx_push), .din (tx_count_w), .full (txc_full),
+        .wr_clk (clk_ctrl), .wr_en (tx_push), .din (tx_word), .full (txc_full),
         .rd_clk (ft_clk_i), .rd_en (txc_rd_en), .dout (txc_dout), .empty (txc_empty),
         .sleep (1'b0), .injectdbiterr (1'b0), .injectsbiterr (1'b0),
         .almost_empty (), .almost_full (), .data_valid (), .dbiterr (), .overflow (),
@@ -190,7 +223,7 @@ module ft601_top (
     wire        rxc_empty;
 
     xpm_fifo_async #(
-        .FIFO_MEMORY_TYPE ("block"), .FIFO_WRITE_DEPTH (1024),
+        .FIFO_MEMORY_TYPE ("block"), .FIFO_WRITE_DEPTH (RX_FIFO_DEPTH),
         .WRITE_DATA_WIDTH (32),      .READ_DATA_WIDTH  (32),
         .READ_MODE ("fwft"), .FIFO_READ_LATENCY (0),
         .USE_ADV_FEATURES ("0000"), .CDC_SYNC_STAGES (2),
@@ -208,13 +241,40 @@ module ft601_top (
     wire unused_rxc = |rxc_dout;   // drained and discarded
 
     // ---- pattern source ---------------------------------------------------
-    reg [31:0] tx_count = 32'd0;
-    assign tx_count_w = tx_count;
-    assign tx_push    = ~txc_full;
+    // The same incrementing counter as before, now carried inside protocol
+    // frames instead of as a bare stream, so `ft601_probe bench --verify` still
+    // proves every word followed its predecessor - but now across framing.
+    //
+    // Frames must be whole for the message layer to find a boundary to insert a
+    // heartbeat at, and the payload length is chosen so a frame divides the 256
+    // block buffer evenly: 1 header + 15 payload = 16 blocks, so a run of frames
+    // lands on a 1 KB boundary every 16 frames.  That makes the errata case the
+    // COMMON case here rather than a rare one, which is what we want to exercise.
+    localparam [7:0] MSG_LEN   = 8'd15;         // payload blocks per frame
+    localparam [7:0] MSG_TYPE  = 8'h10;         // first application type
+
+    reg [31:0] tx_count = 32'd0;                // the verified sequence
+    reg [7:0]  tx_left  = 8'd0;                 // payload blocks still to emit
+
+    // A header when the previous frame is finished, payload otherwise.  Header
+    // layout is little-endian: len in [7:0], type in [15:8].  See
+    // docs/PROTOCOL.md.
+    assign tx_word = (tx_left == 8'd0) ? {16'h0000, MSG_TYPE, MSG_LEN}
+                                       : tx_count;
+    assign tx_push = ~txc_full;
 
     always @(posedge clk_ctrl) begin
-        if (rst)          tx_count <= 32'd0;
-        else if (tx_push) tx_count <= tx_count + 32'd1;
+        if (rst) begin
+            tx_count <= 32'd0;
+            tx_left  <= 8'd0;
+        end else if (tx_push) begin
+            if (tx_left == 8'd0) begin
+                tx_left <= MSG_LEN;             // header just went out
+            end else begin
+                tx_left  <= tx_left - 8'd1;     // payload
+                tx_count <= tx_count + 32'd1;
+            end
+        end
     end
 
     // ---- host command channel ---------------------------------------------

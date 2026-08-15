@@ -63,6 +63,11 @@
 
 #define MAX_DEPTH                   64
 
+// Message protocol (docs/PROTOCOL.md).  A 32-bit little-endian header, len in
+// [7:0] as payload blocks not counting the header, type in [15:8].
+#define MSG_TYPE_IDLE               0x00    // heartbeat / filler, no payload use
+#define MSG_TYPE_SEQ                0x10    // the verified counter stream
+
 // Announced on EP_SESSION_OUT before a read shows up on EP_DATA_IN.  Provenance
 // as described in the licensing note above.
 struct ft60x_ctrlreq {
@@ -391,8 +396,15 @@ struct bench {
     //          unambiguous at depth 1.
     bool                  verify;
     bool                  have_prev;
-    uint64_t              markers;
+    uint64_t              markers;        // IDLE frames seen (heartbeats)
     uint32_t              prev_word;
+
+    // Frame parser state, carried ACROSS reads: a message may straddle any
+    // transfer boundary, so this cannot be reset per buffer.
+    bool                  synced;         // found a frame boundary yet?
+    uint64_t              skipped;        // blocks discarded acquiring sync
+    uint32_t              blocks_left;    // payload blocks still expected
+    uint64_t              frame_errors;   // headers that made no sense
     uint64_t              intra_errors;
     uint64_t              inter_errors;
     uint32_t              first_bad_expect;
@@ -406,48 +418,94 @@ static void verify_buffer(struct bench *b, const unsigned char *buf, int len)
     int words = len / 4;
     if(words <= 0) { return; }
 
-    // The gateware byte-swaps each word on the way out, exactly as the reference
-    // controller does (pcileech_ft601.sv reverses the four bytes of every word in
-    // both directions).  Swap back here so the counter is comparable; the swap is
-    // a property of the reference's wire format, not of this test.
+    // The wire is little-endian: ft_data[7:0] is the low byte, so byte 0 of the
+    // buffer is the low byte of the word.  A plain little-endian load.  The
+    // gateware's byte reversal and the matching swap that used to live here are
+    // both gone; they were pcileech's wire format, not the chip's.
     const uint8_t *p = (const uint8_t *)buf;
-    #define WORD_AT(i) ((uint32_t)p[(i)*4+0] << 24 | (uint32_t)p[(i)*4+1] << 16 | \
-                        (uint32_t)p[(i)*4+2] <<  8 | (uint32_t)p[(i)*4+3])
+    #define WORD_AT(i) ((uint32_t)p[(i)*4+0] <<  0 | (uint32_t)p[(i)*4+1] <<  8 | \
+                        (uint32_t)p[(i)*4+2] << 16 | (uint32_t)p[(i)*4+3] << 24)
 
-    // The gateware emits 0x66665555 as an idle/preload marker - five of them,
-    // filling the output queue, after reset and after 15 idle cycles.  That is
-    // the reference controller's behaviour, deliberately kept, so it is expected
-    // traffic rather than corruption.  Count them, and let the next real word
-    // re-seed the sequence instead of reporting a break against a marker.
-    #define MARKER 0x66665555u
+    // Parse frames, and verify the counter across the PAYLOAD only.
+    //
+    // No marker filtering by value.  The gateware no longer emits 0x66665555,
+    // and filtering by value would have been wrong regardless: a real counter
+    // word passes through 0x66665555 once per 32-bit wrap.  Heartbeats are
+    // identified structurally, as IDLE frames, which is the whole reason the
+    // padding became a frame.
+    //
+    // Parser state is carried across buffers - a message may straddle any read
+    // boundary - so a desync here is permanent by design.  See docs/PROTOCOL.md
+    // on why there is deliberately no resynchronisation.
+    // ACQUIRE SYNC.  The gateware free-runs, so a read starts wherever the
+    // chip's 1 KB packetiser happened to be - block 0 is mid-frame 15 times out
+    // of 16.  The protocol has no sync word (docs/PROTOCOL.md, deliberately), so
+    // there is nothing generic to lock onto; but this test knows exactly what its
+    // own source emits, so it locks onto that.  Confirm a candidate by checking
+    // the next header lands one full frame later, which makes a false lock about
+    // 1 in 2^64 rather than 1 in 2^32.
+    //
+    // This is sync ACQUISITION in the test harness, not protocol resync.  A real
+    // consumer gets its framing from request/response instead: the first block
+    // after a request it made is a header by construction.
+    #define SEQ_HDR   ((uint32_t)((MSG_TYPE_SEQ << 8) | 15u))
+    #define SEQ_FRAME 16                        /* header + 15 payload */
 
-    if(b->have_prev && WORD_AT(0) != b->prev_word + 1 && WORD_AT(0) != MARKER) {
-        b->inter_errors++;
-        if(!b->have_first_bad) {
-            b->first_bad_expect = b->prev_word + 1;
-            b->first_bad_got    = WORD_AT(0);
-            b->have_first_bad   = true;
+    int start = 0;
+    if(!b->synced) {
+        for(int i = 0; i + SEQ_FRAME < words; i++) {
+            if(WORD_AT(i) == SEQ_HDR && WORD_AT(i + SEQ_FRAME) == SEQ_HDR) {
+                start        = i;
+                b->synced    = true;
+                b->skipped  += (uint64_t)i;
+                b->blocks_left = 0;
+                break;
+            }
         }
+        if(!b->synced) { b->skipped += (uint64_t)words; return; }
     }
 
-    for(int i = 1; i < words; i++) {
-        if(WORD_AT(i) == MARKER || WORD_AT(i - 1) == MARKER) {
-            if(WORD_AT(i) == MARKER) { b->markers++; }
+    bool first_payload = true;      // first payload word in THIS buffer
+    for(int i = start; i < words; i++) {
+        uint32_t w = WORD_AT(i);
+
+        if(b->blocks_left == 0) {
+            // Header.  Little-endian: len in [7:0], type in [15:8].
+            uint32_t len   = w & 0xffu;
+            uint32_t mtype = (w >> 8) & 0xffu;
+
+            if(mtype == MSG_TYPE_IDLE) {
+                b->markers++;               // heartbeat or filler
+            } else if(mtype != MSG_TYPE_SEQ) {
+                b->frame_errors++;          // unknown type: we have lost sync
+                if(!b->have_first_bad) {
+                    b->first_bad_expect = MSG_TYPE_SEQ;
+                    b->first_bad_got    = w;
+                    b->have_first_bad   = true;
+                }
+            }
+            b->blocks_left = len;
             continue;
         }
-        if(WORD_AT(i) != WORD_AT(i - 1) + 1) {
-            b->intra_errors++;
+
+        // Payload block: this is the sequence under test.  A break on the
+        // first payload word of a buffer is `inter` (normally a real drop, but
+        // at depth > 1 an out-of-order completion looks the same); anywhere
+        // else it is `intra`, which is always a real defect.
+        b->blocks_left--;
+        if(b->have_prev && w != b->prev_word + 1) {
+            if(first_payload) b->inter_errors++;
+            else              b->intra_errors++;
             if(!b->have_first_bad) {
-                b->first_bad_expect = WORD_AT(i - 1) + 1;
-                b->first_bad_got    = WORD_AT(i);
+                b->first_bad_expect = b->prev_word + 1;
+                b->first_bad_got    = w;
                 b->have_first_bad   = true;
             }
         }
+        first_payload = false;
+        b->prev_word  = w;
+        b->have_prev  = true;
     }
-
-    b->prev_word = WORD_AT(words - 1);
-    b->have_prev = (WORD_AT(words - 1) != MARKER);
-    #undef MARKER
     #undef WORD_AT
 }
 
@@ -564,6 +622,7 @@ struct result {
     double   mean_latency_ms;
     uint64_t intra_errors;
     uint64_t inter_errors;
+    uint64_t frame_errors;
     uint64_t markers;
     uint32_t first_bad_expect;
     uint32_t first_bad_got;
@@ -667,6 +726,7 @@ static int run_once(libusb_device_handle *h, const struct opts *o, int depth,
     out->markers          = b.markers;
     out->intra_errors     = b.intra_errors;
     out->inter_errors     = b.inter_errors;
+    out->frame_errors     = b.frame_errors;
     out->first_bad_expect = b.first_bad_expect;
     out->first_bad_got    = b.first_bad_got;
     out->have_first_bad   = b.have_first_bad;
@@ -695,7 +755,7 @@ static int cmd_bench(libusb_device_handle *h, const struct opts *o)
         o->session ? "on" : "off", o->verify ? "on" : "off");
     printf("%6s %10s %10s %8s %10s %8s %8s",
         "depth", "MB/s", "lat(ms)", "CPU%", "xfers", "t/outs", "errs");
-    if(o->verify) { printf(" %8s %8s %8s", "intra", "inter", "idlemk"); }
+    if(o->verify) { printf(" %8s %8s %8s %8s", "intra", "inter", "frame", "idle"); }
     printf("\n");
 
     int depths[] = { 1, 2, 4, 8, 16 };
@@ -709,13 +769,14 @@ static int cmd_bench(libusb_device_handle *h, const struct opts *o)
         memset(&r, 0, sizeof(r));
         if(run_once(h, o, depths[i], &r)) { break; }
         total_bytes += r.bytes;
-        total_seq_errors += r.intra_errors + r.inter_errors;
+        total_seq_errors += r.intra_errors + r.inter_errors + r.frame_errors;
         printf("%6d %10.1f %10.3f %8.1f %10" PRIu64 " %8" PRIu64 " %8" PRIu64,
             depths[i], r.mbps, r.mean_latency_ms,
             r.wall > 0 ? 100.0 * r.cpu / r.wall : 0.0,
             r.completions, r.timeouts, r.errors);
         if(o->verify) {
-            printf(" %8" PRIu64 " %8" PRIu64 " %8" PRIu64, r.intra_errors, r.inter_errors, r.markers);
+            printf(" %8" PRIu64 " %8" PRIu64 " %8" PRIu64 " %8" PRIu64,
+                r.intra_errors, r.inter_errors, r.frame_errors, r.markers);
         }
         printf("\n");
         if(o->verify && r.have_first_bad && !shown_first_bad) {
@@ -826,6 +887,62 @@ static int cmd_write(libusb_device_handle *h, const struct opts *o)
 }
 
 // ---------------------------------------------------------------------------
+// dump - print the first words of a read, as the frame parser sees them
+// ---------------------------------------------------------------------------
+//
+// The parser has no sync word by design (docs/PROTOCOL.md), so it assumes the
+// first block of a read is a header.  Whether that assumption holds is the
+// difference between a working parser and 300 phantom sequence breaks, and it
+// is not something a throughput figure will ever tell you.
+static int cmd_dump(libusb_device_handle *h, const struct opts *o)
+{
+    struct bench b;
+    memset(&b, 0, sizeof(b));
+    b.h = h; b.timeout_ms = o->timeout_ms;
+
+    const int want = 4096;
+    unsigned char *buf = malloc(want);
+    if(!buf) { return 1; }
+
+    if(libusb_claim_interface(h, IFACE_COMMS) || libusb_claim_interface(h, IFACE_DATA)) {
+        fprintf(stderr, "could not claim interfaces\n");
+        free(buf); return 1;
+    }
+
+    if(send_session_request(&b, (size_t)want)) {
+        fprintf(stderr, "session request failed\n");
+        goto out;
+    }
+
+    int got = 0;
+    int err = libusb_bulk_transfer(h, EP_DATA_IN, buf, want, &got, o->timeout_ms);
+    if(err && got == 0) {
+        fprintf(stderr, "read failed: %s\n", libusb_strerror(err));
+        goto out;
+    }
+
+    printf("read %d bytes (%d blocks).  first 48 blocks, little-endian:\n\n", got, got / 4);
+    const uint8_t *p = buf;
+    for(int i = 0; i < 48 && i * 4 < got; i++) {
+        uint32_t w = (uint32_t)p[i*4+0] | (uint32_t)p[i*4+1] << 8 |
+                     (uint32_t)p[i*4+2] << 16 | (uint32_t)p[i*4+3] << 24;
+        uint32_t len = w & 0xffu, ty = (w >> 8) & 0xffu;
+        printf("  [%3d] %08x", i, w);
+        if(ty == MSG_TYPE_SEQ && len == 15) { printf("   <- looks like a SEQ header (len=%u)", len); }
+        else if(ty == MSG_TYPE_IDLE && len == 0 && w == 0) { printf("   <- heartbeat"); }
+        printf("\n");
+    }
+    printf("\nIf block 0 is not a header, the parser starts mid-frame and cannot\n"
+           "recover - the protocol has no sync word.\n");
+
+out:
+    libusb_release_interface(h, IFACE_DATA);
+    libusb_release_interface(h, IFACE_COMMS);
+    free(buf);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // zlp - does a transfer ending on a 1024-byte boundary terminate?
 // ---------------------------------------------------------------------------
 
@@ -922,7 +1039,7 @@ static int cmd_zlp(libusb_device_handle *h, const struct opts *o)
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-        "usage: %s <info|config|bench|write|zlp> [options]\n"
+        "usage: %s <info|config|bench|write|dump|zlp> [options]\n"
         "\n"
         "  --pid <hex>     match this product id instead of 601e/601f\n"
         "  --depth <n>     in-flight transfers for bench (default 4, max %d)\n"
@@ -1007,6 +1124,8 @@ int main(int argc, char **argv)
         rc = cmd_bench(h, &o);
     } else if(!strcmp(mode, "write")) {
         rc = cmd_write(h, &o);
+    } else if(!strcmp(mode, "dump")) {
+        rc = cmd_dump(h, &o);
     } else if(!strcmp(mode, "zlp")) {
         rc = cmd_zlp(h, &o);
     } else {

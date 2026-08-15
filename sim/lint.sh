@@ -49,6 +49,7 @@ run latency_probe rtl/latency_probe.sv
 # to simulation semantics we do not rely on.  Diverging from the source to quiet
 # a lint message is not worth it.
 run ft601_fifo    rtl/ft601_fifo.sv -Wno-INITIALDLY
+run ft601_msg_tx  rtl/ft601_msg_tx.sv
 
 # Not linted, deliberately:
 #   clk_gen.v      - nothing but IBUF/BUFG/MMCME2_BASE instantiation.  Verilator

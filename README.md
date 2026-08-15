@@ -25,7 +25,8 @@ ref/        The MIG project + generated XDC from v5, kept as the pinout ground t
 tools/      gen_ddr3_xdc.py - regenerates and verifies constr/ddr3.xdc.
 build/      Headless Vivado build (build.sh drives the Windows-side Vivado from WSL).
 hw/         The carrier board (milestone 4). Licensed separately - see hw/README.md.
-docs/       DERISK.md.
+docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRAM),
+            PROTOCOL.md (the FT601 message framing).
 ```
 
 ## Build
@@ -51,6 +52,8 @@ sim/lint.sh                # Verilator lint, ~1 s - run before any build
 sim/run_params_dump.sh     # derived DDR3 timing for this configuration
 sim/run_latency_tb.sh      # read latency vs the Micron DDR3 model, ~2 min
 sim/run_report_tb.sh       # UART report formatting + framing, ~5 s
+sim/run_ft601_fifo_tb.sh   # FT601 controller moves data from a cold start, ~1 s
+sim/run_ft601_msg_tb.sh    # FT601 heartbeat insertion, per stop-condition, ~2 s
 ```
 
 iverilog and Verilator only — no Vivado, no hardware.
@@ -60,6 +63,13 @@ and the gap is where the bugs hide. An out-of-range part-select
 (`sum_x10[16 +: 32]` on a 40-bit value) elaborated fine under iverilog and was a
 hard synthesis ERROR in Vivado — found after a ten-minute build. Verilator catches
 that class in about a second.
+
+`sim/run_ft601_fifo_tb.sh` earns its place the same way, one level up. Removing
+the reference's `0x66665555` preload left the controller's refill request window
+reachable only from above, so the output queue never loaded from empty and TX
+deadlocked — zero bytes to the host. That cost a build, a flash and a bench run
+to find, and reproduces here in 20 µs of simulated time. Run it after any change
+to `rtl/ft601_fifo.sv`.
 
 ## Program and read the board (no Vivado)
 

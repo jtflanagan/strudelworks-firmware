@@ -11,8 +11,15 @@
 //
 // Every place an earlier version of this file diverged from that structure
 // produced a bug at the burst boundary - a registered TXE#, a four-state machine,
-// tristate-by-default, an empty output queue, an acknowledge-based pop.  None of
-// them are reintroduced.
+// tristate-by-default, an acknowledge-based pop.  None of those are reintroduced.
+//
+// ONE divergence is now deliberate: the reference's five-DWORD 0x66665555 preload
+// is removed, so the output queue starts and returns to EMPTY.  That was on the
+// list above, and it is safe here for a specific reason - FWD is gated on a
+// non-empty queue and the FSM leaves S_IDLE only on a non-empty queue, so the
+// undefined power-on contents of DATA_OUT are never forwarded.  The preload was
+// the reference's 1024-byte errata workaround; this design moves that job to the
+// message layer (see the note at the queue logic, docs/PROTOCOL.md, ft601_top).
 //
 // Despite the filename this module contains NO FIFO.  The reference keeps the
 // clock-domain crossing outside the FT601 controller and so does this: ft601_top
@@ -42,7 +49,13 @@ module ft601_fifo (
     output logic        dout_valid,
     input  wire  [31:0] din,
     input  wire         din_wr_en,
-    output wire         din_req_data
+    output wire         din_req_data,
+
+    // TO THE MESSAGE LAYER (ft601_msg_tx).  Everything it needs to track the
+    // chip's internal 1 KB buffer; see docs/PROTOCOL.md.
+    output wire         fwd,          // a block was handed to the chip THIS cycle
+    output wire         q_empty,      // the skid buffer has drained
+    output wire         in_rx         // the bus is turned around for RX
 );
 
     initial begin
@@ -71,23 +84,25 @@ module ft601_fifo (
     localparam [3:0] S_TX_COOLDOWN1 = 4'hb;
     localparam [3:0] S_TX_COOLDOWN2 = 4'hc;
 
-                        logic [31:0] DATA_OUT [5];
+                        logic [31:0] DATA_OUT [2];
     (* KEEP = "TRUE" *) wire         FWD;
-    (* KEEP = "TRUE" *) logic        OE                  = 1'b1;
-    (* KEEP = "TRUE" *) logic [3:0]  data_cooldown_count = 4'h0;
-    (* KEEP = "TRUE" *) logic [2:0]  data_queue_count    = 3'h0;
-    (* KEEP = "TRUE" *) logic [3:0]  state               = S_IDLE;
+    (* KEEP = "TRUE" *) logic        OE               = 1'b1;
+    (* KEEP = "TRUE" *) logic [1:0]  data_queue_count = 2'd0;
+    (* KEEP = "TRUE" *) logic [3:0]  state            = S_IDLE;
 
     // -------------------------------------------------------------------------
     // FT245 RX / DATA INPUT
+    //
+    // No byte swap.  The wire is little-endian end to end: ft_data[7:0] is the
+    // low byte of the fabric word, both directions, and the host reads it with a
+    // plain little-endian load.  The reference reversed the four bytes here; that
+    // was pcileech's wire format, not the chip's.  Delete it in both directions
+    // or neither - a one-sided change fails bench --verify on the first word.
     // -------------------------------------------------------------------------
 
     always_ff @(posedge clk) begin
-        dout_valid  <= !rst && !ft_rxf && (state == S_RX_ACTIVE);
-        dout[7:0]   <= ft_data[31:24];
-        dout[15:8]  <= ft_data[23:16];
-        dout[23:16] <= ft_data[15:8];
-        dout[31:24] <= ft_data[7:0];
+        dout_valid <= !rst && !ft_rxf && (state == S_RX_ACTIVE);
+        dout       <= ft_data;
     end
 
     // -------------------------------------------------------------------------
@@ -95,34 +110,105 @@ module ft601_fifo (
     //
     // OE drives the bus by DEFAULT and releases it only for RX, so the bus is not
     // turned around on every transmit burst.
+    //
+    // DATA_OUT + data_queue_count is a SKID BUFFER, not a redundant FIFO in
+    // front of the async FIFO behind it.  It earns its place twice over:
+    //
+    //   1. It breaks the path from downstream-ready to upstream-pop.
+    //      din_req_data is a function of data_queue_count ALONE, so the BRAM
+    //      read enable never sees TXE#; TXE# reaches only FWD, which drives
+    //      local flops.  Popping the async FIFO directly on TXE# instead is
+    //      exactly the -5.216 ns path DERISK records as the root cause of the
+    //      build-to-build flakiness: TXE# crossing the state machine
+    //      combinationally into a FIFO pop within a half cycle.
+    //
+    //   2. DATA_OUT[0] is the IOB output register for ft_data.  A BRAM output
+    //      cannot be packed into an IOB; this flop can, and is.
+    //
+    // TWO registers, which is the minimum that works, and the reference's five
+    // were inherited slack rather than a requirement: its FIFO Generator core has
+    // read latency to cover, where our XPM FIFO is FWFT at zero latency and hands
+    // over a word the same cycle it is asked.
+    //
+    // Why not one.  Sustaining a word per cycle from a single register means
+    // popping the FIFO on the cycle its word is consumed - that is FWD, which is
+    // gated by TXE#, so the BRAM read enable would see TXE# again.  Popping only
+    // when empty keeps TXE# out but then forwards one word every TWO cycles: half
+    // rate, ~200 MB/s against the 335 measured.  One skid entry behind the output
+    // register buys both.  With a request on count <= 1, a request and a FWD
+    // cancel at count 1, so it parks there and forwards every cycle.
+    //
+    // Depth is therefore load-bearing in both directions - too few costs
+    // throughput or timing, too many is dead flops - and the request window must
+    // include 0 or the queue cannot load from empty and TX deadlocks outright.
+    // See din_req_data below; that is not hypothetical, it happened.
+    //
+    // It is still not a textbook valid/ready skid buffer, because TXE# is not
+    // AXI-ready: ft_wr is asserted SPECULATIVELY in S_TX_WAIT2, a cycle before
+    // S_TX_ACTIVE consumes anything, and that lead is what reaches full
+    // throughput.  Mapping WR#/TXE# onto valid/ready is a near neighbour of the
+    // "acknowledge-based pop" listed in the header among the divergences that
+    // each produced a bug.
     // -------------------------------------------------------------------------
 
     assign ft_be        = OE ? 4'b1111 : 4'bzzzz;
-    assign ft_data      = OE ? {DATA_OUT[0][7:0],   DATA_OUT[0][15:8],
-                                DATA_OUT[0][23:16], DATA_OUT[0][31:24]} : 32'hzzzzzzzz;
-    assign din_req_data = !rst && (data_queue_count == 3'h2) || (data_queue_count == 3'h3);
-    assign FWD          = !rst && !ft_txe && (data_queue_count != 3'h0) && (state == S_TX_ACTIVE);
+    assign ft_data      = OE ? DATA_OUT[0] : 32'hzzzzzzzz;
+    // Request whenever there is room for one more, INCLUDING when empty.  The
+    // reference requests only at count == 2 or 3 and reaches that window from
+    // ABOVE - its five-DWORD preload starts the count at 5 and FWD drains it into
+    // range.  Delete the preload and the count starts at 0, which cannot reach
+    // 2..3: a request needs count 2..3, count only rises on a request, and FWD
+    // only fires on a non-empty queue.  The queue never loads, the FSM never
+    // leaves S_IDLE, and TX deadlocks with the FIFO backed up behind it.
+    // Measured on hardware: words_sent frozen, every host read timing out, zero
+    // bytes moved.  sim/run_ft601_fifo_tb.sh reproduces it in 20 us.
+    //
+    // A function of registered state ALONE - no ft_txe - which is the property
+    // that keeps the pad signal out of the BRAM read-enable path.
+    assign din_req_data = !rst && (data_queue_count <= 2'd1);
+    assign FWD          = !rst && !ft_txe && (data_queue_count != 2'd0) && (state == S_TX_ACTIVE);
 
+    // Exports for the message layer.  fwd is the blocks-to-chip pulse, NOT
+    // din_wr_en: din_wr_en counts blocks entering the skid buffer, and the two
+    // differ by up to two blocks at the end of a run - which is exactly when the
+    // heartbeat decision gets made.
+    assign fwd     = FWD;
+    assign q_empty = (data_queue_count == 2'd0);
+    assign in_rx   = (state == S_RX_WAIT1)     || (state == S_RX_WAIT2)  ||
+                     (state == S_RX_WAIT3)     || (state == S_RX_ACTIVE) ||
+                     (state == S_RX_COOLDOWN1) || (state == S_RX_COOLDOWN2);
+
+    // The reference reloads five 0x66665555 DWORDs here whenever the queue has
+    // been empty for 15 cycles - its errata workaround, padding every idle stream
+    // so a transfer never ends on a 1024-byte boundary.  It is gone.  This design
+    // handles the errata at the message layer instead: the transmitter inserts a
+    // heartbeat frame when it goes idle on a boundary (see docs/PROTOCOL.md and
+    // ft601_top), which is a real frame the receiver parses rather than a magic
+    // constant it must filter by value - and real payload can legitimately be
+    // 0x66665555.
+    //
+    // The queue therefore starts and returns to EMPTY, with no preload.  That is
+    // safe only because FWD is gated on data_queue_count != 0 and the FSM leaves
+    // S_IDLE only on data_queue_count > 0: DATA_OUT is never forwarded until real
+    // data has been loaded into it, so its power-on contents are don't-care.
     always_ff @(posedge clk) begin
-        if (rst || (data_cooldown_count == 4'hf)) begin
-            data_cooldown_count <= 4'h0;
-            data_queue_count    <= 3'h5;
-            DATA_OUT[0]         <= 32'h66665555;
-            DATA_OUT[1]         <= 32'h66665555;
-            DATA_OUT[2]         <= 32'h66665555;
-            DATA_OUT[3]         <= 32'h66665555;
-            DATA_OUT[4]         <= 32'h66665555;
+        if (rst) begin
+            data_queue_count <= 2'd0;
         end else begin
-            data_cooldown_count <= (data_queue_count == 3'h0) ? (data_cooldown_count + 4'h1) : 4'h0;
-            data_queue_count    <= data_queue_count + (din_wr_en ? 3'h1 : 3'h0) - (FWD ? 3'h1 : 3'h0);
-            if (FWD) begin
-                if (data_queue_count > 3'h1) DATA_OUT[0] <= DATA_OUT[1];
-                if (data_queue_count > 3'h2) DATA_OUT[1] <= DATA_OUT[2];
-                if (data_queue_count > 3'h3) DATA_OUT[2] <= DATA_OUT[3];
-                if (data_queue_count > 3'h4) DATA_OUT[3] <= DATA_OUT[4];
-            end
+            data_queue_count <= data_queue_count + (din_wr_en ? 2'd1 : 2'd0) - (FWD ? 2'd1 : 2'd0);
+
+            // Skid to the output register when the word there is being consumed.
+            // Only reachable at count 2, and a request cannot land at count 2, so
+            // this never races the write below for DATA_OUT[0].
+            if (FWD && (data_queue_count > 2'd1)) DATA_OUT[0] <= DATA_OUT[1];
+
+            // A request implies count <= 1, so the incoming word goes straight to
+            // the output register when that register is empty (count 0) or is
+            // being drained this cycle (count 1 with FWD), and to the skid entry
+            // otherwise.
             if (din_wr_en) begin
-                DATA_OUT[data_queue_count - (FWD ? 3'h1 : 3'h0)] <= din;
+                if (FWD || (data_queue_count == 2'd0)) DATA_OUT[0] <= din;
+                else                                   DATA_OUT[1] <= din;
             end
         end
     end
@@ -140,7 +226,7 @@ module ft601_fifo (
         ft_rd <= (rst || ft_rxf || ((state != S_RX_ACTIVE)    && (state != S_RX_WAIT3)));
         ft_wr <= !(!rst && !ft_txe && ((state == S_TX_WAIT2) ||
                                        ((state == S_TX_ACTIVE) &&
-                                        (din_wr_en || (data_queue_count > 3'h1)))));
+                                        (din_wr_en || (data_queue_count > 2'd1)))));
     end
 
     always_ff @(posedge clk) begin
@@ -151,7 +237,7 @@ module ft601_fifo (
                 // RX is prioritised above TX when both are available.
                 S_IDLE:
                     if (!ft_rxf)                                    state <= S_RX_WAIT1;
-                    else if (!ft_txe && (data_queue_count > 3'h0))  state <= S_TX_WAIT1;
+                    else if (!ft_txe && (data_queue_count > 2'd0))  state <= S_TX_WAIT1;
 
                 // RX.  The receiver is assumed never full; if it is, data is
                 // still received and lost.
@@ -165,7 +251,7 @@ module ft601_fifo (
                 // TX.
                 S_TX_WAIT1:     state <= ft_txe ? S_TX_COOLDOWN1 : S_TX_WAIT2;
                 S_TX_WAIT2:     state <= ft_txe ? S_TX_COOLDOWN1 : S_TX_ACTIVE;
-                S_TX_ACTIVE:    state <= (ft_txe || (!din_wr_en && (data_queue_count <= 3'h1)))
+                S_TX_ACTIVE:    state <= (ft_txe || (!din_wr_en && (data_queue_count <= 2'd1)))
                                             ? S_TX_COOLDOWN1 : S_TX_ACTIVE;
                 S_TX_COOLDOWN1: state <= S_TX_COOLDOWN2;
                 S_TX_COOLDOWN2: state <= S_IDLE;
