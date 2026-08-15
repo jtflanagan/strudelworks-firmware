@@ -118,6 +118,7 @@ struct opts {
     bool     verify;
     bool     starve;            // snoop: deliberately stop heartbeating
     unsigned stall_ms;          // snoop: heartbeat but stop READING, to overflow
+    bool     real_bus;          // snoop: capture the real Apple bus, not synth
     unsigned timeout_ms;
     const char *outfile;
 };
@@ -950,6 +951,13 @@ struct snoop_state {
     // Sequence check over the synthetic source, which spreads a 24-bit counter
     // across the addr and data fields.  Proves the dump is complete rather than
     // merely non-empty.
+    // Light decode, so a real capture says something about the machine rather
+    // than only about the link.
+    uint16_t  addr_lo;
+    uint16_t  addr_hi;
+    uint64_t  n_reads;
+    uint64_t  n_writes;
+
     bool      verify;
     bool      have_prev;
     uint32_t  prev_seq;
@@ -995,6 +1003,13 @@ static void snoop_consume(struct snoop_state *st, const unsigned char *buf, int 
 
         if(st->cur_type == MSG_TYPE_BUS_EVENTS) {
             if(st->out) { fwrite(p + i*4, 4, 1, st->out); }
+            if(st->events == 0) { st->addr_lo = 0xffffu; st->addr_hi = 0; }
+            {
+                uint16_t a = (uint16_t)(w & 0xffffu);
+                if(a < st->addr_lo) { st->addr_lo = a; }
+                if(a > st->addr_hi) { st->addr_hi = a; }
+                if(w & (1u << 16)) { st->n_reads++; } else { st->n_writes++; }
+            }
             st->events++;
             if(st->verify) {
                 uint32_t s = ev_seq(w);
@@ -1022,7 +1037,13 @@ static int cmd_snoop(libusb_device_handle *h, const struct opts *o)
 
     struct snoop_state st;
     memset(&st, 0, sizeof(st));
-    st.verify = o->verify;
+
+    // The sequence check only means anything against the synthetic source, which
+    // encodes a counter.  Real bus traffic is whatever the machine did.
+    st.verify = o->verify && !o->real_bus;
+    if(o->verify && o->real_bus) {
+        printf("note: --verify ignored, real bus traffic carries no sequence\n");
+    }
 
     if(o->outfile) {
         st.out = fopen(o->outfile, "wb");
@@ -1042,13 +1063,17 @@ static int cmd_snoop(libusb_device_handle *h, const struct opts *o)
                "the card should reset the link at ~1 s and re-enumerate\n\n",
             o->seconds);
     } else {
-        printf("capture: %.1f s, heartbeat every %d ms, output %s, verify %s\n\n",
-            o->seconds, HEARTBEAT_MS, o->outfile ? o->outfile : "(discarded)",
-            o->verify ? "on" : "off");
+        printf("capture: %.1f s from the %s source, heartbeat every %d ms,\n"
+               "output %s, verify %s\n\n",
+            o->seconds, o->real_bus ? "REAL Apple bus" : "synthetic",
+            HEARTBEAT_MS, o->outfile ? o->outfile : "(discarded)",
+            st.verify ? "on" : "off");
     }
 
     int rc = 0;
-    if(send_msg(h, MSG_TYPE_BUS_ENABLE, 0x0001, o->timeout_ms)) {
+    // free[0] = enable, free[1] = source (0 synthetic, 1 real bus)
+    uint16_t enable_flags = 0x0001 | (o->real_bus ? 0x0002 : 0x0000);
+    if(send_msg(h, MSG_TYPE_BUS_ENABLE, enable_flags, o->timeout_ms)) {
         fprintf(stderr, "BUS_ENABLE failed - is the snoop bitstream loaded?\n");
         rc = 1;
         goto out;
@@ -1146,6 +1171,10 @@ static int cmd_snoop(libusb_device_handle *h, const struct opts *o)
            "%" PRIu64 " idle\n",
         st.events, wall, wall > 0 ? (double)st.events / wall : 0.0,
         st.frames, st.idles);
+    if(o->real_bus && st.events) {
+        printf("\naddress range %04x..%04x, %" PRIu64 " reads / %" PRIu64 " writes\n",
+            st.addr_lo, st.addr_hi, st.n_reads, st.n_writes);
+    }
     printf("%.2f MB read, card captured %u\n",
         (double)bytes / (1024.0 * 1024.0), st.card_captured);
 
@@ -1355,6 +1384,9 @@ static void usage(const char *argv0)
         "  -o, --output F  snoop: write captured bus events to F (raw 32-bit LE)\n"
         "  --stall <ms>    snoop: keep heartbeating but stop READING for <ms>, to\n"
         "                  overflow the card's event FIFO on purpose\n"
+        "  --real          snoop: capture the real Apple bus instead of the\n"
+        "                  synthetic source.  --verify does not apply: real bus\n"
+        "                  traffic has no sequence to check.\n"
         "  --starve        snoop: enable a capture then STOP heartbeating, to\n"
         "                  exercise the card's 1 s watchdog.  The link resets and\n"
         "                  the device re-enumerates; that is the pass condition.\n"
@@ -1386,6 +1418,7 @@ int main(int argc, char **argv)
         { "output",  required_argument, 0, 'o' },
         { "starve",  no_argument,       0, 'K' },
         { "stall",   required_argument, 0, 'L' },
+        { "real",    no_argument,       0, 'R' },
         { "timeout", required_argument, 0, 't' },
         { "help",    no_argument,       0, 'h' },
         { 0, 0, 0, 0 },
@@ -1393,7 +1426,7 @@ int main(int argc, char **argv)
 
     int c;
     optind = 2;
-    while((c = getopt_long(argc, argv, "p:d:s:S:wevEt:o:KL:h", longopts, NULL)) != -1) {
+    while((c = getopt_long(argc, argv, "p:d:s:S:wevEt:o:KL:Rh", longopts, NULL)) != -1) {
         switch(c) {
             case 'p': o.pid = (int)strtol(optarg, NULL, 16); break;
             case 'd': o.depth = atoi(optarg); break;
@@ -1406,6 +1439,7 @@ int main(int argc, char **argv)
             case 'o': o.outfile = optarg; break;
             case 'K': o.starve = true; break;
             case 'L': o.stall_ms = (unsigned)atoi(optarg); break;
+            case 'R': o.real_bus = true; break;
             case 't': o.timeout_ms = (unsigned)atoi(optarg); break;
             case 'h': usage(argv[0]); return 0;
             default:  usage(argv[0]); return 2;

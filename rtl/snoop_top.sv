@@ -40,6 +40,24 @@ module snoop_top (
     input  wire        usb_rx,
     output wire        usb_tx,
 
+    // Apple II bus (constr/apple_bus.xdc).  INPUTS ONLY - this design snoops
+    // and never drives; see rtl/apple_bus_read.sv.
+    input  wire [7:0]  apple_data_pin,
+    input  wire [15:0] apple_addr_pin,
+    input  wire        apple_rw_pin,
+    input  wire        apple_phi0_pin,
+    input  wire        apple_m2sel_pin,
+    input  wire        apple_m2b0_pin,
+    input  wire        apple_inh_pin,
+    input  wire        apple_res_pin,
+    input  wire        apple_irq_pin,
+    input  wire        apple_rdy_pin,
+    input  wire        apple_dma_pin,
+    input  wire        tini_5v_pin,
+    output wire        tini_oe_pin,
+    output wire        tini_addr_dir_pin,
+    output wire        tini_data_dir_pin,
+
     // FT601 (constr/ft601.xdc)
     input  wire        ft_clk,
     input  wire        ft_rxf,
@@ -239,6 +257,14 @@ module snoop_top (
         else if (want_disable)  capture_enable <= 1'b0;
     end
 
+    // Source select, latched at enable so it cannot change mid-capture.
+    // free[1]: 0 = synthetic, 1 = the real Apple bus.
+    reg source_real = 1'b0;
+    always @(posedge clk_ctrl) begin
+        if (rst)              source_real <= 1'b0;
+        else if (want_enable) source_real <= msg_free[1];
+    end
+
     // Acknowledge every enable change with a status frame, so the host can see
     // the card acted rather than inferring it from the data stopping.
     reg status_req = 1'b0;
@@ -255,20 +281,48 @@ module snoop_top (
         .fired  (watchdog_fired)
     );
 
-    // ---- event source -------------------------------------------------------
-    // Synthetic for now.  The real apple_bus_wrapper drops in behind this same
-    // pair of signals, selected by msg_free[1]; it needs the board in an Apple II
-    // to mean anything, which is exactly why the synthetic source exists.
-    wire [31:0] ev_data;
-    wire        ev_valid;
+    // ---- event sources ------------------------------------------------------
+    // Two, selected per capture.  The synthetic one is not scaffolding to be
+    // removed: it is the only source whose content the host can verify, so it
+    // stays as the way to tell a suspect capture from a suspect capturer.
+    wire [31:0] synth_data,  real_data;
+    wire        synth_valid, real_valid;
+    wire        phi0_active;
 
-    synth_bus_events u_events (
+    synth_bus_events u_synth (
         .clk      (clk_ctrl),
         .rst      (rst),
-        .enable   (capture_enable),
-        .ev_data  (ev_data),
-        .ev_valid (ev_valid)
+        .enable   (capture_enable && !source_real),
+        .ev_data  (synth_data),
+        .ev_valid (synth_valid)
     );
+
+    apple_bus_read u_apple (
+        .clk               (clk_ctrl),
+        .rst               (rst),
+        .enable            (capture_enable && source_real),
+        .apple_data_pin    (apple_data_pin),
+        .apple_addr_pin    (apple_addr_pin),
+        .apple_rw_pin      (apple_rw_pin),
+        .apple_phi0_pin    (apple_phi0_pin),
+        .apple_m2sel_pin   (apple_m2sel_pin),
+        .apple_m2b0_pin    (apple_m2b0_pin),
+        .apple_inh_pin     (apple_inh_pin),
+        .apple_res_pin     (apple_res_pin),
+        .apple_irq_pin     (apple_irq_pin),
+        .apple_rdy_pin     (apple_rdy_pin),
+        .apple_dma_pin     (apple_dma_pin),
+        .tini_5v_pin       (tini_5v_pin),
+        .tini_oe_pin       (tini_oe_pin),
+        .tini_addr_dir_pin (tini_addr_dir_pin),
+        .tini_data_dir_pin (tini_data_dir_pin),
+        .ev_data           (real_data),
+        .ev_valid          (real_valid),
+        .phi0_active       (phi0_active)
+    );
+
+    wire [31:0] ev_data  = source_real ? real_data  : synth_data;
+    wire        ev_valid = source_real ? real_valid : synth_valid;
 
     wire        overflow;
     wire [31:0] captured;
@@ -301,14 +355,18 @@ module snoop_top (
     assign cmd_reset_strobe = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
 
     // ---- status over UART -------------------------------------------------
-    // "C=xxxxxxxx E=x O=x" - events captured, capture enabled, overflow.  The
+    // "C=xxxxxxxx E=x O=x P=x" - events captured, capture enabled, overflow, and
+    // whether phi0 is ticking.  P is the one that answers "is this card actually
+    // in a machine?", which no amount of staring at the USB side will tell you.
+    // The
     // UART is the only way to see the card's own view when the FT601 link is the
     // thing under suspicion.
     localparam [7:0] CH_C = 8'h43, CH_E = 8'h45, CH_O = 8'h4F, CH_EQ = 8'h3D;
+    localparam [7:0] CH_P = 8'h50;
     localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
-    localparam [4:0] RPT_LAST = 5'd19;
-    localparam [4:0] RPT_IDLE = 5'd20;
+    localparam [4:0] RPT_LAST = 5'd23;
+    localparam [4:0] RPT_IDLE = 5'd24;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
@@ -318,6 +376,7 @@ module snoop_top (
     reg [31:0] rpt_cnt  = 32'd0;
     reg        rpt_en   = 1'b0;
     reg        rpt_ovf  = 1'b0;
+    reg        rpt_phi  = 1'b0;
 
     always @(posedge clk_ctrl) begin
         if (!clk_locked) begin
@@ -329,6 +388,7 @@ module snoop_top (
                 rpt_cnt <= captured;
                 rpt_en  <= capture_enable;
                 rpt_ovf <= overflow;
+                rpt_phi <= phi0_active;
                 rpt_idx <= 5'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
@@ -350,6 +410,7 @@ module snoop_top (
             5'd9:  nib = rpt_cnt[3:0];
             5'd13: nib = {3'b000, rpt_en};
             5'd17: nib = {3'b000, rpt_ovf};
+            5'd21: nib = {3'b000, rpt_phi};
             default: nib = 4'd0;
         endcase
     end
@@ -368,8 +429,11 @@ module snoop_top (
             5'd14: ch = CH_SP;
             5'd15: ch = CH_O;
             5'd16: ch = CH_EQ;
-            5'd18: ch = CH_CR;
-            5'd19: ch = CH_LF;
+            5'd18: ch = CH_SP;
+            5'd19: ch = CH_P;
+            5'd20: ch = CH_EQ;
+            5'd22: ch = CH_CR;
+            5'd23: ch = CH_LF;
             default: ch = hex;
         endcase
     end

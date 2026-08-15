@@ -55,6 +55,8 @@ run link_watchdog rtl/link_watchdog.sv
 run sync_fifo     rtl/sync_fifo.sv
 run synth_bus_events rtl/synth_bus_events.sv
 run bus_event_capture rtl/bus_event_capture.sv rtl/sync_fifo.sv
+run synchronizer  rtl/synchronizer.sv
+run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 
 # Not linted, deliberately:
 #   clk_gen.v      - nothing but IBUF/BUFG/MMCME2_BASE instantiation.  Verilator

@@ -100,6 +100,8 @@ if {$snoop} {
         [file join $root rtl link_watchdog.sv] \
         [file join $root rtl sync_fifo.sv] \
         [file join $root rtl synth_bus_events.sv] \
+        [file join $root rtl synchronizer.sv] \
+        [file join $root rtl apple_bus_read.sv] \
         [file join $root rtl bus_event_capture.sv] \
         [file join $root rtl uart_tx.v] \
         [file join $root rtl uart_rx.v] \
@@ -146,10 +148,18 @@ set_property file_type {SystemVerilog}  [get_files *.sv]
 set_property top $topname [current_fileset]
 
 # ---- constraints ---------------------------------------------------------
-# apple_bus.xdc is NOT added yet - no build has ports for it, and an XDC naming a
-# port that does not exist is an error, not a warning.  ft601.xdc applies only to
-# the -ft601 build, which is the only top level that declares the ft_* ports.
-if {$ft601 || $snoop} {
+# An XDC naming a port that does not exist is an error, not a warning, so each
+# constraint file goes only to the tops that declare its ports: ft601.xdc to the
+# two builds with ft_* ports, apple_bus.xdc to the snooper alone.
+if {$snoop} {
+    # The snooper is the first build to declare the apple_* ports, so it is the
+    # first that can take apple_bus.xdc.
+    add_files -fileset constrs_1 -norecurse [list \
+        [file join $root constr alchitry_au.xdc] \
+        [file join $root constr ft601.xdc] \
+        [file join $root constr apple_bus.xdc] \
+    ]
+} elseif {$ft601} {
     add_files -fileset constrs_1 -norecurse [list \
         [file join $root constr alchitry_au.xdc] \
         [file join $root constr ft601.xdc] \
