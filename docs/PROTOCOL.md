@@ -48,9 +48,18 @@ host reads; the receiver carries parser state across all of them.
 
 | type | name | meaning |
 |---|---|---|
-| `0x00` | IDLE | Link filler. Payload, if any, is discarded by the receiver. `len = 0` is the **heartbeat**: the single word `0x00000000`. `len > 0` is defined but currently unused. |
+| `0x00` | IDLE | Link filler, **both directions**. Payload, if any, is discarded by the receiver. `len = 0` is the **heartbeat**: the single word `0x00000000`. |
 | `0x01`–`0x0F` | — | Reserved for link-layer types: ones the FT601 layer may generate or consume on its own, parseable without application state. |
-| `0x10`–`0xFF` | — | Application. |
+| `0x10` | SEQ | Card→host. The verified counter stream from `ft601_top`, the link regression vehicle. |
+| `0x11` | BUS_ENABLE | Host→card. `free[0]` capture enable, `free[1]` source select (0 synthetic, 1 real bus). `enable = 0` is the clean stop. |
+| `0x12` | BUS_EVENTS | Card→host. Payload is N Apple bus event words. |
+| `0x13` | BUS_STATUS | Card→host. Overflow flag, enable state, captured and dropped counts. |
+| `0x14`–`0xFF` | — | Application, unassigned. |
+
+The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
+four bytes in the other direction, and the card's watchdog is reset by any
+well-formed message anyway (see below), so a distinct type would carry no
+information.
 
 ### Deliberately absent: CRC, sync word, resynchronisation
 
@@ -88,6 +97,61 @@ mechanism, and not protocol resync. Do not mistake it for one.
 Note also that frames and the chip's 1 KB buffer do not stay in phase: a
 heartbeat is one block, so every inserted heartbeat shifts the alignment.
 Nothing may rely on a USB packet beginning with a header.
+
+### The silent-until-asked rule, which makes acquisition free
+
+**A card must emit nothing but IDLE frames until the host asks it for
+something.** A heartbeat is a single block, so a stream of heartbeats has a
+frame boundary at *every* block boundary: a host attaching at any moment is in
+sync with no acquisition step at all, and the first real frame it is sent lands
+on a boundary it already knows.
+
+This is why the bus snooper does not start capturing until BUS_ENABLE arrives,
+and it is what makes having no resynchronisation safe in practice rather than
+merely tolerable. A card that streamed before being asked would put the burden
+back on the receiver, which — as measured above — cannot carry it.
+
+The same holds in reverse. The card's receive parser assumes the first block
+after a link reset is a header, which is true because the reset clears the
+chip's buffers in both directions and the host opens the conversation.
+
+## Two-way control
+
+### Watchdog
+
+While a capture is enabled, the card runs a **1 second watchdog**, reset by
+**any well-formed message** — not only by heartbeats. A host that is talking
+anyway needs to send nothing extra; the 100 ms IDLE heartbeat exists so that a
+host with nothing to say still holds the link open.
+
+**Expiry is treated as loss of sync, and loss of sync is not recoverable.** The
+card pulses the FT601's `RESET#` for 1 ms, exactly as the `'R'` command does,
+which discards unsent bus events, both async FIFOs, the chip's internal buffers,
+and the enable state. The device re-enumerates and the host must reopen it.
+
+A malformed message *received* by the card — an unknown type — takes the same
+path, because it is the same condition: the two ends no longer agree on where
+frames begin, and nothing in the format can re-establish that.
+
+### Clean disconnect
+
+BUS_ENABLE with `enable = 0` stops a capture without any of the above: the event
+FIFO is emptied, the card returns to emitting only heartbeats, and the link, the
+USB device and the host's handle all stay up. **This is the path a normal
+shutdown must take.** The watchdog reset exists for hosts that die, not for
+hosts that finish.
+
+### Overflow
+
+If the event FIFO fills — a host that stopped reading, not a bus that is too
+fast, since the link is 30–80× the event rate — the card sets an overflow flag,
+**stops capturing**, and sends BUS_STATUS. Capture does not resume until the
+host re-enables it.
+
+Stopping is deliberate. A dump with silently dropped events in the middle is
+worse than a short one: it claims the machine did something it did not. The
+overflow flag makes the gap explicit and terminal, and the host's dump file ends
+at a frame boundary.
 
 ## The transmit rule
 

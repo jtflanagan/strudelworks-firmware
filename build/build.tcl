@@ -24,6 +24,7 @@ set keep_open 0
 set outdir    [file join $root build work]
 set diag      0
 set ft601     0
+set snoop     0
 
 for {set i 0} {$i < $argc} {incr i} {
     switch -- [lindex $argv $i] {
@@ -35,18 +36,20 @@ for {set i 0} {$i < $argc} {incr i} {
         --diag  { set diag 1 }
         -ft601  -
         --ft601 { set ft601 1 }
+        -snoop  -
+        --snoop { set snoop 1 }
         default { puts "WARNING: ignoring unknown argument [lindex $argv $i]" }
     }
 }
 
-if {$diag && $ft601} {
-    puts "ERROR: -diag and -ft601 select different top levels; pick one."
+if {($diag + $ft601 + $snoop) > 1} {
+    puts "ERROR: -diag, -ft601 and -snoop select different top levels; pick one."
     exit 1
 }
 
 # One place decides the top level, so the source list, the constraint list and
 # the bitstream name below cannot drift apart.
-set topname [expr {$ft601 ? {ft601_top} : ($diag ? {diag_top} : {au_top})}]
+set topname [expr {$snoop ? {snoop_top} : ($ft601 ? {ft601_top} : ($diag ? {diag_top} : {au_top}))}]
 
 set uber [file join $root third_party UberDDR3]
 if {![file isdirectory [file join $uber rtl]]} {
@@ -84,7 +87,25 @@ add_files -norecurse [list \
     [file join $uber rtl ddr3_phy.v] \
 ]
 
-if {$ft601} {
+if {$snoop} {
+    # Bus snooper: the FT601 link plus the message layer, event capture and the
+    # synthetic source.  No DDR3, and no apple_bus.xdc yet - the event source is
+    # synthetic, so this build declares no apple_* ports.
+    add_files -norecurse [list \
+        [file join $root rtl clk_gen.v] \
+        [file join $root rtl ft_clk_buf.v] \
+        [file join $root rtl ft601_fifo.sv] \
+        [file join $root rtl ft601_msg_tx.sv] \
+        [file join $root rtl ft601_msg_rx.sv] \
+        [file join $root rtl link_watchdog.sv] \
+        [file join $root rtl sync_fifo.sv] \
+        [file join $root rtl synth_bus_events.sv] \
+        [file join $root rtl bus_event_capture.sv] \
+        [file join $root rtl uart_tx.v] \
+        [file join $root rtl uart_rx.v] \
+        [file join $root rtl snoop_top.sv] \
+    ]
+} elseif {$ft601} {
     # FT601 link bring-up: no DDR3 and no Apple bus, so only alchitry_au.xdc and
     # ft601.xdc apply.  No .xci here either - the FT601 clock is used directly (ft_clk_buf.v) and v5.s
     # clk_wiz_0 and ft601_fifo.sv uses xpm_fifo_async in place of fifo_ft600.
@@ -128,7 +149,7 @@ set_property top $topname [current_fileset]
 # apple_bus.xdc is NOT added yet - no build has ports for it, and an XDC naming a
 # port that does not exist is an error, not a warning.  ft601.xdc applies only to
 # the -ft601 build, which is the only top level that declares the ft_* ports.
-if {$ft601} {
+if {$ft601 || $snoop} {
     add_files -fileset constrs_1 -norecurse [list \
         [file join $root constr alchitry_au.xdc] \
         [file join $root constr ft601.xdc] \

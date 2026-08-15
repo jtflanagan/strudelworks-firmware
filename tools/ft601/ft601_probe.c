@@ -38,6 +38,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <time.h>
@@ -67,6 +68,13 @@
 // [7:0] as payload blocks not counting the header, type in [15:8].
 #define MSG_TYPE_IDLE               0x00    // heartbeat / filler, no payload use
 #define MSG_TYPE_SEQ                0x10    // the verified counter stream
+#define MSG_TYPE_BUS_ENABLE         0x11    // host->card: start/stop a capture
+#define MSG_TYPE_BUS_EVENTS         0x12    // card->host: Apple bus events
+#define MSG_TYPE_BUS_STATUS         0x13    // card->host: overflow / counts
+
+// The card's watchdog is 1 s and is kicked by any message; 100 ms leaves a wide
+// margin without putting meaningful traffic on the link.
+#define HEARTBEAT_MS                100
 
 // Announced on EP_SESSION_OUT before a read shows up on EP_DATA_IN.  Provenance
 // as described in the licensing note above.
@@ -108,7 +116,10 @@ struct opts {
     bool     sweep;
     bool     session;
     bool     verify;
+    bool     starve;            // snoop: deliberately stop heartbeating
+    unsigned stall_ms;          // snoop: heartbeat but stop READING, to overflow
     unsigned timeout_ms;
+    const char *outfile;
 };
 
 // ---------------------------------------------------------------------------
@@ -887,6 +898,298 @@ static int cmd_write(libusb_device_handle *h, const struct opts *o)
 }
 
 // ---------------------------------------------------------------------------
+// snoop - run a bus capture and write the events to a file
+// ---------------------------------------------------------------------------
+//
+// The two-way half of the protocol.  The card is silent until asked, which is
+// what makes framing free here: everything before BUS_ENABLE is single-block
+// IDLE frames, so the first block of the first BUS_EVENTS frame is a header at a
+// boundary we already know.  There is no sync search in this mode and there does
+// not need to be - contrast cmd_bench, which attaches to a free-running
+// transmitter and has to lock on.
+//
+// Heartbeats are not optional.  Stop sending them for a second and the card
+// treats the host as gone, resets the FT601 and re-enumerates it; the handle
+// here goes stale and the capture is over.  That is the design, not a hazard to
+// work around - see docs/PROTOCOL.md.
+
+static volatile sig_atomic_t snoop_stop = 0;
+static void snoop_sigint(int sig) { (void)sig; snoop_stop = 1; }
+
+// Send one host->card frame.  Header only; none of the host->card types carry
+// payload yet.
+static int send_msg(libusb_device_handle *h, uint8_t type, uint16_t free_bits,
+                    unsigned timeout_ms)
+{
+    unsigned char buf[4];
+    uint32_t w = ((uint32_t)free_bits << 16) | ((uint32_t)type << 8) | 0u;
+    buf[0] = (unsigned char)(w & 0xff);
+    buf[1] = (unsigned char)((w >> 8) & 0xff);
+    buf[2] = (unsigned char)((w >> 16) & 0xff);
+    buf[3] = (unsigned char)((w >> 24) & 0xff);
+
+    int sent = 0;
+    int err = libusb_bulk_transfer(h, EP_DATA_OUT, buf, 4, &sent, timeout_ms);
+    if(err) { return err; }
+    return sent == 4 ? 0 : LIBUSB_ERROR_IO;
+}
+
+struct snoop_state {
+    FILE     *out;
+    uint32_t  blocks_left;
+    uint8_t   cur_type;
+    uint64_t  events;
+    uint64_t  idles;
+    uint64_t  frames;
+    uint64_t  bad_types;
+    bool      overflow_seen;
+    bool      status_seen;
+    bool      status_enable;
+    uint32_t  card_captured;
+
+    // Sequence check over the synthetic source, which spreads a 24-bit counter
+    // across the addr and data fields.  Proves the dump is complete rather than
+    // merely non-empty.
+    bool      verify;
+    bool      have_prev;
+    uint32_t  prev_seq;
+    uint64_t  seq_breaks;
+};
+
+static uint32_t ev_seq(uint32_t ev)
+{
+    // addr = seq[15:0], data = seq[23:16]  (see rtl/synth_bus_events.sv)
+    return (ev & 0xffffu) | (((ev >> 20) & 0xffu) << 16);
+}
+
+static void snoop_consume(struct snoop_state *st, const unsigned char *buf, int len)
+{
+    const uint8_t *p = (const uint8_t *)buf;
+    int words = len / 4;
+
+    for(int i = 0; i < words; i++) {
+        uint32_t w = (uint32_t)p[i*4+0] | (uint32_t)p[i*4+1] << 8 |
+                     (uint32_t)p[i*4+2] << 16 | (uint32_t)p[i*4+3] << 24;
+
+        if(st->blocks_left == 0) {
+            uint32_t l = w & 0xffu;
+            st->cur_type    = (uint8_t)((w >> 8) & 0xffu);
+            st->blocks_left = l;
+            st->frames++;
+            switch(st->cur_type) {
+                case MSG_TYPE_IDLE:   st->idles++; break;
+                case MSG_TYPE_BUS_EVENTS: break;
+                case MSG_TYPE_BUS_STATUS:
+                    if(w & (1u << 16)) { st->overflow_seen = true; }
+                    st->status_enable = (w & (1u << 17)) != 0;
+                    st->status_seen   = true;
+                    break;
+                default:
+                    st->bad_types++;
+                    break;
+            }
+            continue;
+        }
+
+        st->blocks_left--;
+
+        if(st->cur_type == MSG_TYPE_BUS_EVENTS) {
+            if(st->out) { fwrite(p + i*4, 4, 1, st->out); }
+            st->events++;
+            if(st->verify) {
+                uint32_t s = ev_seq(w);
+                if(st->have_prev && s != ((st->prev_seq + 1) & 0xffffffu)) {
+                    if(st->seq_breaks < 5) {
+                        fprintf(stderr, "  sequence break: expected %06x, got %06x\n",
+                                (st->prev_seq + 1) & 0xffffffu, s);
+                    }
+                    st->seq_breaks++;
+                }
+                st->prev_seq  = s;
+                st->have_prev = true;
+            }
+        } else if(st->cur_type == MSG_TYPE_BUS_STATUS) {
+            st->card_captured = w;
+        }
+    }
+}
+
+static int cmd_snoop(libusb_device_handle *h, const struct opts *o)
+{
+    struct bench b;
+    memset(&b, 0, sizeof(b));
+    b.h = h; b.timeout_ms = o->timeout_ms;
+
+    struct snoop_state st;
+    memset(&st, 0, sizeof(st));
+    st.verify = o->verify;
+
+    if(o->outfile) {
+        st.out = fopen(o->outfile, "wb");
+        if(!st.out) { perror(o->outfile); return 1; }
+    }
+
+    if(libusb_claim_interface(h, IFACE_COMMS) || libusb_claim_interface(h, IFACE_DATA)) {
+        fprintf(stderr, "could not claim interfaces\n");
+        if(st.out) { fclose(st.out); }
+        return 1;
+    }
+
+    signal(SIGINT, snoop_sigint);
+
+    if(o->starve) {
+        printf("capture: %.1f s, NO HEARTBEATS (watchdog test)\n"
+               "the card should reset the link at ~1 s and re-enumerate\n\n",
+            o->seconds);
+    } else {
+        printf("capture: %.1f s, heartbeat every %d ms, output %s, verify %s\n\n",
+            o->seconds, HEARTBEAT_MS, o->outfile ? o->outfile : "(discarded)",
+            o->verify ? "on" : "off");
+    }
+
+    int rc = 0;
+    if(send_msg(h, MSG_TYPE_BUS_ENABLE, 0x0001, o->timeout_ms)) {
+        fprintf(stderr, "BUS_ENABLE failed - is the snoop bitstream loaded?\n");
+        rc = 1;
+        goto out;
+    }
+
+    unsigned char *buf = malloc(o->xfer_size);
+    if(!buf) { rc = 1; goto out; }
+
+    double t0 = now_sec();
+    double next_hb = t0;
+    uint64_t bytes = 0;
+
+    if(o->stall_ms) {
+        // Keep the watchdog fed but take nothing off the link.  Everything
+        // downstream fills - the chip's buffers, the TX FIFO, then the event
+        // FIFO - and the card must notice and stop rather than drop quietly.
+        printf("stalling reads for %u ms (still heartbeating)...\n", o->stall_ms);
+        double t_stall = now_sec();
+        while((now_sec() - t_stall) * 1000.0 < (double)o->stall_ms) {
+            if(send_msg(h, MSG_TYPE_IDLE, 0, o->timeout_ms)) { break; }
+            struct timespec ts = { 0, 20L * 1000L * 1000L };
+            nanosleep(&ts, NULL);
+        }
+        printf("resuming reads\n");
+        next_hb = now_sec();
+    }
+
+    while(!snoop_stop && (now_sec() - t0) < o->seconds) {
+        double now = now_sec();
+        if(o->starve) {
+            // Deliberately silent: the card must notice and reset the link.
+        } else if(now >= next_hb) {
+            if(send_msg(h, MSG_TYPE_IDLE, 0, o->timeout_ms)) {
+                fprintf(stderr, "heartbeat failed - the card may have reset us\n");
+                break;
+            }
+            next_hb = now + (double)HEARTBEAT_MS / 1000.0;
+        }
+
+        // Announce a read and take it.  Short reads are normal and expected:
+        // an idle bus produces a 4-byte heartbeat packet and nothing more.
+        if(send_session_request(&b, o->xfer_size)) { break; }
+
+        int got = 0;
+        int err = libusb_bulk_transfer(h, EP_DATA_IN, buf, (int)o->xfer_size,
+                                       &got, HEARTBEAT_MS);
+        if(got > 0) {
+            bytes += (uint64_t)got;
+            snoop_consume(&st, buf, got);
+        }
+        if(err && err != LIBUSB_ERROR_TIMEOUT && got == 0) {
+            fprintf(stderr, "read failed: %s\n", libusb_strerror(err));
+            break;
+        }
+        if(st.overflow_seen) {
+            fprintf(stderr, "\nOVERFLOW reported by the card - capture stopped there.\n"
+                            "The dump ends at that point rather than containing a\n"
+                            "silent gap.  The host was not draining fast enough.\n");
+            break;
+        }
+    }
+
+    double wall = now_sec() - t0;
+
+    // Clean stop: this is the path that does NOT reset the link.
+    //
+    // Then DRAIN.  Disabling discards the card's event FIFO, but events already
+    // handed to the TX FIFO and the chip's 1 KB buffers are still in flight and
+    // legitimately belong to this capture.  Walking away here leaves them on the
+    // link, and the next capture reads the tail of this one - measured, as one
+    // sequence break at the seam of a second run.
+    //
+    // The card sends a BUS_STATUS on disable; that frame is the end-of-capture
+    // marker, and its payload is the card's own event count, which is the
+    // independent check that nothing was lost between card and host.
+    if(send_msg(h, MSG_TYPE_BUS_ENABLE, 0x0000, o->timeout_ms)) {
+        fprintf(stderr, "clean stop failed\n");
+    } else {
+        st.status_seen = false;
+        double t_drain = now_sec();
+        while(!st.status_seen && (now_sec() - t_drain) < 1.0) {
+            if(send_session_request(&b, o->xfer_size)) { break; }
+            int got = 0;
+            libusb_bulk_transfer(h, EP_DATA_IN, buf, (int)o->xfer_size, &got, 100);
+            if(got > 0) { bytes += (uint64_t)got; snoop_consume(&st, buf, got); }
+        }
+        if(st.status_seen && !st.status_enable) {
+            printf("\nclean stop acknowledged (capture off, link left up)\n");
+        } else {
+            printf("\nclean stop sent, but no acknowledgement arrived\n");
+        }
+    }
+
+    printf("\n%" PRIu64 " events in %.2f s (%.0f/s), %" PRIu64 " frames, "
+           "%" PRIu64 " idle\n",
+        st.events, wall, wall > 0 ? (double)st.events / wall : 0.0,
+        st.frames, st.idles);
+    printf("%.2f MB read, card captured %u\n",
+        (double)bytes / (1024.0 * 1024.0), st.card_captured);
+
+    // The card counts what it put into its FIFO; we count what came out the
+    // other end.  They must agree, and that is a stronger statement than the
+    // sequence check alone - it catches a whole frame going missing, which a
+    // per-event check on a resynchronised stream could slide past.
+    if(st.card_captured != 0) {
+        if((uint64_t)st.card_captured == st.events) {
+            printf("Counts agree: the card captured exactly what arrived.\n");
+        } else {
+            printf("\nWARNING: card captured %u but %" PRIu64 " arrived (difference %lld).\n",
+                st.card_captured, st.events,
+                (long long)st.card_captured - (long long)st.events);
+            rc = 1;
+        }
+    }
+
+    if(st.bad_types) {
+        printf("\nWARNING: %" PRIu64 " unknown frame type(s) - framing was lost.\n",
+            st.bad_types);
+        rc = 1;
+    }
+    if(o->verify) {
+        if(st.seq_breaks == 0 && st.events > 0) {
+            printf("\nSequence intact: every event followed its predecessor, so the\n"
+                   "dump is complete and not merely non-empty.\n");
+        } else if(st.seq_breaks) {
+            printf("\nWARNING: %" PRIu64 " sequence break(s) - events were LOST.\n",
+                st.seq_breaks);
+            rc = 1;
+        }
+    }
+
+    free(buf);
+
+out:
+    if(st.out) { fclose(st.out); }
+    libusb_release_interface(h, IFACE_DATA);
+    libusb_release_interface(h, IFACE_COMMS);
+    return rc;
+}
+
+// ---------------------------------------------------------------------------
 // dump - print the first words of a read, as the frame parser sees them
 // ---------------------------------------------------------------------------
 //
@@ -1039,7 +1342,7 @@ static int cmd_zlp(libusb_device_handle *h, const struct opts *o)
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-        "usage: %s <info|config|bench|write|dump|zlp> [options]\n"
+        "usage: %s <info|config|bench|write|snoop|dump|zlp> [options]\n"
         "\n"
         "  --pid <hex>     match this product id instead of 601e/601f\n"
         "  --depth <n>     in-flight transfers for bench (default 4, max %d)\n"
@@ -1049,6 +1352,12 @@ static void usage(const char *argv0)
         "  --no-session    omit the session request (link will NOT work; for\n"
         "                  proving that it is required)\n"
         "  --verify        check the incoming counter sequence for gaps\n"
+        "  -o, --output F  snoop: write captured bus events to F (raw 32-bit LE)\n"
+        "  --stall <ms>    snoop: keep heartbeating but stop READING for <ms>, to\n"
+        "                  overflow the card's event FIFO on purpose\n"
+        "  --starve        snoop: enable a capture then STOP heartbeating, to\n"
+        "                  exercise the card's 1 s watchdog.  The link resets and\n"
+        "                  the device re-enumerates; that is the pass condition.\n"
         "  --timeout <ms>  per-transfer timeout (default 1000)\n",
         argv0, MAX_DEPTH);
 }
@@ -1074,6 +1383,9 @@ int main(int argc, char **argv)
         { "session",    no_argument,    0, 'e' },
         { "no-session", no_argument,    0, 'E' },
         { "verify",  no_argument,       0, 'v' },
+        { "output",  required_argument, 0, 'o' },
+        { "starve",  no_argument,       0, 'K' },
+        { "stall",   required_argument, 0, 'L' },
         { "timeout", required_argument, 0, 't' },
         { "help",    no_argument,       0, 'h' },
         { 0, 0, 0, 0 },
@@ -1081,7 +1393,7 @@ int main(int argc, char **argv)
 
     int c;
     optind = 2;
-    while((c = getopt_long(argc, argv, "p:d:s:S:wevEt:h", longopts, NULL)) != -1) {
+    while((c = getopt_long(argc, argv, "p:d:s:S:wevEt:o:KL:h", longopts, NULL)) != -1) {
         switch(c) {
             case 'p': o.pid = (int)strtol(optarg, NULL, 16); break;
             case 'd': o.depth = atoi(optarg); break;
@@ -1091,6 +1403,9 @@ int main(int argc, char **argv)
             case 'e': o.session = true; break;
             case 'E': o.session = false; break;
             case 'v': o.verify = true; break;
+            case 'o': o.outfile = optarg; break;
+            case 'K': o.starve = true; break;
+            case 'L': o.stall_ms = (unsigned)atoi(optarg); break;
             case 't': o.timeout_ms = (unsigned)atoi(optarg); break;
             case 'h': usage(argv[0]); return 0;
             default:  usage(argv[0]); return 2;
@@ -1124,6 +1439,8 @@ int main(int argc, char **argv)
         rc = cmd_bench(h, &o);
     } else if(!strcmp(mode, "write")) {
         rc = cmd_write(h, &o);
+    } else if(!strcmp(mode, "snoop")) {
+        rc = cmd_snoop(h, &o);
     } else if(!strcmp(mode, "dump")) {
         rc = cmd_dump(h, &o);
     } else if(!strcmp(mode, "zlp")) {
