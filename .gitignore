@@ -2,6 +2,10 @@
 # upstream's GPL-3.0-or-later code stays visibly upstream's.  See LICENSING.md.
 /third_party/UberDDR3/
 
+# Same treatment for Klaus Dormann's test suites (GPL-3.0), fetched by
+# third_party/fetch_6502_tests.sh.
+/third_party/6502_tests/
+
 # Vivado
 /build/work/
 /build/vivado.log
@@ -21,6 +25,7 @@ __pycache__/
 
 # simulation build products
 /sim/*.out
+/sim/cpu_work/
 
 /build/results/
 

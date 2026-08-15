@@ -57,6 +57,9 @@ run synth_bus_events rtl/synth_bus_events.sv
 run bus_event_capture rtl/bus_event_capture.sv rtl/sync_fifo.sv
 run synchronizer  rtl/synchronizer.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
+# -Irtl: the microcode field definitions are a generated `include, and they live
+# beside the RTL rather than in the simulator's working directory.
+run cpu65c02      -Irtl rtl/cpu65c02.sv
 
 # Not linted, deliberately:
 #   clk_gen.v      - nothing but IBUF/BUFG/MMCME2_BASE instantiation.  Verilator

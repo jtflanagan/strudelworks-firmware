@@ -856,6 +856,136 @@ than inferred. Keep `rtl/apple_bus_read.sv` **input-only**; put driving in a
 separate module so the instrument can never become a participant. The `--snoop`
 build's Apple pins would become `inout` only in a master top.
 
+**6. The 65C02 soft core.** 🟡 **functionally complete, cycle counts verified**
+
+`rtl/cpu65c02.sv`. This is the piece that makes the CPU socket worth having: the
+card can only stand in for the CPU if it behaves like one on every cycle, not
+just at the end of each instruction.
+
+*Why not an off-the-shelf core.* There are many 6502 cores and most are correct
+in the sense a software emulator needs — registers and memory end up right. The
+socket needs a stricter property, because the rest of the machine watches the bus
+every cycle: the same **number** of cycles per instruction, and the same
+**address** driven during each of them, including the dummy reads where RW says
+"read" and the CPU discards the byte.
+
+*What the structure guarantees.* Every state performs exactly one bus access and
+every bus access is one state. There is no state that skips the bus and none that
+touches it twice, so an instruction's cycle count is exactly the length of its
+state path and a dummy cycle is an ordinary state that happens to discard `din`.
+That is the precondition for cycle accuracy, and it is the thing a core organised
+around instructions gets wrong — it has to bolt dummy cycles on afterwards, which
+is how they end up missing or at the wrong address.
+
+*Timing contract.* One bus cycle per `cyc_en` pulse, with `addr`/`rw`/`dout`
+registered and set up on the edge that ends the previous cycle. One `cyc_en` per
+phi0 gives the address a full bus cycle of setup; `cyc_en` tied high runs a cycle
+per clk for internal-memory mode. The core does not know which it is in.
+
+*Verified.* Both of Klaus Dormann's suites pass — 96.6 M cycles for the NMOS
+functional test and 66.9 M for the 65C02 extended-opcodes test — and all 256
+opcodes match the published cycle table, including the conditional cases:
+indexed page crossings, the write forms that pay for the fixup cycle whether or
+not the index carried, ASL/LSR/ROL/ROR abs,X at 6-or-7 against INC/DEC abs,X at a
+flat 7, taken and page-crossing branches, and the extra cycle decimal ADC/SBC
+takes on the CMOS part.
+
+Worth recording that the functional suites passed *first*, and the cycle table
+then found six opcodes — the absolute stores and INC/DEC abs — taking one cycle
+too many. A functional suite cannot see that class of bug at all, which is the
+argument for `sim/run_cpu_cycles_tb.sh` existing separately.
+
+*Implementation: microcoded, with a separate address unit.* The first working
+version was a hand-written state machine. It passed everything and ran at
+~118 MHz, and its critical path explained why: the state register out through a
+256-way opcode decode, into the addressing-mode logic, into the effective-address
+arithmetic, and back to the state register — 16 logic levels. The rewrite
+attacks both halves of that.
+
+**The decode is gone as logic.** The microcode ROM is addressed by
+`{opcode, ucycle}` directly, with no mapping stage, so the opcode indexes the ROM
+and there is no instruction decoder to walk through. It costs 3 block RAMs.
+
+**The address arithmetic is eight bits wide, everywhere.** This is the part worth
+internalising, because it is a property of the 6502 rather than a trick. Every
+16-bit address computation on this architecture splits into an 8-bit add plus a
+carry into the high byte — and the instruction set hands over an extra cycle
+exactly when that carry actually has to propagate:
+
+| the extra cycle | what it is really for |
+|---|---|
+| indexed page cross (+1) | ADL+X carried; ADH moves here |
+| taken branch page cross (+1) | PCL+offset left the page; PCH moves here |
+| JMP (abs) at 6 rather than 5 | the pointer's carry — which is the CMOS fix for the NMOS ($xxFF) wrap bug |
+
+So the rule the microcode obeys is that **no microinstruction adds two arbitrary
+8-bit operands into the high byte**. The AGU's low half is a real adder; its high
+half is only ever an incrementer/decrementer driven by a carry that is either
+produced this cycle or was saved from the cycle the ISA already paid for. The
+AGU and the ALU run in parallel and neither feeds the other, so a cycle can form
+an effective address and compute an ALU result at once.
+
+A core that computes the full 16-bit effective address in one cycle is not being
+clever — it is declining a cycle the architecture handed it, and paying for the
+refusal in Fmax.
+
+*Resource cost and speed, measured.* `build/synth_ooc.sh`, out of context on
+`xc7a35tftg256-2`, routed:
+
+```
+                       microcoded      previous FSM
+Slice LUTs             446  (2.1%)     1039  (5.0%)
+Slice Registers         96  (0.2%)      152  (0.4%)
+Block RAM                3  (6.0%)        0
+setup WNS @ 10 ns    +0.929 ns        +0.057 ns
+Fmax                  ~144 MHz         ~118 MHz
+```
+
+**~144 MHz**, closing in from above: a 7.0 ns target achieves 7.18 ns (139 MHz),
+6.0 ns achieves 6.95 ns (144 MHz), and 5.5 ns achieves only 7.21 ns — the placer
+thrashing on an unreachable goal, as it did on the FSM version. Less than half
+the LUTs of the state machine, for three block RAMs out of fifty.
+
+*What limits it now, and what does not.* The critical path is the microcode ROM
+output, through the AGU operand mux, along the 8-bit adder's carry chain, and
+back to the ROM address — the page-cross condition selecting the next
+microinstruction. Nine logic levels against sixteen.
+
+Notably it is **not** the Z flag, which is the usual wall for this class of core
+and does not appear in the timing report at all. That is not luck, it is the same
+property as the address arithmetic: a branch tests flags a previous instruction
+wrote, never a flag computed in the same cycle, so the zero-detect is an ordinary
+register-to-register hop with a whole cycle to itself.
+
+*Behaviour preserved across the rewrite.* Both suites pass with **exactly** the
+cycle totals the state-machine version produced — 96,561,329 and 66,905,009 —
+which over 163 million cycles is a far stronger equivalence check than either
+suite alone.
+
+*Two bugs the rewrite introduced, both worth recording* because both are specific
+to this style. First, the page-cross fixup incremented ADH by one instead of by
+the saved carry; reads only reach that cycle when the carry was set, so they
+could not tell the difference, and it was a **stores-only** corruption. Second,
+JMP indirect updated ADH on the same edge that drove the address built from it,
+so the high byte was still stale — which reproduces precisely the NMOS page-wrap
+bug the sixth cycle exists to fix. Both are the same underlying mistake: putting
+work in the cycle that consumes it rather than the cycle before.
+
+*⬜ What is NOT verified: the dummy-cycle addresses.* Counts are checked; which
+address is driven during a dummy cycle is not. Three are informed guesses and are
+marked `UNVERIFIED` at their use in the source: the indexed page-cross fixup
+address, the JMP (abs) extra cycle, and the decimal extra cycle. The 65C02
+differs from the NMOS part on exactly these, and the difference is **not
+recoverable from Klaus's suites**, which check results rather than buses. Closing
+this needs a cycle-level reference — either a per-cycle bus trace from a real
+65C02, which `snoop_top` can already capture, or a published cycle-by-cycle
+reference. The filler cycles of `$5C`, the 8-cycle NOP, are a guess for the same
+reason.
+
+*Variant.* WDC W65C02S — the superset, so Rockwell's RMB/SMB/BBR/BBS are present
+along with STP and WAI, and the undefined encodings are the CMOS NOPs rather than
+the NMOS undocumented instructions.
+
 ## Two memory modes, and the DMA decision
 
 The design has two distinct modes, and nearly every question about caching,
