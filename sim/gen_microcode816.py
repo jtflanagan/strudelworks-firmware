@@ -1062,6 +1062,47 @@ def emit_vh():
     return "\n".join(lines) + "\n"
 
 
+def emit_hex0():
+    """Slot 0 of every opcode, for the distributed-RAM decode ROM.
+
+    The opcode arrives on din at the END of its fetch cycle, so the first
+    microinstruction of an instruction is the one thing that cannot be
+    prefetched - there was nothing to address the block RAM with.  That is the
+    same constraint that stops a 6502 instruction taking one cycle, and it gets
+    the same answer: a small fast decode for the first cycle only.  256 entries
+    in distributed RAM read combinationally from the registered opcode.
+    """
+    filler = encode(u(**FETCH))
+    out = []
+    for opcode in range(256):
+        slots = PROG.get(opcode)
+        w = encode(slots[0]) if slots else filler
+        out.append(f"{w:0{(WIDTH + 3) // 4}x}")
+    return "\n".join(out) + "\n"
+
+
+def emit_seq0():
+    """Just the cond/alt of every opcode's slot 0, 8 bits per opcode.
+
+    Separate from the wide decode ROM on purpose.  Slot 0's branch decision has
+    to be made during the FETCH cycle, addressed by the opcode arriving on din -
+    while the wide word is only ever read on the cycle AFTER, addressed by the
+    registered ir.  Sharing one array would make the wide ROM's address depend
+    on din and on the interrupt decision, which puts both in front of every
+    datapath path through the microinstruction.  Splitting keeps the wide read
+    addressed purely by a register.
+    """
+    out = []
+    for opcode in range(256):
+        slots = PROG.get(opcode)
+        if slots:
+            cond, alt = slots[0]["cond"], slots[0]["alt"]
+        else:
+            cond, alt = COND["ALWAYS"], 0
+        out.append(f"{((cond & 0xF) << 4) | (alt & 0xF):02x}")
+    return "\n".join(out) + "\n"
+
+
 def emit_hex():
     filler = encode(u(**FETCH))
     out = []
@@ -1081,11 +1122,17 @@ def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     vh = os.path.join(root, "rtl", "cpu65816_ucode.vh")
     hx = os.path.join(root, "rtl", "cpu65816_ucode.hex")
-    vh_text, hx_text = emit_vh(), emit_hex()
+    h0 = os.path.join(root, "rtl", "cpu65816_ucode0.hex")
+    hs = os.path.join(root, "rtl", "cpu65816_useq0.hex")
+    # resolve() mutates PROG, and emit_hex0 must see the SAME resolved slots as
+    # emit_hex - so the main image is built first.
+    hx_text = emit_hex()
+    vh_text, h0_text, hs_text = emit_vh(), emit_hex0(), emit_seq0()
 
     if "--check" in sys.argv:
         bad = False
-        for path, text in ((vh, vh_text), (hx, hx_text)):
+        for path, text in ((vh, vh_text), (hx, hx_text), (h0, h0_text),
+                           (hs, hs_text)):
             have = open(path).read() if os.path.exists(path) else None
             if have != text:
                 print(f"STALE: {path}")
@@ -1098,10 +1145,14 @@ def main():
 
     open(vh, "w").write(vh_text)
     open(hx, "w").write(hx_text)
+    open(h0, "w").write(h0_text)
+    open(hs, "w").write(hs_text)
     used = sum(len(PROG[o]) for o in PROG)
     print(f"wrote {vh}")
     print(f"wrote {hx}: {256 * SLOTS} words x {WIDTH} bits "
           f"({used} used, {256 * SLOTS - used} filler)")
+    print(f"wrote {h0}: 256 words x {WIDTH} bits (the decode ROM)")
+    print(f"wrote {hs}: 256 words x 8 bits (slot 0 cond/alt)")
     if undefined:
         print(f"NOTE: {len(undefined)} opcodes not yet implemented: "
               + " ".join(f"${o:02X}" for o in undefined))

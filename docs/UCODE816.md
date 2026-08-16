@@ -69,11 +69,11 @@ bug to fix silently.
 
 Out-of-context, `xc7a35tftg256-2`, Vivado 2026.1, post-route:
 
-| | 10 ns target | 8 ns target |
+| | 10 ns target | 7 ns target |
 |---|---|---|
-| Slice LUTs | 748 | 814 |
-| Slice registers | 181 | 181 |
-| CARRY4 | 38 | 38 |
+| Slice LUTs | 862 | 961 |
+| Slice registers | 216 | 247 |
+| CARRY4 | 40 | 40 |
 | Block RAM (RAMB36) | 8 | 8 |
 | DSP | 0 | 0 |
 
@@ -115,6 +115,12 @@ All at an 8 ns target, default flow unless noted:
 | delete dead `ADDR_AGU`, narrow `bk_a` | 8.184 ns | 122.2 | +0.4 |
 | ROM output replication | 8.184 ns | 122.2 | 0.0 |
 | *(probe)* ROM output pipelined | *6.382 ns* | *156.7* | *+34* |
+| **decode once, run from registers** | **7.627 ns** | **131.1** | **+8.9** |
+
+The last row is the only structural change that paid, and section 3's
+"decode once" subsection is how. Note it is quoted at a 7 ns target: at 6.5 ns
+the same design comes out at 121.4 MHz, because an unreachable target makes the
+placer thrash. Close in from above.
 
 Each row is measured against the row above it with the same flow, which is the
 only way these are comparable — Vivado is deterministic for identical inputs,
@@ -155,78 +161,84 @@ bare pipeline insert breaks the sequencer, whose next address depends on the
 microinstruction currently executing — but it says the ROM latency is worth
 **+34 MHz** and everything else is worth ~1.
 
-### The 6502's own answer: decode once, then run from registers
+### The 6502's own answer: decode once, then run from registers — BUILT
 
-The most promising idea to come out of this exploration is not an FPGA trick, it
-is the structure of the original part. **Every 6502 instruction takes at least
-two cycles**, and that is not an accident of the instruction set: the first
-cycle decodes, and the cycles after it are driven by the *registered* results of
-that decode rather than by re-deriving control from scratch. The random control
-logic is not re-consulted from the opcode every cycle; it is consulted once.
+The idea that paid, and it is not an FPGA trick: it is the structure of the
+original part. **Every 6502 instruction takes at least two cycles**, because the
+first cycle decodes and the ones after it are driven by the *registered* result
+of that decode rather than by consulting the control store again.
 
-The question is whether a microcoded core can do the same thing — spend the
-first cycle producing control, and drive every later cycle from flops instead of
-from a fresh block RAM read. That would attack the 2.1 ns clock-to-out directly,
-because a flip-flop's clock-to-Q is ~0.4 ns.
+Applied here: read the microcode store **one cycle ahead** and park it in a
+fabric flop, whose clock-to-Q is ~0.4 ns against the block RAM's 2.125.
 
-**The precondition holds.** For this to work, the branch decisions inside an
-instruction have to be knowable before the cycle they govern. Measured against
-the 1521 emitted microinstructions:
+```
+cycle N-1 : block RAM reads the microinstruction for cycle N
+edge N    : it lands in uc_q
+cycle N   : the datapath runs from uc_q, a flop
+```
 
-| decided by | slots | share |
-|---|---|---|
-| nothing — unconditional | 1146 | 75.3 % |
-| mode state (`m`, `x`, `DL`, decimal, `e`) | 302 | 19.9 % |
-| registered state (flags, `A`) | 10 | 0.7 % |
-| **a value computed in the same cycle** (`agu_co`) | **33** | **2.2 %** |
+**Result: 8.184 ns → 7.627 ns, 122.2 → 131.1 MHz**, at 961 LUTs (from 814) and
+247 flops (from 181), both at the 7 ns target. Same 8 block RAMs. One bus cycle
+per clock throughout.
 
-And the mode state is genuinely **instruction-invariant**: checking every
-instruction for a slot that tests a mode *after* an earlier slot of the same
-instruction wrote it returns **zero**. `REP`, `SEP`, `XCE` and `PLP` do change
-`m`/`x`/`e`/`D`, but nothing later in those instructions tests them. So
-evaluating a mode condition at decode time is not merely convenient, it is
-*correct*.
+**Why it is legal.** Deciding a branch a cycle early only works if what the
+condition tests is stable across that cycle. Of 1521 slots: 1146 unconditional,
+302 on mode state (`m`, `x`, `DL`, decimal, `e`), 10 on registered flags, and
+**33 on a carry produced in the very cycle that tests it**. The mode state is
+genuinely instruction-invariant — searching for a slot that tests a mode after
+an earlier slot of the same instruction wrote it returns **zero**.
 
-**The shape.** To have the microinstruction for cycle N sitting in a fabric flop
-at the start of cycle N, the block RAM read must complete during cycle N-1,
-which means its address must be known during cycle N-2 — two cycles of lead.
-That needs the branch decision for slot k+1 to be available while slot k is
-still executing, so each microinstruction carries **the next slot's `cond`/`alt`
-rather than its own**. That is a one-slot shift in the assembler, not a wider
-word: a slot's own `cond`/`alt` become dead once the previous slot carries them,
-so the ROM stays 66 bits and 8 tiles.
+**The two hard parts, and what they actually cost.**
 
-**Two hard parts, and the 6502 answers both.**
+1. *The first cycle.* The opcode arrives on `din` at the END of its fetch cycle,
+   so slot 0 is the one microinstruction that cannot be prefetched — the same
+   constraint that stops a 6502 instruction taking one cycle. It gets its own
+   256-entry decode ROM in distributed RAM. That turned out to be the limiter:
+   the ROM read costs ~4 LUT levels in front of the datapath on slot-0 cycles,
+   not the ~1 ns assumed, which is why this landed at 131 rather than the
+   145-150 predicted and the 157 the pipelined probe bounded.
+2. *The 33 live-carry slots.* Only four shapes, and every one adds an index or
+   the incremented PC to a byte the PREVIOUS slot loads straight from `din` — so
+   the carry is always `din` plus one of `XL`, `YL`, `PC+1`, computable a cycle
+   early. One 8-bit adder and a 3:1 mux, with the operand selected by the
+   prefetched microinstruction's own fields, so it needs no extra ROM bit.
 
-1. *The first cycle.* The opcode arrives on `din` at the end of the fetch cycle,
-   so slot 0's control cannot have been prefetched — there was nothing to
-   address the ROM with. This is exactly why a 6502 instruction cannot take one
-   cycle. The fix is the same one the original uses: give the first slot its own
-   fast, shallow decode rather than the deep microcode path. 256 entries × 66
-   bits in **distributed RAM** is about 264 LUTs and reads combinationally from
-   the registered `ir` in roughly 1 ns — still well under the block RAM's
-   2.125 ns, and only ~17 % of cycles take that path.
-2. *The 33 live-carry slots.* `IDX` and `EPAGE` test a carry produced in the
-   cycle that tests it. But in every case the operands are available one cycle
-   earlier: the indexed fixup tests `ADL + XL` where `ADL` was loaded from `din`
-   in the previous slot, so `din + XL` computed a cycle early gives the same
-   answer. A dedicated narrow early-carry adder fed from `din` covers both —
-   which is precisely the kind of special-case hardware the original's random
-   logic is made of.
+**A timing trap worth recording.** The first version let the wide decode ROM
+serve both reads — addressed by `din` on the fetch cycle and `ir` after. That is
+functionally fine and cost **14 MHz** (131 → 117), because the ROM output feeds
+the whole datapath through `uc`, so static timing put
+`f_i → take_int → decode ROM → everything` in front of every register in the
+core. Splitting the fetch-cycle read into its own 8-bit `cond`/`alt` ROM, and
+addressing the wide one from `ir` alone, recovered all of it. **Which array a
+read comes from is a timing decision when the array's output fans out to
+everything.**
 
-**Expected payoff.** The pipelined-ROM probe measured **156.7 MHz** for exactly
-this condition — control arriving from a flop rather than a block RAM — at no
-area cost. Slot 0 coming from distributed RAM instead is ~0.6 ns slower than a
-flop, so a realistic landing zone is **~145-150 MHz**, against 122 today, while
-keeping one bus cycle per clock. Cost is roughly +264 LUTs for the decode ROM,
-+66 flops for the prefetch register, a small early-carry adder, and no extra
-block RAM.
+**And the microcode image did not change at all.** The `cond`/`alt` shift this
+document previously proposed turned out to be unnecessary: the block RAM output
+during cycle N already *is* the microinstruction for cycle N+1, so its
+sequencing fields are available a cycle early for free. That removed the
+verification hazard the earlier write-up flagged.
 
-**What would have to be re-verified.** The cycle-count checker walks the
-sequencer, so shifting `cond`/`alt` by one slot changes the thing it is
-checking, not just the thing being checked. `sim/gen_cycle_table816.py` would
-need its walker updated in the same commit as the assembler, and it is the test
-that would catch a mis-shifted field — which is the whole reason it exists.
+### What the equivalence test caught that the audit did not
+
+The static audit said the change was safe. It was wrong twice, and
+`sim/run_cpu816_equiv.sh` — running both cores against the same pseudo-random
+memory and demanding identical `addr`/`rw`/`dout`/`sync` every cycle — found
+both within 350 cycles:
+
+- **The dispatch hardcoded slot 1** as the successor of an opcode fetch. But
+  slot 0's own condition may skip it: `EOR #` with `m=1` should be two cycles
+  and was three. Slot 0's `cond`/`alt` have to be read during the fetch cycle,
+  from `din`.
+- **The branch condition read `ir[7:6]`**, which during a fetch cycle still
+  holds the *previous* opcode — so branches resolved against the wrong
+  instruction's bits. Deciding a cycle early means the opcode selecting that
+  decision has not been latched yet.
+
+Both are one-cycle errors in one opcode out of 256. A cycle-count table over the
+microcode image cannot see either, because neither changes the image. That is
+the argument for keeping this test: it covers the layer the other checks
+structurally cannot.
 
 ### Two things learned about the tools
 
@@ -384,14 +396,15 @@ variations on each other:
    block RAM into distributed RAM, which reads from a registered address in
    ~1.0 ns against the block RAM's 2.125. Keeps one bus cycle per clock, adds no
    hazards, roughly doubles LUT count.
-2. **Structural: ~145-150 MHz.** Decode once and run the rest of the
-   instruction from registers, the way the original part does — see "The 6502's
-   own answer" in section 3, which is the most promising idea here and is
-   supported by the measurement that 95.9 % of slots are decidable before the
-   cycle they govern. Costs ~264 LUTs and no extra block RAM. The two hard parts
-   are the first cycle (needs its own fast decode path, which is exactly why a
-   6502 instruction cannot take one cycle) and the 33 live-carry slots (need a
-   narrow early-carry adder fed from `din`).
+2. **Make the first cycle cheaper.** Decode-once is built and is worth
+   +8.9 MHz, and what now limits it is the 256-entry decode ROM that slot 0
+   reads: ~4 LUT levels in front of the datapath on those cycles, against ~0.4
+   for the flop every other cycle. The pipelined probe says 156.7 MHz is
+   available if that path were as fast as the rest, so ~25 MHz is still on the
+   table. Options: a shallower decode (fewer distinct slot-0 shapes — most are
+   `read_operand` with different loads, so a uniform slot 0 plus a small
+   side-table may be reachable), or splitting the decode ROM so only the fields
+   on the critical path take the fast route.
 3. **Different axis entirely: drop cycle-accuracy on the cached path.** This
    core spends the 65816's published cycle counts, and on a 99 % cache hit it
    does not have to — nothing is watching the bus. Cycle-accuracy is needed when

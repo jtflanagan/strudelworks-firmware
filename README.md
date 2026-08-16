@@ -85,6 +85,7 @@ On this branch only (`ucode_65816`), an exploratory 65816 core:
 sim/fetch_65816_tests.sh               # sample SingleStepTests/65816, ~130 MB
 python3 sim/gen_microcode816.py --check
 python3 sim/gen_cycle_table816.py      # cycle counts vs the suite, ~1 s
+sim/run_cpu816_equiv.sh                # pipelined sequencer vs the plain one, ~40 s
 ```
 
 iverilog and Verilator only — no Vivado, no hardware.
