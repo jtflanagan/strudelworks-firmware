@@ -75,9 +75,19 @@ import os
 # Symbolic values.  Names here become `UC_<NAME>` localparams in the .vh.
 # ---------------------------------------------------------------------------
 
-# addr_sel - where the 24-bit address bus comes from.  Every one of these but
-# AGU is a plain concatenation of registers.
-ADDR = dict(PC=0, AGU=1, AD=2, SP=3, VEC=4, VEC1=5, DP=6, AGUSP=7)
+# addr_sel - where the 24-bit address bus comes from.  EVERY ONE of these is a
+# plain concatenation of registers, and that is a property worth protecting: it
+# means the live AGU result never reaches the address pins, so the adder is not
+# in the address bus's cone at all.
+#
+# The first draft carried an AGU source here, copied from the 8-bit core, where
+# a cycle could drive a freshly computed effective address straight onto the
+# bus.  Every addressing mode in this core computes into ADL/ADH/BANK and drives
+# from AD a cycle later, so it was never once used - and it cost timing on every
+# path through the address mux.  DP and AGUSP went the same way.  If a future
+# mode really needs to drive the AGU output directly, add it back knowingly;
+# do not leave it here on the chance.
+ADDR = dict(PC=0, AD=1, SP=2, VEC=3, VEC1=4)
 
 # AGU low half: agu_lo = lo_a + lo_b + lo_ci, 8 bits, carry out.
 LO_A = dict(ADL=0, PCL=1, SL=2, MDL=3, ZERO=4, MDH=5, ADH=6, DL=7)
@@ -97,7 +107,10 @@ HI_D = dict(NONE=0, ONE=1, SIGN=2)
 # because a bank boundary is only ever crossed by a carry out of the high byte
 # - never by adding a second bank operand.  So the 24-bit address is a 16-bit
 # adder with an 8-bit incrementer on top, not a 24-bit adder.
-BK_A = dict(BANK=0, DBR=1, PBR=2, ZERO=3, DIN=4)
+# Only two sources are ever selected: the bank already held, or the byte being
+# read this cycle (the bank operand of a long address).  DBR/PBR/ZERO reach the
+# bank register through ld_bk instead, which is where they are actually needed.
+BK_A = dict(BANK=0, DIN=1)
 BK_C = dict(NONE=0, LIVE=1, SAVED=2)
 
 # Register loads
@@ -162,7 +175,7 @@ FIELDS = [
     ("hi_b",      3),
     ("hi_c",      2),
     ("hi_d",      2),
-    ("bk_a",      3),
+    ("bk_a",      1),
     ("bk_c",      2),
     ("ld_adl",    2),
     ("ld_adh",    2),

@@ -128,7 +128,7 @@ module cpu65816 #(
     wire [2:0] f_hi_b   = uc[UCP_HI_B     +: 3];
     wire [1:0] f_hi_c   = uc[UCP_HI_C     +: 2];
     wire [1:0] f_hi_d   = uc[UCP_HI_D     +: 2];
-    wire [2:0] f_bk_a   = uc[UCP_BK_A     +: 3];
+    wire       f_bk_a   = uc[UCP_BK_A];
     wire [1:0] f_bk_c   = uc[UCP_BK_C     +: 2];
     wire [1:0] f_ld_adl = uc[UCP_LD_ADL   +: 2];
     wire [1:0] f_ld_adh = uc[UCP_LD_ADH   +: 2];
@@ -252,16 +252,7 @@ module cpu65816 #(
 
     // The bank half is only ever a register plus a carry - a 65816 index can
     // run off the end of a bank, but nothing ever ADDS a second bank operand.
-    logic [7:0] bk_a;
-    always_comb begin
-        case (f_bk_a)
-            UC_BK_A_DBR:  bk_a = dbr;
-            UC_BK_A_PBR:  bk_a = pbr;
-            UC_BK_A_ZERO: bk_a = 8'h00;
-            UC_BK_A_DIN:  bk_a = din;
-            default:      bk_a = bank;
-        endcase
-    end
+    wire [7:0] bk_a = (f_bk_a == UC_BK_A_DIN) ? din : bank;
     wire bk_carry = (f_bk_c == UC_BK_C_LIVE)  ? agu_hco :
                     (f_bk_c == UC_BK_C_SAVED) ? agu_hc  : 1'b0;
     wire [7:0] agu_bk = bk_a + {7'd0, bk_carry};
@@ -274,15 +265,18 @@ module cpu65816 #(
     wire [15:0] pc_inc = pc + 16'd1;
 
     // ---- address bus --------------------------------------------------------
+    // Every source is a concatenation of REGISTERS.  The AGU result is
+    // deliberately absent: every addressing mode computes into ADL/ADH/BANK and
+    // drives from AD on a later cycle, so the adder never has to reach the
+    // address pins, and the address bus costs one mux level from flops rather
+    // than a mux level behind a 16-bit carry chain.
     logic [23:0] addr_mux;
     always_comb begin
         case (f_asel)
-            UC_ADDR_AGU:  addr_mux = {agu_bk, agu_hi, agu_lo};
             UC_ADDR_AD:   addr_mux = {bank, adh, adl};
             UC_ADDR_SP:   addr_mux = {8'h00, s_eff};
             UC_ADDR_VEC:  addr_mux = {8'h00, 8'hFF, vec_lo};
             UC_ADDR_VEC1: addr_mux = {8'h00, 8'hFF, vec_lo + 8'd1};
-            UC_ADDR_DP:   addr_mux = {8'h00, adh, adl};
             default:      addr_mux = {pbr, pc};
         endcase
     end
