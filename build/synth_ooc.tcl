@@ -29,6 +29,7 @@ set part    xc7a35tftg256-2
 set top     ""
 set srcs    {}
 set period  10.0
+set effort  "default"
 set outdir  [file join $root build ooc]
 
 for {set i 0} {$i < $argc} {incr i} {
@@ -37,6 +38,7 @@ for {set i 0} {$i < $argc} {incr i} {
         -src    { incr i; lappend srcs [lindex $argv $i] }
         -part   { incr i; set part   [lindex $argv $i] }
         -period { incr i; set period [lindex $argv $i] }
+        -effort { incr i; set effort [lindex $argv $i] }
         -outdir { incr i; set outdir [lindex $argv $i] }
         default { puts "WARNING: ignoring unknown argument [lindex $argv $i]" }
     }
@@ -73,7 +75,18 @@ foreach f $srcs {
     read_verilog -sv $f
 }
 
-synth_design -top $top -part $part -mode out_of_context
+# -effort high trades runtime for Fmax with no change to the design.  Worth
+# having as a flag rather than a default: the default flow is what you want when
+# comparing two REVISIONS, because it is fast and its variance is low, and the
+# high-effort flow is what you want when you are asking how fast this thing can
+# actually go.  Mixing the two across a comparison is how you conclude that a
+# change helped when the directive did.
+if {$effort eq "high"} {
+    synth_design -top $top -part $part -mode out_of_context \
+        -directive PerformanceOptimized -flatten_hierarchy rebuilt
+} else {
+    synth_design -top $top -part $part -mode out_of_context
+}
 
 # The clock has to be declared AFTER synth_design in this flow - there is no
 # design to attach it to before that.  Everything in this core is one clock
@@ -86,10 +99,22 @@ puts "=========================================================="
 report_utilization -file [file join $outdir ${top}_synth_util.rpt]
 puts [report_utilization -return_string -slr]
 
-opt_design
-place_design
-phys_opt_design
-route_design
+# No post-route phys_opt_design here.  A second AggressiveExplore pass after
+# routing died mid-phase with no error in the log and no reports written, which
+# is a bad trade for the tenths of a nanosecond it was finding: a flow that
+# sometimes produces no answer is worse than a slightly slower one that always
+# does.
+if {$effort eq "high"} {
+    opt_design       -directive ExploreWithRemap
+    place_design     -directive ExtraTimingOpt
+    phys_opt_design  -directive AggressiveExplore
+    route_design     -directive Explore
+} else {
+    opt_design
+    place_design
+    phys_opt_design
+    route_design
+}
 
 puts "=========================================================="
 puts " POST-ROUTE - $top on $part, ${period} ns target"
@@ -143,6 +168,14 @@ foreach line [split $util "\n"] {
     if {$show} { puts $line }
 }
 puts ""
-puts " (no BRAM, no DSP, no LUTRAM - the core is pure logic and flops)"
+# Report the memory and arithmetic primitives from the design rather than
+# asserting anything about them.  This line used to be a hardcoded claim that
+# the core was "pure logic and flops", which was true of the block it was
+# written for and false of the next one - and a confident wrong line in a report
+# costs more than no line, because it gets believed.
+foreach {label pat} {BRAM RAMB* DSP DSP48* LUTRAM RAM??* SRL SRL*} {
+    set n [llength [get_cells -hierarchical -quiet -filter "REF_NAME =~ $pat"]]
+    if {$n > 0} { puts [format " %-7s %d" $label $n] }
+}
 puts "=========================================================="
 puts "reports in $outdir"

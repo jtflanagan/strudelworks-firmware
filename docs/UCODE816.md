@@ -10,9 +10,9 @@ decision about a 65816 core can be made against numbers instead of guesses:
 3. How fast does it run, and what limits it?
 
 Short answers: **SingleStepTests/65816, which checks the bus cycle by cycle**;
-**757 LUTs, 181 flops, 8 block RAMs**; and **~122 MHz, limited by the microcode
-sequencer loop** - specifically by the block RAM's clock-to-out plus the AGU
-carry that the loop's conditions test live.
+**757 LUTs, 181 flops, 8 block RAMs**; and **~123 MHz single-cycle, ~157 MHz if
+a microinstruction may take two clocks** - the gap is entirely the microcode
+ROM's 2.1 ns clock-to-out, and the second option costs no area.
 
 ---
 
@@ -102,12 +102,15 @@ Fmax is only derivable from a **missed** constraint — the router stops as soon
 as it meets the target, so a met run establishes a floor and nothing more. Both
 rows below are 8 ns targets, missed:
 
-| revision | target | achieved | Fmax |
+| revision | flow | achieved | Fmax |
 |---|---|---|---|
-| with the `ld_if` enable gate | 8.0 ns | 8.675 ns | 115.3 MHz |
-| **without it** (current) | 8.0 ns | **8.211 ns** | **121.8 MHz** |
+| with the `ld_if` enable gate | default | 8.675 ns | 115.3 MHz |
+| without it (current) | default | 8.211 ns | 121.8 MHz |
+| without it | `--effort high` | 8.132 ns | 123.0 MHz |
+| ROM output pipelined (bound, not a design) | default | **6.382 ns** | **156.7 MHz** |
 
-**~122 MHz**, hold comfortable throughout (WHS +0.165 ns). Vivado is
+**~123 MHz as it stands, ~157 MHz available for the price of one clock per
+microinstruction** - see below. Hold is comfortable throughout. Vivado is
 deterministic for identical inputs, so the pair above is a clean A/B on one
 change rather than two samples of a noisy process — but note that comparing runs
 across *different* revisions of the source is not, and an earlier revision
@@ -176,7 +179,45 @@ What every one of those twenty paths still has in common is where it *starts*:
 `uc_reg/CLK`. The 2.125 ns of block RAM clock-to-out is paid by all of them,
 before any logic runs. That, and not any particular piece of logic, is the floor.
 
-Levers, in descending order of what they are worth:
+### Where the headroom actually is
+
+Two more measurements settle it.
+
+**Tool effort is not the answer.** `build/synth_ooc.sh --effort high`
+(PerformanceOptimized synthesis, ExtraTimingOpt placement, AggressiveExplore
+phys_opt) gives **8.132 ns, 123.0 MHz** — +1.2 MHz over the default flow. Worth
+having as a flag, not worth planning around.
+
+**The block RAM's clock-to-out is the whole remaining term.** Putting a pipeline
+register between the ROM output and the datapath lets Vivado use the BRAM's
+optional output register and turns every path from `BRAM → logic → FF` into
+`FF → logic → FF`. That variant measures **6.382 ns, 156.7 MHz** — at 808 LUTs
+and the same 8 block RAMs.
+
+**+34 MHz, for no area.** (The probe is a bound, not a design: a bare pipeline
+insert breaks the sequencer, whose next address depends on the microinstruction
+currently executing. It measures what the ROM latency is costing, which is what
+we wanted to know.)
+
+### The cheap way to collect it: spend a clock
+
+The design that realises that bound is **two clocks per microinstruction** —
+one to fetch it with the ROM's output register enabled, one to execute it. The
+four-candidate lookahead problem disappears, because the spare clock is exactly
+the latency that `DO_REG` costs.
+
+The reason this is nearly free here is worth stating: **this core is nowhere
+near throughput-limited.** It already takes one bus cycle per `cyc_en` pulse,
+and the machine it plugs into runs its bus at about 1 MHz. Going to two clocks
+per bus cycle at a 100 MHz system clock still yields 50 M bus cycles/s, roughly
+fifty times anything an Apple II can ask for. What is scarce is not bus
+throughput but **setup margin against the system clock the DDR3 controller
+already fixes at 100 MHz** — and that goes from 23 % to 57 %.
+
+So the ordering is: if more margin at 100 MHz is what is wanted, spend a clock
+before spending eight more block RAMs.
+
+Levers, if the microinstruction must stay single-cycle:
 
 1. **The ROM's optional output register**, which is the only lever left that
    attacks the term all twenty paths share. Vivado flags it directly

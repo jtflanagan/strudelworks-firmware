@@ -5,6 +5,7 @@
 #
 #   build/synth_ooc.sh                       # cpu65c02 at 100 MHz
 #   build/synth_ooc.sh --period 6.0          # ask for 166 MHz instead
+#   build/synth_ooc.sh --effort high         # trade runtime for Fmax
 #   build/synth_ooc.sh --top foo --src rtl/foo.sv
 #
 # Same WSL plumbing as build/build.sh, and for the same two reasons: a .bat is
@@ -17,6 +18,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 top="cpu65c02"
 srcs=()
 period="10.0"
+effort=""
 extra=()
 
 while [ $# -gt 0 ]; do
@@ -24,6 +26,7 @@ while [ $# -gt 0 ]; do
         --top)    shift; top="$1" ;;
         --src)    shift; srcs+=("$1") ;;
         --period) shift; period="$1" ;;
+        --effort) shift; effort="$1" ;;
         *)        extra+=("$1") ;;
     esac
     shift
@@ -57,6 +60,7 @@ rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
 
 args=(-top "$top" -period "$period" -outdir "$(wslpath -w "$WORKDIR")")
+[ -n "$effort" ] && args+=(-effort "$effort")
 for s in "${srcs[@]}"; do
     args+=(-src "$(wslpath -w "$s")")
 done
