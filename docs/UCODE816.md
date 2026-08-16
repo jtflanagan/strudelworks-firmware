@@ -149,29 +149,54 @@ So the AGU *is* in the critical path after all — not as arithmetic feeding an
 address, but because `COND_CARRY`/`COND_IDX`/`COND_PAGE` test its carry out
 *live*, and the next ROM address cannot be formed until that resolves.
 
+### Fetching both successors: tried, and it does not pay
+
+The obvious attack on that loop is to stop letting the condition choose an
+*address*. Fetch **both** successors every cycle — port A the sequential one at
+`{ir, ucyc+1}`, port B the branch target at `{ir, alt}`, neither of which
+depends on `cond_met` — then register the condition and use it a cycle later to
+pick which of the two fetched words is live. This was prototyped and measured.
+
+Two predictions held exactly:
+
+- **It costs no extra block RAM.** A RAMB36 is true dual-port and at 4096 deep
+  each port is 9 bits wide, so the same 8 tiles serve two independent 68-bit
+  reads. Vivado inferred one dual-port ROM rather than duplicating it: still 8.
+- **It removes the loop.** Zero sequencer-loop paths remained in the top twenty.
+
+And it bought **nothing**: 8.211 ns → 8.193 ns, 121.8 → 122.1 MHz, for +82 LUTs.
+
+The reason is the interesting part. With the loop gone, the top twenty became a
+*scatter* of unrelated endpoints — `s`, `a`, `x`, `y`, `d`, `dbr`, `bank`, `pc`,
+`f_z` — all within 0.15 ns of each other. The loop had been ahead of the pack by
+almost nothing, so removing it just promoted the next path. The design is now
+**balanced**, and a balanced design does not respond to point fixes.
+
+What every one of those twenty paths still has in common is where it *starts*:
+`uc_reg/CLK`. The 2.125 ns of block RAM clock-to-out is paid by all of them,
+before any logic runs. That, and not any particular piece of logic, is the floor.
+
 Levers, in descending order of what they are worth:
 
-1. **The ROM's optional output register is not being used.** Vivado says so
-   directly (`Synth 8-7052`), and it costs 2.125 ns of a 7.6 ns path — 28 %,
-   spent before a single LUT. Enabling `DO_REG` would cut it to roughly 0.4 ns.
-   The obstacle is that it adds a cycle of read latency, and the opcode-fetch
-   address is `{din, 0}` — din only resolves at the *end* of the cycle, so it
-   cannot be presented a cycle early. Resolving that (a separate fast path for
-   slot 0, or a pipelined sequencer) is the one change that could plausibly
-   reach ~150 MHz. Everything else is worth tenths of a nanosecond.
-2. **Take the operand mux out from in front of the adder.** The condition waits
-   on an 8:1 `lo_b` mux *then* an 8-bit add. Computing the carry for the two
-   operands that conditions actually test (X and Y) in parallel and muxing the
-   1-bit results afterwards trades two cheap adders for ~3 levels and ~1 ns of
-   mux-and-route ahead of the carry chain.
-3. **Spend the free ROM bits.** The word is 68 bits and 8 RAMB36 in a
+1. **The ROM's optional output register**, which is the only lever left that
+   attacks the term all twenty paths share. Vivado flags it directly
+   (`Synth 8-7052`): 2.125 ns of clock-to-out that `DO_REG` would cut to
+   roughly 0.5 ns. The price is that it makes the read **two** cycles deep, and
+   two cycles of lookahead means **four** candidate successors, not two — the
+   successors of both successors. Four ports is two copies of the ROM:
+   **16 RAMB36, 32 % of the part**, plus a 68-bit 4:1 mux. Expected landing
+   zone ~7.0 ns, so **~143 MHz**, for double the block RAM. That is the whole
+   remaining trade, and whether it is worth it depends entirely on what else
+   wants block RAM in the same design.
+2. **Spend the free ROM bits.** The word is 68 bits and 8 RAMB36 in a
    4096-deep configuration provide 72, so **4 bits are free**. Each can replace
    a decode: `hi_pass` is currently an equality compare on `f_fl`, and
    `op_wide` a comparison of the 5-bit `f_wb` against six constants — both sit
    in the datapath and both could be direct ROM bits.
-4. **Fanout and placement.** Route is 53 % of the path. The BRAM's second port
-   can read the same address purely as a physically-separate replica of hot
-   control bits, which costs no extra block RAM.
+3. **Fanout and placement.** Route is ~50 % of every one of these paths, and
+   with the design balanced this is where a broad, small win would have to come
+   from — it is the one term that moves *all* the paths at once rather than
+   promoting the next one.
 
 Note that shrinking the ROM helps none of this and would hurt, since a mapping
 stage lands directly on the loop.

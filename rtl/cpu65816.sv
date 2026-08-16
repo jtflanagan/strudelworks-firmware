@@ -95,17 +95,47 @@ module cpu65816 #(
 `include "cpu65816_ucode.vh"
 
     // ---- microcode ROM ------------------------------------------------------
-    // {opcode, ucycle}: 4096 x 69 bits.  Sixteen slots per opcode because a
+    // {opcode, ucycle}: 4096 x 68 bits.  Sixteen slots per opcode because a
     // 16-bit RMW under a non-zero direct page runs to nine cycles and the block
     // moves need a loop slot on top; 11 is the deepest actually used, so 63% of
     // the ROM is filler and a 12-slot scheme would fit.
+    //
+    // BOTH SUCCESSORS ARE FETCHED, AND THE CONDITION CHOOSES BETWEEN THEM
+    // AFTERWARDS.  The obvious way to write this sequencer is to compute the
+    // next address - which needs the condition - and read one microinstruction.
+    // That puts cond_met, and therefore the AGU carry it tests, inside the ROM's
+    // address path, and the resulting loop (ROM out -> operand mux -> adder ->
+    // condition -> ROM address) was this core's critical path.
+    //
+    // Instead both candidates are read every cycle, on the two ports of the same
+    // block RAM: port A takes the sequential successor and port B the branch
+    // target.  Neither address depends on the condition - ucyc is a register and
+    // alt is a field of the current microinstruction - so the condition no longer
+    // reaches the address pins at all.  It is registered and used a cycle later
+    // to pick which of the two fetched words is the live microinstruction.
+    //
+    // This needs no extra block RAM: a RAMB36 is true dual-port, and at 4096 deep
+    // each port is 9 bits wide, so the same 8 tiles serve two independent 68-bit
+    // reads of the same contents.  It also needs no change to the ROM image, so
+    // the microcode and its cycle-count check carry over untouched.
+    //
+    // Note this deliberately does NOT enable the block RAM's optional output
+    // register.  That would cut clock-to-out from 2.1 ns to ~0.5 ns, but it makes
+    // the read two cycles deep, and two cycles of lookahead means FOUR candidate
+    // successors rather than two - which two ports cannot supply.
     localparam int UA_W = 8 + UC_SLOTS_LOG2;
 
     (* rom_style = "block" *) logic [UC_W-1:0] ucode [0:(1 << UA_W) - 1];
     initial $readmemh(UCODE_FILE, ucode);
 
-    logic [UC_W-1:0] uc;            // the microinstruction driving THIS cycle
-    logic [UA_W-1:0] uaddr;         // combinational: the one driving the next
+    logic [UC_W-1:0] uc_a, uc_b;    // the two candidate successors, both fetched
+    logic            uc_sel;        // registered: which one is live this cycle
+    logic [UA_W-1:0] addr_a, addr_b;
+
+    // The microinstruction driving THIS cycle.  A mux output rather than a
+    // register - the registers are uc_a/uc_b, which are the block RAM's own
+    // output registers.
+    wire [UC_W-1:0] uc = uc_sel ? uc_a : uc_b;
 
     // Field extraction.  Positions come from the generated header, so these
     // cannot drift from the assembler.
@@ -505,17 +535,31 @@ module cpu65816 #(
 
     wire wai_wake = (ir == 8'hCB) && (nmi_pend || ~irq_n);
 
+    // ---- the two candidate addresses ----------------------------------------
+    // Neither depends on cond_met, which is the whole point: the condition is
+    // registered and applied to the fetched WORDS a cycle later, so it never
+    // reaches the ROM's address pins.
+    //
+    // On an opcode fetch both ports read the same place, because a fetch has no
+    // alternative successor - the opcode itself decides, and it is on din now.
+    // That read is still a combinational path from din to the address pins, but
+    // it is a short one: no operand mux, no adder and no condition in it.
     always_comb begin
         if (f_sync) begin
-            // The opcode is on din right now.  An interrupt hijacks the slot by
-            // running BRK's microcode against the byte that was just discarded.
-            uaddr = take_int ? {8'h00, 4'd0} : {din, 4'd0};
-        end else if (wai_wake) begin
-            uaddr = {ir, 4'd2};                     // WAI's exit slot
+            // An interrupt hijacks the slot by running BRK's microcode against
+            // the byte that was just discarded.
+            addr_a = take_int ? {8'h00, 4'd0} : {din, 4'd0};
+            addr_b = addr_a;
         end else begin
-            uaddr = {ir, ucyc_next};
+            addr_a = {ir, ucyc + 4'd1};     // taken: the sequential successor
+            addr_b = {ir, f_alt};           // not taken: the branch target
         end
     end
+
+    // Which of the two fetched words becomes live next cycle.  WAI rides port A
+    // for free: it parks by looping slot 1 on itself (cond NEVER, alt 1), so
+    // port A is already reading slot 2 - its exit - every cycle it waits.
+    wire uc_sel_next = f_sync | cond_met | wai_wake;
 
     // ---- register file ------------------------------------------------------
     // NOTE, and it is the difference between 115 MHz and 128 MHz: there is no
@@ -548,10 +592,18 @@ module cpu65816 #(
             agu_c <= 1'b0; agu_hc <= 1'b0; hlt <= 1'b0;
             nmi_prev <= 1'b1; nmi_pend <= 1'b0;
             int_brk <= 1'b0; int_nmi <= 1'b0; in_rst <= 1'b1;
-            uc    <= '0;
-            ucyc  <= 4'd1;
+            // Reset enters the interrupt sequence at its first stack cycle.  A
+            // zeroed microinstruction is a benign read at PC with cond ALWAYS,
+            // so the first live fetch comes from port A at {ir=0, ucyc+1}.
+            uc_a   <= '0;
+            uc_b   <= '0;
+            uc_sel <= 1'b1;
+            ucyc   <= 4'd1;
         end else if (cyc_en) begin
-            uc   <= ucode[uaddr];
+            // Both successors, every cycle, from the two ports of one ROM.
+            uc_a   <= ucode[addr_a];
+            uc_b   <= ucode[addr_b];
+            uc_sel <= uc_sel_next;
             ucyc <= f_sync ? 4'd0 : (wai_wake ? 4'd2 : ucyc_next);
 
             nmi_prev <= nmi_n;
