@@ -97,6 +97,14 @@ puts "=========================================================="
 report_utilization -file [file join $outdir ${top}_route_util.rpt]
 report_timing_summary -file [file join $outdir ${top}_timing.rpt]
 
+# The worst path alone is a poor guide to what to optimise.  If the top twenty
+# paths are all the same shape, fixing that shape moves Fmax; if they are a
+# scatter of unrelated endpoints, the design is balanced and only a structural
+# change helps.  One is worth acting on and the other is not, and the summary
+# report cannot tell them apart.
+report_timing -max_paths 20 -sort_by slack -path_type summary \
+    -file [file join $outdir ${top}_paths.rpt]
+
 set wns [get_property SLACK [get_timing_paths -delay_type max]]
 set whs [get_property SLACK [get_timing_paths -delay_type min]]
 

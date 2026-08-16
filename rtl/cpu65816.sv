@@ -35,13 +35,15 @@
 //       into the bank byte as well. ***
 //
 // So the AGU is a real 16-bit adder with an 8-bit bank incrementer above it.
-// The expectation going in was that this carry chain would set Fmax.  IT DOES
-// NOT: out of context on xc7a35tftg256-2 the worst path is the microcode ROM's
-// output back to its own address input - the sequencer deciding which
-// microinstruction comes next - and the core closes at ~118 MHz with the AGU
-// nowhere near the top of the list.  The width cost area, not speed.  Anything
-// aimed at making this core faster belongs on the condition mux feeding
-// ucyc_next, not on the adder.
+// Out of context on xc7a35tftg256-2 the core closes at ~122 MHz, and the binding
+// path is the sequencer loop - the microcode ROM's output back to its own
+// address input.  The AGU is IN that loop, though not as address arithmetic:
+// COND_CARRY/COND_IDX/COND_PAGE test its carry out live, so the next ROM address
+// cannot form until the add has resolved.  The largest single term in the path
+// is not logic at all, but 2.1 ns of block RAM clock-to-out - the ROM's optional
+// output register is unused, because enabling it would add a cycle of read
+// latency and the opcode-fetch address {din, 0} only resolves at the END of its
+// cycle.  docs/UCODE816.md ranks what that leaves worth doing.
 //
 // THE ALU, by contrast, stays 8 bits wide.  Every 16-bit memory operation takes
 // two bus cycles because the operand is two bytes, and the instruction set
@@ -124,7 +126,6 @@ module cpu65816 #(
     wire [2:0] f_ld_bk  = uc[UCP_LD_BK    +: 3];
     wire [2:0] f_ld_pc  = uc[UCP_LD_PC    +: 3];
     wire [1:0] f_ld_s   = uc[UCP_LD_S     +: 2];
-    wire       f_ld_if  = uc[UCP_LD_IF];
     wire [4:0] f_dout   = uc[UCP_DOUT     +: 5];
     wire [4:0] f_alu_op = uc[UCP_ALU_OP   +: 5];
     wire [2:0] f_alu_a  = uc[UCP_ALU_A    +: 3];
@@ -517,7 +518,20 @@ module cpu65816 #(
     end
 
     // ---- register file ------------------------------------------------------
-    wire ld_en = ~f_ld_if | cond_met;
+    // NOTE, and it is the difference between 115 MHz and 128 MHz: there is no
+    // conditional-load gate here.  An earlier version carried a `ld_if` field
+    // that ANDed cond_met into every register's clock enable, so that a
+    // conditional slot could suppress its own write-backs.  Nothing in this
+    // instruction set needs it - it existed for BBR/BBS, which the 65816 does
+    // not have - but Vivado cannot see that, because `ld_if` arrives from a
+    // block RAM whose contents it will not constant-fold.  The result was that
+    // cond_met, and therefore the AGU carry it depends on, sat in the clock
+    // enable of nearly every flop in the core: all twenty worst paths ended on
+    // a CE pin.  Deleting the field moved cond_met off ~200 enable pins and
+    // left it driving only the 4-bit next-microcycle mux.
+    //
+    // If a conditional load is ever genuinely needed, gate the ONE register
+    // that needs it.  Do not reintroduce a global enable.
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -559,7 +573,7 @@ module cpu65816 #(
                 end
             end
 
-            if (ld_en) begin
+            begin
                 case (f_ld_adl)
                     UC_LD_ADL_AGU: adl <= agu_lo;
                     UC_LD_ADL_DIN: adl <= din;

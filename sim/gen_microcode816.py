@@ -43,11 +43,13 @@ One does not:
              (sr,S),Y are the same shape, and [dp],Y carries on into the bank
              byte - a 24-bit chain.
 
-So the AGU is a genuine 16-bit adder with a bank incrementer above it.  The
-expectation going in was that this carry chain would set the core's Fmax.  IT
-DOES NOT: measured out of context, the worst path is the microcode ROM's output
-back to its own address input - the sequencer loop - and the core runs at
-~118 MHz.  The width cost area, not speed.  See docs/UCODE816.md.
+So the AGU is a genuine 16-bit adder with a bank incrementer above it.  Measured
+out of context the core runs at ~122 MHz, and the binding path is the sequencer
+loop: the microcode ROM's output back to its own address input.  The AGU sits in
+that loop, but not as address arithmetic - COND_CARRY/COND_IDX/COND_PAGE test
+its carry out LIVE, so the next ROM address cannot form until the add resolves.
+The single largest term in the path is not logic at all but the block RAM's
+2.1 ns clock-to-out.  See docs/UCODE816.md.
 
 This was checked against ground truth rather than a datasheet table - see
 sim/gen_cycle_table816.py, which reads the cycle counts and the bus traces out
@@ -167,7 +169,6 @@ FIELDS = [
     ("ld_bk",     3),
     ("ld_pc",     3),
     ("ld_s",      2),
-    ("ld_if",     1),   # gate all register loads on the condition
     ("dout",      5),
     ("alu_op",    5),
     ("alu_a",     3),
@@ -185,7 +186,7 @@ DEFAULTS = dict(sync=0, rw=1, addr_sel=ADDR["PC"], lo_a=LO_A["ADL"],
                 lo_b=LO_B["ZERO"], lo_ci=0, hi_a=HI_A["ADH"],
                 hi_b=HI_B["ZERO"], hi_c=HI_C["NONE"], hi_d=HI_D["NONE"],
                 bk_a=BK_A["BANK"], bk_c=BK_C["NONE"], ld_adl=0, ld_adh=0,
-                ld_bk=0, ld_pc=0, ld_s=0, ld_if=0, dout=DOUT["AL"],
+                ld_bk=0, ld_pc=0, ld_s=0, dout=DOUT["AL"],
                 alu_op=OP["NOP"], alu_a=ALU_A["DIN"], wb=0, fl=FL["NONE"],
                 seti=0, cond=COND["ALWAYS"], alt=0)
 

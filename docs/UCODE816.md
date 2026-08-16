@@ -10,8 +10,9 @@ decision about a 65816 core can be made against numbers instead of guesses:
 3. How fast does it run, and what limits it?
 
 Short answers: **SingleStepTests/65816, which checks the bus cycle by cycle**;
-**754 LUTs, 181 flops, 8 block RAMs**; and **~118 MHz, limited by the microcode
-sequencer loop rather than by the datapath**.
+**757 LUTs, 181 flops, 8 block RAMs**; and **~122 MHz, limited by the microcode
+sequencer loop** - specifically by the block RAM's clock-to-out plus the AGU
+carry that the loop's conditions test live.
 
 ---
 
@@ -58,7 +59,7 @@ target:
 
 | | cpu65816 | share of part |
 |---|---|---|
-| Slice LUTs | 754 | 3.6 % |
+| Slice LUTs | 757 | 3.6 % |
 | Slice registers | 181 | 0.4 % |
 | CARRY4 | 38 | — |
 | F7 / F8 muxes | 22 / 3 | — |
@@ -72,15 +73,16 @@ build/synth_ooc.sh --top cpu65816 --src rtl/cpu65816.sv --period 10.0
 ```
 
 Note that area is not target-independent: resynthesising against a tighter
-target buys speed with LUTs, so quote the target alongside the number.
+target buys speed with LUTs, so quote the target alongside the number. The same
+core at an 8 ns target comes out at 821 LUTs rather than 757.
 
-**The logic is cheap; the block RAM is the figure to watch.** 754 LUTs is
+**The logic is cheap; the block RAM is the figure to watch.** 757 LUTs is
 nothing on this part. 8 of 50 block RAMs is a real commitment, and it is a
 direct consequence of the ROM being addressed by `{opcode, ucycle}` with no
 mapping stage — which is what keeps instruction decode out of the critical path
 entirely, since there is no decoder in the design at all.
 
-The ROM is 4096 × 69 bits and only 1521 words are used: **63 % is filler.** The
+The ROM is 4096 × 68 bits and only 1521 words are used: **63 % is filler.** The
 deepest opcode needs 11 slots of the 16 the address allocates. Two levers exist
 if 8 BRAMs is ever the problem:
 
@@ -97,44 +99,87 @@ neither would buy speed.
 ## 3. Speed
 
 Fmax is only derivable from a **missed** constraint — the router stops as soon
-as it meets the target, so a met run establishes a floor and nothing more.
-Closing in from above, three targets, all missed:
+as it meets the target, so a met run establishes a floor and nothing more. Both
+rows below are 8 ns targets, missed:
 
-| target | achieved | Fmax | hold (WHS) |
+| revision | target | achieved | Fmax |
 |---|---|---|---|
-| 8.0 ns | 8.432 ns | 118.6 MHz | +0.189 ns |
-| 7.0 ns | 8.536 ns | 117.2 MHz | +0.210 ns |
-| 6.0 ns | 8.275 ns | 120.8 MHz | +0.159 ns |
+| with the `ld_if` enable gate | 8.0 ns | 8.675 ns | 115.3 MHz |
+| **without it** (current) | 8.0 ns | **8.211 ns** | **121.8 MHz** |
 
-**~118–121 MHz.** The spread across targets is placement noise, not signal: an
-unreachable target makes the placer thrash, so the three runs bracket the answer
-rather than refine it. Call it **8.3–8.5 ns**, and note that hold is comfortable
-throughout.
+**~122 MHz**, hold comfortable throughout (WHS +0.165 ns). Vivado is
+deterministic for identical inputs, so the pair above is a clean A/B on one
+change rather than two samples of a noisy process — but note that comparing runs
+across *different* revisions of the source is not, and an earlier revision
+measuring 8.432 ns is not evidence about either row here.
 
 ### What limits it
 
-Going in, the expected limiter was the 16-bit AGU carry chain — that is the
-widest arithmetic in the core and the reason section 4 exists. **It is not the
-limiter.** Vivado reports the worst path as
+**Read the top twenty paths, not the worst one.** At a relaxed target the router
+stops as soon as it meets timing, so the reported worst path is whatever
+happened to be slowest without anyone trying — it is not the binding
+constraint. Two successive misreadings of this design came from quoting it.
 
-> **microcode ROM output → microcode ROM address** (`uc_reg` →
-> `uc_reg/ADDRARDADDR`)
+Pushed to 8 ns, the top twenty paths were all the same shape: microcode ROM
+output → **a register clock-enable pin** (`pc_reg[8]/CE`, `adl_reg[*]/CE`,
+`x_reg[*]/CE`). The cause was a vestigial `ld_if` field that ANDed `cond_met`
+into every register's clock enable so a conditional slot could suppress its own
+write-backs. **Nothing in the 65816 needs it** — it existed for BBR/BBS, which
+this instruction set does not have, and it was set in 0 of 1521
+microinstructions. Vivado cannot see that, because `ld_if` arrives from a block
+RAM whose contents it will not constant-fold, so `cond_met` — and the AGU carry
+it depends on — sat in the enable path of nearly every flop in the core.
 
-— the sequencer loop. The core is limited by how fast it can decide *which
-microinstruction comes next*, not by any arithmetic it performs.
+Deleting the field: **8.675 ns → 8.211 ns, 115.3 → 121.8 MHz**, same design
+otherwise, for a net reduction in logic.
 
-This matters for anything done next:
+With that gone the limiter is the **sequencer loop**, and its composition is
+worth writing down because it says what to do next:
 
-- Widening the datapath to 16 bits did **not** buy the speed penalty it looked
-  like it would. The AGU is not near the top of the list.
-- If this core ever needs to be faster, the lever is the **condition mux feeding
-  `ucyc_next`** — fourteen conditions, several of which (`IDX`, `EPAGE`) are
-  themselves small expressions over AGU carries that have to resolve before the
-  next ROM address is known. Registering the condition, or splitting the ROM
-  into a fast next-address slice and a slow control slice, attacks the actual
-  path.
-- Shrinking the ROM does not help speed and may hurt it, since a mapping stage
-  lands directly on the critical path.
+```
+uc_reg/DOADO       2.125 ns   BRAM clock-to-out, 28% of the path, before any logic
+  → f_lo_b         0.918 ns   route, fanout 16
+  → lo_b 8:1 mux   3 LUT levels
+  → CARRY4 x3                 the AGU low adder
+  → cond_met → ucyc_next → uc_reg/ADDRARDADDR
+Data Path Delay: 7.646 ns (logic 3.568 ns 46.7%, route 4.078 ns 53.3%)
+```
+
+So the AGU *is* in the critical path after all — not as arithmetic feeding an
+address, but because `COND_CARRY`/`COND_IDX`/`COND_PAGE` test its carry out
+*live*, and the next ROM address cannot be formed until that resolves.
+
+Levers, in descending order of what they are worth:
+
+1. **The ROM's optional output register is not being used.** Vivado says so
+   directly (`Synth 8-7052`), and it costs 2.125 ns of a 7.6 ns path — 28 %,
+   spent before a single LUT. Enabling `DO_REG` would cut it to roughly 0.4 ns.
+   The obstacle is that it adds a cycle of read latency, and the opcode-fetch
+   address is `{din, 0}` — din only resolves at the *end* of the cycle, so it
+   cannot be presented a cycle early. Resolving that (a separate fast path for
+   slot 0, or a pipelined sequencer) is the one change that could plausibly
+   reach ~150 MHz. Everything else is worth tenths of a nanosecond.
+2. **Take the operand mux out from in front of the adder.** The condition waits
+   on an 8:1 `lo_b` mux *then* an 8-bit add. Computing the carry for the two
+   operands that conditions actually test (X and Y) in parallel and muxing the
+   1-bit results afterwards trades two cheap adders for ~3 levels and ~1 ns of
+   mux-and-route ahead of the carry chain.
+3. **Spend the free ROM bits.** The word is 68 bits and 8 RAMB36 in a
+   4096-deep configuration provide 72, so **4 bits are free**. Each can replace
+   a decode: `hi_pass` is currently an equality compare on `f_fl`, and
+   `op_wide` a comparison of the 5-bit `f_wb` against six constants — both sit
+   in the datapath and both could be direct ROM bits.
+4. **Fanout and placement.** Route is 53 % of the path. The BRAM's second port
+   can read the same address purely as a physically-separate replica of hot
+   control bits, which costs no extra block RAM.
+
+Note that shrinking the ROM helps none of this and would hurt, since a mapping
+stage lands directly on the loop.
+
+**Caveat for planning.** These are out-of-context numbers. Dropped into a design
+that is also placing UberDDR3 and the FT601 datapath, routing gets worse, and
+route is already the majority of this path. Treat ~122 MHz as an upper bound on
+what integration will show, not a budget.
 
 ---
 
