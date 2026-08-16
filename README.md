@@ -30,7 +30,9 @@ tools/      gen_ddr3_xdc.py - regenerates and verifies constr/ddr3.xdc.
 build/      Headless Vivado build (build.sh drives the Windows-side Vivado from WSL).
 hw/         The carrier board (milestone 4). Licensed separately - see hw/README.md.
 docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRAM),
-            PROTOCOL.md (the FT601 message framing).
+            PROTOCOL.md (the FT601 message framing), and on this branch
+            UCODE816.md - a first stab at a microcoded 65816, what it costs and
+            what can verify it.  Exploratory, not on the milestone plan.
 ```
 
 ## Build
@@ -75,6 +77,14 @@ sim/run_bus_snoop_tb.sh    # bus event capture, framing, overflow, ~1 s
 python3 sim/gen_microcode.py --check   # microcode ROM matches its generator
 sim/run_cpu_cycles_tb.sh   # every opcode's cycle count vs the 65C02 table, ~5 s
 sim/run_cpu_tb.sh          # Klaus Dormann's two functional suites, ~16 s
+```
+
+On this branch only (`ucode_65816`), an exploratory 65816 core:
+
+```sh
+sim/fetch_65816_tests.sh               # sample SingleStepTests/65816, ~130 MB
+python3 sim/gen_microcode816.py --check
+python3 sim/gen_cycle_table816.py      # cycle counts vs the suite, ~1 s
 ```
 
 iverilog and Verilator only — no Vivado, no hardware.
