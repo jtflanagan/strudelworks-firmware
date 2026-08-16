@@ -60,6 +60,9 @@ run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 # -Irtl: the microcode field definitions are a generated `include, and they live
 # beside the RTL rather than in the simulator's working directory.
 run cpu65c02      -Irtl rtl/cpu65c02.sv
+# The exploratory 65816 (branch ucode_65816).  Same generated-include
+# arrangement as the 65C02 core.
+run cpu65816      -Irtl rtl/cpu65816.sv
 
 # Not linted, deliberately:
 #   clk_gen.v      - nothing but IBUF/BUFG/MMCME2_BASE instantiation.  Verilator

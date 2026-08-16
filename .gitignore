@@ -27,6 +27,10 @@ __pycache__/
 /sim/*.out
 /sim/cpu_work/
 
+# SingleStepTests/65816, fetched by sim/fetch_65816_tests.sh.  Not vendored:
+# the suite states no licence, and the full set is 2.9 GB.
+/sim/cpu816_work/
+
 /build/results/
 
 # host-side build products
