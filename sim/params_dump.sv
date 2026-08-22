@@ -1,5 +1,5 @@
 `timescale 1ps / 1ps
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 // Instantiate ddr3_controller with the strudelworks configuration purely so its
 // self-describing $display block prints the derived timing for OUR parameters.

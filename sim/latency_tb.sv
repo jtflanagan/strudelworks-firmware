@@ -1,5 +1,5 @@
 `timescale 1ps / 1ps
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
 // latency_tb - measure UberDDR3 read latency in simulation, against the Micron

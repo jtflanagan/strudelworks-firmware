@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
 // sync_fifo - single-clock FIFO, first-word-fall-through, with an occupancy count.

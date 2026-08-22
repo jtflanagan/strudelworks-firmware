@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
 // ft601_msg_rx_tb - host->card frame parsing, and the watchdog on top of it.

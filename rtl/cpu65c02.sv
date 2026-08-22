@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
 // cpu65c02 - a microcoded 65C02, built around the bus cycle.

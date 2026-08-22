@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
 # Simulate UberDDR3 read latency at the strudelworks configuration, using the
 # Micron DDR3 model and UberDDR3's behavioural Xilinx primitive models.

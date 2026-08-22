@@ -224,17 +224,21 @@ move the JEDEC refresh budget onto us for no gain.
 The patch must live in this repo as a patch file against the pinned commit, so a
 future UberDDR3 bump cannot silently drop it.
 
-### Licensing: UberDDR3 is GPL-3.0-or-later, and so is this project
+### Licensing: the source is GPL-2.0-or-later, the bitstream is GPL-3.0-or-later
 
-**Settled.** UberDDR3 is GPL-3.0-**or-later**, a bitstream containing it is a
-derivative work, so this project's gateware is GPL-3.0-or-later. AppleTini is
-BSD-2 and appletini-mega is MIT; strudelworks deliberately differs from both.
+**Settled.** Our own files are GPL-2.0-**or-later** — chosen while the project was
+unreleased and solely ours to relicense. UberDDR3 is GPL-3.0-**or-later**, and a
+bitstream containing it is a derivative work, so the built gateware is
+GPL-3.0-or-later. The `-or-later` on our files is what makes that combination
+legal; GPL-2-only would not. AppleTini is BSD-2 and appletini-mega is MIT;
+strudelworks deliberately differs from both.
 
-Files that stand alone stay BSD-2-Clause so they can be lifted into non-GPL
-projects, the carrier board will be licensed separately under CERN-OHL (`hw/`),
-and every file carries an SPDX header. Full reasoning, the per-file table, the
-Vivado and anti-tivoization consequences, and the two third-party traps waiting
-in the v5 port are in [`../LICENSING.md`](../LICENSING.md).
+`tools/ft601/ft601_probe.c` is the one exception, GPL-3.0-or-later by inheritance
+from LeechCore-plugins. The carrier board will be licensed separately under
+CERN-OHL (`hw/`), and every file carries an SPDX header. Full reasoning, the
+source-vs-bitstream distinction, the Vivado and anti-tivoization consequences, and
+the two third-party traps waiting in the v5 port are in
+[`../LICENSING.md`](../LICENSING.md).
 
 ### Traps found in the upstream reference designs
 
@@ -1130,8 +1134,8 @@ on the worst case. No fabric speed-up buys back a quarter-microsecond stall.
 - **Legacy machines never miss**: `gt49 = 0` in every window, refresh included.
 - **The 2 Gb refresh cost is measured, not scaled** — 30 cycles typical, 37 worst.
   No Micron download was needed; see the density note above.
-- **Licence: GPL-3.0-or-later** for the gateware, BSD-2-Clause per-file where a
-  file stands alone, CERN-OHL for the board. See [`../LICENSING.md`](../LICENSING.md).
+- **Licence: GPL-2.0-or-later** for our source, GPL-3.0-or-later for any bitstream
+  built from it (UberDDR3), CERN-OHL for the board. See [`../LICENSING.md`](../LICENSING.md).
 - **Line buffer coherency is a non-problem.** DMA is forbidden in
   internal-memory mode, so we are the only writer and self-invalidation is the
   whole of it.

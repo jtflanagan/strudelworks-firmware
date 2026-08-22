@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
 """Generate constr/ddr3.xdc from the MIG project file, and verify it against the
 XDC that MIG itself generated.
@@ -57,7 +57,7 @@ GROUP_ORDER = [
 ]
 
 HEADER = """\
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
 ##############################################################################
 # DDR3 pin constraints - Alchitry Au (xc7a35t-ftg256-2) + MT41K128M16JT-125

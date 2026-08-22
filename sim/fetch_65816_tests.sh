@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
 # Sample SingleStepTests/65816 - the closest thing the 65816 has to Klaus
 # Dormann's suites, and in one respect better: every test records the

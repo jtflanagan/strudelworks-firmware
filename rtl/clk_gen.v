@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
 // clk_gen - all clocks for the strudelworks design, from the Au's 100 MHz osc.

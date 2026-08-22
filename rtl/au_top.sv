@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
 // au_top - strudelworks milestone 1: DDR3 bring-up and latency measurement.

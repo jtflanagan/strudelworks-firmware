@@ -21,15 +21,15 @@
 // same sweep natively and over usbipd and the two curves separate the driver's
 // behaviour from the transport's overhead.
 //
-// LICENSING NOTE.  This file is GPL-3.0-or-later rather than BSD-2-Clause like
-// most of tools/.  The `struct ft60x_ctrlreq` layout and the fact that a read
+// LICENSING NOTE.  This file is GPL-3.0-or-later rather than GPL-2.0-or-later like
+// the rest of the repository.  The `struct ft60x_ctrlreq` layout and the fact that a read
 // must be announced on endpoint 0x01 before it appears on 0x82 are not
 // documented by FTDI; they come from the LambdaConcept pciescreamer driver by
 // way of ufrisk/LeechCore-plugins (leechcore_ft601_driver_linux, GPLv3,
 // contributed by Jeremie Boutoille / Synacktiv).  The FT_60XCONFIGURATION
 // layout is separate -- that one *is* public FTDI D3XX API documentation.  If
-// this file ever wants to be BSD-2, the session-request layout is the piece
-// that needs deriving independently; everything else here is already clean.
+// this file ever wants to be GPL-2.0-or-later, the session-request layout is the
+// piece that needs deriving independently; everything else here is already clean.
 
 #include <errno.h>
 #include <getopt.h>

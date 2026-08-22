@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Build for ft601_probe.  Portable to the Pi 5 (aarch64) as-is -- libusb is the
 # only dependency and every distro ships it, which is the whole point of not

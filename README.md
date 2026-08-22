@@ -209,15 +209,24 @@ See [docs/DERISK.md](docs/DERISK.md).
 
 ## License
 
-**Gateware: GPL-3.0-or-later** — [UberDDR3](https://github.com/AngeloJacobo/UberDDR3)
-is GPL-3.0-or-later, and a bitstream containing it is a derivative work. Files
-that stand alone (the clock generator, the latency probe, the tooling, the
-constraints) are **BSD-2-Clause** so they can be reused outside a GPL project;
-the combination is GPL-3. Every file carries an SPDX header, which is
-authoritative.
+**Source: GPL-2.0-or-later. Built gateware: GPL-3.0-or-later.**
+
+Every file in this repository is GPL-2.0-**or-later**, with one exception noted
+below. A *bitstream* built from them is GPL-3.0-or-later, because it contains
+[UberDDR3](https://github.com/AngeloJacobo/UberDDR3), which is GPL-3.0-or-later
+and whose derivative any such bitstream is. The `-or-later` is what makes that
+combination legal, so do not narrow it to GPL-2-only.
+
+In practice: you may lift any file here into a GPL-2 project, provided you do not
+also bring UberDDR3. You may not take a built strudelworks bitstream under GPL-2.
+
+The exception is `tools/ft601/ft601_probe.c`, which is GPL-3.0-or-later because it
+derives undocumented FT601 protocol details from `ufrisk/LeechCore-plugins`
+(GPLv3). Every file carries an SPDX header, which is authoritative.
 
 The carrier board will be licensed separately under CERN-OHL — a PCB layout is
 not a derivative of a Verilog DDR3 controller. See [hw/](hw/README.md).
 
-Full reasoning, the per-file table, the Vivado and anti-tivoization consequences,
-and two third-party licence traps waiting in the v5 port: [LICENSING.md](LICENSING.md).
+Full reasoning, the source-vs-bitstream distinction, the Vivado and
+anti-tivoization consequences, and two third-party licence traps waiting in the v5
+port: [LICENSING.md](LICENSING.md).

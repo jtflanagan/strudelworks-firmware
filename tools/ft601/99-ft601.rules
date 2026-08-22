@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Non-root access to the FT601 for libusb.  Needed on the Pi 5 deployment target
 # and convenient under WSL; without it every ft601_probe run wants sudo.

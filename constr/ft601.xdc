@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
 set_property PACKAGE_PIN D4 [get_ports {ft_clk}]
 set_property IOSTANDARD LVCMOS33 [get_ports {ft_clk}]

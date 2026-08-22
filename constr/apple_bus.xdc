@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
 set_property PACKAGE_PIN F5 [get_ports {apple_data_pin[0]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {apple_data_pin[0]}]
