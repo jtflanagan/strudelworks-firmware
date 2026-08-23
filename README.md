@@ -51,16 +51,14 @@ build/build.sh --diag             # diag_top  - minimal diagnostic
 Each top gets its own Vivado work directory, so a `--snoop` build cannot quietly
 reuse a stale `au_top` project. Artefacts land in `build/results/<top>.bit`.
 
-Note the Vivado path below is stale on this machine; the live install is
-`C:\AMDDesignTools\2026.1`, so builds need
-`VIVADO=/mnt/c/AMDDesignTools/2026.1/Vivado/bin/vivado.bat`.
-
 No IP cores: no MIG, and `rtl/clk_gen.v` instantiates `MMCME2_BASE` directly
 instead of using `clk_wiz`. A fresh clone plus the fetch script is a complete
 build with nothing to regenerate by hand.
 
-Vivado lives on the Windows host (`C:\Xilinx\2025.1\Vivado`, with 2024.2 also
-installed); `build/build.sh` handles the WSL path conversion. Override with
+Vivado lives on the Windows host. The build is **2026.1**, in
+`C:\AMDDesignTools\2026.1\Vivado`; `build/build.sh` and `build/synth_ooc.sh`
+find it themselves and handle the WSL path conversion. A derelict `C:\Xilinx`
+install may also be present and is searched last, never preferred. Override with
 `VIVADO=/path/to/vivado.bat`.
 
 ## Simulate

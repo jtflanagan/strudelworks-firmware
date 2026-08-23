@@ -15,14 +15,21 @@
 #      Vivado report the script as missing.
 #
 # Usage: build/build.sh [extra tclargs...]
-#   VIVADO=/mnt/c/Xilinx/2025.1/Vivado/bin/vivado.bat build/build.sh
+#   VIVADO=/mnt/c/AMDDesignTools/2026.1/Vivado/bin/vivado.bat build/build.sh
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 VIVADO="${VIVADO:-}"
 if [ -z "$VIVADO" ]; then
+  # The 2026.1 install is the live one, under C:\AMDDesignTools.  C:\Xilinx is a
+  # derelict earlier install that is still on disk and still looks plausible; it
+  # is listed last so it is only ever a fallback, never the default.  Same order
+  # as build/synth_ooc.sh - the two must not disagree about which Vivado builds
+  # this project, or an OOC timing number gets compared against a bitstream from
+  # a different toolchain.
   for cand in \
+    /mnt/c/AMDDesignTools/2026.1/Vivado/bin/vivado.bat \
     /mnt/c/Xilinx/2025.1/Vivado/bin/vivado.bat \
     /mnt/c/Xilinx/Vivado/2024.2/bin/vivado.bat
   do
@@ -30,7 +37,14 @@ if [ -z "$VIVADO" ]; then
   done
 fi
 if [ -z "$VIVADO" ]; then
-  echo "No Vivado found. Set VIVADO=/path/to/vivado.bat" >&2
+  cat >&2 <<'EOF'
+No Vivado found.  Looked for, in order:
+  /mnt/c/AMDDesignTools/2026.1/Vivado/bin/vivado.bat   <- the current one
+  /mnt/c/Xilinx/2025.1/Vivado/bin/vivado.bat
+  /mnt/c/Xilinx/Vivado/2024.2/bin/vivado.bat
+
+If it is installed somewhere else:  VIVADO=/path/to/vivado.bat build/build.sh
+EOF
   exit 1
 fi
 echo "using $VIVADO"
@@ -43,6 +57,18 @@ fi
 # Verify the generated DDR3 constraints still agree with the MIG reference before
 # spending 15 minutes on a build against a stale pinout.
 python3 "$root/tools/gen_ddr3_xdc.py" --check
+
+# Stamp the bitstream with when this build started, readable back over the link
+# as registers 0 and 1.  Captured HERE rather than inside Vivado so that the two
+# halves cannot disagree, and so a rebuild can be pinned to an old stamp with
+# STAMP_DATE=20260823 STAMP_TIME=143900 build/build.sh.
+# 10# forces base ten: HHMMSS carries a leading zero for most of the morning,
+# and an unadorned 093000 is an octal literal to both bash and Tcl - 09 is not
+# even a valid one, so it fails rather than silently being wrong. Which is the
+# better failure, but not one to have at all.
+STAMP_DATE="${STAMP_DATE:-$((10#$(date +%Y%m%d)))}"
+STAMP_TIME="${STAMP_TIME:-$((10#$(date +%H%M%S)))}"
+printf 'build stamp: %08d %06d\n' "$STAMP_DATE" "$STAMP_TIME"
 
 # The Vivado project must live on a Windows-native filesystem - see the note in
 # build.tcl.  Sources are still read from the repo over UNC, which works fine;
@@ -108,4 +134,5 @@ vivado_win="$(wslpath -w "$VIVADO")"
 cd /
 exec cmd.exe /c "$vivado_win" -mode batch -nojournal -notrace \
     -log "$log_win" -journal "$jou_win" \
-    -source "$script_win" -tclargs -outdir "$workdir_win" "$@"
+    -source "$script_win" -tclargs -outdir "$workdir_win" \
+    -stamp-date "$STAMP_DATE" -stamp-time "$STAMP_TIME" "$@"

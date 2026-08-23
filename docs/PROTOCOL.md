@@ -51,15 +51,98 @@ host reads; the receiver carries parser state across all of them.
 | `0x00` | IDLE | Link filler, **both directions**. Payload, if any, is discarded by the receiver. `len = 0` is the **heartbeat**: the single word `0x00000000`. |
 | `0x01`–`0x0F` | — | Reserved for link-layer types: ones the FT601 layer may generate or consume on its own, parseable without application state. |
 | `0x10` | SEQ | Card→host. The verified counter stream from `ft601_top`, the link regression vehicle. |
-| `0x11` | BUS_ENABLE | Host→card. `free[0]` capture enable, `free[1]` source select (0 synthetic, 1 real bus). `enable = 0` is the clean stop. |
+| `0x11` | BUS_ENABLE | Host→card. `free[0]` capture enable, `free[1]` source select (0 synthetic, 1 real bus), `free[7:4]` heartbeat period select. `enable = 0` is the clean stop. |
 | `0x12` | BUS_EVENTS | Card→host. Payload is N Apple bus event words. |
 | `0x13` | BUS_STATUS | Card→host. Overflow flag, enable state, captured and dropped counts. |
-| `0x14`–`0xFF` | — | Application, unassigned. |
+| `0x14` | REG_READ | Host→card. Payload `[addr]`. Answered with REG_VALUE. |
+| `0x15` | REG_WRITE | Host→card. Payload `[addr][data]`. Also answered with REG_VALUE. |
+| `0x16` | REG_VALUE | Card→host. Payload `[addr][data]`, answering either of the above. |
+| `0x17`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
 well-formed message anyway (see below), so a distinct type would carry no
 information.
+
+### Control registers
+
+A 32-bit Wishbone on the card, in a region well clear of DDR3:
+
+```
+0x0000_0000 .. 0x0FFF_FFFF   DDR3       (2^24 bursts x 16 bytes = 256 MB)
+0x8000_0000 .. 0x8000_FFFF   registers
+```
+
+One address bit separates them, so neither has to know the other exists. The
+DDR3 bus is **not** reused for this: it is 128 bits wide and its address is a
+burst index, which is the right shape for bulk memory and the wrong one for
+control registers. `wb_regfile` is a separate 32-bit instance of the same
+protocol.
+
+| addr | name | access | meaning |
+|---|---|---|---|
+| `0x8000_0000` | BUILD_DATE | RO | `YYYYMMDD` as a decimal integer |
+| `0x8000_0004` | BUILD_TIME | RO | `HHMMSS` as a decimal integer |
+
+Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
+`-generic`, so they describe the bitstream rather than whenever it was loaded.
+**Zero means unstamped** — a GUI build, or gateware older than this map, which
+never answers at all. Either way the host reports "unknown" rather than
+rendering it as a date.
+
+Three rules hold for the whole register space, and each exists to avoid a worse
+failure than the one it replaces:
+
+- **A read of an unimplemented address returns zero and still acks.** Withholding
+  the ack would hang the bridge waiting for a reply that is never coming, and
+  the host would see a dead link rather than a bad address.
+- **A write to a read-only or unimplemented address is accepted and discarded**,
+  and the reply carries what the register reads back *afterwards*. That is the
+  cheap way for a host to tell a write that landed from one that did not,
+  without a separate status path.
+- **Every reply echoes the address it answers**, so replies can be matched to
+  requests without assuming they come back in order.
+
+One request is outstanding at a time; a second arriving before the first is
+answered is dropped. The host is strictly request-response here, and making
+this queue would add a depth and an overflow policy to serve a case that does
+not occur. If a host ever does pipeline, the symptom is a missing reply rather
+than a wrong one, because of the address echo.
+
+**A reply never lands inside another message.** `tx_arb` tracks message
+boundaries in the outgoing stream and manufactures a gap by back-pressuring the
+event path, rather than waiting for one to occur — waiting would work on a quiet
+link and starve on a busy one. This matters more than it sounds: with no sync
+word and no resynchronisation, an interleaved word does not break the stream
+loudly, it makes it plausible and wrong from that point on. `sim/reg_map_tb.sv`
+asserts it directly.
+
+### The heartbeat period is the link's latency floor
+
+`BUS_ENABLE free[7:4]` sets the card's idle heartbeat period to
+`IDLE_TICKS >> n`, latched at enable alongside the source select so it cannot
+change mid-capture. **Zero is the card's built-in default**, and that is what
+makes this safe to graft onto an existing message: a host that never sets the
+field sends zero and gets exactly the behaviour that shipped.
+
+It is worth being able to move because the heartbeat is what *terminates the
+host's read*. A 4-byte frame is a short packet, so it ends the bulk transfer and
+the host gets its data; without one, an oversized read waits out its libusb
+timeout. So the host cannot learn about data sooner than the next dispatch, and
+the heartbeat period is the floor on that.
+
+Measured on a live Apple at the default 100 µs, the host sees 12,861
+data-bearing reads a second: a 1 KB dispatch every 251 µs (256 blocks at the
+Apple's 4.1 MB/s) with two heartbeats between them. Three dispatches per 250 µs
+is 12,000/s predicted against 12,861 observed, and 33% carrying the kilobyte
+against 31% observed.
+
+Shortening the period cuts the floor and costs two things, both of which want
+watching: 4 bytes per heartbeat of bandwidth, and — the one that matters — **one
+of the host's posted transfers per heartbeat**, since a short packet ends a
+posted read. Ring depth is the host's protection against a scheduling stall, so
+this trades latency against stall tolerance. Measure `min_posted` and the
+overflow threshold, not just the latency.
 
 ### Deliberately absent: CRC, sync word, resynchronisation
 
@@ -202,7 +285,8 @@ the link is genuinely idle on a 1 KB boundary.
 3. **Voluntary idle, nothing sent.** Idle link. Idle timer only.
 4. **TXE# stall mid-buffer.** Chip busy, no dispatch. `buf_blocks` and `sent`
    untouched; the run resumes into the same buffer. This is why the counter
-   must not reset on burst boundaries.
+   must not reset on burst boundaries. A stall longer than one idle window is
+   the exception — see the idle timer below.
 5. **TXE# stall at a buffer boundary** — no free buffer for the next one, the
    common case when the host falls behind. The fill already dispatched;
    `buf_blocks` has wrapped to 0, which correctly describes the new empty
@@ -220,11 +304,12 @@ the link is genuinely idle on a 1 KB boundary.
    means more blocks are coming. A producer that stalls forever is a producer
    bug, and the partial message is lost in the receiver's parser state either
    way.
-9. **Anything unmodelled.** The idle timer unsticks it.
+9. **Anything unmodelled.** The idle timer unsticks it — on a busy link as
+   well as a quiet one, which is the whole of its value as a backstop.
 
 ### Idle timer
 
-An unconditional heartbeat when nothing has been sent for ~100 µs
+An unconditional heartbeat when **nothing has been dispatched** for ~100 µs
 (parameterised). Three jobs, and it is worth its ~40 KB/s on a dead link for
 any one of them:
 
@@ -237,6 +322,40 @@ any one of them:
 
 The case-2 injection stays even though the timer would eventually catch it:
 immediate is better than 100 µs late.
+
+**What restarts it is the load-bearing part.** The quantity is time since the
+*host* last received something, so the only events that may restart it are the
+two that put a packet on the wire: a fill (the wrap of `buf_blocks`) and a
+detected idle dispatch. Not our own TX FIFO going empty, and not a block being
+handed to the chip — neither means the host got anything.
+
+An earlier implementation reset the counter on `!fifo_empty`, which reads as
+"the link is busy, no need for filler" and is wrong in the one situation the
+timer exists for. Every case above is a way of *stopping*, so every case above
+leaves the FIFO empty and the timer free to run; the backstop, by contrast,
+covers a dispatch that was missed, and a dispatch is missed while data is
+flowing. Queued data therefore held down the timer exactly when it was needed,
+and the 100 µs bound became however long it took the chip's buffer to fill by
+other means — 8 s to 132 s between stalls of ~6 ms each, on a streaming link,
+with nothing ever lost. The 4-byte read that ends such a stall is the
+signature: the buffer held only the heartbeat, so nothing had been dispatched
+for the whole of it.
+
+The timer also **free-runs**: expiry restarts the count rather than latching. A
+one-shot is re-armed only by a delivery, which is the very thing whose absence
+it reports, so a link that stays undelivered would be poked once and never
+again. Free-running, it is poked once per window until something gets through.
+
+The consequence for case 4: a TXE# stall *longer than one window* now leaves a
+heartbeat owed, emitted when TXE# returns. That is deliberate — a chip that has
+refused data for 100 µs has dispatched nothing for 100 µs — and it costs 4
+bytes.
+
+Emission needs only a message boundary (`blocks_left == 0`), not a quiet FIFO.
+Waiting for `fifo_empty` to insert is the same mistake in a second place:
+it defers the fix until the link goes quiet, when the debt that matters is the
+one raised while it is busy. The heartbeat takes priority over real data for
+the one cycle it occupies.
 
 ## Host-side rules
 

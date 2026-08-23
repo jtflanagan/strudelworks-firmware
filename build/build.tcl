@@ -25,6 +25,12 @@ set outdir    [file join $root build work]
 set diag      0
 set ft601     0
 set snoop     0
+# YYYYMMDD and HHMMSS as two separate decimal integers. Two args rather than one
+# quoted pair because this reaches Vivado through cmd.exe, which would split the
+# space anyway. Supplied by build/build.sh so the stamp is when the BUILD
+# started, not whenever Vivado happened to reach this line.
+set stamp_date 0
+set stamp_time 0
 
 for {set i 0} {$i < $argc} {incr i} {
     switch -- [lindex $argv $i] {
@@ -38,6 +44,8 @@ for {set i 0} {$i < $argc} {incr i} {
         --ft601 { set ft601 1 }
         -snoop  -
         --snoop { set snoop 1 }
+        -stamp-date { incr i; set stamp_date [lindex $argv $i] }
+        -stamp-time { incr i; set stamp_time [lindex $argv $i] }
         default { puts "WARNING: ignoring unknown argument [lindex $argv $i]" }
     }
 }
@@ -103,6 +111,9 @@ if {$snoop} {
         [file join $root rtl synchronizer.sv] \
         [file join $root rtl apple_bus_read.sv] \
         [file join $root rtl bus_event_capture.sv] \
+        [file join $root rtl wb_regfile.sv] \
+        [file join $root rtl reg_bridge.sv] \
+        [file join $root rtl tx_arb.sv] \
         [file join $root rtl uart_tx.v] \
         [file join $root rtl uart_rx.v] \
         [file join $root rtl snoop_top.sv] \
@@ -146,6 +157,16 @@ if {$snoop} {
 set_property file_type {Verilog}        [get_files *.v]
 set_property file_type {SystemVerilog}  [get_files *.sv]
 set_property top $topname [current_fileset]
+
+# Build stamp -> top-level generics. Vivado's -generic takes decimal integers
+# here; the RTL declares them as `integer` parameters and packs them into 32-bit
+# registers. Zero means "not stamped", which is what an interactive build from
+# the GUI produces, and the host reports it as such rather than as a date.
+if {$stamp_date != 0 || $stamp_time != 0} {
+    puts "build stamp: date=$stamp_date time=$stamp_time"
+    set_property generic [list BUILD_DATE=$stamp_date BUILD_TIME=$stamp_time] \
+                 [current_fileset]
+}
 
 # ---- constraints ---------------------------------------------------------
 # An XDC naming a port that does not exist is an error, not a warning, so each

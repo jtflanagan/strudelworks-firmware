@@ -33,7 +33,12 @@
 //   led[7:4]   bits 27:24 of the captured-event count - a coarse rate display
 //////////////////////////////////////////////////////////////////////////////////
 
-module snoop_top (
+module snoop_top #(
+    // Stamped by build/build.sh via build.tcl's -generic, and readable back over
+    // the link as registers 0 and 1.  Zero means an unstamped build.
+    parameter integer BUILD_DATE = 0,   // YYYYMMDD
+    parameter integer BUILD_TIME = 0    // HHMMSS
+) (
     input  wire        clk_pin,
     input  wire        rst_n,
     output wire [7:0]  led,
@@ -171,6 +176,18 @@ module snoop_top (
     wire        tx_push;
     wire        hb_sent;
 
+    // bus_event_capture -> tx_arb -> tx_fifo.  The arbiter is in the middle so a
+    // register reply can be slipped in between whole messages; see tx_arb.
+    wire [31:0] cap_word;
+    wire        cap_push;
+    wire        cap_full;
+    wire [31:0] rsp_addr, rsp_data;
+    wire        rsp_valid, rsp_take;
+    // Driven by the synchronizer further down, next to the control-domain
+    // register it crosses from; declared here because the instantiation that
+    // consumes it comes first.
+    wire [3:0]  hb_shift_ft;
+
     ft601_msg_tx u_msg_tx (
         .clk          (ft_clk_i),
         .rst          (rst),
@@ -183,6 +200,7 @@ module snoop_top (
         .fwd          (ft_fwd),
         .q_empty      (ft_q_empty),
         .in_rx        (ft_in_rx),
+        .idle_shift   (hb_shift_ft),
         .hb_sent      (hb_sent)
     );
 
@@ -230,6 +248,8 @@ module snoop_top (
     wire [7:0]  msg_type;
     wire [15:0] msg_free;
     wire [7:0]  msg_len;
+    wire [31:0] pay_data;
+    wire        pay_valid;
 
     ft601_msg_rx u_msg_rx (
         .clk         (clk_ctrl),
@@ -241,8 +261,8 @@ module snoop_top (
         .msg_type    (msg_type),
         .msg_free    (msg_free),
         .msg_len     (msg_len),
-        .pay_data    (),
-        .pay_valid   (),
+        .pay_data    (pay_data),
+        .pay_valid   (pay_valid),
         .frame_error (rx_frame_error)
     );
 
@@ -256,6 +276,24 @@ module snoop_top (
         else if (want_enable)   capture_enable <= 1'b1;
         else if (want_disable)  capture_enable <= 1'b0;
     end
+
+    // Heartbeat period select, free[7:4], latched at enable alongside the source
+    // so it cannot change mid-capture.  Zero is the built-in default, which is
+    // what lets this ride in an existing message: a host that never sets it
+    // sends zero and nothing changes.
+    reg [3:0] hb_shift_ctrl = 4'd0;
+    always @(posedge clk_ctrl) begin
+        if (rst)              hb_shift_ctrl <= 4'd0;
+        else if (want_enable) hb_shift_ctrl <= msg_free[7:4];
+    end
+
+    // clk_ctrl -> ft_clk.  Four bits that change once per capture and are then
+    // held for the whole run, so two flops are enough: the only exposure is the
+    // single transition, and the worst it can produce is one heartbeat at a
+    // blended period before the value settles.
+    synchronizer #(.WIDTH(4)) u_hb_shift_sync (
+        .clk (ft_clk_i), .rst (rst), .in (hb_shift_ctrl), .out (hb_shift_ft)
+    );
 
     // Source select, latched at enable so it cannot change mid-capture.
     // free[1]: 0 = synthetic, 1 = the real Apple bus.
@@ -334,11 +372,72 @@ module snoop_top (
         .status_req (status_req),
         .ev_data    (ev_data),
         .ev_valid   (ev_valid),
-        .tx_data    (tx_word),
-        .tx_push    (tx_push),
-        .tx_full    (txc_full),
+        .tx_data    (cap_word),
+        .tx_push    (cap_push),
+        .tx_full    (cap_full),
         .overflow   (overflow),
         .captured   (captured)
+    );
+
+    // ---- control registers --------------------------------------------------
+    // A 32-bit Wishbone of its own rather than a decode off the DDR3 bus, which
+    // is 128 bits wide and addressed by burst index.  See wb_regfile.
+    wire        rwb_cyc, rwb_stb, rwb_we, rwb_ack, rwb_stall;
+    wire [31:0] rwb_adr, rwb_dat_w, rwb_dat_r;
+    wire [3:0]  rwb_sel;
+
+    reg_bridge u_reg_bridge (
+        .clk       (clk_ctrl),
+        .rst       (rst),
+        .msg_valid (msg_valid),
+        .msg_type  (msg_type),
+        .pay_data  (pay_data),
+        .pay_valid (pay_valid),
+        .wb_cyc    (rwb_cyc),
+        .wb_stb    (rwb_stb),
+        .wb_we     (rwb_we),
+        .wb_adr    (rwb_adr),
+        .wb_dat_w  (rwb_dat_w),
+        .wb_sel    (rwb_sel),
+        .wb_ack    (rwb_ack),
+        .wb_stall  (rwb_stall),
+        .wb_dat_r  (rwb_dat_r),
+        .rsp_addr  (rsp_addr),
+        .rsp_data  (rsp_data),
+        .rsp_valid (rsp_valid),
+        .rsp_take  (rsp_take)
+    );
+
+    wb_regfile #(
+        .BUILD_DATE (BUILD_DATE),
+        .BUILD_TIME (BUILD_TIME)
+    ) u_regfile (
+        .clk      (clk_ctrl),
+        .rst      (rst),
+        .wb_cyc   (rwb_cyc),
+        .wb_stb   (rwb_stb),
+        .wb_we    (rwb_we),
+        .wb_adr   (rwb_adr),
+        .wb_dat_w (rwb_dat_w),
+        .wb_sel   (rwb_sel),
+        .wb_ack   (rwb_ack),
+        .wb_stall (rwb_stall),
+        .wb_dat_r (rwb_dat_r)
+    );
+
+    tx_arb u_tx_arb (
+        .clk       (clk_ctrl),
+        .rst       (rst),
+        .src_data  (cap_word),
+        .src_push  (cap_push),
+        .src_full  (cap_full),
+        .rsp_addr  (rsp_addr),
+        .rsp_data  (rsp_data),
+        .rsp_valid (rsp_valid),
+        .rsp_take  (rsp_take),
+        .tx_data   (tx_word),
+        .tx_push   (tx_push),
+        .tx_full   (txc_full)
     );
 
     // ---- host command channel ---------------------------------------------

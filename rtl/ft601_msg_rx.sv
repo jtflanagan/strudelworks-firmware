@@ -47,6 +47,8 @@ module ft601_msg_rx (
     // point - a new type has to be added here before it can be sent.
     localparam [7:0] T_IDLE       = 8'h00;
     localparam [7:0] T_BUS_ENABLE = 8'h11;
+    localparam [7:0] T_REG_READ   = 8'h14;
+    localparam [7:0] T_REG_WRITE  = 8'h15;
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -59,7 +61,12 @@ module ft601_msg_rx (
     wire [7:0]  hdr_len  = fifo_dout[7:0];
     wire [7:0]  hdr_type = fifo_dout[15:8];
 
-    wire hdr_known = (hdr_type == T_IDLE) || (hdr_type == T_BUS_ENABLE);
+    // Every host->card type has to appear here.  An unknown one is treated as
+    // lost sync and reset the link, so forgetting to add a type is not a
+    // message that gets ignored - it is a link that drops the moment the host
+    // first uses it.
+    wire hdr_known = (hdr_type == T_IDLE)      || (hdr_type == T_BUS_ENABLE) ||
+                     (hdr_type == T_REG_READ)  || (hdr_type == T_REG_WRITE);
 
     always_ff @(posedge clk) begin
         if (rst) begin
