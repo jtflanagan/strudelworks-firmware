@@ -72,6 +72,27 @@ module apple_bus_read #(
     // differs between watching the bus and driving it - and this module has no
     // opinion, having no way to drive either way.
 
+    // SYNC SUBSTITUTION, for a master build only.
+    //
+    // The SYNC bit in the event word is the real 6502's, and a card that has
+    // asserted DMA' has disconnected that chip - so while it drives, the pin
+    // reads zero and the trace loses its instruction boundaries entirely.  An
+    // opcode fetch and an operand read then look the same, and nothing
+    // downstream can decode the capture.
+    //
+    // With `en` high the driving core's own SYNC is recorded instead.  The bit
+    // is then LOGICALLY exact and electrically absent: it is the same signal
+    // the core will drive onto the real SYNC line once the card sits in the CPU
+    // socket rather than in a slot, arriving here by a shorter route because
+    // the slot has no way to carry it.  Not a guess, and not a measurement.
+    //
+    // The distinction still gets recorded, because this module reports what it
+    // observed and a reader is entitled to know which bits those are: the host
+    // flags it in the trace file's header.  A watching build ties `en` low and
+    // nothing here changes.
+    input  wire         sync_override,
+    input  wire         sync_override_en,
+
     // one event per phi0 cycle
     output logic [31:0] ev_data,
     output logic        ev_valid,
@@ -174,7 +195,7 @@ module apple_bus_read #(
 
             if (addr_snap) begin
                 addr_q <= addr_clean;
-                ctl_q  <= {m2b0, m2sel, res, rw};
+                ctl_q  <= {m2b0, sync_override_en ? sync_override : m2sel, res, rw};
             end
 
             if (data_snap && enable) begin

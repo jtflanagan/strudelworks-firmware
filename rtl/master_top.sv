@@ -115,6 +115,8 @@ module master_top #(
         .apple_dma_pin     (apple_dma_pin),
         .ev_data           (real_data),
         .ev_valid          (real_valid),
+        .sync_override     (drv_sync),
+        .sync_override_en  (cpu_source_active),
         .res_sync          (apple_res_sync),
         .irq_sync          (apple_irq_sync),
         .phi0_sync         (apple_phi0_sync),
@@ -129,7 +131,7 @@ module master_top #(
     wire [15:0] cpu_addr;
     wire        cpu_rw;
     wire [7:0]  cpu_dout, cpu_din;
-    wire        cpu_cyc_en;
+    wire        cpu_cyc_en, cpu_sync;
 
     cpu65c02 u_cpu (
         .clk    (apple_clk),
@@ -141,7 +143,7 @@ module master_top #(
         .din    (cpu_din),
         .irq_n  (apple_irq_sync),
         .nmi_n  (1'b1),             // the slot brings out no NMI
-        .sync   (),
+        .sync   (cpu_sync),
         .halted ()                  // STP is not on the base part; see the RTL
     );
 
@@ -149,7 +151,7 @@ module master_top #(
     wire [15:0] addr_drive;
     wire        rw_drive;
     wire [7:0]  data_drive;
-    wire        addr_rw_oe, data_oe, dma_assert;
+    wire        addr_rw_oe, data_oe, dma_assert, drv_sync;
 
     apple_bus_write u_write (
         .clk           (apple_clk),
@@ -160,6 +162,7 @@ module master_top #(
         .cpu_addr      (cpu_addr),
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
+        .cpu_sync      (cpu_sync),
         .cyc_en        (cpu_cyc_en),
         .cpu_din       (cpu_din),
         .addr_drive    (addr_drive),
@@ -168,6 +171,7 @@ module master_top #(
         .addr_rw_oe    (addr_rw_oe),
         .data_oe       (data_oe),
         .dma_assert    (dma_assert),
+        .drv_sync      (drv_sync),
         .driving       ()
     );
 

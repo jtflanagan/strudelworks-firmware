@@ -101,6 +101,8 @@ module snoop_top #(
         .apple_dma_pin     (apple_dma_pin),
         .ev_data           (real_data),
         .ev_valid          (real_valid),
+        .sync_override     (1'b0),
+        .sync_override_en  (1'b0),   // the instrument reports only what it saw
         .res_sync          (apple_res_sync),
         .irq_sync          (),
         .phi0_sync         (),

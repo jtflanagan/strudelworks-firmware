@@ -106,6 +106,8 @@ module apple_bus_write #(
     input  wire [15:0] cpu_addr,
     input  wire        cpu_rw,          // 1 = read
     input  wire [7:0]  cpu_dout,
+    // The core's SYNC, latched with the rest of its op.  See drv_sync below.
+    input  wire        cpu_sync,
     output logic       cyc_en,          // one pulse per bus cycle
     output logic [7:0] cpu_din,
 
@@ -116,6 +118,22 @@ module apple_bus_write #(
     output wire         addr_rw_oe,
     output wire         data_oe,
     output wire         dma_assert,     // 1 = pull DMA' low
+
+    // SYNC for the cycle being driven, held stable across it.
+    //
+    // WHY THIS EXISTS.  The Apple's SYNC line is the real 6502's output, and
+    // asserting DMA' disconnects that chip - so while we master, the pin reads
+    // zero for every cycle of the capture and instruction boundaries are simply
+    // not in the trace.  A recorded bus without them cannot be decoded: an
+    // opcode fetch and an operand read look identical.
+    //
+    // The core knows, so the card can say.  This is the SAME signal the core
+    // will drive onto the real SYNC line when the card moves from a slot into
+    // the CPU socket; the slot has nowhere to carry it, so it takes a shorter
+    // route.  Logically exact, electrically absent, and flagged as such out to
+    // the trace file's header - see apple_bus_read's sync_override and the
+    // host's kFlagSyncSynth.
+    output wire         drv_sync,
 
     // Visibility, for a status register or a testbench.
     output logic        driving          // a bus cycle is being driven
@@ -140,6 +158,7 @@ module apple_bus_write #(
     logic [15:0] drv_addr;
     logic        drv_rw;
     logic [7:0]  drv_dout;
+    logic        drv_sync_q;
 
     // The data bus is ours only inside the emit window, and only on a write.
     logic emit_window;
@@ -149,6 +168,7 @@ module apple_bus_write #(
     // read disturbs nothing even if something downstream decodes it.
     localparam logic [15:0] PARK_ADDR = 16'h0000;
 
+    assign drv_sync   = drv_sync_q;
     assign addr_drive = drv_addr;
     assign rw_drive   = drv_rw;
     assign data_drive = drv_dout;
@@ -165,6 +185,7 @@ module apple_bus_write #(
             drv_addr    <= PARK_ADDR;
             drv_rw      <= 1'b1;
             drv_dout    <= 8'd0;
+            drv_sync_q  <= 1'b0;
             emit_window <= 1'b0;
             cyc_en      <= 1'b0;
             cpu_din     <= 8'd0;
@@ -182,6 +203,7 @@ module apple_bus_write #(
                 // left staged.
                 drv_addr    <= PARK_ADDR;
                 drv_rw      <= 1'b1;
+                drv_sync_q  <= 1'b0;
                 emit_window <= 1'b0;
                 driving     <= 1'b0;
             end else begin
@@ -192,6 +214,7 @@ module apple_bus_write #(
                     drv_addr    <= cpu_addr;
                     drv_rw      <= cpu_rw;
                     drv_dout    <= cpu_dout;
+                    drv_sync_q  <= cpu_sync;
                     emit_window <= 1'b0;      // release the data bus
                     driving     <= 1'b1;
                 end

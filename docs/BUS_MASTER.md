@@ -279,12 +279,23 @@ question.
 
 ## Open
 
-- ⬜ **A master trace has no SYNC.** `m2sel` is the real 6502's SYNC line and the
-  real 6502 is disconnected, so it reads zero for the whole capture. Instruction
-  boundaries are therefore not recoverable from a trace of ourselves, and
-  `run_trace_replay.sh --from` cannot be used on one. Replaying a master capture
-  needs the boundaries from somewhere else — the core's own sync, exported as a
-  status bit, would do it.
+- ✅ **A master trace had no SYNC**, and now records the core's own instead.
+  `m2sel` is the real 6502's SYNC line and asserting DMA′ disconnects that chip,
+  so it read zero for all 16,777,208 cycles of the first master capture —
+  leaving an undecodable trace, since an opcode fetch and an operand read look
+  identical without it.
+
+  `apple_bus_write` latches the core's SYNC with the rest of its op and
+  `apple_bus_read` records that instead, in a master build only. The bit is then
+  **logically exact and electrically absent**: it is the same signal the core
+  will drive onto the real SYNC line once the card sits in the **CPU socket**
+  rather than a slot, arriving by a shorter route because the slot has nowhere
+  to carry it. Not a guess, and not a measurement.
+
+  The distinction is still recorded, because everything else in the word was
+  measured on the wire: the host sets `kFlagSyncSynth` in the trace header and
+  `run_trace_replay.sh` says so in its banner. When the socket build arrives the
+  same bit becomes a genuine measurement and the flag simply stops being set.
 
 
 - ✅ **`cyc_en` is one pulse per phi0** — done, in the driver, and checked.

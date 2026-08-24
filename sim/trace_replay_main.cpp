@@ -81,7 +81,17 @@ constexpr uint32_t kFlagArmedOnReset = 1u << 1;
 // writes it, and it exists so a self-test trace can never be mistaken for a
 // capture of a real machine. See the emit mode below for why that distinction
 // is the whole point.
-constexpr uint32_t kFlagSelfTest = 1u << 2;
+//
+// Bit 4, not 2: the host took 2 for kFlagSyncSynth. Two writers of one format
+// picking bits independently is how a flag ends up meaning two things, so this
+// one moved rather than the host's - nothing has been written with the old
+// value except self-test traces, which are regenerated on demand.
+constexpr uint32_t kFlagSelfTest = 1u << 4;
+// The host's flag: SYNC in this capture is the driving core's, not the bus's.
+// A card that has taken the bus has disconnected the real 6502, and SYNC is
+// that chip's output - so the card substitutes its own core's.  Everything else
+// in the word was measured on the wire; this bit was reconstructed.
+constexpr uint32_t kFlagSyncSynth = 1u << 2;
 
 struct Header {
     uint32_t magic;
@@ -804,7 +814,16 @@ static int replay_and_report(const Options& opt, std::size_t align_at, uint8_t s
             return 2;
         }
 
-        if (g_header.flags & trace::kFlagSelfTest) {
+        if (g_header.flags & trace::kFlagSyncSynth) {
+        std::printf("\n          NOTE: SYNC here is the DRIVING CORE'S own, not the bus's.\n"
+                    "          The card had taken the bus, so the real 6502 was disconnected\n"
+                    "          and its SYNC line reads zero throughout.  The bit is the same\n"
+                    "          signal the core will drive on the real SYNC line once the card\n"
+                    "          sits in the CPU socket instead of a slot - logically exact,\n"
+                    "          electrically absent.  Every other field was measured on the\n"
+                    "          wire, and --from works normally.\n");
+    }
+    if (g_header.flags & trace::kFlagSelfTest) {
             std::printf("\nPASS - the tool works end to end on a trace it generated. This "
                         "says nothing\nabout the core; only a capture of a real 65C02 "
                         "can.\n");

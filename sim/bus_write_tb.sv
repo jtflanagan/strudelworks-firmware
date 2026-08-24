@@ -60,11 +60,16 @@ module bus_write_tb;
     reg  [7:0]  cpu_dout = 8'h00;
     wire        cyc_en;
     always @(posedge clk) if (cyc_en) begin
+        cpu_sync <= ~cpu_sync;
         cpu_addr <= cpu_addr + 16'd1;
         cpu_rw   <= ~cpu_rw;                       // alternate read/write
         cpu_dout <= cpu_dout + 8'd17;
     end
 
+    // A stand-in for the core's SYNC: high on the first cycle of each of its
+    // "instructions", so the tb can check it is held across the bus cycle.
+    reg        cpu_sync = 1'b1;
+    wire       drv_sync;
     reg  [7:0] data_sync = 8'hA5;
     reg        master_active = 1'b0;
 
@@ -82,6 +87,7 @@ module bus_write_tb;
         .phi0_sync (phi0), .data_sync (data_sync),
         .master_active (master_active),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),
+        .cpu_sync (cpu_sync), .drv_sync (drv_sync),
         .cyc_en (cyc_en), .cpu_din (cpu_din),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
@@ -112,6 +118,10 @@ module bus_write_tb;
     integer    data_oe_in_window = 0;
     integer    write_cycles_sampled = 0;
     integer    early_sampled = 0;
+    reg        last_sync = 1'bx;
+    integer    sync_changes = 0;
+    integer    sync_change_at = -1;
+    integer    bad_sync = 0;
     integer    early_driven = 0;
 
     always @(posedge clk) if (!rst && master_active) begin
@@ -130,6 +140,11 @@ module bus_write_tb;
             last_addr = addr_drive;
         end
         if (cyc_en) cycen_this_cycle = cycen_this_cycle + 1;
+        if (drv_sync !== last_sync) begin
+            sync_changes = sync_changes + 1;
+            if (cycles_seen > 1) sync_change_at = since_fall;
+            last_sync = drv_sync;
+        end
 
         // The data bus is ours only on a write, only inside the window.  Two
         // sample points rather than a range: one deep in the address phase,
@@ -154,12 +169,14 @@ module bus_write_tb;
         if (fall) begin
             // Judge the cycle that just ended.
             if (cycles_seen > 1) begin
+                if (sync_changes > 1) bad_sync = bad_sync + 1;
                 if (changes_this_cycle > 1) bad_change = bad_change + 1;
                 if (cycen_this_cycle != 1)  bad_cycen  = bad_cycen + 1;
             end
             cycles_seen = cycles_seen + 1;
             changes_this_cycle = 0;
             cycen_this_cycle = 0;
+            sync_changes = 0;
         end
     end
 
@@ -209,6 +226,16 @@ module bus_write_tb;
             $display("  ok: every change at cycle %0d after phi0 falling; reader samples at %0d, so %0d cycles of round-trip margin",
                      worst_change_at, READER_ADDR_TAP + 1,
                      READER_ADDR_TAP + 1 - worst_change_at);
+
+        // --- case 4b / the reconstructed SYNC is held like the address -------
+        // It is recorded in the trace at the reader's address tap, so it has to
+        // be as stable across the cycle as everything else the trace records.
+        if (bad_sync != 0)
+            fail("the driven SYNC moved more than once inside a bus cycle");
+        else if (sync_change_at != worst_change_at)
+            fail("the driven SYNC does not move with the address");
+        else
+            $display("  ok: driven SYNC latched with the op, one value per cycle");
 
         // --- case 5 / one cyc_en per bus cycle -------------------------------
         if (bad_cycen != 0)
