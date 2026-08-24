@@ -70,6 +70,11 @@ module card_link #(
     input  wire        apple_res_sync,
     output wire        cpu_source_active,
 
+    // The Mockingboard's slot, latched on the same RES' edge; 0 = disabled.
+    // A watching top leaves it unconnected - a snoop build cannot answer for
+    // a slot, and CAN_MASTER=0 holds this at zero anyway.
+    output wire [2:0]  mb_slot_active,
+
     // FT601 (constr/ft601.xdc)
     input  wire        ft_clk,
     input  wire        ft_rxf,
@@ -404,6 +409,7 @@ module card_link #(
         .rst      (rst),
         .apple_res_sync    (apple_res_sync),
         .cpu_source_active (cpu_source_active),
+        .mb_slot_active    (mb_slot_active),
         .wb_cyc   (rwb_cyc),
         .wb_stb   (rwb_stb),
         .wb_we    (rwb_we),

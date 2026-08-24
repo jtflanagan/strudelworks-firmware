@@ -128,6 +128,8 @@ if {$snoop || $master} {
         add_files -norecurse [list \
             [file join $root rtl apple_bus_write.sv] \
             [file join $root rtl cpu65c02.sv] \
+            [file join $root rtl via6522.v] \
+            [file join $root rtl mockingboard.sv] \
             [file join $root rtl master_top.sv] \
         ]
         # cpu65c02 loads its microcode with $readmemh at elaboration, so the

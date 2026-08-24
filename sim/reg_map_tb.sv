@@ -95,11 +95,13 @@ module reg_map_tb;
     // it with 0; case 8 below covers that side too, with a second instance.
     reg  apple_res_sync = 1'b1;      // active low, idle high
     wire cpu_source_active;
+    wire [2:0] mb_slot_active;
 
     wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME),
                  .CAN_MASTER (1'b1)) u_regs (
         .clk (clk), .rst (rst),
         .apple_res_sync (apple_res_sync), .cpu_source_active (cpu_source_active),
+        .mb_slot_active (mb_slot_active),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
@@ -323,6 +325,46 @@ module reg_map_tb;
                      out_mem[base+2][31:24] - latches_before);
             errors = errors + 1;
         end else $display("  ok: one latch per assertion, not per cycle held");
+
+        // --- case 9 / MB_SLOT follows the same latched contract --------------
+        // Same shape as CPU_SOURCE, checked more briefly: the write is an
+        // intention, the reset acts on it, and the readback carries both.
+        if (mb_slot_active !== 3'd0) begin
+            $display("FAIL: the Mockingboard is enabled before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: MB_SLOT starts disabled");
+
+        push_word(hdr(T_REG_WRITE, 8'd2, 16'd0));
+        push_word(32'h8000_000C);
+        push_word(32'h0000_0004);          // slot 4, the Mockingboard's home
+        repeat (40) @(posedge clk);
+        if (mb_slot_active !== 3'd0) begin
+            $display("FAIL: the WRITE enabled the Mockingboard - it must take a reset");
+            errors = errors + 1;
+        end else $display("  ok: writing MB_SLOT does not enable on its own");
+
+        pulse_reset_line;
+        if (mb_slot_active !== 3'd4) begin
+            $display("FAIL: RES' asserted but MB_SLOT did not latch to 4");
+            errors = errors + 1;
+        end else $display("  ok: the reset assertion latches the slot");
+
+        base = out_n;
+        push_word(hdr(T_REG_READ, 8'd1, 16'd0));
+        push_word(32'h8000_000C);
+        repeat (60) @(posedge clk);
+        if (out_n - base < 3) begin
+            $display("FAIL: no MB_SLOT reply");
+            errors = errors + 1;
+        end else if (out_mem[base+2][2:0] !== 3'd4 ||
+                     out_mem[base+2][10:8] !== 3'd4) begin
+            $display("FAIL: MB_SLOT readback %08x, expected desired=4 active=4",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else begin
+            $display("  ok: readback desired=%0d active=%0d",
+                     out_mem[base+2][2:0], out_mem[base+2][10:8]);
+        end
 
         // --- case 7 / the parser never lost sync -----------------------------
         if (frame_error !== 1'b0) begin

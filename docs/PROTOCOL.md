@@ -83,6 +83,8 @@ protocol.
 |---|---|---|---|
 | `0x8000_0000` | BUILD_DATE | RO | `YYYYMMDD` as a decimal integer |
 | `0x8000_0004` | BUILD_TIME | RO | `HHMMSS` as a decimal integer |
+| `0x8000_0008` | CPU_SOURCE | RW bit 0 | which CPU drives the Apple bus; latched at RES' — see BUS_MASTER.md |
+| `0x8000_000C` | MB_SLOT | RW bits 2:0 | the Mockingboard's slot, 0 = off; latched at RES' — see MOCKINGBOARD.md |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

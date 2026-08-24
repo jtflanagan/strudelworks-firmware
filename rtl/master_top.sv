@@ -77,6 +77,7 @@ module master_top #(
     wire        apple_res_sync, apple_irq_sync, apple_phi0_sync;
     wire [7:0]  apple_data_sync;
     wire        cpu_source_active;
+    wire [2:0]  mb_slot_active;
 
     card_link #(
         .BUILD_DATE (BUILD_DATE),
@@ -91,6 +92,7 @@ module master_top #(
         .phi0_live (phi0_live),
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (cpu_source_active),
+        .mb_slot_active (mb_slot_active),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),
@@ -133,6 +135,13 @@ module master_top #(
     wire [7:0]  cpu_dout, cpu_din;
     wire        cpu_cyc_en, cpu_sync;
 
+    // The Mockingboard's IRQ takes the short route into the core, the same
+    // route drv_sync takes out of it: a real card would pull the slot's IRQ'
+    // line and this card's CPU is on the near side of that pin, so the VIA
+    // interrupts are folded in here instead.  Physical cards still interrupt
+    // through the pin, via apple_irq_sync, exactly as before.
+    wire mb_irq;
+
     cpu65c02 u_cpu (
         .clk    (apple_clk),
         .rst    (cpu_rst),
@@ -141,7 +150,7 @@ module master_top #(
         .rw     (cpu_rw),
         .dout   (cpu_dout),
         .din    (cpu_din),
-        .irq_n  (apple_irq_sync),
+        .irq_n  (apple_irq_sync && !mb_irq),
         .nmi_n  (1'b1),             // the slot brings out no NMI
         .sync   (cpu_sync),
         .halted ()                  // STP is not on the base part; see the RTL
@@ -152,6 +161,13 @@ module master_top #(
     wire        rw_drive;
     wire [7:0]  data_drive;
     wire        addr_rw_oe, data_oe, dma_assert, drv_sync;
+
+    wire [15:0] op_addr;
+    wire        op_rw;
+    wire [7:0]  op_wdata;
+    wire        op_present, op_commit;
+    wire        mb_rd_claim;
+    wire [7:0]  mb_rd_data;
 
     apple_bus_write u_write (
         .clk           (apple_clk),
@@ -165,6 +181,13 @@ module master_top #(
         .cpu_sync      (cpu_sync),
         .cyc_en        (cpu_cyc_en),
         .cpu_din       (cpu_din),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_wdata      (op_wdata),
+        .op_present    (op_present),
+        .op_commit     (op_commit),
+        .slot_rd_claim (mb_rd_claim),
+        .slot_rd_data  (mb_rd_data),
         .addr_drive    (addr_drive),
         .rw_drive      (rw_drive),
         .data_drive    (data_drive),
@@ -173,6 +196,25 @@ module master_top #(
         .dma_assert    (dma_assert),
         .drv_sync      (drv_sync),
         .driving       ()
+    );
+
+    // ---- the Mockingboard ---------------------------------------------------
+    // Two VIAs answering for an empty slot; the sound itself is synthesised on
+    // the host from the captured VIA writes.  See rtl/mockingboard.sv.
+    mockingboard u_mb (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .res_sync      (apple_res_sync),
+        .master_active (cpu_source_active),
+        .slot_assign   (mb_slot_active),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_wdata      (op_wdata),
+        .op_present    (op_present),
+        .op_commit     (op_commit),
+        .rd_claim      (mb_rd_claim),
+        .rd_data       (mb_rd_data),
+        .irq           (mb_irq)
     );
 
     // ---- the pins -----------------------------------------------------------

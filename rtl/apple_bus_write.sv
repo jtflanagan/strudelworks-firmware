@@ -77,6 +77,17 @@
 // everything downstream.  DATA is windowed, and only on a write: on a read the
 // machine's own memory is driving and we must not.
 //
+// ONE EXCEPTION to "never on a read", and it is claimed, not assumed.  An
+// on-card peripheral (rtl/mockingboard.sv) can raise slot_rd_claim for a read
+// cycle whose address the motherboard maps to an EMPTY slot - a range nothing
+// else drives, which is what makes the Apple's floating bus float.  The card
+// then emits the peripheral's byte in the same window a write would use, and
+// the byte comes back through the pins and the reader's synchroniser to be
+// BOTH the core's din and the captured event: the CPU and the trace read the
+// same wire a real slot card would have driven, and neither needs to know the
+// data never left the board.  The claim is registered upstream once per cycle
+// (see the peripheral), so it cannot move inside the window it gates.
+//
 // THE CORE IS LOCKED TO THE BUS by cyc_en, one pulse per phi0 cycle, which is
 // the interface rtl/cpu65c02.sv was built for.  din is latched at T_DIN and is
 // therefore already stable when the core samples it at T_CYCEN.
@@ -110,6 +121,24 @@ module apple_bus_write #(
     input  wire        cpu_sync,
     output logic       cyc_en,          // one pulse per bus cycle
     output logic [7:0] cpu_din,
+
+    // The presented op, for an on-card peripheral to watch.  op_addr/op_rw/
+    // op_wdata are the drv_* registers: one stable value per bus cycle.
+    // op_present pulses once when they have just been latched (the address
+    // phase); op_commit pulses at T_DIN (the data phase), which is where a
+    // peripheral applies a write or the side effects of a read, and is also
+    // its once-per-cycle tick.  Neither fires unless mastering.
+    output wire [15:0] op_addr,
+    output wire        op_rw,
+    output wire [7:0]  op_wdata,
+    output logic       op_present,
+    output logic       op_commit,
+
+    // A peripheral's answer for a claimed READ cycle: emit slot_rd_data in
+    // the data window instead of leaving the bus to float.  Must be stable
+    // across the cycle - registered at op_present upstream.
+    input  wire        slot_rd_claim,
+    input  wire [7:0]  slot_rd_data,
 
     // To the pins, via the master top.
     output wire  [15:0] addr_drive,
@@ -171,11 +200,19 @@ module apple_bus_write #(
     assign drv_sync   = drv_sync_q;
     assign addr_drive = drv_addr;
     assign rw_drive   = drv_rw;
-    assign data_drive = drv_dout;
+    // On a claimed read the peripheral's byte goes out in the write data's
+    // window; R/W stays a READ, because it is one - the machine's write strobe
+    // must not fire, only its bus carry the byte.
+    assign data_drive = drv_rw ? slot_rd_data : drv_dout;
 
     assign addr_rw_oe = master_active;
-    assign data_oe    = master_active && emit_window && !drv_rw;
+    assign data_oe    = master_active && emit_window &&
+                        (!drv_rw || slot_rd_claim);
     assign dma_assert = master_active;
+
+    assign op_addr  = drv_addr;
+    assign op_rw    = drv_rw;
+    assign op_wdata = drv_dout;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -190,12 +227,21 @@ module apple_bus_write #(
             cyc_en      <= 1'b0;
             cpu_din     <= 8'd0;
             driving     <= 1'b0;
+            op_present  <= 1'b0;
+            op_commit   <= 1'b0;
         end else begin
             prev_phi0 <= phi0_sync;
             fall_pipe <= {fall_pipe[T_PRESENT-1:0], fall};
             rise_pipe <= {rise_pipe[T_CYCEN-1:0],   rise};
 
             cyc_en <= 1'b0;
+
+            // One fabric cycle after t_present, so a consumer clocked on this
+            // pulse reads the drv_* registers it announces, not their
+            // predecessors.  op_commit needs no such delay: nothing it
+            // announces is being latched on the same edge.
+            op_present <= master_active && t_present;
+            op_commit  <= 1'b0;
 
             if (!master_active) begin
                 // Not ours.  Park everything so that taking the bus starts from
@@ -221,6 +267,7 @@ module apple_bus_write #(
 
                 if (t_emit)  emit_window <= 1'b1;
                 if (t_din)   cpu_din     <= data_sync;
+                if (t_din)   op_commit   <= 1'b1;
                 if (t_cycen) cyc_en      <= 1'b1;
             end
         end

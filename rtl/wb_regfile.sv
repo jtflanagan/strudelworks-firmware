@@ -59,6 +59,10 @@ module wb_regfile #(
     // enables from this; see docs/BUS_MASTER.md.
     output wire            cpu_source_active,
 
+    // Which slot the on-card Mockingboard answers as; 0 keeps it out of the
+    // machine entirely.  Latched the same way CPU_SOURCE is - see below.
+    output wire [2:0]      mb_slot_active,
+
     // Wishbone B4 classic, 32-bit.
     input  wire            wb_cyc,
     input  wire            wb_stb,
@@ -85,6 +89,7 @@ module wb_regfile #(
     localparam [13:0] R_BUILD_DATE = 'd0;   // 0x8000_0000, RO
     localparam [13:0] R_BUILD_TIME = 'd1;   // 0x8000_0004, RO
     localparam [13:0] R_CPU_SOURCE = 'd2;   // 0x8000_0008, RW in bit 0
+    localparam [13:0] R_MB_SLOT    = 'd3;   // 0x8000_000C, RW in bits 2:0
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -146,6 +151,38 @@ module wb_regfile #(
     wire [31:0] cpu_source_rd = {cpu_src_latches, 7'd0, CAN_MASTER,
                                  7'd0, cpu_src_active, 7'd0, cpu_src_desired};
 
+    // ---- MB_SLOT ------------------------------------------------------------
+    //
+    //   [2:0]    desired   RW   which slot the Mockingboard answers as; 0 = off
+    //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //
+    // The same reset-latched contract as CPU_SOURCE, for the same reason
+    // scaled down: the slot scan happens at boot, and a card that appears (or
+    // moves) in the middle of a running machine is a card the software has
+    // already decided about.  A reset is when the decision is re-made, so a
+    // reset is when the answer changes.  Gated by CAN_MASTER because the
+    // Mockingboard can only put a byte on the bus from a mastering build; in
+    // a snoop build `desired` reads back as written and `active` stays 0,
+    // which is the register telling the truth rather than erring.
+    logic [2:0] mb_slot_desired;
+    logic [2:0] mb_slot_active_q;
+
+    assign mb_slot_active = mb_slot_active_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            mb_slot_desired <= 3'd0;      // no Mockingboard until asked for
+            mb_slot_active_q <= 3'd0;
+        end else begin
+            if (res_assert) begin
+                mb_slot_active_q <= CAN_MASTER ? mb_slot_desired : 3'd0;
+            end
+            if (wr_mb_slot) mb_slot_desired <= wb_dat_w[2:0];
+        end
+    end
+
+    wire [31:0] mb_slot_rd = {21'd0, mb_slot_active_q, 5'd0, mb_slot_desired};
+
     assign wb_stall = 1'b0;
 
     wire access = wb_cyc && wb_stb;
@@ -166,6 +203,7 @@ module wb_regfile #(
                         R_BUILD_DATE: wb_dat_r <= BUILD_DATE[31:0];
                         R_BUILD_TIME: wb_dat_r <= BUILD_TIME[31:0];
                         R_CPU_SOURCE: wb_dat_r <= cpu_source_rd;
+                        R_MB_SLOT:    wb_dat_r <= mb_slot_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -183,6 +221,8 @@ module wb_regfile #(
     // be a lie about what the host can express.
     wire wr_cpu_source = access && !wb_ack && in_region && wb_we &&
                          (word == R_CPU_SOURCE);
+    wire wr_mb_slot    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_MB_SLOT);
 
     // wb_adr[1:0] are byte lanes within a word and are deliberately not decoded.
     wire _unused_ok = &{1'b0, wb_dat_w[31:1], wb_sel, wb_adr[1:0], 1'b0};

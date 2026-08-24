@@ -89,6 +89,10 @@ module bus_write_tb;
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),
         .cpu_sync (cpu_sync), .drv_sync (drv_sync),
         .cyc_en (cyc_en), .cpu_din (cpu_din),
+        // No peripheral in this tb: the claim is tied low, which is also the
+        // proof that an idle claim changes nothing the checks below assert.
+        .op_addr (), .op_rw (), .op_wdata (), .op_present (), .op_commit (),
+        .slot_rd_claim (1'b0), .slot_rd_data (8'h00),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)

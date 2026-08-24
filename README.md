@@ -30,7 +30,8 @@ tools/      gen_ddr3_xdc.py - regenerates and verifies constr/ddr3.xdc.
 build/      Headless Vivado build (build.sh drives the Windows-side Vivado from WSL).
 hw/         The carrier board (milestone 4). Licensed separately - see hw/README.md.
 docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRAM),
-            PROTOCOL.md (the FT601 message framing), and on this branch
+            PROTOCOL.md (the FT601 message framing), MOCKINGBOARD.md (the VIA
+            pair on the card, the sound on the host), and on this branch
             UCODE816.md - a first stab at a microcoded 65816, what it costs and
             what can verify it.  Exploratory, not on the milestone plan.
 ```
@@ -72,6 +73,10 @@ sim/run_ft601_fifo_tb.sh   # FT601 controller moves data from a cold start, ~1 s
 sim/run_ft601_msg_tb.sh    # FT601 heartbeat insertion, per stop-condition, ~2 s
 sim/run_ft601_msg_rx_tb.sh # host->card framing + the 1 s link watchdog, ~1 s
 sim/run_bus_snoop_tb.sh    # bus event capture, framing, overflow, ~1 s
+sim/run_bus_write_tb.sh    # driving the Apple bus as its CPU, ~1 s
+sim/run_reg_map_tb.sh      # control registers end to end, ~1 s
+sim/run_mockingboard_tb.sh # the Mockingboard's VIAs behind the driver, ~2 s
+sim/run_cpu_irq_tb.sh      # a live hardware IRQ, taken between instructions, ~1 s
 python3 sim/gen_microcode.py --check   # microcode ROM matches its generator
 sim/run_cpu_cycles_tb.sh   # every opcode's cycle count vs the 65C02 table, ~5 s
 sim/run_cpu_tb.sh          # Klaus Dormann's two functional suites, ~16 s
