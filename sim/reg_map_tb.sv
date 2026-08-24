@@ -96,12 +96,18 @@ module reg_map_tb;
     reg  apple_res_sync = 1'b1;      // active low, idle high
     wire cpu_source_active;
     wire [2:0] mb_slot_active;
+    // The boot hold's side of BOOT_HOLD: the tb plays the hold itself.
+    wire boot_arm, boot_release;
+    reg  boot_held = 1'b0;
+    integer release_pulses = 0;
+    always @(posedge clk) if (boot_release) release_pulses = release_pulses + 1;
 
     wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME),
                  .CAN_MASTER (1'b1)) u_regs (
         .clk (clk), .rst (rst),
         .apple_res_sync (apple_res_sync), .cpu_source_active (cpu_source_active),
         .mb_slot_active (mb_slot_active),
+        .boot_arm (boot_arm), .boot_release (boot_release), .boot_held (boot_held),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
@@ -114,12 +120,22 @@ module reg_map_tb;
     wire [31:0] tx_data;
     wire        tx_push;
     reg         tx_full = 1'b0;
+    // A notice, offered the way card_link offers one: held until taken.
+    reg  [31:0] note_word  = 32'd0;
+    reg         note_valid = 1'b0;
+    wire        note_take;
+    integer     note_takes = 0;
+    always @(posedge clk) if (note_take) begin
+        note_valid = 1'b0;
+        note_takes = note_takes + 1;
+    end
 
     tx_arb u_arb (
         .clk (clk), .rst (rst),
         .src_data (src_data), .src_push (src_push), .src_full (src_full),
         .rsp_addr (rsp_addr), .rsp_data (rsp_data),
         .rsp_valid (rsp_valid), .rsp_take (rsp_take),
+        .note_word (note_word), .note_valid (note_valid), .note_take (note_take),
         .tx_data (tx_data), .tx_push (tx_push), .tx_full (tx_full)
     );
 
@@ -364,6 +380,102 @@ module reg_map_tb;
         end else begin
             $display("  ok: readback desired=%0d active=%0d",
                      out_mem[base+2][2:0], out_mem[base+2][10:8]);
+        end
+
+        // --- case 10 / BOOT_HOLD: arm is a level, release is a pulse ---------
+        // Not reset-latched, unlike its neighbours: arm is "stop at the next
+        // boot", and a reset is what it is waiting for, not what applies it.
+        if (boot_arm !== 1'b0) begin
+            $display("FAIL: the boot hold is armed before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: BOOT_HOLD starts unarmed");
+
+        do_write(32'h8000_0010, 32'h0000_0001);           // arm
+        if (boot_arm !== 1'b1) begin
+            $display("FAIL: writing arm=1 did not arm");
+            errors = errors + 1;
+        end else $display("  ok: writing arm=1 arms, with no reset needed");
+        if (release_pulses !== 0) begin
+            $display("FAIL: arming released something");
+            errors = errors + 1;
+        end
+
+        // The hold engages: held reads back and the count moves.
+        boot_held = 1'b1;
+        base = out_n;
+        do_read(32'h8000_0010);
+        if (out_mem[base+2][0] !== 1'b1 || out_mem[base+2][8] !== 1'b1 ||
+            out_mem[base+2][16] !== 1'b0 || out_mem[base+2][31:24] !== 8'd1) begin
+            $display("FAIL: BOOT_HOLD readback %08x, expected arm=1 held=1 release=0 holds=1",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: readback arm=1 held=1 holds=1 while held");
+
+        // Release keeps arm as written alongside it, and pulses exactly once
+        // however long the message took: the hold consumes a pulse, not a
+        // level, so a level would release every boot from here on.
+        do_write(32'h8000_0010, 32'h0001_0001);           // release, stay armed
+        if (release_pulses !== 1) begin
+            $display("FAIL: release pulsed %0d time(s), expected exactly 1", release_pulses);
+            errors = errors + 1;
+        end else if (boot_arm !== 1'b1) begin
+            $display("FAIL: the release write disarmed when told to stay armed");
+            errors = errors + 1;
+        end else $display("  ok: release is one pulse, and arm stays as written");
+
+        boot_held = 1'b0;
+        do_write(32'h8000_0010, 32'h0001_0000);           // release AND disarm
+        if (boot_arm !== 1'b0 || release_pulses !== 2) begin
+            $display("FAIL: release-and-disarm: arm=%0d pulses=%0d", boot_arm, release_pulses);
+            errors = errors + 1;
+        end else $display("  ok: one write can release and disarm together");
+
+        base = out_n;
+        do_read(32'h8000_0010);
+        if (out_mem[base+2][16] !== 1'b0 || out_mem[base+2][8] !== 1'b0 ||
+            out_mem[base+2][31:24] !== 8'd1) begin
+            $display("FAIL: after release BOOT_HOLD reads %08x", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: release reads back as 0; holds still counts the one");
+
+        // --- case 11 / a notice, like a reply, never lands inside a message --
+        // The CPU_HOLD notice is one header-only word injected through the
+        // same slot a reply uses, so it has the same obligation.
+        base = out_n;
+        note_word = {15'd0, 1'b1, 8'h17, 8'd0};
+        @(negedge clk);
+        src_data = hdr(T_BUS_EVENTS, 8'd3, 16'd0); src_push = 1'b1;
+        @(negedge clk);
+        src_data = 32'hAAAA_0001;
+        note_valid = 1'b1;                                // arrives mid-payload
+        @(negedge clk);
+        src_data = 32'hAAAA_0002;
+        @(negedge clk);
+        src_data = 32'hAAAA_0003;
+        @(negedge clk);
+        src_push = 1'b0;
+        repeat (40) @(posedge clk);
+
+        hdr_at = -1;
+        for (i = base; i < out_n - 3; i = i + 1) begin
+            if (out_mem[i] === hdr(T_BUS_EVENTS, 8'd3, 16'd0)) hdr_at = i;
+        end
+        if (hdr_at < 0) begin
+            $display("FAIL: the BUS_EVENTS message never came out (notice case)");
+            errors = errors + 1;
+        end else begin
+            expect_word(hdr_at + 1, 32'hAAAA_0001, "event word 1 with a notice pending");
+            expect_word(hdr_at + 2, 32'hAAAA_0002, "event word 2 with a notice pending");
+            expect_word(hdr_at + 3, 32'hAAAA_0003, "event word 3 with a notice pending");
+            if (out_mem[hdr_at + 4] !== {15'd0, 1'b1, 8'h17, 8'd0}) begin
+                $display("FAIL: the notice did not follow the message: word %0d = %08x",
+                         hdr_at + 4, out_mem[hdr_at + 4]);
+                errors = errors + 1;
+            end else if (note_takes !== 1) begin
+                $display("FAIL: the notice was taken %0d time(s)", note_takes);
+                errors = errors + 1;
+            end else
+                $display("  ok: CPU_HOLD notice waited for the boundary, went out once");
         end
 
         // --- case 7 / the parser never lost sync -----------------------------

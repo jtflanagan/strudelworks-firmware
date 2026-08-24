@@ -25,6 +25,13 @@
 // The reply is three words - header, address, data - and once started it is
 // emitted to completion.  Nothing can preempt it, so no boundary check is needed
 // on the way out.
+//
+// A NOTICE takes the same slot.  The card has one thing to say unasked - that
+// the boot hold engaged or released (docs/BOOT_MENU.md) - and it is a single
+// header-only word, injected at a boundary exactly as a reply is.  A reply
+// wins when both are waiting: the host is blocked on a reply and merely
+// listening for a notice.  The notice word is read at the moment it goes out,
+// so a level that changed while waiting is reported as it is, not as it was.
 //////////////////////////////////////////////////////////////////////////////////
 module tx_arb #(
     parameter [7:0] T_REG_VALUE = 8'h16
@@ -44,22 +51,30 @@ module tx_arb #(
     input  wire        rsp_valid,
     output logic       rsp_take,
 
+    // FROM the top: an unsolicited one-word message.  note_valid is held until
+    // note_take; note_word is sampled when it is emitted.
+    input  wire [31:0] note_word,
+    input  wire        note_valid,
+    output logic       note_take,
+
     // TO the TX FIFO
     output logic [31:0] tx_data,
     output logic        tx_push,
     input  wire         tx_full
 );
 
-    // 0 = forwarding, 1..3 = emitting word N of the reply.
-    logic [1:0] inj = 2'd0;
-    wire injecting = (inj != 2'd0);
+    // 0 = forwarding, 1..3 = emitting word N of the reply, 4 = the notice.
+    logic [2:0] inj = 3'd0;
+    wire injecting = (inj != 3'd0);
 
     // Payload blocks still owed by the header last forwarded.  Zero means the
     // next word out of the source is a header, which is the only safe moment.
     logic [7:0] blocks_left = 8'd0;
     wire at_boundary = (blocks_left == 8'd0);
 
-    wire want = rsp_valid && at_boundary && !injecting;
+    wire want_rsp  = rsp_valid  && at_boundary && !injecting;
+    wire want_note = note_valid && at_boundary && !injecting && !rsp_valid;
+    wire want      = want_rsp || want_note;
 
     // Hold capture off while a reply is pending or in flight.  It already
     // handles a full FIFO, so this needs no new behaviour from it.
@@ -69,9 +84,10 @@ module tx_arb #(
         if (injecting) begin
             tx_push = !tx_full;
             case (inj)
-                2'd1:    tx_data = {16'd0, T_REG_VALUE, 8'd2};  // free, type, len
-                2'd2:    tx_data = rsp_addr;
-                default: tx_data = rsp_data;
+                3'd1:    tx_data = {16'd0, T_REG_VALUE, 8'd2};  // free, type, len
+                3'd2:    tx_data = rsp_addr;
+                3'd3:    tx_data = rsp_data;
+                default: tx_data = note_word;
             endcase
         end else begin
             tx_push = src_push && !tx_full;
@@ -81,19 +97,24 @@ module tx_arb #(
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            inj         <= 2'd0;
+            inj         <= 3'd0;
             blocks_left <= 8'd0;
             rsp_take    <= 1'b0;
+            note_take   <= 1'b0;
         end else begin
-            rsp_take <= 1'b0;
+            rsp_take  <= 1'b0;
+            note_take <= 1'b0;
 
             if (injecting) begin
                 if (!tx_full) begin
-                    if (inj == 2'd3) begin
-                        inj      <= 2'd0;
+                    if (inj == 3'd3) begin
+                        inj      <= 3'd0;
                         rsp_take <= 1'b1;
+                    end else if (inj == 3'd4) begin
+                        inj       <= 3'd0;
+                        note_take <= 1'b1;
                     end else begin
-                        inj <= inj + 2'd1;
+                        inj <= inj + 3'd1;
                     end
                 end
             end else begin
@@ -110,8 +131,9 @@ module tx_arb #(
                 // not yet seen it and rsp_valid is still asserted - which looks
                 // exactly like a fresh request.  Without this guard every reply
                 // is emitted twice, and the host reads the duplicate as the
-                // answer to whatever it asks next.
-                if (want && !src_push && !tx_full && !rsp_take) inj <= 2'd1;
+                // answer to whatever it asks next.  note_take, the same.
+                if (want && !src_push && !tx_full && !rsp_take && !note_take)
+                    inj <= want_rsp ? 3'd1 : 3'd4;
             end
         end
     end

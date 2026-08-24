@@ -57,7 +57,8 @@ host reads; the receiver carries parser state across all of them.
 | `0x14` | REG_READ | Host→card. Payload `[addr]`. Answered with REG_VALUE. |
 | `0x15` | REG_WRITE | Host→card. Payload `[addr][data]`. Also answered with REG_VALUE. |
 | `0x16` | REG_VALUE | Card→host. Payload `[addr][data]`, answering either of the above. |
-| `0x17`–`0xFF` | — | Application, unassigned. |
+| `0x17` | CPU_HOLD | Card→host, **unsolicited**. Header only; `free[0]` = the soft core is held at its reset vector. Sent on every change while a capture is enabled, through the same boundary-respecting slot as a REG_VALUE. See BOOT_MENU.md. |
+| `0x18`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -85,6 +86,7 @@ protocol.
 | `0x8000_0004` | BUILD_TIME | RO | `HHMMSS` as a decimal integer |
 | `0x8000_0008` | CPU_SOURCE | RW bit 0 | which CPU drives the Apple bus; latched at RES' — see BUS_MASTER.md |
 | `0x8000_000C` | MB_SLOT | RW bits 2:0 | the Mockingboard's slot, 0 = off; latched at RES' — see MOCKINGBOARD.md |
+| `0x8000_0010` | BOOT_HOLD | RW bit 0, W1 bit 16 | hold the soft core at its reset vector; `arm`, `held`, `release`, `holds` — see BOOT_MENU.md |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

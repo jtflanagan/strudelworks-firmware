@@ -63,6 +63,14 @@ module wb_regfile #(
     // machine entirely.  Latched the same way CPU_SOURCE is - see below.
     output wire [2:0]      mb_slot_active,
 
+    // The boot hold (rtl/boot_hold.sv).  arm is a level the host sets;
+    // release is a one-cycle pulse per write of the release bit; held comes
+    // back from the hold itself, for the readback.  A watching top ties held
+    // to 0 and leaves the rest unconnected.
+    output wire            boot_arm,
+    output logic           boot_release,
+    input  wire            boot_held,
+
     // Wishbone B4 classic, 32-bit.
     input  wire            wb_cyc,
     input  wire            wb_stb,
@@ -90,6 +98,7 @@ module wb_regfile #(
     localparam [13:0] R_BUILD_TIME = 'd1;   // 0x8000_0004, RO
     localparam [13:0] R_CPU_SOURCE = 'd2;   // 0x8000_0008, RW in bit 0
     localparam [13:0] R_MB_SLOT    = 'd3;   // 0x8000_000C, RW in bits 2:0
+    localparam [13:0] R_BOOT_HOLD  = 'd4;   // 0x8000_0010, RW bit 0, W1 bit 16
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -183,6 +192,49 @@ module wb_regfile #(
 
     wire [31:0] mb_slot_rd = {21'd0, mb_slot_active_q, 5'd0, mb_slot_desired};
 
+    // ---- BOOT_HOLD ----------------------------------------------------------
+    //
+    //   [0]      arm       RW   hold the soft core at its reset vector, at the
+    //                           next reset and every one after, until cleared
+    //   [8]      held      RO   the core is held now
+    //   [16]     release   W1   let a held core go; reads as 0
+    //   [31:24]  holds     RO   times the hold has engaged, wrapping
+    //
+    // NOT reset-latched, unlike its neighbours, and deliberately: `arm` is the
+    // standing intention "stop at the next boot", which is exactly what a
+    // level that persists across resets expresses.  The hold itself engages
+    // at a point the core defines - the first opcode fetch after reset - and
+    // rtl/boot_hold.sv is where that is recognised; this register only carries
+    // the host's wishes in and the state back out.  See docs/BOOT_MENU.md.
+    //
+    // `holds` is the counterpart of CPU_SOURCE's `latches`: it lets a host
+    // that missed a CPU_HOLD notice - or attached after it - tell a hold that
+    // happened from one that did not.  The release bit reads as zero because
+    // it is an action, not a state; the state it acts on is `held`.
+    logic       boot_arm_q;
+    logic [7:0] boot_holds;
+    logic       boot_held_prev;
+
+    assign boot_arm = boot_arm_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            boot_arm_q     <= 1'b0;       // boot straight through until asked
+            boot_holds     <= 8'd0;
+            boot_held_prev <= 1'b0;
+            boot_release   <= 1'b0;
+        end else begin
+            boot_held_prev <= boot_held;
+            if (boot_held && !boot_held_prev) boot_holds <= boot_holds + 8'd1;
+            if (wr_boot_hold) boot_arm_q <= wb_dat_w[0];
+            // One pulse per write that set the bit, however long the host's
+            // message took to arrive.  The hold consumes it at a cycle end.
+            boot_release <= wr_boot_hold && wb_dat_w[16];
+        end
+    end
+
+    wire [31:0] boot_hold_rd = {boot_holds, 15'd0, boot_held, 7'd0, boot_arm_q};
+
     assign wb_stall = 1'b0;
 
     wire access = wb_cyc && wb_stb;
@@ -204,6 +256,7 @@ module wb_regfile #(
                         R_BUILD_TIME: wb_dat_r <= BUILD_TIME[31:0];
                         R_CPU_SOURCE: wb_dat_r <= cpu_source_rd;
                         R_MB_SLOT:    wb_dat_r <= mb_slot_rd;
+                        R_BOOT_HOLD:  wb_dat_r <= boot_hold_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -223,6 +276,8 @@ module wb_regfile #(
                          (word == R_CPU_SOURCE);
     wire wr_mb_slot    = access && !wb_ack && in_region && wb_we &&
                          (word == R_MB_SLOT);
+    wire wr_boot_hold  = access && !wb_ack && in_region && wb_we &&
+                         (word == R_BOOT_HOLD);
 
     // wb_adr[1:0] are byte lanes within a word and are deliberately not decoded.
     wire _unused_ok = &{1'b0, wb_dat_w[31:1], wb_sel, wb_adr[1:0], 1'b0};

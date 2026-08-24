@@ -91,6 +91,17 @@
 // THE CORE IS LOCKED TO THE BUS by cyc_en, one pulse per phi0 cycle, which is
 // the interface rtl/cpu65c02.sv was built for.  din is latched at T_DIN and is
 // therefore already stable when the core samples it at T_CYCEN.
+//
+// AN OVERRIDE OP takes a cycle away from the core.  rtl/boot_hold.sv holds the
+// core at its reset vector and reads the keyboard for the host in the
+// meantime; it does that by raising ovr_en, and this module then presents
+// ovr_addr as a read in place of the core's op - latched at the same tap, held
+// for the same cycle, so the bus sees no difference - and withholds cyc_en, so
+// the core does not advance past a cycle that was not its own.  Whether a
+// cycle was overridden is decided ONCE, at T_PRESENT, and remembered in
+// drv_ovr until the cycle ends: a decision that changed mid-cycle would let
+// cyc_en fire for an op the core never issued, and the core would swallow the
+// keyboard's byte as its opcode.
 //////////////////////////////////////////////////////////////////////////////////
 module apple_bus_write #(
     // Tap INDICES, matching apple_bus_read's convention: tap N pulses N+1
@@ -140,6 +151,15 @@ module apple_bus_write #(
     input  wire        slot_rd_claim,
     input  wire [7:0]  slot_rd_data,
 
+    // An override, from boot_hold: while ovr_en, the next cycle presents a
+    // READ of ovr_addr instead of the core's op and the core is not advanced.
+    // Sampled at T_PRESENT only.
+    input  wire        ovr_en,
+    input  wire [15:0] ovr_addr,
+    // The op just presented was an override, not the core's.  Announced with
+    // op_present, for boot_hold to follow what the bus actually carried.
+    output wire        op_ovr,
+
     // To the pins, via the master top.
     output wire  [15:0] addr_drive,
     output wire         rw_drive,       // 1 = read, as on the bus
@@ -188,6 +208,7 @@ module apple_bus_write #(
     logic        drv_rw;
     logic [7:0]  drv_dout;
     logic        drv_sync_q;
+    logic        drv_ovr;         // this cycle is the override's, not the core's
 
     // The data bus is ours only inside the emit window, and only on a write.
     logic emit_window;
@@ -213,6 +234,7 @@ module apple_bus_write #(
     assign op_addr  = drv_addr;
     assign op_rw    = drv_rw;
     assign op_wdata = drv_dout;
+    assign op_ovr   = drv_ovr;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -223,6 +245,7 @@ module apple_bus_write #(
             drv_rw      <= 1'b1;
             drv_dout    <= 8'd0;
             drv_sync_q  <= 1'b0;
+            drv_ovr     <= 1'b0;
             emit_window <= 1'b0;
             cyc_en      <= 1'b0;
             cpu_din     <= 8'd0;
@@ -250,6 +273,7 @@ module apple_bus_write #(
                 drv_addr    <= PARK_ADDR;
                 drv_rw      <= 1'b1;
                 drv_sync_q  <= 1'b0;
+                drv_ovr     <= 1'b0;
                 emit_window <= 1'b0;
                 driving     <= 1'b0;
             end else begin
@@ -257,10 +281,14 @@ module apple_bus_write #(
                 // whole point: one stable value per bus cycle, anchored to the
                 // cycle that samples it.
                 if (t_present) begin
-                    drv_addr    <= cpu_addr;
-                    drv_rw      <= cpu_rw;
+                    // An override is a read of its address and never a SYNC:
+                    // it is not an instruction, and the trace must not decode
+                    // it as one.
+                    drv_addr    <= ovr_en ? ovr_addr : cpu_addr;
+                    drv_rw      <= ovr_en ? 1'b1     : cpu_rw;
                     drv_dout    <= cpu_dout;
-                    drv_sync_q  <= cpu_sync;
+                    drv_sync_q  <= ovr_en ? 1'b0     : cpu_sync;
+                    drv_ovr     <= ovr_en;
                     emit_window <= 1'b0;      // release the data bus
                     driving     <= 1'b1;
                 end
@@ -268,7 +296,8 @@ module apple_bus_write #(
                 if (t_emit)  emit_window <= 1'b1;
                 if (t_din)   cpu_din     <= data_sync;
                 if (t_din)   op_commit   <= 1'b1;
-                if (t_cycen) cyc_en      <= 1'b1;
+                // The core advances only through cycles that were its own.
+                if (t_cycen && !drv_ovr) cyc_en <= 1'b1;
             end
         end
     end

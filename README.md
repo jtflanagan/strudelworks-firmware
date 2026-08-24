@@ -31,7 +31,8 @@ build/      Headless Vivado build (build.sh drives the Windows-side Vivado from 
 hw/         The carrier board (milestone 4). Licensed separately - see hw/README.md.
 docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRAM),
             PROTOCOL.md (the FT601 message framing), MOCKINGBOARD.md (the VIA
-            pair on the card, the sound on the host), and on this branch
+            pair on the card, the sound on the host), BOOT_MENU.md (the soft
+            core held at its reset vector for a host-drawn menu), and on this branch
             UCODE816.md - a first stab at a microcoded 65816, what it costs and
             what can verify it.  Exploratory, not on the milestone plan.
 ```

@@ -75,6 +75,13 @@ module card_link #(
     // a slot, and CAN_MASTER=0 holds this at zero anyway.
     output wire [2:0]  mb_slot_active,
 
+    // The boot hold (rtl/boot_hold.sv, in a mastering top).  arm and release
+    // are the host's, from the BOOT_HOLD register; held comes back for the
+    // readback and for the CPU_HOLD notice.  A watching top ties held to 0.
+    output wire        boot_arm,
+    output wire        boot_release,
+    input  wire        boot_held,
+
     // FT601 (constr/ft601.xdc)
     input  wire        ft_clk,
     input  wire        ft_rxf,
@@ -410,6 +417,9 @@ module card_link #(
         .apple_res_sync    (apple_res_sync),
         .cpu_source_active (cpu_source_active),
         .mb_slot_active    (mb_slot_active),
+        .boot_arm          (boot_arm),
+        .boot_release      (boot_release),
+        .boot_held         (boot_held),
         .wb_cyc   (rwb_cyc),
         .wb_stb   (rwb_stb),
         .wb_we    (rwb_we),
@@ -421,6 +431,37 @@ module card_link #(
         .wb_dat_r (rwb_dat_r)
     );
 
+    // ---- the CPU_HOLD notice --------------------------------------------------
+    // The one thing the card says unasked: the boot hold engaged, or let go.
+    // A header-only message, free[0] = held, sent on every edge of `held` -
+    // and carrying the level as it is when the word goes out, so a bounce
+    // that flips it twice while a notice waits still ends with the host
+    // knowing the truth.  An edge and a take in the same cycle keep the
+    // notice pending, for the same reason.
+    //
+    // Gated on the capture being enabled, which is the silent-until-asked
+    // rule (docs/PROTOCOL.md): a host that has not opened a capture is not
+    // listening, and a notice queued for it would be the first word its
+    // successor reads.  A host attaching to a hold already in progress reads
+    // BOOT_HOLD instead, which is why `held` is in the register too.
+    localparam [7:0] T_CPU_HOLD = 8'h17;
+
+    reg  held_prev    = 1'b0;
+    reg  note_pending = 1'b0;
+    wire note_take;
+    wire held_edge = (boot_held != held_prev);
+
+    always @(posedge clk_ctrl) begin
+        if (rst) begin
+            held_prev    <= 1'b0;
+            note_pending <= 1'b0;
+        end else begin
+            held_prev <= boot_held;
+            if (held_edge && capture_enable) note_pending <= 1'b1;
+            else if (note_take)              note_pending <= 1'b0;
+        end
+    end
+
     tx_arb u_tx_arb (
         .clk       (clk_ctrl),
         .rst       (rst),
@@ -431,6 +472,9 @@ module card_link #(
         .rsp_data  (rsp_data),
         .rsp_valid (rsp_valid),
         .rsp_take  (rsp_take),
+        .note_word ({15'd0, boot_held, T_CPU_HOLD, 8'd0}),
+        .note_valid (note_pending),
+        .note_take (note_take),
         .tx_data   (tx_word),
         .tx_push   (tx_push),
         .tx_full   (txc_full)

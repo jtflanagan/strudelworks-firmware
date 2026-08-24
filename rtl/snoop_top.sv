@@ -73,6 +73,8 @@ module snoop_top #(
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (),          // nothing here can act on it
         .mb_slot_active (),             // nor on this
+        .boot_arm (), .boot_release (), // nor hold a core it does not have
+        .boot_held (1'b0),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),

@@ -26,6 +26,11 @@
 // too, and it comes out of reset running its own 7-cycle reset sequence -
 // fetching $FFFC/$FFFD from the machine's own ROM over the bus it is driving.
 //
+// THE BOOT HOLD sits between the core and the driver.  When the host has
+// armed it, the core is stopped at its post-reset opcode fetch and the driver
+// presents keyboard reads on its behalf until the host says go; see
+// rtl/boot_hold.sv and docs/BOOT_MENU.md.  Unarmed, it is a wire.
+//
 // WHAT IS NOT HERE YET: INH, RDY and NMI.  INH would let the card override the
 // machine's own memory, which is a memory-mode decision that has not been made;
 // RDY is not used by the Apple II for the CPU; the slot brings out no NMI.
@@ -78,6 +83,7 @@ module master_top #(
     wire [7:0]  apple_data_sync;
     wire        cpu_source_active;
     wire [2:0]  mb_slot_active;
+    wire        boot_arm, boot_release, boot_held;
 
     card_link #(
         .BUILD_DATE (BUILD_DATE),
@@ -93,6 +99,8 @@ module master_top #(
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (cpu_source_active),
         .mb_slot_active (mb_slot_active),
+        .boot_arm (boot_arm), .boot_release (boot_release),
+        .boot_held (boot_held),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),
@@ -165,9 +173,11 @@ module master_top #(
     wire [15:0] op_addr;
     wire        op_rw;
     wire [7:0]  op_wdata;
-    wire        op_present, op_commit;
+    wire        op_present, op_commit, op_ovr;
     wire        mb_rd_claim;
     wire [7:0]  mb_rd_data;
+    wire        ovr_en;
+    wire [15:0] ovr_addr;
 
     apple_bus_write u_write (
         .clk           (apple_clk),
@@ -188,6 +198,9 @@ module master_top #(
         .op_commit     (op_commit),
         .slot_rd_claim (mb_rd_claim),
         .slot_rd_data  (mb_rd_data),
+        .ovr_en        (ovr_en),
+        .ovr_addr      (ovr_addr),
+        .op_ovr        (op_ovr),
         .addr_drive    (addr_drive),
         .rw_drive      (rw_drive),
         .data_drive    (data_drive),
@@ -196,6 +209,24 @@ module master_top #(
         .dma_assert    (dma_assert),
         .drv_sync      (drv_sync),
         .driving       ()
+    );
+
+    // ---- the boot hold ------------------------------------------------------
+    boot_hold u_hold (
+        .clk           (apple_clk),
+        .cpu_rst       (cpu_rst),
+        .master_active (cpu_source_active),
+        .arm           (boot_arm),
+        .release_req   (boot_release),
+        .cpu_sync      (cpu_sync),
+        .op_present    (op_present),
+        .op_commit     (op_commit),
+        .op_sync       (drv_sync),
+        .op_ovr        (op_ovr),
+        .din           (cpu_din),
+        .ovr_en        (ovr_en),
+        .ovr_addr      (ovr_addr),
+        .held          (boot_held)
     );
 
     // ---- the Mockingboard ---------------------------------------------------

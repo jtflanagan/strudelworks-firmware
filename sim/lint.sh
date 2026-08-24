@@ -61,6 +61,7 @@ run reg_bridge    rtl/reg_bridge.sv
 run tx_arb        rtl/tx_arb.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 run apple_bus_write rtl/apple_bus_write.sv
+run boot_hold     rtl/boot_hold.sv
 # via6522 is third-party (see its header) and linted only as a dependency of
 # the mockingboard, with the style warnings its 2011 idiom trips suppressed
 # rather than fixed - it ran real machines as-is, and diverging from the
