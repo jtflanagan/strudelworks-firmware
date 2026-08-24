@@ -95,6 +95,7 @@ case "${1:-}" in
   --diag)  WORKDIR="${WORKDIR}-diag"  ;;
   --ft601) WORKDIR="${WORKDIR}-ft601" ;;
   --snoop) WORKDIR="${WORKDIR}-snoop" ;;
+  --master) WORKDIR="${WORKDIR}-master" ;;
 esac
 if [ -e "$WORKDIR" ] && ! rm -rf "$WORKDIR" 2>/dev/null; then
   cat >&2 <<EOF

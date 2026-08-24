@@ -25,6 +25,7 @@ set outdir    [file join $root build work]
 set diag      0
 set ft601     0
 set snoop     0
+set master    0
 # YYYYMMDD and HHMMSS as two separate decimal integers. Two args rather than one
 # quoted pair because this reaches Vivado through cmd.exe, which would split the
 # space anyway. Supplied by build/build.sh so the stamp is when the BUILD
@@ -44,20 +45,22 @@ for {set i 0} {$i < $argc} {incr i} {
         --ft601 { set ft601 1 }
         -snoop  -
         --snoop { set snoop 1 }
+        -master -
+        --master { set master 1 }
         -stamp-date { incr i; set stamp_date [lindex $argv $i] }
         -stamp-time { incr i; set stamp_time [lindex $argv $i] }
         default { puts "WARNING: ignoring unknown argument [lindex $argv $i]" }
     }
 }
 
-if {($diag + $ft601 + $snoop) > 1} {
-    puts "ERROR: -diag, -ft601 and -snoop select different top levels; pick one."
+if {($diag + $ft601 + $snoop + $master) > 1} {
+    puts "ERROR: -diag, -ft601, -snoop and -master select different top levels; pick one."
     exit 1
 }
 
 # One place decides the top level, so the source list, the constraint list and
 # the bitstream name below cannot drift apart.
-set topname [expr {$snoop ? {snoop_top} : ($ft601 ? {ft601_top} : ($diag ? {diag_top} : {au_top}))}]
+set topname [expr {$master ? {master_top} : ($snoop ? {snoop_top} : ($ft601 ? {ft601_top} : ($diag ? {diag_top} : {au_top})))}]
 
 set uber [file join $root third_party UberDDR3]
 if {![file isdirectory [file join $uber rtl]]} {
@@ -95,10 +98,13 @@ add_files -norecurse [list \
     [file join $uber rtl ddr3_phy.v] \
 ]
 
-if {$snoop} {
-    # Bus snooper: the FT601 link plus the message layer, event capture and the
-    # synthetic source.  No DDR3, and no apple_bus.xdc yet - the event source is
-    # synthetic, so this build declares no apple_* ports.
+if {$snoop || $master} {
+    # The two Apple-facing builds.  Same file list but for the top: everything
+    # that does not care which way the pins point is card_link, and only the top
+    # differs - snoop_top declares the Apple pins INPUT and has no driver in it
+    # at all, master_top declares them inout and puts a driver and a CPU behind
+    # them.  A second copy of the link plumbing was the alternative, and a bug
+    # fixed in one copy is a bug still shipped in the other.
     add_files -norecurse [list \
         [file join $root rtl clk_gen.v] \
         [file join $root rtl ft_clk_buf.v] \
@@ -116,8 +122,24 @@ if {$snoop} {
         [file join $root rtl tx_arb.sv] \
         [file join $root rtl uart_tx.v] \
         [file join $root rtl uart_rx.v] \
-        [file join $root rtl snoop_top.sv] \
+        [file join $root rtl card_link.sv] \
     ]
+    if {$master} {
+        add_files -norecurse [list \
+            [file join $root rtl apple_bus_write.sv] \
+            [file join $root rtl cpu65c02.sv] \
+            [file join $root rtl master_top.sv] \
+        ]
+        # cpu65c02 loads its microcode with $readmemh at elaboration, so the
+        # path has to be absolute: the simulator's - and the synthesiser's -
+        # working directory is not the RTL's directory.
+        set_property generic [list \
+            UCODE_FILE=[file join $root rtl cpu65c02_ucode.hex] \
+        ] [current_fileset]
+        add_files -norecurse [list [file join $root rtl cpu65c02_ucode.hex]]
+    } else {
+        add_files -norecurse [list [file join $root rtl snoop_top.sv]]
+    }
 } elseif {$ft601} {
     # FT601 link bring-up: no DDR3 and no Apple bus, so only alchitry_au.xdc and
     # ft601.xdc apply.  No .xci here either - the FT601 clock is used directly (ft_clk_buf.v) and v5.s
@@ -171,15 +193,22 @@ if {$stamp_date != 0 || $stamp_time != 0} {
 # ---- constraints ---------------------------------------------------------
 # An XDC naming a port that does not exist is an error, not a warning, so each
 # constraint file goes only to the tops that declare its ports: ft601.xdc to the
-# two builds with ft_* ports, apple_bus.xdc to the snooper alone.
-if {$snoop} {
-    # The snooper is the first build to declare the apple_* ports, so it is the
-    # first that can take apple_bus.xdc.
+# builds with ft_* ports, apple_bus.xdc to the two Apple-facing ones, and
+# apple_bus_master.xdc to the one that actually drives them.
+if {$snoop || $master} {
     add_files -fileset constrs_1 -norecurse [list \
         [file join $root constr alchitry_au.xdc] \
         [file join $root constr ft601.xdc] \
         [file join $root constr apple_bus.xdc] \
     ]
+    # The output direction exists only in the build that drives.  An XDC naming
+    # a path that cannot exist is an error, not a warning, so a set_false_path
+    # -to an input port would fail the snooper's build outright.
+    if {$master} {
+        add_files -fileset constrs_1 -norecurse [list \
+            [file join $root constr apple_bus_master.xdc] \
+        ]
+    }
 } elseif {$ft601} {
     add_files -fileset constrs_1 -norecurse [list \
         [file join $root constr alchitry_au.xdc] \

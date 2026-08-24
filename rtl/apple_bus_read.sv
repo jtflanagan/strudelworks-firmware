@@ -67,14 +67,10 @@ module apple_bus_read #(
     input  wire        apple_rdy_pin,
     input  wire        apple_dma_pin,
 
-    // Level shifters.  tini_oe follows the 5 V rail, so the buffers are only
-    // enabled when the Apple is actually powered - carried over from v5, where
-    // the polarity is known-working.  Both direction pins are held at "towards
-    // the FPGA"; this design never drives.
-    input  wire        tini_5v_pin,
-    output wire        tini_oe_pin,
-    output wire        tini_addr_dir_pin,
-    output wire        tini_data_dir_pin,
+    // The level shifters are NOT ours.  Each top drives tini_oe / the two
+    // direction pins itself, because their direction is exactly the thing that
+    // differs between watching the bus and driving it - and this module has no
+    // opinion, having no way to drive either way.
 
     // one event per phi0 cycle
     output logic [31:0] ev_data,
@@ -89,6 +85,11 @@ module apple_bus_read #(
     // the Apple bus, which is the property that matters.
     output wire         res_sync,
 
+    // Synchronised IRQ', likewise active low, for a master top to feed the
+    // soft core.  A watching build leaves it unconnected.
+    output wire         irq_sync,
+
+
     // Synchronised phi0 and data, likewise.  A master top needs both live: phi0
     // to place its own taps, and data to be the CPU's `din` on a read.  Sharing
     // the synchronisers rather than adding a second set is not only cheaper -
@@ -100,9 +101,6 @@ module apple_bus_read #(
     output logic        phi0_active
 );
 
-    assign tini_oe_pin       = tini_5v_pin;
-    assign tini_addr_dir_pin = 1'b0;
-    assign tini_data_dir_pin = 1'b0;
 
     // ---- synchronise ---------------------------------------------------------
     wire [7:0]  data_clean;
@@ -129,6 +127,7 @@ module apple_bus_read #(
     wire m2b0  = misc_clean[5];
     wire res   = misc_clean[3];
     assign res_sync  = res;
+    assign irq_sync  = misc_clean[2];
     assign phi0_sync = phi0;
     assign data_sync = data_clean;
 

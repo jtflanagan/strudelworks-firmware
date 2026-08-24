@@ -2,40 +2,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
-// snoop_top - Apple bus snooper over the FT601 link.  NO DDR3.
+// snoop_top - the instrument.  Watches the Apple II bus and never drives it.
 //
-// The first application on the framed link, and the first two-way control: the
-// host asks for a capture, the card streams bus events as BUS_EVENTS frames, and
-// the host writes them to a file for later analysis.  docs/PROTOCOL.md.
+// The Apple pins are declared INPUT here, which is the whole argument for this
+// top existing separately from master_top: a snooper cannot become a participant
+// by mistake, because there is nowhere for a driver to attach.  The card's own
+// plumbing - link, messages, capture, registers - is card_link, shared with the
+// master; only the pin directions and what sits behind them differ.
 //
-// ft601_top is deliberately NOT extended into this.  It is the link regression
-// vehicle - `ft601_probe bench --verify` against its counter source is what
-// caught the padder deadlock, the byte-order symmetry and the skid-buffer
-// changes - and it needs to stay runnable exactly as it is.
-//
-// SILENT UNTIL ASKED.  Before BUS_ENABLE this card sends nothing but heartbeats,
-// which are single-block IDLE frames.  Every block boundary is therefore a frame
-// boundary, so a host attaching at any moment is in sync with no acquisition
-// step, and the first BUS_EVENTS frame lands on a boundary it already knows.
-// That is what makes having no resynchronisation safe here rather than merely
-// tolerable - see the measured alternative in docs/PROTOCOL.md.
-//
-// LOSS OF SYNC IS NOT RECOVERABLE, by decision.  Both the watchdog expiring and
-// an unknown message type arriving pull the same lever: a full 1 ms FT601 reset,
-// which discards unsent events, both async FIFOs and the chip's own buffers, and
-// re-enumerates the device.  The clean stop (BUS_ENABLE with enable=0) exists so
-// that a normal shutdown never comes through there.
-//
-//   led[0]     clk_gen locked
-//   led[1]     capture enabled
-//   led[2]     heartbeat, ~1 Hz - the user domain is running
-//   led[3]     overflow, sticky until the next enable
-//   led[7:4]   bits 27:24 of the captured-event count - a coarse rate display
+// CAN_MASTER is 0, so the CPU_SOURCE register can be read and written from the
+// host exactly as it is in a master build, and still cannot latch itself into
+// "the soft core is driving".  See docs/BUS_MASTER.md.
 //////////////////////////////////////////////////////////////////////////////////
-
 module snoop_top #(
-    // Stamped by build/build.sh via build.tcl's -generic, and readable back over
-    // the link as registers 0 and 1.  Zero means an unstamped build.
     parameter integer BUILD_DATE = 0,   // YYYYMMDD
     parameter integer BUILD_TIME = 0    // HHMMSS
 ) (
@@ -45,8 +24,7 @@ module snoop_top #(
     input  wire        usb_rx,
     output wire        usb_tx,
 
-    // Apple II bus (constr/apple_bus.xdc).  INPUTS ONLY - this design snoops
-    // and never drives; see rtl/apple_bus_read.sv.
+    // Apple II bus (constr/apple_bus.xdc).  INPUTS ONLY.
     input  wire [7:0]  apple_data_pin,
     input  wire [15:0] apple_addr_pin,
     input  wire        apple_rw_pin,
@@ -76,269 +54,40 @@ module snoop_top #(
     inout  wire [3:0]  ft_be
 );
 
-    // ---- clocks -----------------------------------------------------------
-    wire clk_ctrl, clk_ddr3_unused, clk_ddr3_90_unused, clk_ref_unused;
-    wire clk_locked;
+    wire        apple_clk, apple_rst;
+    wire        capture_on, capture_real;
+    wire [31:0] real_data;
+    wire        real_valid, phi0_live, apple_res_sync;
 
-    clk_gen u_clk (
-        .clk_in      (clk_pin),
-        .rst         (~rst_n),
-        .clk_ctrl    (clk_ctrl),
-        .clk_ddr3    (clk_ddr3_unused),
-        .clk_ddr3_90 (clk_ddr3_90_unused),
-        .clk_ref     (clk_ref_unused),
-        .locked      (clk_locked)
+    card_link #(
+        .BUILD_DATE (BUILD_DATE),
+        .BUILD_TIME (BUILD_TIME),
+        .CAN_MASTER (1'b0)
+    ) u_card (
+        .clk_pin (clk_pin), .rst_n (rst_n), .led (led),
+        .usb_rx (usb_rx), .usb_tx (usb_tx),
+        .apple_clk (apple_clk), .apple_rst (apple_rst),
+        .capture_on (capture_on), .capture_real (capture_real),
+        .real_data (real_data), .real_valid (real_valid),
+        .phi0_live (phi0_live),
+        .apple_res_sync (apple_res_sync),
+        .cpu_source_active (),          // nothing here can act on it
+        .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
+        .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
+        .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),
+        .ft_data (ft_data), .ft_be (ft_be)
     );
 
-    wire ft_clk_i;
-    ft_clk_buf u_ft_clk (.ft_clk_pin(ft_clk), .ft_clk(ft_clk_i));
-
-    // ---- reset ------------------------------------------------------------
-    localparam integer RST_TICKS      = 64;
-    localparam integer CMD_RST_CYCLES = 100_000;   // 1 ms at 100 MHz
-
-    // Three things pull the reset lever, and they are all the same lever on
-    // purpose: the host's 'R' command, the watchdog expiring, and a malformed
-    // message arriving.  The last two are both "we no longer agree with the host
-    // about where frames begin", which is unrecoverable by design.
-    //
-    // 1 ms is measured, not chosen: a ~40 ns pulse left the chip untouched and
-    // 1 ms made it re-enumerate.  See ft601_top for the full note.
-    wire       cmd_reset_strobe;
-    wire       watchdog_fired;
-    wire       rx_frame_error;
-    wire       link_reset_trigger = cmd_reset_strobe | watchdog_fired | rx_frame_error;
-
-    reg [16:0] cmd_rst_cnt = 17'd0;
-
-    always @(posedge clk_ctrl) begin
-        if (!clk_locked)                    cmd_rst_cnt <= 17'd0;
-        else if (link_reset_trigger)        cmd_rst_cnt <= CMD_RST_CYCLES[16:0];
-        else if (cmd_rst_cnt != 17'd0)      cmd_rst_cnt <= cmd_rst_cnt - 17'd1;
-    end
-
-    wire cmd_reset = (cmd_rst_cnt != 17'd0);
-
-    reg [7:0] tickcount = 8'd0;
-    always @(posedge clk_ctrl) begin
-        if (!clk_locked)                tickcount <= 8'd0;
-        else if (tickcount < RST_TICKS) tickcount <= tickcount + 8'd1;
-    end
-
-    wire rst = ~clk_locked | (tickcount < RST_TICKS) | cmd_reset;
-
-    assign ft_reset = ~rst;
-
-    reg [4:0] tickcount_ft = 5'd0;
-    always @(posedge ft_clk_i) begin
-        if (tickcount_ft != 5'd16) tickcount_ft <= tickcount_ft + 5'd1;
-    end
-
-    wire fifo_rst = rst | (tickcount_ft != 5'd16);
-
-    // ---- FT601 controller -------------------------------------------------
-    wire [31:0] ft_dout;
-    wire        ft_dout_valid;
-    wire [31:0] ft_din;
-    wire        ft_din_wr_en;
-    wire        ft_din_req_data;
-    wire        ft_fwd, ft_q_empty, ft_in_rx;
-
-    ft601_fifo u_ft (
-        .clk          (ft_clk_i),
-        .rst          (rst),
-        .ft_be        (ft_be),
-        .ft_data      (ft_data),
-        .ft_rxf       (ft_rxf),
-        .ft_txe       (ft_txe),
-        .ft_oe        (ft_oe),
-        .ft_rd        (ft_rd),
-        .ft_wr        (ft_wr),
-        .ft_wakeup    (ft_wakeup),
-        .dout         (ft_dout),
-        .dout_valid   (ft_dout_valid),
-        .din          (ft_din),
-        .din_wr_en    (ft_din_wr_en),
-        .din_req_data (ft_din_req_data),
-        .fwd          (ft_fwd),
-        .q_empty      (ft_q_empty),
-        .in_rx        (ft_in_rx)
-    );
-
-    // ---- FPGA -> host crossing --------------------------------------------
-    localparam integer TX_FIFO_DEPTH = 4096;
-    localparam integer RX_FIFO_DEPTH = 1024;
-
-    wire [31:0] txc_dout;
-    wire        txc_empty, txc_full;
-    wire        txc_rd_en;
-    wire [31:0] tx_word;
-    wire        tx_push;
-    wire        hb_sent;
-
-    // bus_event_capture -> tx_arb -> tx_fifo.  The arbiter is in the middle so a
-    // register reply can be slipped in between whole messages; see tx_arb.
-    wire [31:0] cap_word;
-    wire        cap_push;
-    wire        cap_full;
-    wire [31:0] rsp_addr, rsp_data;
-    wire        rsp_valid, rsp_take;
-    // Driven by the synchronizer further down, next to the control-domain
-    // register it crosses from; declared here because the instantiation that
-    // consumes it comes first.
-    wire [3:0]  hb_shift_ft;
-
-    ft601_msg_tx u_msg_tx (
-        .clk          (ft_clk_i),
-        .rst          (rst),
-        .fifo_dout    (txc_dout),
-        .fifo_empty   (txc_empty),
-        .fifo_rd_en   (txc_rd_en),
-        .din          (ft_din),
-        .din_wr_en    (ft_din_wr_en),
-        .din_req_data (ft_din_req_data),
-        .fwd          (ft_fwd),
-        .q_empty      (ft_q_empty),
-        .in_rx        (ft_in_rx),
-        .idle_shift   (hb_shift_ft),
-        .hb_sent      (hb_sent)
-    );
-
-    xpm_fifo_async #(
-        .FIFO_MEMORY_TYPE ("block"), .FIFO_WRITE_DEPTH (TX_FIFO_DEPTH),
-        .WRITE_DATA_WIDTH (32),      .READ_DATA_WIDTH  (32),
-        .READ_MODE ("fwft"), .FIFO_READ_LATENCY (0),
-        .USE_ADV_FEATURES ("0000"), .CDC_SYNC_STAGES (2),
-        .RELATED_CLOCKS (0), .ECC_MODE ("no_ecc"), .WAKEUP_TIME (0)
-    ) tx_fifo (
-        .rst (fifo_rst),
-        .wr_clk (clk_ctrl), .wr_en (tx_push), .din (tx_word), .full (txc_full),
-        .rd_clk (ft_clk_i), .rd_en (txc_rd_en), .dout (txc_dout), .empty (txc_empty),
-        .sleep (1'b0), .injectdbiterr (1'b0), .injectsbiterr (1'b0),
-        .almost_empty (), .almost_full (), .data_valid (), .dbiterr (), .overflow (),
-        .prog_empty (), .prog_full (), .rd_data_count (), .rd_rst_busy (),
-        .sbiterr (), .underflow (), .wr_ack (), .wr_data_count (), .wr_rst_busy ()
-    );
-
-    // ---- host -> FPGA crossing --------------------------------------------
-    wire [31:0] rxc_dout;
-    wire        rxc_empty;
-    wire        rxc_rd_en;
-
-    xpm_fifo_async #(
-        .FIFO_MEMORY_TYPE ("block"), .FIFO_WRITE_DEPTH (RX_FIFO_DEPTH),
-        .WRITE_DATA_WIDTH (32),      .READ_DATA_WIDTH  (32),
-        .READ_MODE ("fwft"), .FIFO_READ_LATENCY (0),
-        .USE_ADV_FEATURES ("0000"), .CDC_SYNC_STAGES (2),
-        .RELATED_CLOCKS (0), .ECC_MODE ("no_ecc"), .WAKEUP_TIME (0)
-    ) rx_fifo (
-        .rst (fifo_rst),
-        .wr_clk (ft_clk_i), .wr_en (ft_dout_valid), .din (ft_dout), .full (),
-        .rd_clk (clk_ctrl), .rd_en (rxc_rd_en), .dout (rxc_dout), .empty (rxc_empty),
-        .sleep (1'b0), .injectdbiterr (1'b0), .injectsbiterr (1'b0),
-        .almost_empty (), .almost_full (), .data_valid (), .dbiterr (), .overflow (),
-        .prog_empty (), .prog_full (), .rd_data_count (), .rd_rst_busy (),
-        .sbiterr (), .underflow (), .wr_ack (), .wr_data_count (), .wr_rst_busy ()
-    );
-
-    // ---- host -> card messages ---------------------------------------------
-    localparam [7:0] T_BUS_ENABLE = 8'h11;
-
-    wire        msg_valid;
-    wire [7:0]  msg_type;
-    wire [15:0] msg_free;
-    wire [7:0]  msg_len;
-    wire [31:0] pay_data;
-    wire        pay_valid;
-
-    ft601_msg_rx u_msg_rx (
-        .clk         (clk_ctrl),
-        .rst         (rst),
-        .fifo_dout   (rxc_dout),
-        .fifo_empty  (rxc_empty),
-        .fifo_rd_en  (rxc_rd_en),
-        .msg_valid   (msg_valid),
-        .msg_type    (msg_type),
-        .msg_free    (msg_free),
-        .msg_len     (msg_len),
-        .pay_data    (pay_data),
-        .pay_valid   (pay_valid),
-        .frame_error (rx_frame_error)
-    );
-
-    wire bus_enable_msg = msg_valid && (msg_type == T_BUS_ENABLE);
-    wire want_enable    = bus_enable_msg && msg_free[0];
-    wire want_disable   = bus_enable_msg && !msg_free[0];
-
-    reg capture_enable = 1'b0;
-    always @(posedge clk_ctrl) begin
-        if (rst)                capture_enable <= 1'b0;
-        else if (want_enable)   capture_enable <= 1'b1;
-        else if (want_disable)  capture_enable <= 1'b0;
-    end
-
-    // Heartbeat period select, free[7:4], latched at enable alongside the source
-    // so it cannot change mid-capture.  Zero is the built-in default, which is
-    // what lets this ride in an existing message: a host that never sets it
-    // sends zero and nothing changes.
-    reg [3:0] hb_shift_ctrl = 4'd0;
-    always @(posedge clk_ctrl) begin
-        if (rst)              hb_shift_ctrl <= 4'd0;
-        else if (want_enable) hb_shift_ctrl <= msg_free[7:4];
-    end
-
-    // clk_ctrl -> ft_clk.  Four bits that change once per capture and are then
-    // held for the whole run, so two flops are enough: the only exposure is the
-    // single transition, and the worst it can produce is one heartbeat at a
-    // blended period before the value settles.
-    synchronizer #(.WIDTH(4)) u_hb_shift_sync (
-        .clk (ft_clk_i), .rst (rst), .in (hb_shift_ctrl), .out (hb_shift_ft)
-    );
-
-    // Source select, latched at enable so it cannot change mid-capture.
-    // free[1]: 0 = synthetic, 1 = the real Apple bus.
-    reg source_real = 1'b0;
-    always @(posedge clk_ctrl) begin
-        if (rst)              source_real <= 1'b0;
-        else if (want_enable) source_real <= msg_free[1];
-    end
-
-    // Acknowledge every enable change with a status frame, so the host can see
-    // the card acted rather than inferring it from the data stopping.
-    reg status_req = 1'b0;
-    always @(posedge clk_ctrl) status_req <= !rst && bus_enable_msg;
-
-    // ---- watchdog -----------------------------------------------------------
-    link_watchdog u_wd (
-        .clk    (clk_ctrl),
-        .rst    (rst),
-        .arm    (want_enable),
-        .disarm (want_disable),
-        .kick   (msg_valid),        // ANY well-formed message, not only heartbeats
-        .armed  (),
-        .fired  (watchdog_fired)
-    );
-
-    // ---- event sources ------------------------------------------------------
-    // Two, selected per capture.  The synthetic one is not scaffolding to be
-    // removed: it is the only source whose content the host can verify, so it
-    // stays as the way to tell a suspect capture from a suspect capturer.
-    wire [31:0] synth_data,  real_data;
-    wire        synth_valid, real_valid;
-    wire        phi0_active;
-
-    synth_bus_events u_synth (
-        .clk      (clk_ctrl),
-        .rst      (rst),
-        .enable   (capture_enable && !source_real),
-        .ev_data  (synth_data),
-        .ev_valid (synth_valid)
-    );
+    // The level shifters point Apple -> FPGA, always.  A constant, so there is
+    // no state in which this board could be driving.
+    assign tini_oe_pin       = tini_5v_pin;
+    assign tini_addr_dir_pin = 1'b0;
+    assign tini_data_dir_pin = 1'b0;
 
     apple_bus_read u_apple (
-        .clk               (clk_ctrl),
-        .rst               (rst),
-        .enable            (capture_enable && source_real),
+        .clk               (apple_clk),
+        .rst               (apple_rst),
+        .enable            (capture_on && capture_real),
         .apple_data_pin    (apple_data_pin),
         .apple_addr_pin    (apple_addr_pin),
         .apple_rw_pin      (apple_rw_pin),
@@ -350,224 +99,13 @@ module snoop_top #(
         .apple_irq_pin     (apple_irq_pin),
         .apple_rdy_pin     (apple_rdy_pin),
         .apple_dma_pin     (apple_dma_pin),
-        .tini_5v_pin       (tini_5v_pin),
-        .tini_oe_pin       (tini_oe_pin),
-        .tini_addr_dir_pin (tini_addr_dir_pin),
-        .tini_data_dir_pin (tini_data_dir_pin),
         .ev_data           (real_data),
         .ev_valid          (real_valid),
         .res_sync          (apple_res_sync),
-        .phi0_active       (phi0_active)
+        .irq_sync          (),
+        .phi0_sync         (),
+        .data_sync         (),
+        .phi0_active       (phi0_live)
     );
-
-    wire [31:0] ev_data  = source_real ? real_data  : synth_data;
-    wire        ev_valid = source_real ? real_valid : synth_valid;
-
-    wire        overflow;
-    wire [31:0] captured;
-
-    bus_event_capture u_capture (
-        .clk        (clk_ctrl),
-        .rst        (rst),
-        .enable     (capture_enable),
-        .status_req (status_req),
-        .ev_data    (ev_data),
-        .ev_valid   (ev_valid),
-        .tx_data    (cap_word),
-        .tx_push    (cap_push),
-        .tx_full    (cap_full),
-        .overflow   (overflow),
-        .captured   (captured)
-    );
-
-    // ---- control registers --------------------------------------------------
-    // A 32-bit Wishbone of its own rather than a decode off the DDR3 bus, which
-    // is 128 bits wide and addressed by burst index.  See wb_regfile.
-    wire        rwb_cyc, rwb_stb, rwb_we, rwb_ack, rwb_stall;
-    wire [31:0] rwb_adr, rwb_dat_w, rwb_dat_r;
-    wire [3:0]  rwb_sel;
-
-    reg_bridge u_reg_bridge (
-        .clk       (clk_ctrl),
-        .rst       (rst),
-        .msg_valid (msg_valid),
-        .msg_type  (msg_type),
-        .pay_data  (pay_data),
-        .pay_valid (pay_valid),
-        .wb_cyc    (rwb_cyc),
-        .wb_stb    (rwb_stb),
-        .wb_we     (rwb_we),
-        .wb_adr    (rwb_adr),
-        .wb_dat_w  (rwb_dat_w),
-        .wb_sel    (rwb_sel),
-        .wb_ack    (rwb_ack),
-        .wb_stall  (rwb_stall),
-        .wb_dat_r  (rwb_dat_r),
-        .rsp_addr  (rsp_addr),
-        .rsp_data  (rsp_data),
-        .rsp_valid (rsp_valid),
-        .rsp_take  (rsp_take)
-    );
-
-    // CAN_MASTER stays 0 here, and that is the whole point of the parameter:
-    // this is the INSTRUMENT.  It carries the CPU_SOURCE register so the host
-    // can read and write it uniformly across builds, and the register refuses
-    // to ever latch itself into "the soft core is driving" because nothing in
-    // this top can drive.  See docs/BUS_MASTER.md.
-    wire apple_res_sync;
-    wire cpu_source_active_unused;
-
-    wb_regfile #(
-        .BUILD_DATE (BUILD_DATE),
-        .BUILD_TIME (BUILD_TIME),
-        .CAN_MASTER (1'b0)
-    ) u_regfile (
-        .clk      (clk_ctrl),
-        .rst      (rst),
-        .apple_res_sync    (apple_res_sync),
-        .cpu_source_active (cpu_source_active_unused),
-        .wb_cyc   (rwb_cyc),
-        .wb_stb   (rwb_stb),
-        .wb_we    (rwb_we),
-        .wb_adr   (rwb_adr),
-        .wb_dat_w (rwb_dat_w),
-        .wb_sel   (rwb_sel),
-        .wb_ack   (rwb_ack),
-        .wb_stall (rwb_stall),
-        .wb_dat_r (rwb_dat_r)
-    );
-
-    tx_arb u_tx_arb (
-        .clk       (clk_ctrl),
-        .rst       (rst),
-        .src_data  (cap_word),
-        .src_push  (cap_push),
-        .src_full  (cap_full),
-        .rsp_addr  (rsp_addr),
-        .rsp_data  (rsp_data),
-        .rsp_valid (rsp_valid),
-        .rsp_take  (rsp_take),
-        .tx_data   (tx_word),
-        .tx_push   (tx_push),
-        .tx_full   (txc_full)
-    );
-
-    // ---- host command channel ---------------------------------------------
-    // 'R' resets the FT601, over the Au's own serial bridge - a separate USB
-    // device, so it is reachable exactly when the FT601 is not.
-    wire [7:0] urx_data;
-    wire       urx_valid;
-
-    uart_rx #(.CLK_HZ(100_000_000), .BAUD(115_200)) u_uart_rx (
-        .clk (clk_ctrl), .rst (~clk_locked),
-        .rx (usb_rx), .rx_data (urx_data), .rx_valid (urx_valid)
-    );
-
-    assign cmd_reset_strobe = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
-
-    // ---- status over UART -------------------------------------------------
-    // "C=xxxxxxxx E=x O=x P=x" - events captured, capture enabled, overflow, and
-    // whether phi0 is ticking.  P is the one that answers "is this card actually
-    // in a machine?", which no amount of staring at the USB side will tell you.
-    // The
-    // UART is the only way to see the card's own view when the FT601 link is the
-    // thing under suspicion.
-    localparam [7:0] CH_C = 8'h43, CH_E = 8'h45, CH_O = 8'h4F, CH_EQ = 8'h3D;
-    localparam [7:0] CH_P = 8'h50;
-    localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
-
-    localparam [4:0] RPT_LAST = 5'd23;
-    localparam [4:0] RPT_IDLE = 5'd24;
-
-    wire [7:0] uart_data;
-    wire       uart_valid, uart_ready;
-
-    reg [21:0] rpt_div  = 22'd0;
-    reg [4:0]  rpt_idx  = RPT_IDLE;
-    reg [31:0] rpt_cnt  = 32'd0;
-    reg        rpt_en   = 1'b0;
-    reg        rpt_ovf  = 1'b0;
-    reg        rpt_phi  = 1'b0;
-
-    always @(posedge clk_ctrl) begin
-        if (!clk_locked) begin
-            rpt_div <= 22'd0;
-            rpt_idx <= RPT_IDLE;
-        end else begin
-            rpt_div <= rpt_div + 22'd1;
-            if (rpt_div == 22'd0 && rpt_idx == RPT_IDLE) begin
-                rpt_cnt <= captured;
-                rpt_en  <= capture_enable;
-                rpt_ovf <= overflow;
-                rpt_phi <= phi0_active;
-                rpt_idx <= 5'd0;
-            end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
-                if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
-                else                     rpt_idx <= rpt_idx + 5'd1;
-            end
-        end
-    end
-
-    reg [3:0] nib;
-    always @(*) begin
-        case (rpt_idx)
-            5'd2:  nib = rpt_cnt[31:28];
-            5'd3:  nib = rpt_cnt[27:24];
-            5'd4:  nib = rpt_cnt[23:20];
-            5'd5:  nib = rpt_cnt[19:16];
-            5'd6:  nib = rpt_cnt[15:12];
-            5'd7:  nib = rpt_cnt[11:8];
-            5'd8:  nib = rpt_cnt[7:4];
-            5'd9:  nib = rpt_cnt[3:0];
-            5'd13: nib = {3'b000, rpt_en};
-            5'd17: nib = {3'b000, rpt_ovf};
-            5'd21: nib = {3'b000, rpt_phi};
-            default: nib = 4'd0;
-        endcase
-    end
-
-    wire [7:0] hex = (nib < 4'd10) ? (8'h30 + {4'd0, nib})
-                                   : (8'h41 + {4'd0, nib} - 8'd10);
-
-    reg [7:0] ch;
-    always @(*) begin
-        case (rpt_idx)
-            5'd0:  ch = CH_C;
-            5'd1:  ch = CH_EQ;
-            5'd10: ch = CH_SP;
-            5'd11: ch = CH_E;
-            5'd12: ch = CH_EQ;
-            5'd14: ch = CH_SP;
-            5'd15: ch = CH_O;
-            5'd16: ch = CH_EQ;
-            5'd18: ch = CH_SP;
-            5'd19: ch = CH_P;
-            5'd20: ch = CH_EQ;
-            5'd22: ch = CH_CR;
-            5'd23: ch = CH_LF;
-            default: ch = hex;
-        endcase
-    end
-
-    assign uart_data  = ch;
-    assign uart_valid = (rpt_idx != RPT_IDLE);
-
-    uart_tx #(.CLK_HZ(100_000_000), .BAUD(115_200)) u_uart_tx (
-        .clk (clk_ctrl), .rst (~clk_locked),
-        .tx_data (uart_data), .tx_valid (uart_valid), .tx_ready (uart_ready), .tx (usb_tx)
-    );
-
-    // ---- status -----------------------------------------------------------
-    reg [25:0] heartbeat = 26'd0;
-    always @(posedge clk_ctrl) heartbeat <= heartbeat + 26'd1;
-
-    wire unused_hb = hb_sent;
-    wire unused_len = |msg_len;
-
-    assign led[0]   = clk_locked;
-    assign led[1]   = capture_enable;
-    assign led[2]   = heartbeat[25];
-    assign led[3]   = overflow;
-    assign led[7:4] = captured[27:24];
 
 endmodule

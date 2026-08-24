@@ -130,12 +130,63 @@ answers to the same question, and they disagree exactly when it matters.
 **Data is deliberately still driven for a few cycles after the falling edge**,
 until `T_PRESENT` of the next cycle. That is hold time, not a leak.
 
+## The master build
+
+**✅ Built, and it fits.** `build/build.sh --master` → `master_top.bit`.
+
+```
+                     snoop      master
+  setup WNS       +0.216 ns   +0.065 ns
+  hold  WHS       +0.070 ns   +0.101 ns
+  Slice LUTs                      1300  (6.3%)
+  Slice Registers                 1433  (3.4%)
+  Block RAM                         10  (20%)
+  Bonded IOB                        91  (53%)
+  IOBUFs               32            58
+```
+
+The 26 extra IOBUFs are exactly the pins that became bidirectional: 16 address,
+8 data, R/W and DMA′.
+
+**The tight path is not ours.** The master's 0.065 ns is `ft_txe` into the FT601
+controller, in the `ft_clk` domain — the same interface DERISK records as having
+been carefully constrained, now under more placement pressure from a bigger
+design. The soft CPU's own worst path, its microcode ROM into the new
+`last_addr` register, has **0.89 ns** of slack. If the FT601 path ever needs
+winning back, that is where to look and it has nothing to do with mastering.
+
+**The tops were split rather than duplicated.** `card_link.sv` is the card minus
+the Apple — link, messages, capture, registers, UART — and both tops instantiate
+it. The alternative was a second copy of five hundred lines of link plumbing,
+where a bug fixed in one copy is a bug still shipped in the other. What is left
+in each top is only what differs:
+
+| | `snoop_top` | `master_top` |
+|---|---|---|
+| Apple pins | `input` | `inout` |
+| `CAN_MASTER` | 0 | 1 |
+| level shifters | tied Apple→FPGA | follow the drive enables |
+| behind them | nothing | `apple_bus_write` + `cpu65c02` |
+
+`apple_bus_read` is in **both**, unchanged and driving nothing, so every cycle
+the master drives is captured and shipped on the path already closed on
+hardware. A driven cycle can be checked against a capture rather than inferred,
+and `sim/run_trace_replay.sh` already knows how to read the result.
+
+The shifter control moved out of the reader into the tops, because their
+direction is exactly what differs between watching and driving — and the reader,
+having no way to drive either way, has no opinion.
+
+**The core is reset with the machine**: `cpu_rst = card reset || RES′ asserted`.
+So the //e being reset resets the soft core too, and it comes out running its own
+seven-cycle reset sequence, fetching `$FFFC`/`$FFFD` from the machine's own ROM
+over the bus it is driving.
+
 ## What changes here
 
-`rtl/apple_bus_read.sv` **stays input-only.** The instrument must not become a
-participant — that is what makes a driven cycle checkable against a capture
-rather than inferred. Driving goes in a new `rtl/apple_bus_write.sv`, and the
-Apple pins become `inout` only in a master top, never in `--snoop`.
+✅ Done as planned: `rtl/apple_bus_read.sv` is input-only in both builds, driving
+lives in `rtl/apple_bus_write.sv`, and the Apple pins are `inout` only in
+`master_top`.
 
 We already have every pin: `apple_dma_pin`, `tini_addr_dir_pin`,
 `tini_data_dir_pin`, `tini_oe_pin` are all in `constr/apple_bus.xdc`. Note the
