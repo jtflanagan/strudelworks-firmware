@@ -233,7 +233,59 @@ Covered by `sim/run_reg_map_tb.sh`, end to end from a REG_WRITE message: that a
 write alone does **not** hand over, that a reset does, that every field reads
 back, and that a held-low RES′ latches once rather than once per cycle.
 
+## ✅ It works
+
+The card is the Apple II's CPU. Second attempt, `master_top` at commit `ff1a6e3`:
+
+```
+16.44 s captured, 0 gaps
+free-running for 8.23 s after the last RES' release
+
+write-then-read-back by region
+  $0000-$0FFF   matched   153544   differed        0
+  $C000-$CFFF   matched   371661   differed    36429
+
+mismatches outside the I/O page: 0
+writes to the text screen: 3603
+```
+
+**Every RAM write reads back.** The 36,429 differences are all in `$C000-$CFFF`,
+where a write and a read are different operations by definition — soft switches
+and I/O registers, not failures. The machine boots, runs, and draws.
+
+*The first attempt failed, and the failure is the useful part.* The handover
+itself worked on the first try: DMA′ pulled, seven-cycle reset, the vector out of
+the Apple's own ROM, and the monitor executing correctly — `CLD`, `JSR $FE84`,
+`LDY #$FF`, `STY $32`. It came apart at the first `RTS`, pulling `$A0`/`$A0`
+where it had pushed `$FA`/`$65` six cycles earlier. 6740 of 6855 write-then-read
+pairs did not read back, while every read was perfect.
+
+The cause was `T_EMIT`, and **not** the scaling — aty's 195 ns scaled to 200 ns
+here, faithfully. The number was right for a different question. In aty the card
+impersonates **memory**, driving a byte the CPU samples at the *end* of the
+cycle, and its own soft CPU writes into shadow RAM behind INH, so that tap had
+never been asked to be a CPU write. A CPU must hold its write data across its
+whole active phase. `T_EMIT` 19 → 2.
+
+Early, but deliberately not from `T_PRESENT`: the data bus belongs to the video
+circuitry while phi0 is low — that is what makes the floating bus return screen
+data — so driving from the present tap would put us against the machine's own RAM
+output for half of every cycle. Just after the rising edge stays inside the CPU's
+half.
+
+**The lesson worth keeping**: a scaled constant carries its units but not its
+meaning. Both taps were 200 ns and only one of them was an answer to our
+question.
+
 ## Open
+
+- ⬜ **A master trace has no SYNC.** `m2sel` is the real 6502's SYNC line and the
+  real 6502 is disconnected, so it reads zero for the whole capture. Instruction
+  boundaries are therefore not recoverable from a trace of ourselves, and
+  `run_trace_replay.sh --from` cannot be used on one. Replaying a master capture
+  needs the boundaries from somewhere else — the core's own sync, exported as a
+  status bit, would do it.
+
 
 - ✅ **`cyc_en` is one pulse per phi0** — done, in the driver, and checked.
 - ✅ **Changeover** — done, see below.
