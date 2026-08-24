@@ -60,7 +60,20 @@ import os
 # concatenation of registers except AGU; keeping them separate means the AGU is
 # free to compute a value to LATCH while the bus shows something else, which is
 # what the dummy-read cycles need.
-ADDR = dict(PC=0, AGU=1, ZP=2, AD=3, SP=4, VEC=5, VEC1=6)
+# LAST is the address driven during the previous bus cycle, and it is what every
+# CMOS dummy cycle selects.  The NMOS part put a half-computed effective address
+# on the bus during an internal cycle; the 65C02 re-reads whatever it read last.
+# One source covers all of it - the operand byte for zp,X and abs,X, the
+# pointer's high byte for (zp),Y, PC for a taken branch - because that is
+# genuinely one rule and not six coincidences.  Measured against a real part
+# over 24.7 million cycles; see docs/DERISK.md.
+# FIXUP is LAST or AD depending on whether the index actually carried, decided
+# in hardware from the saved carry.  It exists because the part's behaviour on
+# the indexed fixup cycle is not a property of the INSTRUCTION but of the DATA:
+# if the address needed fixing it re-reads the last program byte, and if it did
+# not it drives the effective address.  Microcode cannot see that; the AGU's
+# saved carry can.
+ADDR = dict(PC=0, AGU=1, ZP=2, AD=3, SP=4, VEC=5, VEC1=6, LAST=7, FIXUP=8)
 
 # AGU low-half operands.  agu_lo = lo_a + lo_b + lo_ci, 8 bits, carry out.
 LO_A = dict(ADL=0, PCL=1, S=2, MD=3)
@@ -97,7 +110,7 @@ COND = dict(ALWAYS=0, NEVER=1, CARRY=2, BRANCH=3, PAGE=4, DEC=5, ZPBIT=6)
 FIELDS = [
     ("sync",      1),   # this cycle is an opcode fetch
     ("rw",        1),   # 1 = read, 0 = write
-    ("addr_sel",  3),
+    ("addr_sel",  4),
     ("lo_a",      2),
     ("lo_b",      3),
     ("lo_ci",     1),
@@ -180,7 +193,7 @@ def index_lo(idx, alt, always=False):
                 cond=COND["ALWAYS"] if always else COND["CARRY"], alt=alt)
 
 
-def fixup():
+def fixup(bus="fixup"):
     """Propagate the deferred carry into the address high byte.
 
     ADH moves by the SAVED carry, not by one.  The distinction matters because
@@ -189,11 +202,33 @@ def fixup():
     store a page high.  Reads only arrive here when the carry was set, so they
     cannot tell the two apart, which is what makes this a store-only bug.
 
-    The bus shows the un-fixed address meanwhile, which is what the hardware
-    does: the whole point of the cycle is that the high byte is not right yet.
+    WHAT THE BUS SHOWS SPLITS, and it splits on whether the cycle is CONDITIONAL
+    or MANDATORY - which is not a distinction anyone would have guessed, and is
+    measured rather than reasoned:
+
+    WHAT THE BUS SHOWS is not a property of the instruction, which is what made
+    it hard to guess and easy to measure:
+
+      abs,X / abs,Y   if the index CARRIED, the part re-reads the last program
+                      byte - the high operand.  If it did not, it drives the
+                      effective address, which in that case is already correct.
+                      Reads and the shifts only reach this cycle on a carry, so
+                      they always take the first form; stores and INC/DEC reach
+                      it either way and take both.  ADDR["FIXUP"] is that
+                      choice, made in hardware from the saved carry, because the
+                      microcode cannot see the data.
+
+      (zp),Y          re-reads the pointer's own high byte in page zero, carry
+                      or no carry.  So STA (zp),Y re-reads its pointer while
+                      STA abs,X does not - an asymmetry with no obvious reason
+                      behind it, and the trace is the authority.
+
+    All of this used to be the un-fixed address unconditionally - a defensible
+    guess before there was a part to compare against.  Of the 77 differences the
+    bustest capture found, 26 were this one cycle.
     """
-    return u(addr_sel=ADDR["AD"], hi_a=HI_A["ADH"], hi_c=HI_C["SAVED"],
-             ld_adh=LD_ADH["AGU"])
+    return u(addr_sel=ADDR["FIXUP"] if bus == "fixup" else ADDR["LAST"],
+             hi_a=HI_A["ADH"], hi_c=HI_C["SAVED"], ld_adh=LD_ADH["AGU"])
 
 
 # ---------------------------------------------------------------------------
@@ -217,10 +252,11 @@ def am_zp():
 
 def am_zpidx(idx):
     return [read_operand(ld_adl=LD_ADL["DIN"]),
-            # Dummy read at the UN-indexed address, indexing as we go.  Zero
-            # page wraps, so the carry is simply dropped - no fixup cycle, and
-            # none is charged for.
-            u(addr_sel=ADDR["ZP"], lo_a=LO_A["ADL"], lo_b=idx,
+            # The dummy cycle, indexing as it goes.  Zero page wraps, so the
+            # carry is simply dropped - no fixup cycle, and none is charged for.
+            # The bus re-reads the operand byte (LAST); the NMOS part showed the
+            # un-indexed zero-page address here instead.
+            u(addr_sel=ADDR["LAST"], lo_a=LO_A["ADL"], lo_b=idx,
               ld_adl=LD_ADL["AGU"])], ADDR["ZP"]
 
 
@@ -238,7 +274,9 @@ def am_absidx(idx, always, acc_label):
 def am_idx():
     # (zp,X): index the pointer in page zero, then read the two pointer bytes.
     return [read_operand(ld_adl=LD_ADL["DIN"]),
-            u(addr_sel=ADDR["ZP"], lo_a=LO_A["ADL"], lo_b=LO_B["X"],
+            # Indexing the pointer is internal work, so the bus re-reads the
+            # operand byte rather than showing the un-indexed zero-page address.
+            u(addr_sel=ADDR["LAST"], lo_a=LO_A["ADL"], lo_b=LO_B["X"],
               ld_adl=LD_ADL["AGU"]),
             u(addr_sel=ADDR["ZP"], alu_op=OP["LD"], alu_a=ALU_A["DIN"],
               wb=WB["MD"], lo_a=LO_A["ADL"], lo_b=LO_B["ONE"],
@@ -256,7 +294,7 @@ def am_idy(always, acc_label):
             u(addr_sel=ADDR["ZP"], ld_adh=LD_ADH["DIN"],
               lo_a=LO_A["MD"], lo_b=LO_B["Y"], ld_adl=LD_ADL["AGU"],
               cond=COND["ALWAYS"] if always else COND["CARRY"], alt=acc_label),
-            fixup()], ADDR["AD"]
+            fixup(bus="last")], ADDR["AD"]
 
 
 def am_ind():
@@ -406,9 +444,8 @@ put(0x14, build("zp", "rmw", op=OP["TRB"], fl=1))
 put(0x1C, build("abs", "rmw", op=OP["TRB"], fl=1))
 put(0x04, build("zp", "rmw", op=OP["TSB"], fl=1))
 put(0x0C, build("abs", "rmw", op=OP["TSB"], fl=1))
-for n in range(8):
-    put(0x07 | (n << 4), build("zp", "rmw", op=OP["RMB"], fl=0))
-    put(0x87 | (n << 4), build("zp", "rmw", op=OP["SMB"], fl=0))
+# Rockwell's RMBn / SMBn are NOT on the base part.  $x7 is a one-byte NOP there;
+# see the CMOS no-op table below, which is where those encodings now live.
 
 # ---- flags ----------------------------------------------------------------
 for oc in (0x18, 0x38, 0x58, 0x78, 0xB8, 0xD8, 0xF8):
@@ -426,8 +463,10 @@ def branch(cond):
         u(addr_sel=ADDR["PC"], lo_a=LO_A["PCL"], lo_b=LO_B["ADL"],
           hi_a=HI_A["PCH"], ld_pc=LD_PC["AGU_LO"], cond=COND["PAGE"], alt="end"),
         # The page did change: this is the granted cycle, and all it does is
-        # move PCH by one.  The bus meanwhile shows the un-fixed address.
-        u(addr_sel=ADDR["PC"], hi_a=HI_A["PCH"], hi_c=HI_C["SAVED"],
+        # move PCH by one.  The bus re-reads what the previous cycle drove,
+        # which was PC before the low byte moved - ADDR["PC"] would give the
+        # half-updated {old PCH, new PCL} instead, which is the NMOS behaviour.
+        u(addr_sel=ADDR["LAST"], hi_a=HI_A["PCH"], hi_c=HI_C["SAVED"],
           hi_d=HI_D["SIGN"], ld_pc=LD_PC["AGU_HI"]),
         u(**FETCH, label="end"),
     ]
@@ -437,19 +476,8 @@ for oc in (0x10, 0x30, 0x50, 0x70, 0x90, 0xB0, 0xD0, 0xF0):
     put(oc, branch(COND["BRANCH"]))
 put(0x80, branch(COND["ALWAYS"]))
 
-# BBRn / BBSn: five cycles whether or not the branch is taken, so the PC load
-# is gated by the condition instead of skipping a slot.
-for n in range(8):
-    for oc, in [(0x0F | (n << 4),), (0x8F | (n << 4),)]:
-        put(oc, [
-            read_operand(ld_adl=LD_ADL["DIN"]),
-            u(addr_sel=ADDR["ZP"], alu_op=OP["LD"], alu_a=ALU_A["DIN"], wb=WB["MD"]),
-            read_operand(ld_adl=LD_ADL["DIN"]),
-            u(addr_sel=ADDR["PC"], lo_a=LO_A["PCL"], lo_b=LO_B["ADL"],
-              hi_a=HI_A["PCH"], hi_c=HI_C["LIVE"], hi_d=HI_D["SIGN"],
-              ld_pc=LD_PC["AGU"], ld_if=1, cond=COND["ZPBIT"], alt=4),
-            u(**FETCH),
-        ])
+# Rockwell's BBRn / BBSn are NOT on the base part either.  $xF is a one-byte
+# NOP there; see the CMOS no-op table below.
 
 # ---- jumps ----------------------------------------------------------------
 put(0x4C, [                                            # JMP abs
@@ -465,7 +493,9 @@ put(0x4C, [                                            # JMP abs
 put(0x6C, [
     read_operand(ld_adl=LD_ADL["DIN"]),
     read_operand(ld_adh=LD_ADH["DIN"]),
-    u(addr_sel=ADDR["PC"]),
+    # The CMOS extra cycle - the one that buys the page-wrap fix.  It re-reads
+    # the pointer's high byte, which is what the cycle before it drove.
+    u(addr_sel=ADDR["LAST"]),
     # Read the target low byte and increment the POINTER, both halves, in this
     # cycle.  The high half must land here and not in the next one: the next
     # cycle is the one that reads the target high byte at {ADH, ADL}, and an ADH
@@ -482,7 +512,7 @@ put(0x7C, [                                            # JMP (abs,X)
     read_operand(ld_adl=LD_ADL["DIN"]),
     read_operand(ld_adh=LD_ADH["DIN"], lo_a=LO_A["ADL"], lo_b=LO_B["X"],
                  ld_adl=LD_ADL["AGU"]),
-    u(addr_sel=ADDR["PC"], hi_a=HI_A["ADH"], hi_c=HI_C["SAVED"],
+    u(addr_sel=ADDR["LAST"], hi_a=HI_A["ADH"], hi_c=HI_C["SAVED"],
       ld_adh=LD_ADH["AGU"]),
     # Same as JMP (abs): the pointer increment completes here, a cycle before the
     # address it produces is driven.  The X index carry got its own cycle above.
@@ -551,20 +581,23 @@ put(0x00, [
 ])
 
 # ---- STP / WAI ------------------------------------------------------------
-# Both park by looping a slot on themselves; hardware breaks the loop.
-put(0xDB, [u(addr_sel=ADDR["PC"]),
-           u(addr_sel=ADDR["PC"], cond=COND["NEVER"], alt=1),
-           u(**FETCH)])
-put(0xCB, [u(addr_sel=ADDR["PC"]),
-           u(addr_sel=ADDR["PC"], cond=COND["NEVER"], alt=1),
-           u(**FETCH)])
+# WDC's, and not on the base part.  $CB and $DB are one-byte NOPs there, in the
+# table below with the rest of $xB.
+#
+# The RTL still carries the `hlt` register and the `halted` output, and they are
+# INERT against this ROM rather than dead code: `hlt` is set by `ir == $DB` at
+# `ucyc == 3'd1`, and a one-cycle NOP never reaches ucyc 1.  Leaving them costs
+# nothing and is what a WDC variant of this ROM would need.
 
 # ---- CMOS no-ops ----------------------------------------------------------
 put(0xEA, build("imp", "none"))
-for oc in [0x03, 0x13, 0x23, 0x33, 0x43, 0x53, 0x63, 0x73, 0x83, 0x93, 0xA3,
-           0xB3, 0xC3, 0xD3, 0xE3, 0xF3, 0x0B, 0x1B, 0x2B, 0x3B, 0x4B, 0x5B,
-           0x6B, 0x7B, 0x8B, 0x9B, 0xAB, 0xBB, 0xEB, 0xFB]:
-    put(oc, [u(**FETCH)])                              # 1 byte, 1 cycle
+# Every $x3, $x7, $xB and $xF: one byte, one cycle, on the base 65C02.  The $x7
+# and $xF columns are Rockwell's bit instructions and the $CB/$DB pair is WDC's
+# WAI/STP - none of which the first-generation part has - so on it they are
+# simply the shortest NOP the encoding space has.
+for column in (0x03, 0x07, 0x0B, 0x0F):
+    for hi in range(0x00, 0x100, 0x10):
+        put(hi | column, [u(**FETCH)])                  # 1 byte, 1 cycle
 for oc in [0x02, 0x22, 0x42, 0x62, 0x82, 0xC2, 0xE2]:
     put(oc, build("imm", "read", op=OP["NOP"]))        # 2 bytes, 2 cycles
 put(0x44, build("zp", "read", op=OP["NOP"]))           # 2 bytes, 3 cycles
@@ -572,11 +605,18 @@ for oc in [0x54, 0xD4, 0xF4]:
     put(oc, build("zpx", "read", op=OP["NOP"]))        # 2 bytes, 4 cycles
 for oc in [0xDC, 0xFC]:
     put(oc, build("abs", "read", op=OP["NOP"]))        # 3 bytes, 4 cycles
+# $5C is the odd one: three bytes, eight cycles, and five of them driving
+# addresses that no functional test can see.  A real part drives {$FF, operand
+# low} once and then $FFFF four times, so the first operand byte has to be kept
+# - the old version left ADL stale and produced {$FF, junk-1} for all five.
+#
+# $FFFF comes from VEC1, which is {$FF, vec_lo + 1} and vec_lo is $FE outside a
+# reset or an NMI entry - neither of which can be in progress during a NOP.
 put(0x5C, [                                            # 3 bytes, 8 cycles
+    read_operand(ld_adl=LD_ADL["DIN"]),
     read_operand(),
-    read_operand(),
-] + [u(addr_sel=ADDR["AGU"], lo_a=LO_A["ADL"], lo_b=LO_B["FF"],
-       hi_a=HI_A["FF"]) for _ in range(5)] + [u(**FETCH)])
+    u(addr_sel=ADDR["AGU"], lo_a=LO_A["ADL"], lo_b=LO_B["ZERO"], hi_a=HI_A["FF"]),
+] + [u(addr_sel=ADDR["VEC1"]) for _ in range(4)] + [u(**FETCH)])
 
 
 # ---------------------------------------------------------------------------

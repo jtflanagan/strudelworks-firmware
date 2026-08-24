@@ -9,6 +9,10 @@
 # 65C02 still has to get all of those right.  A core that passes only the 65C02
 # suite has not been tested on most of its own opcodes.
 #
+# The 65C02 suite is re-assembled for the BASE part before it runs: upstream
+# ships it with Rockwell's bit instructions fully tested, and this core does not
+# have them.  See third_party/build_base_65c02_test.sh.
+#
 # The NMOS suite is safe to run on a CMOS part because it tests documented
 # behaviour only: it uses no undocumented opcodes, and it explicitly ignores
 # N, V and Z after decimal arithmetic - precisely where the two parts disagree.
@@ -60,8 +64,8 @@ find_success() {
 }
 
 run_one() {
-    local name="$1" start="$2"
-    local bin="$tests/$name.bin" lst="$tests/$name.lst"
+    local name="$1" start="$2" dir="${3:-$tests}"
+    local bin="$dir/$name.bin" lst="$dir/$name.lst"
     local hex="$work/$name.hex" success rc=0 out trap line
 
     success="$(find_success "$lst")"
@@ -90,9 +94,19 @@ run_one() {
     return 1
 }
 
+# The 65C02 suite is RE-ASSEMBLED rather than taken as shipped.  Upstream's
+# prebuilt binary fully tests Rockwell's BBR/BBS/RMB/SMB, and this core is a
+# base 65C02 that has none of them - see rtl/cpu65c02.sv's VARIANT note.  Built
+# with those switches at 0, the suite tests those encodings AS NOPs, which is
+# the stronger check: it would catch a core that implemented them anyway.
+base_dir="$root/sim/cpu_work/base_test"
+if [ ! -f "$base_dir/65C02_base_opcodes_test.bin" ]; then
+    bash "$root/third_party/build_base_65c02_test.sh"
+fi
+
 fail=0
-run_one 6502_functional_test        0400 || fail=1
-run_one 65C02_extended_opcodes_test 0400 || fail=1
+run_one 6502_functional_test      0400 || fail=1
+run_one 65C02_base_opcodes_test   0400 "$base_dir" || fail=1
 
 echo "=============================================================="
 if [ $fail -eq 0 ]; then echo "both suites passed"; else echo "FAILURES"; fi

@@ -860,7 +860,10 @@ than inferred. Keep `rtl/apple_bus_read.sv` **input-only**; put driving in a
 separate module so the instrument can never become a participant. The `--snoop`
 build's Apple pins would become `inout` only in a master top.
 
-**6. The 65C02 soft core.** 🟡 **functionally complete, cycle counts verified**
+**6. The 65C02 soft core.** 🟡 **base-65C02 variant, functionally complete, all
+256 opcodes cycle-verified, reset sequence corrected; bus-level comparison
+against a real part has a tool, one capture, and an exerciser awaiting its
+run**
 
 `rtl/cpu65c02.sv`. This is the piece that makes the CPU socket worth having: the
 card can only stand in for the CPU if it behaves like one on every cycle, not
@@ -961,10 +964,12 @@ property as the address arithmetic: a branch tests flags a previous instruction
 wrote, never a flag computed in the same cycle, so the zero-detect is an ordinary
 register-to-register hop with a whole cycle to itself.
 
-*Behaviour preserved across the rewrite.* Both suites pass with **exactly** the
+*Behaviour preserved across the rewrite.* Both suites passed with **exactly** the
 cycle totals the state-machine version produced — 96,561,329 and 66,905,009 —
 which over 163 million cycles is a far stronger equivalence check than either
-suite alone.
+suite alone. (Both are now 2 higher, 96,561,331 and 66,905,011, since the reset
+fix below lengthened the reset sequence by two cycles. The delta being exactly
+two is what says nothing else moved with it.)
 
 *Two bugs the rewrite introduced, both worth recording* because both are specific
 to this style. First, the page-cross fixup incremented ADH by one instead of by
@@ -977,8 +982,8 @@ work in the cycle that consumes it rather than the cycle before.
 
 *⬜ What is NOT verified: the dummy-cycle addresses.* Counts are checked; which
 address is driven during a dummy cycle is not. Three are informed guesses and are
-marked `UNVERIFIED` at their use in the source: the indexed page-cross fixup
-address, the JMP (abs) extra cycle, and the decimal extra cycle. The 65C02
+listed in `rtl/cpu65c02.sv`'s header: the indexed page-cross fixup address, the
+JMP (abs) extra cycle, and the decimal extra cycle. The 65C02
 differs from the NMOS part on exactly these, and the difference is **not
 recoverable from Klaus's suites**, which check results rather than buses. Closing
 this needs a cycle-level reference — either a per-cycle bus trace from a real
@@ -986,9 +991,304 @@ this needs a cycle-level reference — either a per-cycle bus trace from a real
 reference. The filler cycles of `$5C`, the 8-cycle NOP, are a guess for the same
 reason.
 
-*Variant.* WDC W65C02S — the superset, so Rockwell's RMB/SMB/BBR/BBS are present
-along with STP and WAI, and the undefined encodings are the CMOS NOPs rather than
-the NMOS undocumented instructions.
+*🟡 The instrument for closing it now exists.* `sim/run_trace_replay.sh` replays a
+captured Apple II bus trace against this core and compares the address and R/W on
+every cycle. Traces come from the host — `swhost --real --trace FILE` — which
+arms on RES′ so a capture begins at a reset and the machine's state at word 0 is
+known. What remains is a capture from a real machine; the tool is verified
+against a self-generated trace by `sim/run_trace_selftest.sh`, which also checks
+that a deliberately corrupted trace fails at the word it was corrupted in.
+
+*How it deals with what a trace cannot tell it.* Three things differ between the
+traced machine and this core for reasons that are nobody's fault, and the tool
+names each rather than letting it be mistaken for a finding:
+
+  - **The stack pointer.** Reset does not load S, it decrements it, so a real
+    machine leaves reset with whatever the previous hour of software left minus
+    three. The tool reads both resets off their own buses — the descending
+    page-one reads before the vector fetch — derives S on each side, reports the
+    two, and seeds this core with the traced value through an injected
+    `LDX #S / TXS`. Neither side's behaviour is assumed; the compensation is a
+    measured difference.
+  - **Alignment.** The run is aligned on the `$FFFC/$FFFD` vector fetch, which
+    both machines perform and which puts them at the same PC with the same
+    flags, rather than on the RES′ edge — how many cycles a part spends getting
+    from one to the other is precisely what must not be assumed. Any residual
+    offset is found by a skew search and reported.
+  - **Interrupts are not in the trace.** The event word carries RES′ and nothing
+    else, so an IRQ appears only as the traced part suddenly fetching `$FFFE`.
+    The tool recognises that shape and says so.
+
+*✅ CLOSED, by a capture from a real Apple II.* `sim/trace_work/apple.bustrace`,
+64 MB from `swhost --real --trace`, replayed against this core: **9,397,687
+cycles in lockstep with the architectural state never parting company**, which
+is a far stronger statement about the core than either functional suite. Eleven
+distinct dummy-cycle sites drive a different address, and they are all the same
+underlying difference:
+
+| opcode | cycle | real 65C02 | this core | seen | mode |
+|---|---|---|---|---|---|
+| `$6C` | 3 | `$FDEF` | `$FDF0` | 41239 | JMP (abs), the CMOS extra cycle |
+| `$91` | 4 | `$003D` | `$BFB0` | 5846 | STA (zp),Y — the always-paid fixup |
+| `$B0` | 3 | `$FC01` | `$FCF0` | 1350 | BCS, taken and page-crossing |
+| `$D0` | 3 | `$FC10` | `$FCD9` | 410 | BNE, same |
+| `$30` | 3 | `$C1FF` | `$C101` | 110 | BMI, same |
+| `$10` | 3 | `$C1FB` | `$C101` | 24 | BPL, same |
+| `$95` | 2 | `$FEA8` | `$0001` | 8 | STA zp,X |
+| `$94` | 2 | `$FEA6` | `$0000` | 4 | STY zp,X |
+| `$B4` | 2 | `$C196` | `$0000` | 4 | LDY zp,X |
+| `$B5` | 2 | `$C19E` | `$0001` | 4 | LDA zp,X |
+| `$BD` | 3 | `$FAAD` | `$FA01` | 2 | LDA abs,X, page crossed |
+
+**One rule accounts for every row: the 65C02 re-reads the last address it
+accessed during an internal cycle, where this core drives a partially-formed
+effective address.** For `$6C`, `$BD` and the `zp,X` forms that is the last
+program byte; for `$91` it is the pointer's high byte in zero page; for the
+branches it is PC. This core's choices are the NMOS ones — `am_zpidx` in
+`sim/gen_microcode.py` even says "dummy read at the UN-indexed address" — and
+the NMOS part is precisely what the 65C02 changed here.
+
+So the three addresses this section called informed guesses are now measured.
+The indexed page-cross fixup and the JMP (abs) extra cycle are both wrong in the
+same way; the decimal extra cycle did not appear in this capture, because the
+monitor's idle loop does no decimal arithmetic. ⬜ **Not yet fixed** — it is a
+change to `am_zpidx`, `am_absidx`, `am_idy` and the branch microcode, and it
+wants its own pass.
+
+*✅ The variant was wrong, and is now right: this is a BASE 65C02.* The chip in
+the machine is a first-generation part — the CMOS additions, but none of
+Rockwell's RMB/SMB/BBR/BBS and none of WDC's STP/WAI. The core implemented all
+of them, which means it answered `$x7` with a read-modify-write where the real
+chip does nothing for one cycle. On those encodings it was not standing in for
+the part at all.
+
+They are now one-byte, one-cycle NOPs, which is what the part does, and the
+whole `$x3`/`$x7`/`$xB`/`$xF` space is handled uniformly in
+`sim/gen_microcode.py`. The RTL keeps its `hlt` register and `halted` output:
+against this ROM they are inert rather than dead, because `hlt` is set by
+`ir == $DB` at `ucyc == 1` and a one-cycle NOP never reaches ucyc 1 — and a WDC
+variant of the ROM would need them.
+
+Verification moved with it. `sim/gen_cycle_table.py` now carries the base part's
+timing, and nothing is excluded: `$CB` and `$DB` used to be skipped because STP
+and WAI never reach a next opcode fetch, so **all 256 opcodes are measured**,
+280 checks, 0 failures. And upstream's prebuilt 65C02 suite could no longer be
+used as shipped — it is assembled with `rkwl_wdc_op = 1`, which fully tests
+Rockwell's bit instructions — so `third_party/build_base_65c02_test.sh`
+re-assembles it with that switch and `wdc_op` at **0**, which tests those
+encodings *as NOPs*. That is stronger than skipping them: it would catch a core
+that implemented them anyway.
+
+That script proves its own toolchain before it is trusted. It first assembles
+upstream's configuration **unchanged** and requires the result to reproduce
+upstream's prebuilt binary byte for byte; only then does it build the variant,
+which therefore differs by exactly two assignments. Getting that control to pass
+took three corrections — as65 needs `-x` for the CMOS modes, its `.bin` begins
+at the lowest used address rather than at zero, and it fills unused memory with
+`$FF` — every one of which would otherwise have produced a subtly wrong test
+whose failures got blamed on the core.
+
+Both suites pass: 96,561,331 and 66,874,616 cycles.
+
+*✅ CLOSED COMPLETELY, by a capture of `apple/bustest.s` on the real machine.*
+24,717,434 cycles replayed in lockstep — the whole trace after the exerciser
+starts — with the architectural state never parting company, and **77 distinct
+(opcode, cycle) sites** where the dummy-cycle address differs. Every one of them
+is the same rule, in three shapes:
+
+| sites | what the real 65C02 drives |
+|---|---|
+| 64 | re-reads the last **program** byte |
+| 8 | re-reads the last **zero-page** byte it read — the `(zp),Y` pointer high byte |
+| 5 | `$5C`'s filler: `$FF00` once, then `$FFFF` |
+
+by instruction group: 26 absolute,X/,Y · 23 zero-page,X/,Y · 16 `(zp),Y` and
+`(zp,X)` · 5 taken page-crossing branches · 5 `$5C` · 1 `JMP (abs)` · 1
+`JMP (abs,X)`. Each site was hit 14,612 times, once per pass, over 14,612
+passes of the exerciser.
+
+**The 65C02 re-reads the last address it accessed during an internal cycle,
+where this core drives a partially-formed effective address.** That is the whole
+finding, and the informed guesses this section used to list are now measurements
+across the entire instruction set rather than whatever the monitor's idle loop
+happened to reach. `$5C`'s filler and `JMP (abs)`'s extra cycle — the last two
+unverified items — are settled.
+
+✅ **Fixed, and the same trace now replays clean: 24,717,434 cycles, zero
+differences.** The 9.4 M-cycle monitor-boot capture — entirely different code —
+also replays clean, which is what says the fix is the rule and not a curve
+fitted to one program.
+
+*How, in one address source.* `ADDR["LAST"]` is the address driven during the
+previous bus cycle, a registered mux input costing 16 flops and no arithmetic.
+Almost every case is just that: zero-page indexed, `(zp,X)`, `(zp),Y`, the taken
+page-crossing branch, `JMP (abs)` and `JMP (abs,X)` all re-read whatever they
+read last, and the microcode does not need to know which mode it is in.
+
+*Except one, and it is the interesting one.* On the `abs,X`/`abs,Y` fixup cycle
+what the part drives is **not a property of the instruction but of the data**:
+if the index carried it re-reads the last program byte, and if it did not it
+drives the effective address — which in that case is already correct. Reads and
+the shifts only reach that cycle on a carry so they always take the first form;
+stores and `INC`/`DEC abs,X` reach it either way and take both. Microcode cannot
+see that, so `ADDR["FIXUP"]` makes the choice in hardware from the AGU's saved
+carry — the same carry the cycle already uses to move ADH. It widened the
+address field to 4 bits and the ROM to 51, still three block RAMs.
+
+That distinction cost three rounds to find: fixing everything to "re-read the
+last address" took 77 sites to 13, splitting conditional from mandatory took it
+to 5, and only the five page-crossing stores left standing showed that the real
+split is the carry.
+
+`(zp),Y` re-reads its pointer either way, so `STA (zp),Y` re-reads its pointer
+while `STA abs,X` does not. There is no obvious reason for that asymmetry; the
+trace is the authority.
+
+*Regression.* Both Klaus suites pass at **exactly** the cycle counts they had
+before the change — 96,561,331 and 66,874,616 — which over 163 M cycles says the
+fix moved nothing but which address is driven during cycles whose value is
+discarded. All 256 opcodes still match the cycle table, 280 checks, 0 failures.
+Lint clean.
+
+⬜ **Not re-synthesised.** No Vivado on the workstation. The ROM is 51 bits
+rather than 50 and the address mux has two more inputs, one of them a two-input
+mux on the saved carry — the OOC numbers in this document are from before the
+change and want redoing before the timing claims are relied on.
+
+*⬜ The trace this needs next: `apple/bustest.s`.* The first capture covered
+eleven dummy-cycle sites because that is all the monitor's keyboard loop
+reaches. `bustest` is written to be watched rather than to pass — it executes
+every opcode the part has, and every page-sensitive addressing mode in **both**
+its same-page and page-crossing forms, so a trace of it contains the instruction
+set rather than a sample of it.
+
+It is assembled `--cpu 65SC02`, so the assembler refuses Rockwell's instructions
+rather than the variant being a thing to remember; the crossings are held by
+`.assert` directives comparing the page of each branch target against the page
+after the branch, so a layout edit that stopped a branch from crossing fails the
+build. Rockwell's and WDC's encodings are still *executed*, as raw bytes, because
+"does nothing, in one cycle" is itself behaviour worth capturing.
+
+`sim/run_bustest.sh` runs it on the core before it goes near hardware, and
+reports what it actually covers rather than what it was meant to: **256 of 256
+opcodes**, 1100 indexed accesses inside the page and 697 that carried into the
+next, four passes in 13,514 cycles, and no access to `$C000-$CFFF` — where on
+the Apple a *read* is not a read but a soft switch. It found two bugs in the
+exerciser that a hardware trip would have paid minutes each for: `setup` wrote
+the `JMP (abs)` pointer at `$42FF` and then filled `$4000-$43FF` over the top of
+it, and `SCRATCH,X` with X=4 overlapped the pass counter, so every pass rewrote
+it with the same value and a program that was running perfectly looked hung.
+
+`apple/build.sh` assembles it and writes `bustest.dsk` by copying a **real DOS
+3.3 disk** and adding two files to it with `a2kit`: `BUSTEST` as a binary at
+`$6000`, and a `HELLO` that `BRUN`s it, so booting the disk installs the
+exerciser without anyone typing anything. The file is then read back out through
+DOS's own structures and compared against what was built.
+
+*This replaced a hand-rolled image, and the reason is worth recording.* The
+first version wrote its own boot sector and its own DOS 3.3 filesystem in
+Python, because no DOS image was in the repo and Apple's DOS is not ours to
+vendor. Both of those were true and neither was a good reason: there was a DOS
+master sitting on the workstation, `a2kit` was one `cargo install` away, and
+what got built instead was a solved problem solved again — including 60 bytes of
+boot sector that no Apple had ever run. The rule it broke is a simple one:
+**"not in the repo" is not "not available", and the answer to that is to ask.**
+
+DOS itself is still not committed — `apple/base/` is ignored, and the script
+says what to put there — but that is a reference to a file, not a
+reimplementation of one.
+
+*What was lost with it, honestly.* The hand-written loader could be simulated:
+`sim/run_bustest.sh` used to boot the disk image with only the controller ROM's
+read routine stubbed, which checked the slot arithmetic, the sector counting and
+the physical/logical interleave. None of that exists to check now, because DOS
+does the loading and DOS has been booting Apples since 1980. The check that
+remains is the one that matters — that the bytes on the disk are the bytes that
+were built — and `a2kit` does it by reading the file back rather than by
+agreeing with itself.
+
+*One thing the shrink was for is now moot, and one is not.* bustest went from
+4265 bytes to **1449** by computing its page-crossing boundary instead of
+pinning it at `$7000`; that was needed when everything had to fit on track 0
+ahead of a boot sector, and DOS does not care. It stays because the padding was
+never buying anything but a longer load, and the behaviour is byte-identical.
+
+*The event word had a SYNC bit in it the whole time, and not using it cost two
+wrong answers.* The field the wire format calls `m2sel`, after the IIe slot
+signal that pin nominally carries, is wired to the CPU's **SYNC** line — high
+exactly on an opcode fetch. Established from this capture two ways: over 33.5 M
+cycles the number that are *both* a write and `m2sel` is **zero**, and taking
+each `m2sel` cycle's byte as an opcode, the distance to the next one matched the
+published cycle count for **109,090 consecutive instructions**, allowing the
+documented +1. (`m2b0` is never high at all.) That is also an independent
+confirmation of the cycle table, from hardware.
+
+Without it, instruction boundaries in a trace were being inferred from the
+*core's* sync — the thing under test — and there was no way to tell an opcode
+fetch from an operand or data read. Both of the wrong answers below came from
+that.
+
+*Two wrong answers this capture produced first, and why.* The replay picks the
+reset with the longest clean run behind it, which is right for a capture *of* a
+reset and wrong for a capture of a program the reset merely leads **to**. Here
+it chose a later Ctrl-OpenApple-Reset and diverged 66 cycles in — inside the
+monitor's own path, on a `PHP` after `BIT $C015`, where the real part's carry
+had survived the reset and this core's had not. Not a finding: reset does not
+clear A, X, Y or the flags, so those are unmodellable from outside, exactly as
+this section already said.
+
+The fix is `--from=ADDR`, which aligns on an opcode fetch at a given address
+instead — unambiguous now that SYNC says where instructions start. A program
+entered from a reset vector sets up its own stack and registers within a few
+instructions, so both machines converge whatever they arrived with. Aligned at
+the exerciser's entry, the same trace runs 24.7 M cycles without the state ever
+parting company.
+
+*A property of the capture worth keeping.* RES′ is a switch with nothing
+debouncing it, so one press of Ctrl-Reset arrived as **seven** reset sequences,
+five of which had under 1000 cycles behind them before the next bounce cut them
+off. The replay tool picks the reset with the longest clean run rather than the
+first, and refuses to return a verdict on a run under 5000 cycles at all — the
+first version of it aligned on a bounce, got four cycles, and reported PASS.
+
+*✅ A difference the tool found before any Apple II was involved, since fixed:
+reset was two stack cycles, not three.* Found on the bus before any Apple II was involved —
+the tool reads both machines' reset sequences in the same terms, so a synthetic
+trace with a correct reset in front of it was enough to expose it. From `rst`
+release this core drove `$0000`, `$0100`, `$01FF`, `$FFFC`, `$FFFD`: one dummy
+read, **two** stack reads, the vector. A 65C02 does two dummy reads and **three**
+stack reads, seven cycles. So the core left reset with S one byte higher than the
+part does — a functional difference, not merely a bus-timing one.
+
+Klaus's suites cannot see it, because both set S themselves before touching the
+stack. `BRK` was correct all along — it pushes three times, `$01FF`/`$01FE`/
+`$01FD` — so the fault was in reset's ENTRY, not in the shared microcode.
+
+The cause is the ROM's pipeline. `uaddr` is `{ir, ucyc_next}`, so the slot
+fetched during a cycle is the one that RUNS in the next; the cycle out of reset
+runs the zeroed `uc`, and what it fetches is slot `ucyc+1`. Entering at `3'd1`
+therefore skipped slot 1 outright. Entering at **`3'd7`** makes that zeroed cycle
+stand in for a slot of its own and resumes at slot 0, which is the part's
+sequence exactly: two reads at PC, three stack, two vector.
+
+```
+before   $0000  $0100  $01FF                $FFFC  $FFFD      5 cycles, S -= 2
+after    $0000  $0000  $0100  $01FF  $01FE  $FFFC  $FFFD      7 cycles, S -= 3
+```
+
+Both Klaus suites still pass, and each total moved by **exactly +2 cycles** —
+96,561,331 and 66,905,011 against 96,561,329 and 66,905,009 — which is the two
+cycles reset gained and nothing else. Over 163 million cycles that is a sharper
+statement than "still passes": no other instruction's behaviour moved at all.
+The 278-check cycle table is unaffected.
+
+Reset's two reads at PC are now themselves on the unverified list: this core
+drives them at PC and PC, and a real part may show PC and PC+1.
+
+*Variant.* The **base 65C02** — the first-generation part. The CMOS additions
+are all present; Rockwell's RMB/SMB/BBR/BBS and WDC's STP/WAI are not, because
+the chip this core stands in for does not have them. Undefined encodings are the
+CMOS NOPs throughout, never the NMOS undocumented instructions.
 
 ## Two memory modes, and the DMA decision
 

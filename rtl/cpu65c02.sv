@@ -58,8 +58,27 @@
 // structurally motivated (the fixup cycle shows the un-fixed address, because
 // that is the state the hardware is actually in) but they are not evidence.
 //
-// VARIANT: WDC W65C02S.  RMB/SMB/BBR/BBS, STP and WAI are present; the undefined
-// encodings are the CMOS NOPs, not the NMOS undocumented instructions.
+// The list, so it is in one place: the indexed page-cross fixup address, the
+// JMP (abs) extra cycle, the decimal extra cycle, the five filler cycles of
+// $5C, and the two reads at PC that open the reset sequence - which this core
+// drives at PC and PC, where a real part may show PC and PC+1.
+//
+// sim/run_trace_replay.sh is what settles these: it replays a captured Apple II
+// bus trace against this core and compares the address on every cycle.
+//
+// VARIANT: the BASE 65C02 - the first-generation part (NCR / GTE / Synertek and
+// Rockwell's own early parts), which is what the machine this core stands in for
+// actually has.  So: the CMOS additions are all here - BRA, PHX/PHY/PLX/PLY,
+// STZ, TRB/TSB, INC A/DEC A, JMP (abs,X), the new BIT and (zp) modes, and the
+// decimal ADC/SBC fix - but Rockwell's RMB/SMB/BBR/BBS and WDC's STP/WAI are
+// NOT.  Those encodings are one-byte one-cycle NOPs, as they are on the part.
+//
+// This is not a simplification, it is the point: a core that answers $x7 with a
+// read-modify-write where the real chip does nothing is not standing in for that
+// chip.  sim/gen_microcode.py is where the variant lives.
+//
+// The undefined encodings are the CMOS NOPs throughout, never the NMOS
+// undocumented instructions.
 //////////////////////////////////////////////////////////////////////////////////
 
 module cpu65c02 #(
@@ -102,7 +121,7 @@ module cpu65c02 #(
     // cannot drift from the assembler.
     wire       f_sync   = uc[UCP_SYNC];
     wire       f_rw     = uc[UCP_RW];
-    wire [2:0] f_asel   = uc[UCP_ADDR_SEL +: 3];
+    wire [3:0] f_asel   = uc[UCP_ADDR_SEL +: 4];
     wire [1:0] f_lo_a   = uc[UCP_LO_A     +: 2];
     wire [2:0] f_lo_b   = uc[UCP_LO_B     +: 3];
     wire       f_lo_ci  = uc[UCP_LO_CI];
@@ -133,6 +152,7 @@ module cpu65c02 #(
     logic [2:0]  ucyc;
     logic        agu_c;             // carry SAVED from the previous AGU add
     logic        in_rst, int_brk, int_nmi, nmi_prev, nmi_pend, hlt;
+    logic [15:0] last_addr;
 
     wire [7:0] p_bits = {f_n, f_v, 1'b1, 1'b0, f_d, f_i, f_z, f_c};
 
@@ -205,6 +225,23 @@ module cpu65c02 #(
     always_comb begin
         case (f_asel)
             UC_ADDR_AGU:  addr_mux = {agu_hi, agu_lo};
+            // The address driven during the PREVIOUS bus cycle.  This is the
+            // whole of the CMOS dummy-cycle rule: where the NMOS part put a
+            // partially-formed effective address on the bus during an internal
+            // cycle, the 65C02 re-reads whatever it read last - the operand
+            // byte, the pointer's high byte, PC.  Measured across 24.7 million
+            // cycles against a real part; see docs/DERISK.md.
+            //
+            // A registered mux input, so it costs the same as any other source
+            // and keeps this mux at one level with no arithmetic in it.
+            UC_ADDR_LAST: addr_mux = last_addr;
+            // The indexed fixup cycle, where what the part drives depends on
+            // the DATA and not on the instruction: it re-reads the last program
+            // byte when the index carried and the address therefore needs
+            // fixing, and drives the effective address when it did not.  The
+            // saved carry is the same one this cycle uses to move ADH, so this
+            // costs a two-input mux and no new state.
+            UC_ADDR_FIXUP: addr_mux = agu_c ? last_addr : {adh, adl};
             UC_ADDR_ZP:   addr_mux = {8'h00, adl};
             UC_ADDR_AD:   addr_mux = {adh, adl};
             UC_ADDR_SP:   addr_mux = {8'h01, s};
@@ -215,6 +252,14 @@ module cpu65c02 #(
     end
 
     assign addr   = addr_mux;
+
+    // One cycle of history, for UC_ADDR_LAST above.  Advanced on cyc_en so it
+    // tracks BUS cycles rather than clocks, which is what the rule is about.
+    always_ff @(posedge clk) begin
+        if (rst)          last_addr <= 16'h0000;
+        else if (cyc_en)  last_addr <= addr_mux;
+    end
+
     // Reset runs the BRK microcode but must not write: the three stack cycles
     // become reads.  Cheaper and less error-prone than a second sequence.
     assign rw     = f_rw | in_rst;
@@ -396,12 +441,25 @@ module cpu65c02 #(
             agu_c <= 1'b0; hlt <= 1'b0;
             nmi_prev <= 1'b1; nmi_pend <= 1'b0;
             int_brk <= 1'b0; int_nmi <= 1'b0; in_rst <= 1'b1;
-            // Enter BRK's microcode at the first stack cycle.  Reset does the
-            // same three stack accesses as an interrupt, as reads, then pulls
-            // the vector - so it is the same sequence, not a special case.
-            ucyc  <= 3'd1;
+            // Enter BRK's microcode from the top.  Reset runs the same sequence
+            // an interrupt does - a dummy read at PC, three stack accesses (as
+            // reads, forced by `rw = f_rw | in_rst`), then the vector - so it is
+            // the same microcode, not a special case.
+            //
+            // 3'd7, not 3'd0, and the reason is the ROM's pipeline: `uaddr` is
+            // {ir, ucyc_NEXT}, so the slot fetched during a cycle is the one
+            // that RUNS in the following one.  The cycle out of reset runs the
+            // zeroed `uc` below, and what it fetches is slot ucyc+1.  Entering
+            // at 7 therefore makes that zeroed cycle stand in for a slot of its
+            // own and resumes at slot 0; entering at 1 - as this did - skipped
+            // slot 1 entirely, which cost reset a stack cycle and left S one
+            // byte high.  Both branches of ucyc_next give 0 from 7, so the
+            // entry does not depend on how a zeroed condition field evaluates.
+            //
+            // The count that results is the part's: two reads at PC (this cycle
+            // and slot 0), three stack, two vector - seven.
+            ucyc  <= 3'd7;
             uc    <= '0;
-            ucyc  <= 3'd1;
         end else if (cyc_en) begin
             uc   <= ucode[uaddr];
             ucyc <= f_sync ? 3'd0 : (wai_wake ? 3'd2 : ucyc_next);
