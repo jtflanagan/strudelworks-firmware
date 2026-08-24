@@ -1150,10 +1150,32 @@ fix moved nothing but which address is driven during cycles whose value is
 discarded. All 256 opcodes still match the cycle table, 280 checks, 0 failures.
 Lint clean.
 
-⬜ **Not re-synthesised.** No Vivado on the workstation. The ROM is 51 bits
-rather than 50 and the address mux has two more inputs, one of them a two-input
-mux on the saved carry — the OOC numbers in this document are from before the
-change and want redoing before the timing claims are relied on.
+*✅ Re-synthesised, and the cost is measured against the same toolchain.* Both
+points below are Vivado 2026.1 OOC on `xc7a35tftg256-2` asking for 6.0 ns — the
+pre-change figure comes from synthesising commit `da458eb` in a worktree rather
+than from this document, so the comparison is not across tool versions:
+
+| | before | after |
+|---|---|---|
+| achieved period | 6.950 ns | 7.154 ns |
+| **Fmax** | **143.9 MHz** | **139.8 MHz** |
+| Slice LUTs (routed) | 494 | 520 |
+| Slice Registers | 96 | 112 |
+| Block RAM | 3 | 3 |
+
+**−4.1 MHz and +26 LUTs**, for cycle-exact bus behaviour against a real part.
+The +16 registers are exactly `last_addr`. The ROM went from 50 bits to 51 and
+still fits three block RAMs.
+
+The critical path is **unchanged** — still `uc_reg` output back to `uc_reg`
+address, the microcode feedback loop through the AGU carry chain that this
+document already identifies. The new address sources are not on it, so the loss
+is congestion rather than a new structure, and that is where to look if it ever
+needs winning back.
+
+(The 143.9 MHz also reproduces the ~144 MHz recorded earlier in this document
+from a different Vivado, which is worth knowing: that figure was not
+toolchain-skewed.)
 
 *⬜ The trace this needs next: `apple/bustest.s`.* The first capture covered
 eleven dummy-cycle sites because that is all the monitor's keyboard loop
