@@ -31,6 +31,7 @@ module reg_map_tb;
     always #5 clk = ~clk;
 
     integer errors = 0;
+    reg [7:0] latches_before;
 
     // ---- host -> card: a little FIFO the parser reads from --------------------
     reg  [31:0] rx_mem [0:63];
@@ -42,6 +43,17 @@ module reg_map_tb;
 
     task push_word(input [31:0] w);
         begin rx_mem[rx_wr] = w; rx_wr = rx_wr + 1; end
+    endtask
+
+    // One clean RES' assertion and release, the way the motherboard does it:
+    // held long enough that anything happening inside it is invisible.
+    task pulse_reset_line;
+        begin
+            apple_res_sync = 1'b0;
+            repeat (8) @(posedge clk);
+            apple_res_sync = 1'b1;
+            repeat (8) @(posedge clk);
+        end
     endtask
 
     function [31:0] hdr(input [7:0] t, input [7:0] len, input [15:0] free);
@@ -79,8 +91,15 @@ module reg_map_tb;
         .rsp_valid (rsp_valid), .rsp_take (rsp_take)
     );
 
-    wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME)) u_regs (
+    // CAN_MASTER is 1 here so the latch can be exercised.  The snoop top builds
+    // it with 0; case 8 below covers that side too, with a second instance.
+    reg  apple_res_sync = 1'b1;      // active low, idle high
+    wire cpu_source_active;
+
+    wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME),
+                 .CAN_MASTER (1'b1)) u_regs (
         .clk (clk), .rst (rst),
+        .apple_res_sync (apple_res_sync), .cpu_source_active (cpu_source_active),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
@@ -235,6 +254,75 @@ module reg_map_tb;
         end else begin
             $display("  ok: the reply arrived too, %0d word(s) total", out_n - base);
         end
+
+        // --- case 8 / CPU_SOURCE latches on the RES' assertion ---------------
+        //
+        // The property, not the plumbing: writing the register must NOT hand
+        // over the bus.  Only a reset may, and exactly once per assertion
+        // however long it is held or however much the line bounces.
+        pulse_reset_line;      // start from a known latch count
+        if (cpu_source_active !== 1'b0) begin
+            $display("FAIL: mastering after a reset with desired=0");
+            errors = errors + 1;
+        end else $display("  ok: desired=0 latches to not-mastering");
+
+        // Ask for the soft core.  Nothing may happen yet.
+        push_word(hdr(T_REG_WRITE, 8'd2, 16'd0));
+        push_word(32'h8000_0008);
+        push_word(32'h0000_0001);
+        repeat (40) @(posedge clk);
+        if (cpu_source_active !== 1'b0) begin
+            $display("FAIL: the WRITE handed over the bus - it must take a reset");
+            errors = errors + 1;
+        end else $display("  ok: writing desired=1 does not hand over on its own");
+
+        // Now reset.  This is the moment it may change, and it must.
+        pulse_reset_line;
+        if (cpu_source_active !== 1'b1) begin
+            $display("FAIL: RES' asserted but the soft core did not take the bus");
+            errors = errors + 1;
+        end else $display("  ok: the reset assertion is what hands over");
+
+        // Read it back and check every field.
+        base = out_n;
+        push_word(hdr(T_REG_READ, 8'd1, 16'd0));
+        push_word(32'h8000_0008);
+        repeat (60) @(posedge clk);
+        if (out_n - base < 3) begin
+            $display("FAIL: no CPU_SOURCE reply");
+            errors = errors + 1;
+        end else begin
+            if (out_mem[base+2][0] !== 1'b1) begin
+                $display("FAIL: desired did not read back");  errors = errors + 1;
+            end else if (out_mem[base+2][8] !== 1'b1) begin
+                $display("FAIL: active did not read back");   errors = errors + 1;
+            end else if (out_mem[base+2][16] !== 1'b1) begin
+                $display("FAIL: capable should be 1 here");   errors = errors + 1;
+            end else if (out_mem[base+2][31:24] === 8'd0) begin
+                $display("FAIL: the latch count never moved"); errors = errors + 1;
+            end else begin
+                $display("  ok: readback desired=1 active=1 capable=1 latches=%0d",
+                         out_mem[base+2][31:24]);
+            end
+        end
+
+        // A bouncing RES' must latch once per assertion, not once per glitch
+        // within one.  Held low, further activity changes nothing.
+        latches_before = out_mem[base+2][31:24];
+        apple_res_sync = 1'b0;
+        repeat (4) @(posedge clk);
+        repeat (4) @(posedge clk);          // still low: no second edge
+        apple_res_sync = 1'b1;
+        repeat (8) @(posedge clk);
+        base = out_n;
+        push_word(hdr(T_REG_READ, 8'd1, 16'd0));
+        push_word(32'h8000_0008);
+        repeat (60) @(posedge clk);
+        if (out_mem[base+2][31:24] !== (latches_before + 8'd1)) begin
+            $display("FAIL: a held-low RES' latched %0d times, expected 1",
+                     out_mem[base+2][31:24] - latches_before);
+            errors = errors + 1;
+        end else $display("  ok: one latch per assertion, not per cycle held");
 
         // --- case 7 / the parser never lost sync -----------------------------
         if (frame_error !== 1'b0) begin

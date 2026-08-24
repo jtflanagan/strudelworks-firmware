@@ -81,6 +81,14 @@ module apple_bus_read #(
     output logic        ev_valid,
 
     // for the UART report: is there a machine out there at all?
+    // Synchronised RES', ACTIVE LOW, straight off the pin.  An output rather
+    // than only a bit in the event word because the CPU changeover is latched
+    // on its falling edge and wants it live, not a capture cycle later.
+    //
+    // This does not make the reader a participant: it still drives nothing on
+    // the Apple bus, which is the property that matters.
+    output wire         res_sync,
+
     output logic        phi0_active
 );
 
@@ -112,6 +120,7 @@ module apple_bus_read #(
     wire m2sel = misc_clean[6];
     wire m2b0  = misc_clean[5];
     wire res   = misc_clean[3];
+    assign res_sync = res;
 
     // ---- phi0 edges ----------------------------------------------------------
     logic prev_phi0 = 1'b0;

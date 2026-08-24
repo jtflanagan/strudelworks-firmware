@@ -103,14 +103,50 @@ card brings out DMA′ but **not** the DMA daisy-chain pins, so single-card
 mastering is fine and priority arbitration against another DMA card is not
 expressible.
 
+## The changeover, and why a reset owns it
+
+**✅ Built.** `CPU_SOURCE`, at `0x8000_0008` in `rtl/wb_regfile.sv`:
+
+```
+[0]      desired   RW   0 = the native 6502 (default), 1 = the soft core
+[8]      active    RO   what was latched at the last RES' assertion
+[16]     capable   RO   this bitstream can actually master the bus
+[31:24]  latches   RO   RES' assertions seen, wrapping
+```
+
+**Writing it does not hand over the bus.** The write sets an intention; the
+falling edge of RES′ is what acts on it. There is no good moment to take the bus
+from a running machine — the real CPU is mid-instruction, the soft core is not
+where the real one was, and whatever mess the DMA′ transition makes lands in
+software's lap. A reset has no such lap: the motherboard holds RESET far longer
+than the changeover takes, and everything after it starts from the vector, so a
+switch made anywhere inside that window is invisible by construction.
+
+The **edge**, not the level, so it is exactly one changeover per reset however
+long the line is held — and however much it bounces, which it does, being a
+switch with nothing debouncing it.
+
+`latches` is what lets the host tell "not reset yet" from "reset and ignored":
+write `desired`, read back, and if the count has not moved then `active` is
+still answering about the previous reset.
+
+`capable` is 0 in `snoop_top`, and the register **refuses to latch itself into
+mastering** when it is. The instrument carries the register so the host can read
+it uniformly across builds, and cannot lie about being the machine's CPU.
+
+Host side: `swhost --cpu native|soft` writes it, and the banner reports it —
+including saying plainly when the bitstream cannot master, rather than leaving
+someone to wonder why a write had no effect.
+
+Covered by `sim/run_reg_map_tb.sh`, end to end from a REG_WRITE message: that a
+write alone does **not** hand over, that a reset does, that every field reads
+back, and that a held-low RES′ latches once rather than once per cycle.
+
 ## Open
 
 - ⬜ **The soft CPU's `cyc_en` becomes one pulse per phi0**, which is the
   interface `rtl/cpu65c02.sv` was built for and has never been driven with.
-- ⬜ **Changeover is atomic across a reset in aty** — the CPU source is latched
-  once, at RES′ assert, never mid-run. Whether we want the same rule or can
-  hand over live is undecided, and it is the question with the most ways to be
-  wrong.
+- ✅ **Changeover** — done, see below.
 - ⬜ **The setup and hold the machine expects from a driver** are still not
   measured. The taps above say *when aty drives*, which is strong evidence but
   is not the same as the datasheet figure, and it is not recoverable from a

@@ -356,6 +356,7 @@ module snoop_top #(
         .tini_data_dir_pin (tini_data_dir_pin),
         .ev_data           (real_data),
         .ev_valid          (real_valid),
+        .res_sync          (apple_res_sync),
         .phi0_active       (phi0_active)
     );
 
@@ -408,12 +409,23 @@ module snoop_top #(
         .rsp_take  (rsp_take)
     );
 
+    // CAN_MASTER stays 0 here, and that is the whole point of the parameter:
+    // this is the INSTRUMENT.  It carries the CPU_SOURCE register so the host
+    // can read and write it uniformly across builds, and the register refuses
+    // to ever latch itself into "the soft core is driving" because nothing in
+    // this top can drive.  See docs/BUS_MASTER.md.
+    wire apple_res_sync;
+    wire cpu_source_active_unused;
+
     wb_regfile #(
         .BUILD_DATE (BUILD_DATE),
-        .BUILD_TIME (BUILD_TIME)
+        .BUILD_TIME (BUILD_TIME),
+        .CAN_MASTER (1'b0)
     ) u_regfile (
         .clk      (clk_ctrl),
         .rst      (rst),
+        .apple_res_sync    (apple_res_sync),
+        .cpu_source_active (cpu_source_active_unused),
         .wb_cyc   (rwb_cyc),
         .wb_stb   (rwb_stb),
         .wb_we    (rwb_we),
