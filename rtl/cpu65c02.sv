@@ -66,6 +66,13 @@
 // sim/run_trace_replay.sh is what settles these: it replays a captured Apple II
 // bus trace against this core and compares the address on every cycle.
 //
+// HARDWARE INTERRUPTS are verified by sim/cpu_irq_tb.sv, added after the first
+// one ever fired on hardware.  The functional suites drive irq_n high and the
+// cycle test has no interrupt line, so the IRQ entry path - taken only at an
+// instruction boundary, PC HELD across it so RTI returns to the interrupted
+// instruction rather than two bytes past it - had no coverage until a
+// Mockingboard's timer interrupt exposed it.  See int_pc_hold below.
+//
 // VARIANT: the BASE 65C02 - the first-generation part (NCR / GTE / Synertek and
 // Rockwell's own early parts), which is what the machine this core stands in for
 // actually has.  So: the CMOS additions are all here - BRA, PHX/PHY/PLX/PLY,
@@ -414,6 +421,28 @@ module cpu65c02 #(
     // after which the mask decides whether a handler runs.  STP parks until rst.
     wire wai_wake = (ir == 8'hCB) && (nmi_pend || ~irq_n);
 
+    // The PC must NOT advance on a hardware interrupt: the pushed return address
+    // is the instruction that was ABOUT to run, so RTI comes back to it rather
+    // than two bytes past it.  BRK is the opposite - a two-byte instruction that
+    // DOES advance to PC+2 - and int_brk is what tells them apart, both running
+    // this same microcode.
+    //
+    // Two cycles increment PC on the way into that microcode and both must be
+    // held for an interrupt:
+    //   * the hijacked opcode fetch          - take_int, the boundary cycle
+    //   * BRK's operand-read slot (slot 0)    - ir==0, ucyc==0, and NOT a BRK
+    // On a real 65C02 both of those are dummy reads at the SAME address (the
+    // boundary), which is exactly what holding PC across them produces.
+    //
+    // Reset runs the microcode too but is excluded: its pushes are discarded
+    // and its PC is overwritten by the vector, so whether it increments in
+    // between changes nothing - and leaving in_rst out keeps that path
+    // bit-for-bit as it was measured.  This was invisible until a live IRQ:
+    // every testbench ties irq_n high, so nothing ever entered here as an
+    // interrupt rather than a reset or a BRK.
+    wire int_pc_hold = take_int |
+                       (~in_rst & ~int_brk & (ir == 8'h00) & (ucyc == 3'd0));
+
     always_comb begin
         if (f_sync) begin
             // The opcode is on din right now.  An interrupt hijacks the slot by
@@ -495,7 +524,11 @@ module cpu65c02 #(
                     default: ;
                 endcase
                 case (f_ld_pc)
-                    UC_LD_PC_INC:    begin pcl <= pcl_inc; pch <= pch_inc; end
+                    // Held on an interrupt entry - see int_pc_hold.  BRK and
+                    // every ordinary fetch still advance.
+                    UC_LD_PC_INC: if (!int_pc_hold) begin
+                                     pcl <= pcl_inc; pch <= pch_inc;
+                                  end
                     UC_LD_PC_AGU:    begin pcl <= agu_lo;  pch <= agu_hi;  end
                     UC_LD_PC_AGU_LO:       pcl <= agu_lo;
                     UC_LD_PC_AGU_HI:       pch <= agu_hi;
