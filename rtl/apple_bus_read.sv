@@ -89,6 +89,14 @@ module apple_bus_read #(
     // the Apple bus, which is the property that matters.
     output wire         res_sync,
 
+    // Synchronised phi0 and data, likewise.  A master top needs both live: phi0
+    // to place its own taps, and data to be the CPU's `din` on a read.  Sharing
+    // the synchronisers rather than adding a second set is not only cheaper -
+    // two synchronisers on one pin are two answers to the same question, and
+    // they disagree exactly when it matters.
+    output wire         phi0_sync,
+    output wire [7:0]   data_sync,
+
     output logic        phi0_active
 );
 
@@ -120,7 +128,9 @@ module apple_bus_read #(
     wire m2sel = misc_clean[6];
     wire m2b0  = misc_clean[5];
     wire res   = misc_clean[3];
-    assign res_sync = res;
+    assign res_sync  = res;
+    assign phi0_sync = phi0;
+    assign data_sync = data_clean;
 
     // ---- phi0 edges ----------------------------------------------------------
     logic prev_phi0 = 1'b0;

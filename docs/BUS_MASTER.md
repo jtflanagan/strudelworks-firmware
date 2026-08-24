@@ -90,6 +90,46 @@ mid-bus-cycle and its live outputs immediately become the *next* instruction's.
 The driven registers must hold this cycle's address, R/W and write data through
 `DATA_SNAP`.
 
+## The driver
+
+**✅ Built.** `rtl/apple_bus_write.sv`, with the taps above as parameters.
+Verified against an Apple-shaped phi0 by `sim/run_bus_write_tb.sh`, whose checks
+are drawn from the ways this is known to fail rather than from the module's
+structure — two of them are aty's bugs written down as assertions:
+
+```
+ok: not mastering - address, data and DMA' all released
+ok: DMA' is a level, held for the whole session
+ok: address and R/W driven continuously, never released
+ok: exactly one address change per cycle, over 30 cycles
+ok: every change at cycle 3 after phi0 falling; reader samples at 20,
+    so 17 cycles of round-trip margin
+ok: exactly one cyc_en per phi0 cycle - the core is locked to the bus
+ok: data driven only on writes
+ok: data released for the address phase
+ok: data driven inside the emit window on all 15 write cycles sampled
+ok: din is latched from the bus and stable at cyc_en
+ok: releasing master_active releases every pin at once
+```
+
+**One stage, not two.** aty stages the core's op and presents it later; the
+lesson there is *anchoring*, not the number of stages. Because our core is
+locked to the bus by `cyc_en` we know exactly when its outputs are valid — about
+50 fabric cycles before they are needed — so latching them at the present tap is
+already one stable value per bus cycle, anchored to the cycle that carries it.
+A separate staging tap on the rising pipe was tried and removed: it left one
+fabric cycle before the next falling edge, which is not a margin, it is a
+coincidence.
+
+**The reader gained two more outputs**, `phi0_sync` and `data_sync`, for the
+same reason as `res_sync`: the driver needs phi0 live to place its taps and the
+data byte live to be the core's `din`. Sharing the synchronisers rather than
+adding a second set is not only cheaper — two synchronisers on one pin are two
+answers to the same question, and they disagree exactly when it matters.
+
+**Data is deliberately still driven for a few cycles after the falling edge**,
+until `T_PRESENT` of the next cycle. That is hold time, not a leak.
+
 ## What changes here
 
 `rtl/apple_bus_read.sv` **stays input-only.** The instrument must not become a
@@ -144,8 +184,7 @@ back, and that a held-low RES′ latches once rather than once per cycle.
 
 ## Open
 
-- ⬜ **The soft CPU's `cyc_en` becomes one pulse per phi0**, which is the
-  interface `rtl/cpu65c02.sv` was built for and has never been driven with.
+- ✅ **`cyc_en` is one pulse per phi0** — done, in the driver, and checked.
 - ✅ **Changeover** — done, see below.
 - ⬜ **The setup and hold the machine expects from a driver** are still not
   measured. The taps above say *when aty drives*, which is strong evidence but

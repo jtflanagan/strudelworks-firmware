@@ -60,6 +60,7 @@ run wb_regfile    rtl/wb_regfile.sv
 run reg_bridge    rtl/reg_bridge.sv
 run tx_arb        rtl/tx_arb.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
+run apple_bus_write rtl/apple_bus_write.sv
 # -Irtl: the microcode field definitions are a generated `include, and they live
 # beside the RTL rather than in the simulator's working directory.
 run cpu65c02      -Irtl rtl/cpu65c02.sv
