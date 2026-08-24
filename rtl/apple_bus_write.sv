@@ -21,11 +21,31 @@
 //
 //   phi0 falling                      phi0 rising
 //   +--------------------------------+------------------------------------+
-//   | T_PRESENT (2)                  | T_EMIT  (19)  data may be driven    |
+//   | T_PRESENT (2)                  | T_EMIT  (2)   drive write data      |
 //   |   latch the core's op and       | T_DIN   (44)  sample the bus        |
 //   |   present it for this cycle     | T_CYCEN (45)  advance the core      |
 //   |   release the data bus          |                                     |
 //   +--------------------------------+------------------------------------+
+//
+// WHY T_EMIT IS EARLY, and why it was not at first.  aty's equivalent tap is
+// ~195 ns after the rising edge and this was scaled from it faithfully - 200 ns
+// here.  The scaling was right and the number was wrong, because it answers a
+// different question: in aty the card is impersonating MEMORY, driving a byte
+// the CPU will sample at the END of the cycle, so late is exactly right.  We
+// are the CPU.  A CPU has to have its write data up for the whole of its active
+// phase, not the last third of it, or the machine's write strobe closes before
+// the data arrives.
+//
+// Measured on hardware: with the late tap the core ran the Apple's own monitor
+// correctly out of ROM and then fell over at the first RTS, because every push
+// had been driven too late to land.  6740 of 6855 write-then-read-back pairs
+// did not read back; reads were perfect throughout.
+//
+// EARLY, BUT NOT FROM T_PRESENT.  The data bus belongs to the video circuitry
+// while phi0 is LOW - that is what makes the Apple's floating bus return screen
+// data - so driving from the present tap would put us against the machine's own
+// RAM output for half of every cycle.  Driving from just after the RISING edge
+// keeps us inside the CPU's half and hands the machine the whole of it.
 //
 // WHY THE ADDRESS IS LATCHED AT A FIXED TAP and not when the core produces it.
 // The core's next address appears the instant cyc_en advances it, mid-CURRENT-
@@ -66,7 +86,7 @@ module apple_bus_write #(
     // fabric cycles after the edge.  Defaults are the 133 MHz numbers from
     // C:/repos/aty scaled to 100 MHz; see docs/BUS_MASTER.md for the working.
     parameter integer T_PRESENT = 2,    // after phi0 falling  (~30 ns)
-    parameter integer T_EMIT    = 19,   // after phi0 rising   (~200 ns)
+    parameter integer T_EMIT    = 2,    // after phi0 rising   (~30 ns)
     parameter integer T_DIN     = 44,   // after phi0 rising   (~450 ns)
     parameter integer T_CYCEN   = 45
 ) (

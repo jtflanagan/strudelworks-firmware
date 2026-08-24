@@ -26,7 +26,7 @@ module bus_write_tb;
     localparam integer READER_ADDR_TAP = 19;
 
     localparam integer T_PRESENT = 2;
-    localparam integer T_EMIT    = 19;
+    localparam integer T_EMIT    = 2;
     localparam integer T_DIN     = 44;
     localparam integer T_CYCEN   = 45;
 
@@ -111,6 +111,8 @@ module bus_write_tb;
     integer    data_oe_mid_addr = 0;
     integer    data_oe_in_window = 0;
     integer    write_cycles_sampled = 0;
+    integer    early_sampled = 0;
+    integer    early_driven = 0;
 
     always @(posedge clk) if (!rst && master_active) begin
         // Count address changes within a bus cycle, and where they happened.
@@ -138,6 +140,12 @@ module bus_write_tb;
         // contract does not make.)
         if (data_oe && rw_drive) data_oe_on_read = data_oe_on_read + 1;
         if (since_fall == 30 && data_oe) data_oe_mid_addr = data_oe_mid_addr + 1;
+        // And the window must OPEN early in the CPU's own half, not late in it:
+        // rise is at cycle 49, so this is 6 cycles into phi0-high.
+        if (since_fall == 55 && !rw_drive) begin
+            early_sampled = early_sampled + 1;
+            if (data_oe) early_driven = early_driven + 1;
+        end
         if (since_fall == 80 && !rw_drive) begin
             write_cycles_sampled = write_cycles_sampled + 1;
             if (data_oe) data_oe_in_window = data_oe_in_window + 1;
@@ -217,6 +225,13 @@ module bus_write_tb;
             fail("the data bus was still driven through the address phase");
         else
             $display("  ok: data released for the address phase");
+        if (early_sampled == 0)
+            fail("no early sample point hit");
+        else if (early_driven != early_sampled)
+            fail("data was not yet driven early in the CPU's half of the cycle");
+        else
+            $display("  ok: data up from early in phi0-high on all %0d write cycles",
+                     early_sampled);
         if (write_cycles_sampled == 0)
             fail("no write cycles were sampled - the stimulus is not exercising writes");
         else if (data_oe_in_window != write_cycles_sampled)
