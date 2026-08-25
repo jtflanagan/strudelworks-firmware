@@ -130,7 +130,9 @@ if {$snoop || $master} {
             [file join $root rtl boot_hold.sv] \
             [file join $root rtl cpu65c02.sv] \
             [file join $root rtl via6522.v] \
+            [file join $root rtl slot_switches.sv] \
             [file join $root rtl mockingboard.sv] \
+            [file join $root rtl hd_card.sv] \
             [file join $root rtl master_top.sv] \
         ]
         # cpu65c02 loads its microcode with $readmemh at elaboration, so the

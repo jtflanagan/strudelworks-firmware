@@ -62,11 +62,13 @@ run tx_arb        rtl/tx_arb.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 run apple_bus_write rtl/apple_bus_write.sv
 run boot_hold     rtl/boot_hold.sv
+run slot_switches rtl/slot_switches.sv
+run hd_card       rtl/hd_card.sv rtl/slot_switches.sv
 # via6522 is third-party (see its header) and linted only as a dependency of
 # the mockingboard, with the style warnings its 2011 idiom trips suppressed
 # rather than fixed - it ran real machines as-is, and diverging from the
 # source to quiet a linter is how faithful ports stop being faithful.
-run mockingboard  rtl/mockingboard.sv rtl/via6522.v \
+run mockingboard  rtl/mockingboard.sv rtl/via6522.v rtl/slot_switches.sv \
                   -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY
 # -Irtl: the microcode field definitions are a generated `include, and they live
 # beside the RTL rather than in the simulator's working directory.

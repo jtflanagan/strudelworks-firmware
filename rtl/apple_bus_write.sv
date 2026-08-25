@@ -94,14 +94,18 @@
 //
 // AN OVERRIDE OP takes a cycle away from the core.  rtl/boot_hold.sv holds the
 // core at its reset vector and reads the keyboard for the host in the
-// meantime; it does that by raising ovr_en, and this module then presents
-// ovr_addr as a read in place of the core's op - latched at the same tap, held
-// for the same cycle, so the bus sees no difference - and withholds cyc_en, so
-// the core does not advance past a cycle that was not its own.  Whether a
-// cycle was overridden is decided ONCE, at T_PRESENT, and remembered in
-// drv_ovr until the cycle ends: a decision that changed mid-cycle would let
-// cyc_en fire for an op the core never issued, and the core would swallow the
-// keyboard's byte as its opcode.
+// meantime; rtl/hd_card.sv stalls the core on its hard disk's EXECUTE port and
+// moves blocks between the Apple's memory and its own buffer.  Both do it by
+// raising ovr_en, and this module then presents ovr_addr / ovr_rw / ovr_wdata
+// in place of the core's op - latched at the same tap, held for the same
+// cycle, so the bus sees no difference - and withholds cyc_en, so the core
+// does not advance past a cycle that was not its own.  An override may be a
+// WRITE: that is what a DMA into the Apple's memory is, and the write data is
+// driven in exactly the window the core's own would be.  Whether a cycle was
+// overridden is decided ONCE, at T_PRESENT, and remembered in drv_ovr until
+// the cycle ends: a decision that changed mid-cycle would let cyc_en fire for
+// an op the core never issued, and the core would swallow the keyboard's byte
+// as its opcode.
 //////////////////////////////////////////////////////////////////////////////////
 module apple_bus_write #(
     // Tap INDICES, matching apple_bus_read's convention: tap N pulses N+1
@@ -151,11 +155,14 @@ module apple_bus_write #(
     input  wire        slot_rd_claim,
     input  wire [7:0]  slot_rd_data,
 
-    // An override, from boot_hold: while ovr_en, the next cycle presents a
-    // READ of ovr_addr instead of the core's op and the core is not advanced.
-    // Sampled at T_PRESENT only.
+    // An override, from boot_hold or hd_card: while ovr_en, the next cycle
+    // presents ovr_addr with ovr_rw (1 = read) and, for a write, ovr_wdata,
+    // instead of the core's op, and the core is not advanced.  Sampled at
+    // T_PRESENT only.
     input  wire        ovr_en,
     input  wire [15:0] ovr_addr,
+    input  wire        ovr_rw,
+    input  wire [7:0]  ovr_wdata,
     // The op just presented was an override, not the core's.  Announced with
     // op_present, for boot_hold to follow what the bus actually carried.
     output wire        op_ovr,
@@ -281,13 +288,12 @@ module apple_bus_write #(
                 // whole point: one stable value per bus cycle, anchored to the
                 // cycle that samples it.
                 if (t_present) begin
-                    // An override is a read of its address and never a SYNC:
-                    // it is not an instruction, and the trace must not decode
-                    // it as one.
-                    drv_addr    <= ovr_en ? ovr_addr : cpu_addr;
-                    drv_rw      <= ovr_en ? 1'b1     : cpu_rw;
-                    drv_dout    <= cpu_dout;
-                    drv_sync_q  <= ovr_en ? 1'b0     : cpu_sync;
+                    // An override is never a SYNC: it is not an instruction,
+                    // and the trace must not decode it as one.
+                    drv_addr    <= ovr_en ? ovr_addr  : cpu_addr;
+                    drv_rw      <= ovr_en ? ovr_rw    : cpu_rw;
+                    drv_dout    <= ovr_en ? ovr_wdata : cpu_dout;
+                    drv_sync_q  <= ovr_en ? 1'b0      : cpu_sync;
                     drv_ovr     <= ovr_en;
                     emit_window <= 1'b0;      // release the data bus
                     driving     <= 1'b1;

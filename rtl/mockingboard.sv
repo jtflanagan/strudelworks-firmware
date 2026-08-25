@@ -28,24 +28,12 @@
 // 6502 driving, nothing can put a byte on the bus at the peripheral's tap, and
 // the module holds its VIAs in reset.
 //
-// SOFT SWITCH TRACKING, and why it is here.  $C400-$C4FF is not always the
-// slot 4 card: with INTCXROM set the motherboard ROM owns all of $C100-$CFFF,
-// and a IIe boots that way - the firmware clears it before the slot scan.  A
-// card that answered $Cnxx unconditionally would fight the motherboard ROM's
-// own bus driver.  So this module watches the same driven ops for writes to
-// the paging switches and claims a cycle only when the slot page is actually
-// mapped to the slots.  Carried from v5_1_3's soft_switch_manager, cut down to
-// the two switches that gate I/O SELECT':
-//
-//   $C006/$C007  INTCXROM   set -> the whole of $C1-$CF is motherboard ROM
-//   $C00A/$C00B  SLOTC3ROM  clear -> $C3xx is motherboard ROM even without
-//                           INTCXROM (the IIe's 80-column firmware)
-//
-// What was deliberately NOT carried: the $C8xx expansion-ROM select and the
-// $CFFF release.  A Mockingboard decodes I/O SELECT' only - it has no ROM -
-// so expansion-ROM arbitration cannot involve this card.  If a card with a
-// $C8xx presence is ever added, that logic comes back from v5_1_3 as its own
-// module rather than growing here.
+// SOFT SWITCH TRACKING lives in rtl/slot_switches.sv, shared with the hard
+// disk: $C400-$C4FF is not always the slot 4 card - with INTCXROM set the
+// motherboard ROM owns all of $C100-$CFFF, and a IIe boots that way - so a
+// cycle is claimed only when that module says the slot page is actually
+// mapped to the slots.  A card that answered $Cnxx unconditionally would
+// fight the motherboard ROM's own bus driver.
 //
 // Register decode matches the real card and v5_1_3 both: A7 picks the VIA
 // (VIA 0 at $Cn00-$Cn7F, VIA 1 at $Cn80-$CnFF), A3-A0 pick the register, and
@@ -100,28 +88,21 @@ module mockingboard (
     wire enabled = master_active && (slot_assign != 3'd0);
 
     // ---- soft switches ------------------------------------------------------
-    // Held at their reset values while RES' is down, which is how the IIe's
-    // MMU behaves and what the host's own tracker (apple_video.cpp) assumes.
-    logic intcxrom, slotc3rom;
+    wire io_select;
 
-    always_ff @(posedge clk) begin
-        if (rst || !res_sync) begin
-            intcxrom  <= 1'b0;
-            slotc3rom <= 1'b0;
-        end else if (op_commit && !op_rw) begin
-            // Write strobes: the address selects the switch, A0 the value.
-            if (op_addr[15:1] == 15'h6003) intcxrom  <= op_addr[0];  // $C006/7
-            if (op_addr[15:1] == 15'h6005) slotc3rom <= op_addr[0];  // $C00A/B
-        end
-    end
+    slot_switches u_sw (
+        .clk (clk), .rst (rst), .res_sync (res_sync),
+        .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
+        .slot (slot_assign),
+        .io_select (io_select)
+    );
 
     // ---- decode -------------------------------------------------------------
     // Live decode of the presented op; registered users only.
     wire slot_hit = enabled &&
                     op_addr[15:12] == 4'hC &&
                     op_addr[11:8]  == {1'b0, slot_assign} &&
-                    !intcxrom &&
-                    !(slot_assign == 3'd3 && !slotc3rom);
+                    io_select;
 
     logic hit_q;        // this cycle's op is ours; qualifies the commit strobe
 

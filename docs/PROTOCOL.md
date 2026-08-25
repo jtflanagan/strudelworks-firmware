@@ -58,7 +58,11 @@ host reads; the receiver carries parser state across all of them.
 | `0x15` | REG_WRITE | Host→card. Payload `[addr][data]`. Also answered with REG_VALUE. |
 | `0x16` | REG_VALUE | Card→host. Payload `[addr][data]`, answering either of the above. |
 | `0x17` | CPU_HOLD | Card→host, **unsolicited**. Header only; `free[0]` = the soft core is held at its reset vector. Sent on every change while a capture is enabled, through the same boundary-respecting slot as a REG_VALUE. See BOOT_MENU.md. |
-| `0x18`–`0xFF` | — | Application, unassigned. |
+| `0x18` | HD_ROM | Host→card. Payload 64 words: the hard disk's 256-byte slot ROM. See HARDDISK.md. |
+| `0x19` | HD_DONE | Host→card. `free[7:0]` = the status the EXECUTE port reads once busy clears; payload `[{count, addr}] [size] [bytes…]` to DMA into the Apple, or header only for none. |
+| `0x1A` | HD_FETCH | Host→card. Payload `[{count, addr}]`: read bytes out of the Apple's memory. |
+| `0x1B` | HD_DATA | Card→host. `free` = count; payload the bytes, answering HD_FETCH. Through the same boundary-respecting slot as a reply, whatever its length. |
+| `0x1C`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -87,6 +91,7 @@ protocol.
 | `0x8000_0008` | CPU_SOURCE | RW bit 0 | which CPU drives the Apple bus; latched at RES' — see BUS_MASTER.md |
 | `0x8000_000C` | MB_SLOT | RW bits 2:0 | the Mockingboard's slot, 0 = off; latched at RES' — see MOCKINGBOARD.md |
 | `0x8000_0010` | BOOT_HOLD | RW bit 0, W1 bit 16 | hold the soft core at its reset vector; `arm`, `held`, `release`, `holds` — see BOOT_MENU.md |
+| `0x8000_0014` | HD_SLOT | RW bits 2:0 | the hard disk's slot, 0 = off; latched at RES', never MB_SLOT's; `rom`, `busy`, `execs` — see HARDDISK.md |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.
@@ -116,7 +121,9 @@ than a wrong one, because of the address echo.
 **A reply never lands inside another message.** `tx_arb` tracks message
 boundaries in the outgoing stream and manufactures a gap by back-pressuring the
 event path, rather than waiting for one to occur — waiting would work on a quiet
-link and starve on a busy one. This matters more than it sounds: with no sync
+link and starve on a busy one. The same slot carries the card's notices and
+its application messages (HD_DATA, up to 129 words, streamed from its source
+and its length snooped from its own header), in that priority order. This matters more than it sounds: with no sync
 word and no resynchronisation, an interleaved word does not break the stream
 loudly, it makes it plausible and wrong from that point on. `sim/reg_map_tb.sv`
 asserts it directly.

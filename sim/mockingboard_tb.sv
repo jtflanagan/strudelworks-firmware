@@ -112,7 +112,7 @@ module mockingboard_tb;
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
         .slot_rd_claim (rd_claim), .slot_rd_data (rd_data),
-        .ovr_en (1'b0), .ovr_addr (16'h0000), .op_ovr (),
+        .ovr_en (1'b0), .ovr_addr (16'h0000), .ovr_rw (1'b1), .ovr_wdata (8'h00), .op_ovr (),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)

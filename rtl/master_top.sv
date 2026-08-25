@@ -31,6 +31,15 @@
 // presents keyboard reads on its behalf until the host says go; see
 // rtl/boot_hold.sv and docs/BOOT_MENU.md.  Unarmed, it is a wire.
 //
+// THE HARD DISK sits there too.  It answers busy on its EXECUTE port until
+// the host has the command's answer, and moves blocks between the Apple's
+// memory and its own buffer through the same override, pausing the core for
+// exactly those cycles; see rtl/hd_card.sv and docs/HARDDISK.md.  The two
+// overrides cannot want the same cycle - the hold takes only the post-reset
+// opcode fetch, a DMA only follows a command the running machine issued -
+// and the mux below gives the hold the cycle anyway, so that if they ever
+// could, the answer is defined.
+//
 // WHAT IS NOT HERE YET: INH, RDY and NMI.  INH would let the card override the
 // machine's own memory, which is a memory-mode decision that has not been made;
 // RDY is not used by the Apple II for the CPU; the slot brings out no NMI.
@@ -53,7 +62,7 @@ module master_top #(
     input  wire        apple_m2sel_pin,
     input  wire        apple_m2b0_pin,
     input  wire        apple_inh_pin,
-    input  wire        apple_res_pin,
+    inout  wire        apple_res_pin,
     input  wire        apple_irq_pin,
     input  wire        apple_rdy_pin,
     inout  wire        apple_dma_pin,
@@ -82,8 +91,17 @@ module master_top #(
     wire        apple_res_sync, apple_irq_sync, apple_phi0_sync;
     wire [7:0]  apple_data_sync;
     wire        cpu_source_active;
-    wire [2:0]  mb_slot_active;
-    wire        boot_arm, boot_release, boot_held;
+    wire [2:0]  mb_slot_active, hd_slot_active;
+    wire        boot_arm, boot_release, boot_held, boot_cold;
+    wire        hd_rom_loaded, hd_busy;
+    wire [7:0]  hd_execs;
+    wire        res_drive;
+    wire        app_msg_valid, app_pay_valid;
+    wire [7:0]  app_msg_type, app_msg_len;
+    wire [15:0] app_msg_free;
+    wire [31:0] app_pay_data;
+    wire [31:0] aux_word;
+    wire        aux_valid, aux_take;
 
     card_link #(
         .BUILD_DATE (BUILD_DATE),
@@ -100,7 +118,16 @@ module master_top #(
         .cpu_source_active (cpu_source_active),
         .mb_slot_active (mb_slot_active),
         .boot_arm (boot_arm), .boot_release (boot_release),
+        .boot_cold (boot_cold),
         .boot_held (boot_held),
+        .hd_slot_active (hd_slot_active),
+        .hd_rom_loaded (hd_rom_loaded), .hd_busy (hd_busy),
+        .hd_execs (hd_execs),
+        .res_drive (res_drive),
+        .app_msg_valid (app_msg_valid), .app_msg_type (app_msg_type),
+        .app_msg_free (app_msg_free), .app_msg_len (app_msg_len),
+        .app_pay_data (app_pay_data), .app_pay_valid (app_pay_valid),
+        .aux_word (aux_word), .aux_valid (aux_valid), .aux_take (aux_take),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),
@@ -174,10 +201,22 @@ module master_top #(
     wire        op_rw;
     wire [7:0]  op_wdata;
     wire        op_present, op_commit, op_ovr;
-    wire        mb_rd_claim;
-    wire [7:0]  mb_rd_data;
-    wire        ovr_en;
-    wire [15:0] ovr_addr;
+    wire        mb_rd_claim, hd_rd_claim;
+    wire [7:0]  mb_rd_data, hd_rd_data;
+    wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw, boot_ovr_rw;
+    wire [15:0] boot_ovr_addr, hd_ovr_addr;
+    wire [7:0]  hd_ovr_wdata, boot_ovr_wdata;
+
+    // Two overrides into one driver: the hold's is always a read of its
+    // keyboard address, the disk's may be a write.  Two peripherals into one
+    // claim: they answer for different slots (wb_regfile refuses to latch
+    // the same one for both), so at most one claims any cycle.
+    wire        ovr_en    = boot_ovr_en | hd_ovr_en;
+    wire [15:0] ovr_addr  = boot_ovr_en ? boot_ovr_addr  : hd_ovr_addr;
+    wire        ovr_rw    = boot_ovr_en ? boot_ovr_rw    : hd_ovr_rw;
+    wire [7:0]  ovr_wdata = boot_ovr_en ? boot_ovr_wdata : hd_ovr_wdata;
+    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim;
+    wire [7:0]  slot_rd_data  = hd_rd_claim ? hd_rd_data : mb_rd_data;
 
     apple_bus_write u_write (
         .clk           (apple_clk),
@@ -196,10 +235,12 @@ module master_top #(
         .op_wdata      (op_wdata),
         .op_present    (op_present),
         .op_commit     (op_commit),
-        .slot_rd_claim (mb_rd_claim),
-        .slot_rd_data  (mb_rd_data),
+        .slot_rd_claim (slot_rd_claim),
+        .slot_rd_data  (slot_rd_data),
         .ovr_en        (ovr_en),
         .ovr_addr      (ovr_addr),
+        .ovr_rw        (ovr_rw),
+        .ovr_wdata     (ovr_wdata),
         .op_ovr        (op_ovr),
         .addr_drive    (addr_drive),
         .rw_drive      (rw_drive),
@@ -224,9 +265,48 @@ module master_top #(
         .op_sync       (drv_sync),
         .op_ovr        (op_ovr),
         .din           (cpu_din),
-        .ovr_en        (ovr_en),
-        .ovr_addr      (ovr_addr),
+        .cold_req      (boot_cold),
+        .ovr_en        (boot_ovr_en),
+        .ovr_addr      (boot_ovr_addr),
+        .ovr_rw        (boot_ovr_rw),
+        .ovr_wdata     (boot_ovr_wdata),
         .held          (boot_held)
+    );
+
+    // ---- the hard disk ------------------------------------------------------
+    // The slot ROM and the EXECUTE port; the images and the command decode
+    // are on the host.  See rtl/hd_card.sv.
+    hd_card u_hd (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .cpu_rst       (cpu_rst),
+        .res_sync      (apple_res_sync),
+        .master_active (cpu_source_active),
+        .slot_assign   (hd_slot_active),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_present    (op_present),
+        .op_commit     (op_commit),
+        .op_ovr        (op_ovr),
+        .din           (cpu_din),
+        .ovr_en        (hd_ovr_en),
+        .ovr_addr      (hd_ovr_addr),
+        .ovr_rw        (hd_ovr_rw),
+        .ovr_wdata     (hd_ovr_wdata),
+        .rd_claim      (hd_rd_claim),
+        .rd_data       (hd_rd_data),
+        .msg_valid     (app_msg_valid),
+        .msg_type      (app_msg_type),
+        .msg_free      (app_msg_free),
+        .msg_len       (app_msg_len),
+        .pay_data      (app_pay_data),
+        .pay_valid     (app_pay_valid),
+        .tx_word       (aux_word),
+        .tx_valid      (aux_valid),
+        .tx_take       (aux_take),
+        .rom_loaded    (hd_rom_loaded),
+        .busy          (hd_busy),
+        .execs         (hd_execs)
     );
 
     // ---- the Mockingboard ---------------------------------------------------
@@ -257,6 +337,13 @@ module master_top #(
     // DMA' is open-drain in spirit: pulled low to take the bus, released
     // otherwise.  Never driven high - the motherboard's pull-up owns that.
     assign apple_dma_pin  = dma_assert ? 1'b0 : 1'bz;
+
+    // RES' the same way: a wired-OR line the host can pulse low to reboot the
+    // machine programmatically.  Hi-Z otherwise, so the keyboard and the
+    // power-on reset still own it.  The reader samples it back as
+    // apple_res_sync, so our own pulse resets the soft core and re-latches the
+    // slot registers exactly as a Ctrl-Reset does.  See wb_regfile's R_RESET.
+    assign apple_res_pin  = res_drive ? 1'b0 : 1'bz;
 
     // The shifters follow the enables, so a buffer only points at the Apple
     // while something is actually driving through it.

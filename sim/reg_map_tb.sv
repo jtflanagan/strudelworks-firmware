@@ -34,7 +34,7 @@ module reg_map_tb;
     reg [7:0] latches_before;
 
     // ---- host -> card: a little FIFO the parser reads from --------------------
-    reg  [31:0] rx_mem [0:63];
+    reg  [31:0] rx_mem [0:255];
     integer     rx_wr = 0, rx_rd = 0;
     wire        rx_empty = (rx_rd >= rx_wr);
     wire [31:0] rx_dout  = rx_empty ? 32'd0 : rx_mem[rx_rd];
@@ -97,17 +97,25 @@ module reg_map_tb;
     wire cpu_source_active;
     wire [2:0] mb_slot_active;
     // The boot hold's side of BOOT_HOLD: the tb plays the hold itself.
-    wire boot_arm, boot_release;
+    wire boot_arm, boot_release, boot_cold;
     reg  boot_held = 1'b0;
     integer release_pulses = 0;
     always @(posedge clk) if (boot_release) release_pulses = release_pulses + 1;
+
+    // The hard disk's side of HD_SLOT: the tb plays the disk.
+    wire [2:0] hd_slot_active;
+    wire       res_drive;
+    reg        hd_rom_loaded = 1'b0, hd_busy = 1'b0;
+    reg  [7:0] hd_execs = 8'd0;
 
     wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME),
                  .CAN_MASTER (1'b1)) u_regs (
         .clk (clk), .rst (rst),
         .apple_res_sync (apple_res_sync), .cpu_source_active (cpu_source_active),
         .mb_slot_active (mb_slot_active),
-        .boot_arm (boot_arm), .boot_release (boot_release), .boot_held (boot_held),
+        .boot_arm (boot_arm), .boot_release (boot_release), .boot_cold (boot_cold), .boot_held (boot_held),
+        .hd_slot_active (hd_slot_active), .hd_rom_loaded (hd_rom_loaded),
+        .hd_busy (hd_busy), .hd_execs (hd_execs), .res_drive (res_drive),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
@@ -130,12 +138,27 @@ module reg_map_tb;
         note_takes = note_takes + 1;
     end
 
+    // An application message, offered the way hd_card offers one: a word at
+    // a time, the next presented the cycle after a take.
+    reg  [31:0] aux_mem [0:15];
+    integer     aux_n = 0;        // words in the message, header included
+    integer     aux_i = 0;        // the one being offered
+    wire        aux_valid = (aux_i < aux_n);
+    wire [31:0] aux_word  = aux_valid ? aux_mem[aux_i] : 32'd0;
+    wire        aux_take;
+    integer     aux_takes = 0;
+    always @(posedge clk) if (aux_take) begin
+        aux_i = aux_i + 1;
+        aux_takes = aux_takes + 1;
+    end
+
     tx_arb u_arb (
         .clk (clk), .rst (rst),
         .src_data (src_data), .src_push (src_push), .src_full (src_full),
         .rsp_addr (rsp_addr), .rsp_data (rsp_data),
         .rsp_valid (rsp_valid), .rsp_take (rsp_take),
         .note_word (note_word), .note_valid (note_valid), .note_take (note_take),
+        .aux_word (aux_word), .aux_valid (aux_valid), .aux_take (aux_take),
         .tx_data (tx_data), .tx_push (tx_push), .tx_full (tx_full)
     );
 
@@ -477,6 +500,176 @@ module reg_map_tb;
             end else
                 $display("  ok: CPU_HOLD notice waited for the boundary, went out once");
         end
+
+        // --- case 12 / HD_SLOT: latched like MB_SLOT, and never the same slot -
+        if (hd_slot_active !== 3'd0) begin
+            $display("FAIL: the hard disk is enabled before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: HD_SLOT starts disabled");
+
+        // The Mockingboard is latched as slot 4 from case 9.  Ask for the
+        // same slot: the write is accepted, the reset refuses to latch it.
+        do_write(32'h8000_0014, 32'h0000_0004);
+        pulse_reset_line;
+        base = out_n;
+        do_read(32'h8000_0014);
+        if (out_mem[base+2][2:0] !== 3'd4 || out_mem[base+2][10:8] !== 3'd0 ||
+            hd_slot_active !== 3'd0) begin
+            $display("FAIL: HD_SLOT=4 with MB_SLOT=4 read back %08x, expected desired=4 active=0",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: the disk yields the Mockingboard's slot - active stays 0");
+
+        // A slot of its own: the write alone does nothing, the reset latches.
+        do_write(32'h8000_0014, 32'h0000_0007);
+        if (hd_slot_active !== 3'd0) begin
+            $display("FAIL: the WRITE enabled the disk - it must take a reset");
+            errors = errors + 1;
+        end else $display("  ok: writing HD_SLOT does not enable on its own");
+        pulse_reset_line;
+        hd_rom_loaded = 1'b1; hd_busy = 1'b1; hd_execs = 8'd9;
+        base = out_n;
+        do_read(32'h8000_0014);
+        if (hd_slot_active !== 3'd7 ||
+            out_mem[base+2][2:0] !== 3'd7 || out_mem[base+2][10:8] !== 3'd7 ||
+            out_mem[base+2][16] !== 1'b1 || out_mem[base+2][17] !== 1'b1 ||
+            out_mem[base+2][31:24] !== 8'd9) begin
+            $display("FAIL: HD_SLOT readback %08x, expected desired=7 active=7 rom=1 busy=1 execs=9",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: readback desired=7 active=7 rom=1 busy=1 execs=9");
+        hd_busy = 1'b0;
+
+        // --- case 13 / an application message, whole, and never inside another
+        // The hard disk's HD_DATA takes tx_arb's third slot: a header and
+        // then its payload, streamed a word at a time.  Same obligation as a
+        // reply - it waits for the boundary and comes out intact - and one of
+        // its own: a source that offers the next word a cycle late must not
+        // have a capture word slipped into the gap.
+        base = out_n;
+        aux_mem[0] = {16'h0200, 8'h1B, 8'd3};    // HD_DATA, 3 payload words
+        aux_mem[1] = 32'hD000_0001;
+        aux_mem[2] = 32'hD000_0002;
+        aux_mem[3] = 32'hD000_0003;
+        aux_i = 0;
+        @(negedge clk);
+        src_data = hdr(T_BUS_EVENTS, 8'd3, 16'd0); src_push = 1'b1;
+        @(negedge clk);
+        src_data = 32'hBBBB_0001;
+        aux_n = 4;                                  // arrives mid-payload
+        @(negedge clk);
+        src_data = 32'hBBBB_0002;
+        @(negedge clk);
+        src_data = 32'hBBBB_0003;
+        @(negedge clk);
+        src_push = 1'b0;
+        // And more capture traffic right behind, to try to interleave.  Offered
+        // the way bus_event_capture offers it: only while src_full is low,
+        // since the arbiter manufactures its gap by back-pressuring the source.
+        repeat (2) @(negedge clk);
+        src_data = hdr(T_BUS_EVENTS, 8'd2, 16'd0);
+        while (src_full) @(negedge clk);
+        src_push = 1'b1;
+        @(negedge clk); src_push = 1'b0;
+        src_data = 32'hCCCC_0001;
+        while (src_full) @(negedge clk);
+        src_push = 1'b1;
+        @(negedge clk); src_push = 1'b0;
+        src_data = 32'hCCCC_0002;
+        while (src_full) @(negedge clk);
+        src_push = 1'b1;
+        @(negedge clk); src_push = 1'b0;
+        repeat (40) @(posedge clk);
+
+        hdr_at = -1;
+        for (i = base; i < out_n - 3; i = i + 1) begin
+            if (out_mem[i] === hdr(T_BUS_EVENTS, 8'd3, 16'd0)) hdr_at = i;
+        end
+        if (hdr_at < 0) begin
+            $display("FAIL: the BUS_EVENTS message never came out (aux case)");
+            errors = errors + 1;
+        end else begin
+            expect_word(hdr_at + 1, 32'hBBBB_0001, "event word 1 with HD_DATA pending");
+            expect_word(hdr_at + 2, 32'hBBBB_0002, "event word 2 with HD_DATA pending");
+            expect_word(hdr_at + 3, 32'hBBBB_0003, "event word 3 with HD_DATA pending");
+            expect_word(hdr_at + 4, aux_mem[0],    "HD_DATA header follows the message");
+            expect_word(hdr_at + 5, aux_mem[1],    "HD_DATA word 1");
+            expect_word(hdr_at + 6, aux_mem[2],    "HD_DATA word 2");
+            expect_word(hdr_at + 7, aux_mem[3],    "HD_DATA word 3");
+            expect_word(hdr_at + 8, hdr(T_BUS_EVENTS, 8'd2, 16'd0),
+                        "the next capture message follows HD_DATA whole");
+            expect_word(hdr_at + 9, 32'hCCCC_0001, "and its payload");
+            if (aux_takes !== 4) begin
+                $display("FAIL: HD_DATA words taken %0d times, expected 4", aux_takes);
+                errors = errors + 1;
+            end else
+                $display("  ok: HD_DATA waited for the boundary, went out whole, once");
+        end
+
+        // --- case 14 / a boot-hold RELEASE re-latches MB_SLOT and HD_SLOT ----
+        // The menu writes the slots during a hold and then releases; the
+        // release must copy `desired` into `active` with no reset, or the
+        // choice would not reach the boot it lets go.  See docs/BOOT_MENU.md.
+        // Fresh desired values, different from what the resets above latched.
+        do_write(32'h8000_000C, 32'h0000_0005);           // MB desired = 5
+        do_write(32'h8000_0014, 32'h0000_0006);           // HD desired = 6
+        if (mb_slot_active !== 3'd4 || hd_slot_active !== 3'd7) begin
+            $display("FAIL: writing the slots latched them without a reset: mb=%0d hd=%0d",
+                     mb_slot_active, hd_slot_active);
+            errors = errors + 1;
+        end else $display("  ok: writing MB/HD desired during a hold changes nothing yet");
+
+        do_write(32'h8000_0010, 32'h0001_0001);           // release, stay armed
+        if (mb_slot_active !== 3'd5) begin
+            $display("FAIL: the release did not re-latch MB_SLOT: active=%0d, expected 5",
+                     mb_slot_active);
+            errors = errors + 1;
+        end else if (hd_slot_active !== 3'd6) begin
+            $display("FAIL: the release did not re-latch HD_SLOT: active=%0d, expected 6",
+                     hd_slot_active);
+            errors = errors + 1;
+        end else $display("  ok: the release re-latches both slots from desired, no reset");
+
+        // The clash rule still holds at the release point: the disk yields.
+        do_write(32'h8000_0014, 32'h0000_0005);           // HD desired = 5 = MB's
+        do_write(32'h8000_0010, 32'h0001_0001);           // release again
+        if (hd_slot_active !== 3'd0) begin
+            $display("FAIL: HD did not yield MB's slot at the release: active=%0d", hd_slot_active);
+            errors = errors + 1;
+        end else $display("  ok: the disk still yields the Mockingboard's slot at a release");
+
+        // --- case 15 / RESET: a write pulses RES' low ------------------------
+        // The programmatic Ctrl-Reset.  A short custom duration so the tb does
+        // not spin: 1 unit = 256 cycles.
+        if (res_drive !== 1'b0) begin
+            $display("FAIL: RES' driven before anyone asked"); errors = errors + 1;
+        end else $display("  ok: RES' idle until asked");
+
+        // 0x0004_0001: cycles field = 4 (1024 cycles), bit 0 = pulse.  Long
+        // enough that the pulse is still asserting after do_write's 60-cycle
+        // settle, so it can be observed as a level here.
+        do_write(32'h8000_0018, 32'h0004_0001);
+        if (res_drive !== 1'b1) begin
+            $display("FAIL: the write did not start a RES' pulse"); errors = errors + 1;
+        end else $display("  ok: writing RESET drives RES' low");
+
+        // It releases on its own after ~1024 cycles.
+        for (i = 0; i < 2000 && res_drive !== 1'b0; i = i + 1) @(posedge clk);
+        if (res_drive !== 1'b0) begin
+            $display("FAIL: RES' pulse never released"); errors = errors + 1;
+        end else if (i < 800) begin
+            $display("FAIL: RES' pulse was too short (%0d cycles)", i); errors = errors + 1;
+        end else $display("  ok: the pulse released itself after ~1024 cycles");
+
+        // The count reads back.
+        base = out_n;
+        push_word(hdr(T_REG_READ, 8'd1, 16'd0));
+        push_word(32'h8000_0018);
+        repeat (60) @(posedge clk);
+        if (out_mem[base+2][31:24] !== 8'd1) begin
+            $display("FAIL: RESET pulse count read back %0d, expected 1", out_mem[base+2][31:24]);
+            errors = errors + 1;
+        end else $display("  ok: the pulse count reads back");
 
         // --- case 7 / the parser never lost sync -----------------------------
         if (frame_error !== 1'b0) begin

@@ -73,8 +73,14 @@ module snoop_top #(
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (),          // nothing here can act on it
         .mb_slot_active (),             // nor on this
-        .boot_arm (), .boot_release (), // nor hold a core it does not have
+        .boot_arm (), .boot_release (), .boot_cold (),  // nor hold a core
         .boot_held (1'b0),
+        .hd_slot_active (),             // nor answer for a hard disk
+        .hd_rom_loaded (1'b0), .hd_busy (1'b0), .hd_execs (8'd0),
+        .res_drive (),
+        .app_msg_valid (), .app_msg_type (), .app_msg_free (),
+        .app_msg_len (), .app_pay_data (), .app_pay_valid (),
+        .aux_word (32'd0), .aux_valid (1'b0), .aux_take (),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),

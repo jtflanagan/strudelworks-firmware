@@ -80,7 +80,39 @@ module card_link #(
     // readback and for the CPU_HOLD notice.  A watching top ties held to 0.
     output wire        boot_arm,
     output wire        boot_release,
+    output wire        boot_cold,
     input  wire        boot_held,
+
+    // The hard disk's slot (rtl/hd_card.sv), latched on the RES' edge like
+    // the Mockingboard's, and its status back for the HD_SLOT readback.  A
+    // watching top ties the inputs to 0.
+    output wire [2:0]  hd_slot_active,
+    input  wire        hd_rom_loaded,
+    input  wire        hd_busy,
+    input  wire [7:0]  hd_execs,
+
+    // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
+    // mastering top wires it to the pin; a snooper leaves it unconnected.
+    output wire        res_drive,
+
+    // ---- application messages, through the seam --------------------------
+    // Host -> card: every decoded message, as ft601_msg_rx produces it, for a
+    // top's peripherals to pick their own types out of.  The link layer has
+    // already acted on the ones that are its business (BUS_ENABLE, the
+    // register pair) and passes the stream on unfiltered.
+    output wire        app_msg_valid,
+    output wire [7:0]  app_msg_type,
+    output wire [15:0] app_msg_free,
+    output wire [7:0]  app_msg_len,
+    output wire [31:0] app_pay_data,
+    output wire        app_pay_valid,
+
+    // Card -> host: a whole message a word at a time, taken between the
+    // capture's frames by tx_arb.  A top with nothing to send ties aux_valid
+    // low.
+    input  wire [31:0] aux_word,
+    input  wire        aux_valid,
+    output wire        aux_take,
 
     // FT601 (constr/ft601.xdc)
     input  wire        ft_clk,
@@ -285,6 +317,13 @@ module card_link #(
         .frame_error (rx_frame_error)
     );
 
+    assign app_msg_valid = msg_valid;
+    assign app_msg_type  = msg_type;
+    assign app_msg_free  = msg_free;
+    assign app_msg_len   = msg_len;
+    assign app_pay_data  = pay_data;
+    assign app_pay_valid = pay_valid;
+
     wire bus_enable_msg = msg_valid && (msg_type == T_BUS_ENABLE);
     wire want_enable    = bus_enable_msg && msg_free[0];
     wire want_disable   = bus_enable_msg && !msg_free[0];
@@ -419,7 +458,13 @@ module card_link #(
         .mb_slot_active    (mb_slot_active),
         .boot_arm          (boot_arm),
         .boot_release      (boot_release),
+        .boot_cold         (boot_cold),
         .boot_held         (boot_held),
+        .hd_slot_active    (hd_slot_active),
+        .hd_rom_loaded     (hd_rom_loaded),
+        .hd_busy        (hd_busy),
+        .hd_execs          (hd_execs),
+        .res_drive         (res_drive),
         .wb_cyc   (rwb_cyc),
         .wb_stb   (rwb_stb),
         .wb_we    (rwb_we),
@@ -475,6 +520,9 @@ module card_link #(
         .note_word ({15'd0, boot_held, T_CPU_HOLD, 8'd0}),
         .note_valid (note_pending),
         .note_take (note_take),
+        .aux_word  (aux_word),
+        .aux_valid (aux_valid),
+        .aux_take  (aux_take),
         .tx_data   (tx_word),
         .tx_push   (tx_push),
         .tx_full   (txc_full)
@@ -590,7 +638,6 @@ module card_link #(
     always @(posedge clk_ctrl) heartbeat <= heartbeat + 26'd1;
 
     wire unused_hb = hb_sent;
-    wire unused_len = |msg_len;
 
     assign led[0]   = clk_locked;
     assign led[1]   = capture_enable;

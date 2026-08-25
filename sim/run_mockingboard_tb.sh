@@ -13,5 +13,6 @@ iverilog -g2012 -o "$out" \
     "$root/sim/mockingboard_tb.sv" \
     "$root/rtl/apple_bus_write.sv" \
     "$root/rtl/mockingboard.sv" \
-    "$root/rtl/via6522.v"
+    "$root/rtl/via6522.v" \
+    "$root/rtl/slot_switches.sv"
 exec vvp "$out"

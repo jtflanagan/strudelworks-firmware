@@ -10,9 +10,13 @@ already receives every bus cycle to rebuild the display - draws the menu on the
 HDMI panel and decides what to do. When it has decided, one register write
 lets the boot go on exactly as if nothing had happened.
 
-The first cut is deliberately the smallest thing that is a menu: a splash
-screen, *press Return*, and the boot continues. What it establishes is the
-mechanism; what it does with it can grow.
+The first cut was the smallest thing that is a menu - a splash and *press
+Return*. It has since grown the settings the machine now has features for:
+enable or move the **Mockingboard**, enable or move the **hard disk** and pick
+the disk it boots from, and continue. The mechanism is unchanged - the hold,
+the keyboard reads, the host drawing the screen - and one thing was added that
+the first cut deferred: a **second latch point** so a choice made in the menu
+reaches the boot it releases into. See "Choices that take effect this boot".
 
 ## Where the hold is, and why it is clean
 
@@ -129,8 +133,9 @@ does not promise.
 
 ## The host
 
-`swhost --cpu soft --boot-menu`. At start the host arms the hold; on every
-`CPU_HOLD` with `held = 1` it replaces the machine's picture with the splash -
+`swhost --cpu soft --boot-menu [--hdv ...] [--disk-dir DIR]`. At start the
+host arms the hold; on every `CPU_HOLD` with `held = 1` it replaces the
+machine's picture with the menu -
 drawn through the same text renderer, character ROM and NTSC path as the
 machine's own screen, so it looks like the machine drew it - and watches the
 event stream for a `$C000` read with bit 7 set and `$0D` in the low seven
@@ -157,7 +162,60 @@ the mode flip-flops - and there is no reason to show it. A monitor plugged
 into the Apple itself shows exactly that during the hold; the menu exists only
 on HDMI. That is the one thing this first cut gives up.
 
-## What the first cut does not do, and how it would
+## The menu, and what it sets
+
+The host draws the menu into a text page of its own and reads keys out of the
+same capture stream (strudelworks-host `src/boot_menu.cpp`). The items:
+
+- **Mockingboard** - off, or the slot it answers as.
+- **Hard disk** - off, or the slot it answers as.
+- **Boot disk** - which image the disk serves as unit 1, scrolled from the
+  files in the disk directory (`--disk-dir`), matched case-insensitively
+  because the images are a mix of `.hdv` and `.HDV`.
+- **Continue boot.**
+
+The two slots may not coincide - the card makes the disk yield, but the menu
+does not offer the clash: cycling a slot skips the one the other holds. Keys
+are the arrow keys where the machine has them and `WASD` where it does not
+(a ][+ has no up/down arrows), uppercased so caps lock is irrelevant; `Return`
+or `Escape` continues the boot from anywhere.
+
+**Selections persist.** The `BootMenu` object outlives the resets, so a
+Ctrl-Reset re-enters the hold showing what was set last. They are also written
+to a defaults file at boot (`--boot-config`, default `boot_menu.conf`) and
+loaded at startup, so they survive a restart of swhost. The disk is stored by
+name, not index, so it survives the directory listing changing.
+
+## Choices that take effect this boot
+
+`MB_SLOT` and `HD_SLOT` latch their `active` value at the RES′ *assertion* -
+which, by the time the hold engages at the first opcode fetch, is already in
+the past. So a choice made in the menu would not reach the boot it is about to
+release into. The first cut named the fix and deferred it: *"either the
+release path gets its own latch point, or the menu says press Reset."* It now
+has the latch point.
+
+`wb_regfile` re-latches `MB_SLOT.active` and `HD_SLOT.active` from `desired` on
+the **boot-hold release** as well as on a reset assertion (`boot_relatch`), so
+the sequence is: the host writes `MB_SLOT`/`HD_SLOT` `desired` during the hold,
+then writes the release, and the same write copies `desired` into `active`
+before the core is let go. The slot-clash rule applies at both latch points -
+the disk yields the Mockingboard's slot at a release too. `CPU_SOURCE`
+deliberately does **not** re-latch here: switching the driving CPU mid-hold is
+the one changeover this design keeps to a reset. Checked by
+`sim/reg_map_tb.sv` case 14.
+
+The host side spans three threads, and the machine being quiescent during a
+hold is what makes it simple (strudelworks-host `src/pipeline.cpp`
+`drive_apply`). The **decode** thread, which owns the menu and the audio
+reconstruction, sets the Mockingboard's slot and writes the defaults file the
+moment "continue" is chosen, then posts a request. The **ingest** thread,
+which owns the transport, drives the rest over a few polls: it asks the
+**disk** thread to open the chosen boot image as unit 1, points the host-side
+controller at the new slot, writes `MB_SLOT` and `HD_SLOT`, and writes the
+release. A few polls of latency cost nothing against a machine that is parked.
+
+## What it still does not do, and how it would
 
 - **Draw on the Apple's own screen.** The same hold, plus a host→card queue of
   bus ops presented in place of the keyboard reads - writes to `$0400-$07FF`
@@ -165,16 +223,13 @@ on HDMI. That is the one thing this first cut gives up.
   driver's override input is already the shape that needs; only the source of
   `ovr_addr` changes. Every op sent comes back as a captured event, so the
   capture stream is the acknowledgement and no flow-control message is needed.
-- **Choices that need a reset-latched register.** `MB_SLOT`, or handing the
-  bus back to the native CPU, cannot take effect from inside a hold: the card
-  cannot pull RES′ (the pin is an input) and letting go of DMA′ mid-sequence
-  is not a state anyone wants. Either the release path gets its own latch
-  point for `MB_SLOT`, or the menu says "press Reset" for those. Deferred until
-  there is a feature that needs it.
-- **A mock.** `MockCard` does not model `BOOT_HOLD` or `CPU_HOLD`, so the
-  splash cannot be seen without the card. The mock would need to answer the
-  register, emit the notice on arm, and turn its event source into keyboard
-  polls - a modest change, when it is wanted.
+- **Switch the driving CPU.** Handing the bus back to the native 6502 is the
+  one changeover kept to a reset, so it is not a menu item; `CPU_SOURCE` does
+  not re-latch at a release.
+- **A mock.** `MockCard` does not model `BOOT_HOLD` or `CPU_HOLD`, so the menu
+  cannot be seen without the card. The mock would need to answer the register,
+  emit the notice on arm, and turn its event source into keyboard polls - a
+  modest change, when it is wanted.
 
 ## Verification
 

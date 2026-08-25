@@ -108,6 +108,7 @@ set_false_path -from [get_ports {tini_5v_pin}]
 # direction pins are tied to "towards the FPGA" in the snooper and follow the
 # drive enables in the master.  Either way they are asynchronous to the Apple,
 # for the reason above.
+set_false_path -to [get_ports {apple_res_pin}]
 set_false_path -to [get_ports {tini_oe_pin}]
 set_false_path -to [get_ports {tini_addr_dir_pin}]
 set_false_path -to [get_ports {tini_data_dir_pin}]

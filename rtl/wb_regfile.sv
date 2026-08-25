@@ -69,7 +69,23 @@ module wb_regfile #(
     // to 0 and leaves the rest unconnected.
     output wire            boot_arm,
     output logic           boot_release,
+    // W1 bit 17: release AND force a cold boot (see rtl/boot_hold.sv).
+    output logic           boot_cold,
     input  wire            boot_held,
+
+    // The hard disk (rtl/hd_card.sv).  The slot is latched at RES' like the
+    // Mockingboard's; the rest is status coming back for the readback.  A
+    // watching top ties the inputs to 0 and leaves the output unconnected.
+    output wire [2:0]      hd_slot_active,
+    input  wire            hd_rom_loaded,
+    input  wire            hd_busy,
+    input  wire [7:0]      hd_execs,
+
+    // Programmatic Ctrl-Reset.  Held low while pulsing; the master top turns
+    // this into an open-drain drive of the Apple's RES' line, exactly as it
+    // drives DMA'.  A snoop build ties CAN_MASTER low, so this never asserts
+    // and its pin stays an input.  See docs/BUS_MASTER.md.
+    output wire            res_drive,
 
     // Wishbone B4 classic, 32-bit.
     input  wire            wb_cyc,
@@ -99,6 +115,8 @@ module wb_regfile #(
     localparam [13:0] R_CPU_SOURCE = 'd2;   // 0x8000_0008, RW in bit 0
     localparam [13:0] R_MB_SLOT    = 'd3;   // 0x8000_000C, RW in bits 2:0
     localparam [13:0] R_BOOT_HOLD  = 'd4;   // 0x8000_0010, RW bit 0, W1 bit 16
+    localparam [13:0] R_HD_SLOT    = 'd5;   // 0x8000_0014, RW in bits 2:0
+    localparam [13:0] R_RESET      = 'd6;   // 0x8000_0018, W1 bit 0 pulses RES'
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -183,7 +201,13 @@ module wb_regfile #(
             mb_slot_desired <= 3'd0;      // no Mockingboard until asked for
             mb_slot_active_q <= 3'd0;
         end else begin
-            if (res_assert) begin
+            // A reset assertion is the ordinary latch point; a boot-hold
+            // RELEASE is the second one, so that a menu shown during a hold
+            // can enable or move the Mockingboard for the very boot it is
+            // about to let go.  See BOOT_HOLD's boot_relatch below and
+            // docs/BOOT_MENU.md.  The write only ever sets `desired`; both
+            // edges copy it into `active`.
+            if (res_assert || boot_relatch) begin
                 mb_slot_active_q <= CAN_MASTER ? mb_slot_desired : 3'd0;
             end
             if (wr_mb_slot) mb_slot_desired <= wb_dat_w[2:0];
@@ -223,6 +247,7 @@ module wb_regfile #(
             boot_holds     <= 8'd0;
             boot_held_prev <= 1'b0;
             boot_release   <= 1'b0;
+            boot_cold      <= 1'b0;
         end else begin
             boot_held_prev <= boot_held;
             if (boot_held && !boot_held_prev) boot_holds <= boot_holds + 8'd1;
@@ -230,10 +255,91 @@ module wb_regfile #(
             // One pulse per write that set the bit, however long the host's
             // message took to arrive.  The hold consumes it at a cycle end.
             boot_release <= wr_boot_hold && wb_dat_w[16];
+            boot_cold    <= wr_boot_hold && wb_dat_w[17];
         end
     end
 
     wire [31:0] boot_hold_rd = {boot_holds, 15'd0, boot_held, 7'd0, boot_arm_q};
+
+    // ---- HD_SLOT ------------------------------------------------------------
+    //
+    //   [2:0]    desired   RW   which slot the hard disk answers as; 0 = off
+    //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [16]     rom       RO   the 256-byte slot ROM has been loaded (HD_ROM)
+    //   [17]     busy      RO   a command is outstanding: the port reads busy
+    //   [31:24]  execs     RO   EXECUTE reads taken, wrapping
+    //
+    // MB_SLOT's contract again, and one more rule: the two slots may not
+    // coincide.  Both peripherals claim read cycles in their slot's ranges,
+    // and two claimants for one cycle would both drive the bus.  The disk
+    // yields - it is the newer of the two - and `active` says so, latching 0
+    // when the Mockingboard has the same slot asked for.  The host checks
+    // the readback rather than assuming.  See docs/HARDDISK.md.
+    logic [2:0] hd_slot_desired;
+    logic [2:0] hd_slot_active_q;
+
+    assign hd_slot_active = hd_slot_active_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            hd_slot_desired  <= 3'd0;     // no hard disk until asked for
+            hd_slot_active_q <= 3'd0;
+        end else begin
+            // Same two latch points as MB_SLOT, and the same clash rule at
+            // each: the disk yields the Mockingboard's slot.  See BOOT_MENU.md.
+            if (res_assert || boot_relatch) begin
+                hd_slot_active_q <= (CAN_MASTER && hd_slot_desired != mb_slot_desired)
+                                    ? hd_slot_desired : 3'd0;
+            end
+            if (wr_hd_slot) hd_slot_desired <= wb_dat_w[2:0];
+        end
+    end
+
+    wire [31:0] hd_slot_rd = {hd_execs, 6'd0, hd_busy, hd_rom_loaded,
+                              5'd0, hd_slot_active_q, 5'd0, hd_slot_desired};
+
+    // ---- RESET --------------------------------------------------------------
+    //
+    //   [0]      pulse     W1   assert the Apple's RES' low for a while
+    //   [31:16]  cycles    W    duration in 256-cycle units; 0 = the default
+    //   [0]      pulsing   RO   the pulse is asserting now
+    //   [31:24]  pulses    RO   pulses issued, wrapping
+    //
+    // A physical Ctrl-Reset pulls the bus RES' line - a wired-OR, open-drain
+    // line - low for as long as the key is held.  This does the same from the
+    // host: the master top drives the line low while `res_drive` is high and
+    // releases it to Hi-Z otherwise.  Everything a real reset does then
+    // follows, because the reader samples our own driven low back as
+    // `apple_res_sync` - the soft core resets, and CPU_SOURCE / MB_SLOT /
+    // HD_SLOT re-latch on the assertion, same as any reset.
+    //
+    // The counter lives in this always-on clock domain, NOT the one RES'
+    // resets, so the pulse it is generating cannot cut itself short.  Only a
+    // CAN_MASTER build may drive; a snooper's pin is an input.
+    //
+    // ~20 us default (2000 cycles at 100 MHz): far longer than the soft core's
+    // seven-cycle reset needs, and short enough to be imperceptible.  A caller
+    // that wants the machine visibly held passes a bigger count.
+    localparam integer RES_DEFAULT = 2000;
+    logic [23:0] res_cnt;
+    logic [7:0]  res_pulses;
+    wire  res_pulsing = (res_cnt != 24'd0);
+    assign res_drive = CAN_MASTER && res_pulsing;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            res_cnt    <= 24'd0;
+            res_pulses <= 8'd0;
+        end else if (wr_reset && wb_dat_w[0] && !res_pulsing) begin
+            res_cnt    <= (wb_dat_w[31:16] != 16'd0) ? {wb_dat_w[31:16], 8'd0}
+                                                     : RES_DEFAULT[23:0];
+            res_pulses <= res_pulses + 8'd1;
+        end else if (res_pulsing) begin
+            res_cnt <= res_cnt - 24'd1;
+        end
+    end
+
+    wire [31:0] reset_rd = {res_pulses, 23'd0, res_pulsing};
 
     assign wb_stall = 1'b0;
 
@@ -257,6 +363,8 @@ module wb_regfile #(
                         R_CPU_SOURCE: wb_dat_r <= cpu_source_rd;
                         R_MB_SLOT:    wb_dat_r <= mb_slot_rd;
                         R_BOOT_HOLD:  wb_dat_r <= boot_hold_rd;
+                        R_HD_SLOT:    wb_dat_r <= hd_slot_rd;
+                        R_RESET:      wb_dat_r <= reset_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -278,6 +386,17 @@ module wb_regfile #(
                          (word == R_MB_SLOT);
     wire wr_boot_hold  = access && !wb_ack && in_region && wb_we &&
                          (word == R_BOOT_HOLD);
+    wire wr_hd_slot    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_HD_SLOT);
+    wire wr_reset      = access && !wb_ack && in_region && wb_we &&
+                         (word == R_RESET);
+
+    // A boot-hold RELEASE re-latches MB_SLOT and HD_SLOT above, so the menu's
+    // choices reach the boot it releases into.  Same qualification as the
+    // release pulse itself; CPU_SOURCE deliberately does NOT re-latch here -
+    // switching the driving CPU mid-hold is the one changeover BOOT_MENU.md
+    // keeps to a reset.
+    wire boot_relatch  = wr_boot_hold && wb_dat_w[16];
 
     // wb_adr[1:0] are byte lanes within a word and are deliberately not decoded.
     wire _unused_ok = &{1'b0, wb_dat_w[31:1], wb_sel, wb_adr[1:0], 1'b0};

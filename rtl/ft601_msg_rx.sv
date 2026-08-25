@@ -49,6 +49,12 @@ module ft601_msg_rx (
     localparam [7:0] T_BUS_ENABLE = 8'h11;
     localparam [7:0] T_REG_READ   = 8'h14;
     localparam [7:0] T_REG_WRITE  = 8'h15;
+    // The hard disk's three, host -> card: the slot ROM, a command's result
+    // (with any bytes to put in the Apple's memory), and a request for bytes
+    // out of it.  See rtl/hd_card.sv and docs/HARDDISK.md.
+    localparam [7:0] T_HD_ROM     = 8'h18;
+    localparam [7:0] T_HD_DONE    = 8'h19;
+    localparam [7:0] T_HD_FETCH   = 8'h1A;
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -66,7 +72,9 @@ module ft601_msg_rx (
     // message that gets ignored - it is a link that drops the moment the host
     // first uses it.
     wire hdr_known = (hdr_type == T_IDLE)      || (hdr_type == T_BUS_ENABLE) ||
-                     (hdr_type == T_REG_READ)  || (hdr_type == T_REG_WRITE);
+                     (hdr_type == T_REG_READ)  || (hdr_type == T_REG_WRITE)  ||
+                     (hdr_type == T_HD_ROM)    || (hdr_type == T_HD_DONE)    ||
+                     (hdr_type == T_HD_FETCH);
 
     always_ff @(posedge clk) begin
         if (rst) begin

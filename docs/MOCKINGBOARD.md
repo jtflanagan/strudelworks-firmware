@@ -45,8 +45,9 @@ case to see it.
 `$C400-$C4FF` is not always the slot 4 card. With INTCXROM set the
 motherboard ROM owns all of `$C100-$CFFF` - and a IIe boots that way - so a
 card that answered unconditionally would drive against the ROM's own output
-buffer. `rtl/mockingboard.sv` therefore tracks the two switches that gate
-I/O SELECT', from the same driven ops:
+buffer. `rtl/slot_switches.sv` (shared with the hard disk's slot ROM, see
+HARDDISK.md) therefore tracks the two switches that gate I/O SELECT', from
+the same driven ops:
 
 | switch | set/clear | effect tracked |
 |---|---|---|
@@ -55,9 +56,8 @@ I/O SELECT', from the same driven ops:
 
 Carried from v5_1_3's `soft_switch_manager.sv`, cut down: the `$C8xx`
 expansion-ROM select and the `$CFFF` release were deliberately left behind,
-because a Mockingboard decodes I/O SELECT' only and has no ROM to arbitrate.
-A future card with a `$C8xx` presence brings that logic back as its own
-module.
+because neither a Mockingboard nor the 256-byte SmartPort ROM has a `$C8xx`
+presence. A future card with one brings that logic back as its own module.
 
 The one invariant that keeps the machine alive, asserted over the whole run
 of `sim/mockingboard_tb.sv`: **the data bus is never driven on a read the
