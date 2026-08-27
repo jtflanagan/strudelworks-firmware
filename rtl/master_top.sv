@@ -40,6 +40,13 @@
 // and the mux below gives the hold the cycle anyway, so that if they ever
 // could, the answer is defined.
 //
+// KEYBOARD AND BUTTON INJECTION sit beside the core's din.  A key the host
+// pressed is what the core latches on its next $C00x read, a button the host
+// holds is bit 7 of its next $C061-$C063 read, and the capture records the
+// same byte for that cycle - a substitution, never a drive, because the
+// motherboard owns those pins; see rtl/kbd_inject.sv, rtl/pb_inject.sv and
+// docs/KEYBOARD.md.  Nothing pressed, both are wires.
+//
 // WHAT IS NOT HERE YET: INH, RDY and NMI.  INH would let the card override the
 // machine's own memory, which is a memory-mode decision that has not been made;
 // RDY is not used by the Apple II for the CPU; the slot brings out no NMI.
@@ -92,9 +99,20 @@ module master_top #(
     wire [7:0]  apple_data_sync;
     wire        cpu_source_active;
     wire [2:0]  mb_slot_active, hd_slot_active;
-    wire        boot_arm, boot_release, boot_held, boot_cold;
+    wire        boot_arm, boot_release, boot_held;
     wire        hd_rom_loaded, hd_busy;
     wire [7:0]  hd_execs;
+    wire        kbd_press, kbd_drop, kbd_strobe;
+    wire [6:0]  kbd_press_key;
+    wire [7:0]  kbd_taken;
+    wire        kbd_sub_en, pb_sub_en;
+    wire [7:0]  kbd_sub_data, pb_sub_data;
+    wire [5:0]  pb_override;
+    wire [2:0]  pb_hw;
+    // The two substitutions answer for disjoint addresses ($C00x, $C061-3),
+    // so at most one asserts on any cycle; the mux only has to be defined.
+    wire        sub_en   = kbd_sub_en | pb_sub_en;
+    wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data : pb_sub_data;
     wire        res_drive;
     wire        app_msg_valid, app_pay_valid;
     wire [7:0]  app_msg_type, app_msg_len;
@@ -118,11 +136,14 @@ module master_top #(
         .cpu_source_active (cpu_source_active),
         .mb_slot_active (mb_slot_active),
         .boot_arm (boot_arm), .boot_release (boot_release),
-        .boot_cold (boot_cold),
         .boot_held (boot_held),
         .hd_slot_active (hd_slot_active),
         .hd_rom_loaded (hd_rom_loaded), .hd_busy (hd_busy),
         .hd_execs (hd_execs),
+        .kbd_press (kbd_press), .kbd_press_key (kbd_press_key),
+        .kbd_drop (kbd_drop),
+        .kbd_strobe (kbd_strobe), .kbd_taken (kbd_taken),
+        .pb_override (pb_override), .pb_hw (pb_hw),
         .res_drive (res_drive),
         .app_msg_valid (app_msg_valid), .app_msg_type (app_msg_type),
         .app_msg_free (app_msg_free), .app_msg_len (app_msg_len),
@@ -154,6 +175,8 @@ module master_top #(
         .ev_valid          (real_valid),
         .sync_override     (drv_sync),
         .sync_override_en  (cpu_source_active),
+        .data_override     (sub_data),
+        .data_override_en  (sub_en),
         .res_sync          (apple_res_sync),
         .irq_sync          (apple_irq_sync),
         .phi0_sync         (apple_phi0_sync),
@@ -203,18 +226,18 @@ module master_top #(
     wire        op_present, op_commit, op_ovr;
     wire        mb_rd_claim, hd_rd_claim;
     wire [7:0]  mb_rd_data, hd_rd_data;
-    wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw, boot_ovr_rw;
+    wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw;
     wire [15:0] boot_ovr_addr, hd_ovr_addr;
-    wire [7:0]  hd_ovr_wdata, boot_ovr_wdata;
+    wire [7:0]  hd_ovr_wdata;
 
     // Two overrides into one driver: the hold's is always a read of its
     // keyboard address, the disk's may be a write.  Two peripherals into one
     // claim: they answer for different slots (wb_regfile refuses to latch
     // the same one for both), so at most one claims any cycle.
     wire        ovr_en    = boot_ovr_en | hd_ovr_en;
-    wire [15:0] ovr_addr  = boot_ovr_en ? boot_ovr_addr  : hd_ovr_addr;
-    wire        ovr_rw    = boot_ovr_en ? boot_ovr_rw    : hd_ovr_rw;
-    wire [7:0]  ovr_wdata = boot_ovr_en ? boot_ovr_wdata : hd_ovr_wdata;
+    wire [15:0] ovr_addr  = boot_ovr_en ? boot_ovr_addr : hd_ovr_addr;
+    wire        ovr_rw    = boot_ovr_en ? 1'b1          : hd_ovr_rw;
+    wire [7:0]  ovr_wdata = hd_ovr_wdata;
     wire        slot_rd_claim = mb_rd_claim | hd_rd_claim;
     wire [7:0]  slot_rd_data  = hd_rd_claim ? hd_rd_data : mb_rd_data;
 
@@ -237,6 +260,8 @@ module master_top #(
         .op_commit     (op_commit),
         .slot_rd_claim (slot_rd_claim),
         .slot_rd_data  (slot_rd_data),
+        .din_sub_en    (sub_en),
+        .din_sub_data  (sub_data),
         .ovr_en        (ovr_en),
         .ovr_addr      (ovr_addr),
         .ovr_rw        (ovr_rw),
@@ -265,12 +290,46 @@ module master_top #(
         .op_sync       (drv_sync),
         .op_ovr        (op_ovr),
         .din           (cpu_din),
-        .cold_req      (boot_cold),
         .ovr_en        (boot_ovr_en),
         .ovr_addr      (boot_ovr_addr),
-        .ovr_rw        (boot_ovr_rw),
-        .ovr_wdata     (boot_ovr_wdata),
         .held          (boot_held)
+    );
+
+    // ---- keyboard injection -------------------------------------------------
+    // One key latch and one strobe, the host's; substituted into the core's
+    // din and the capture on a $C00x read.  See rtl/kbd_inject.sv.
+    kbd_inject u_kbd (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .cpu_rst       (cpu_rst),
+        .master_active (cpu_source_active),
+        .press         (kbd_press),
+        .press_key     (kbd_press_key),
+        .drop          (kbd_drop),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_commit     (op_commit),
+        .sub_en        (kbd_sub_en),
+        .sub_data      (kbd_sub_data),
+        .strobe        (kbd_strobe),
+        .taken         (kbd_taken)
+    );
+
+    // ---- the pushbuttons ----------------------------------------------------
+    // Open-Apple, Closed-Apple and PB2 as the host holds them: hardware, up
+    // or down, merged into bit 7 of a $C061-$C063 read.  See rtl/pb_inject.sv.
+    pb_inject u_pb (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .master_active (cpu_source_active),
+        .sel           (pb_override),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_commit     (op_commit),
+        .data_sync     (apple_data_sync),
+        .sub_en        (pb_sub_en),
+        .sub_data      (pb_sub_data),
+        .hw_level      (pb_hw)
     );
 
     // ---- the hard disk ------------------------------------------------------

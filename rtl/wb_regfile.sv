@@ -69,8 +69,6 @@ module wb_regfile #(
     // to 0 and leaves the rest unconnected.
     output wire            boot_arm,
     output logic           boot_release,
-    // W1 bit 17: release AND force a cold boot (see rtl/boot_hold.sv).
-    output logic           boot_cold,
     input  wire            boot_held,
 
     // The hard disk (rtl/hd_card.sv).  The slot is latched at RES' like the
@@ -80,6 +78,21 @@ module wb_regfile #(
     input  wire            hd_rom_loaded,
     input  wire            hd_busy,
     input  wire [7:0]      hd_execs,
+
+    // Keyboard injection (rtl/kbd_inject.sv).  press and drop are one-cycle
+    // pulses per write of their bits, press_key the key that write carried;
+    // strobe and taken come back for the readback.  A watching top ties the
+    // inputs to 0 and leaves the outputs unconnected.
+    output logic           kbd_press,
+    output logic [6:0]     kbd_press_key,
+    output logic           kbd_drop,
+    input  wire            kbd_strobe,
+    input  wire [7:0]      kbd_taken,
+
+    // The pushbuttons (rtl/pb_inject.sv): the host's word per button out,
+    // the hardware's level back for the readback.
+    output logic [5:0]     pb_override,
+    input  wire [2:0]      pb_hw,
 
     // Programmatic Ctrl-Reset.  Held low while pulsing; the master top turns
     // this into an open-drain drive of the Apple's RES' line, exactly as it
@@ -117,6 +130,8 @@ module wb_regfile #(
     localparam [13:0] R_BOOT_HOLD  = 'd4;   // 0x8000_0010, RW bit 0, W1 bit 16
     localparam [13:0] R_HD_SLOT    = 'd5;   // 0x8000_0014, RW in bits 2:0
     localparam [13:0] R_RESET      = 'd6;   // 0x8000_0018, W1 bit 0 pulses RES'
+    localparam [13:0] R_KBD_INJECT = 'd7;   // 0x8000_001C, W bits 6:0, W1 bits 7-8
+    localparam [13:0] R_BUTTONS    = 'd8;   // 0x8000_0020, RW bits 5:0
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -247,7 +262,6 @@ module wb_regfile #(
             boot_holds     <= 8'd0;
             boot_held_prev <= 1'b0;
             boot_release   <= 1'b0;
-            boot_cold      <= 1'b0;
         end else begin
             boot_held_prev <= boot_held;
             if (boot_held && !boot_held_prev) boot_holds <= boot_holds + 8'd1;
@@ -255,7 +269,6 @@ module wb_regfile #(
             // One pulse per write that set the bit, however long the host's
             // message took to arrive.  The hold consumes it at a cycle end.
             boot_release <= wr_boot_hold && wb_dat_w[16];
-            boot_cold    <= wr_boot_hold && wb_dat_w[17];
         end
     end
 
@@ -341,6 +354,60 @@ module wb_regfile #(
 
     wire [31:0] reset_rd = {res_pulses, 23'd0, res_pulsing};
 
+    // ---- KBD_INJECT ---------------------------------------------------------
+    //
+    //   [6:0]    key       W    the key, taken when press is set
+    //   [7]      press     W1   put key on the keyboard, strobe set, replacing
+    //                           an unconsumed one; reads as 0
+    //   [8]      drop      W1   clear the strobe without a $C010; reads as 0
+    //   [16]     strobe    RO   a key is waiting that the machine has not taken
+    //   [31:24]  taken     RO   strobes the machine consumed, wrapping
+    //
+    // The machine's keyboard has one latch and one strobe, and so does this:
+    // a press is a keypress, it always lands, and the newest wins.  Typing a
+    // string at the machine's pace is the host's job - press, read back until
+    // strobe clears, press the next.  The reply to the press itself is the
+    // acknowledgement that it arrived; the state is in the read after it.
+    // Nothing here is reset-latched: a key is for the program running now,
+    // and rtl/kbd_inject.sv drops it if a reset comes first.  Not gated by
+    // CAN_MASTER - the pulses simply go nowhere in a watching build, and the
+    // readback there says strobe=0, which is the truth.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            kbd_press     <= 1'b0;
+            kbd_press_key <= 7'd0;
+            kbd_drop      <= 1'b0;
+        end else begin
+            kbd_press     <= wr_kbd_inject && wb_dat_w[7];
+            kbd_drop      <= wr_kbd_inject && wb_dat_w[8];
+            if (wr_kbd_inject) kbd_press_key <= wb_dat_w[6:0];
+        end
+    end
+
+    wire [31:0] kbd_inject_rd = {kbd_taken, 7'd0, kbd_strobe, 16'd0};
+
+    // ---- BUTTONS ------------------------------------------------------------
+    //
+    //   [1:0]    pb0       RW   Open-Apple:    00 hardware, 01 up, 10 down
+    //   [3:2]    pb1       RW   Closed-Apple:  the same
+    //   [5:4]    pb2       RW   PB2 ($C063):   the same
+    //   [18:16]  hw        RO   bit 7 as the bus said it, last read of each
+    //
+    // A level the host holds, not an event: the machine reads a button now,
+    // so there is nothing to consume.  Down then hardware is a press.  Not
+    // reset-latched, and NOT dropped by RES' (rtl/pb_inject.sv says why:
+    // Open-Apple-Ctrl-Reset is what Open-Apple is for).  11 is read as
+    // down; the host never writes it.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            pb_override <= 6'd0;          // hardware, all three
+        end else if (wr_buttons) begin
+            pb_override <= wb_dat_w[5:0];
+        end
+    end
+
+    wire [31:0] buttons_rd = {13'd0, pb_hw, 10'd0, pb_override};
+
     assign wb_stall = 1'b0;
 
     wire access = wb_cyc && wb_stb;
@@ -365,6 +432,8 @@ module wb_regfile #(
                         R_BOOT_HOLD:  wb_dat_r <= boot_hold_rd;
                         R_HD_SLOT:    wb_dat_r <= hd_slot_rd;
                         R_RESET:      wb_dat_r <= reset_rd;
+                        R_KBD_INJECT: wb_dat_r <= kbd_inject_rd;
+                        R_BUTTONS:    wb_dat_r <= buttons_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -390,6 +459,10 @@ module wb_regfile #(
                          (word == R_HD_SLOT);
     wire wr_reset      = access && !wb_ack && in_region && wb_we &&
                          (word == R_RESET);
+    wire wr_kbd_inject = access && !wb_ack && in_region && wb_we &&
+                         (word == R_KBD_INJECT);
+    wire wr_buttons    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_BUTTONS);
 
     // A boot-hold RELEASE re-latches MB_SLOT and HD_SLOT above, so the menu's
     // choices reach the boot it releases into.  Same qualification as the

@@ -62,6 +62,8 @@ run tx_arb        rtl/tx_arb.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 run apple_bus_write rtl/apple_bus_write.sv
 run boot_hold     rtl/boot_hold.sv
+run kbd_inject    rtl/kbd_inject.sv
+run pb_inject     rtl/pb_inject.sv
 run slot_switches rtl/slot_switches.sv
 run hd_card       rtl/hd_card.sv rtl/slot_switches.sv
 # via6522 is third-party (see its header) and linted only as a dependency of

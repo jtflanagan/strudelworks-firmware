@@ -77,14 +77,13 @@ module boot_hold (
 
     // From the BOOT_HOLD register.  `arm` is a level: hold at the next
     // post-reset fetch.  `release_req` is a pulse: let the held core go.
+    //
+    // A COLD BOOT is not this module's business any more.  It once DMA-wrote
+    // the //e's power-up bytes before releasing; now the host holds
+    // Open-Apple down across the release through rtl/pb_inject.sv, and the
+    // machine's own reset handler takes its own cold path.
     input  wire        arm,
     input  wire        release_req,
-    // A cold-boot continue: before releasing, DMA-corrupt the //e's power-up
-    // byte so the reset handler takes the COLD path - which auto-boots the
-    // highest bootable slot (the hard disk, if the menu enabled one) instead
-    // of warm-starting back to wherever the machine was.  A plain release
-    // (cold_req low) leaves the boot to warm-start as before.
-    input  wire        cold_req,
 
     // The core's live SYNC.
     input  wire        cpu_sync,
@@ -100,12 +99,9 @@ module boot_hold (
     input  wire [7:0]  din,
 
     // To apple_bus_write: present ovr_addr instead of the core's op, and
-    // withhold the core's cyc_en for that cycle.  Reads while reading the
-    // keyboard; a WRITE (ovr_rw = 0, ovr_wdata) for the two cold-boot bytes.
+    // withhold the core's cyc_en for that cycle.  Always a read.
     output wire        ovr_en,
     output wire [15:0] ovr_addr,
-    output wire        ovr_rw,
-    output wire [7:0]  ovr_wdata,
 
     // The core is held.  Read back through the register, and every edge is a
     // CPU_HOLD notice to the host.
@@ -114,10 +110,6 @@ module boot_hold (
 
     localparam [15:0] KBD      = 16'hC000;   // keyboard data, bit 7 = strobe
     localparam [15:0] KBDSTRB  = 16'hC010;   // any access clears the strobe
-    // The //e warm-starts only when PWREDUP ($3F4) == SOFTEV+1 ($3F3) EOR $A5.
-    // Zeroing both breaks that (0 ^ $A5 = $A5, never 0), forcing a cold boot.
-    localparam [15:0] SOFTEV_H = 16'h03F3;
-    localparam [15:0] PWREDUP  = 16'h03F4;
 
     // ---- has the core fetched since reset? ----------------------------------
     // Set when a SYNC of the core's own is presented on the bus.  An override
@@ -129,11 +121,9 @@ module boot_hold (
     wire first_fetch = cpu_sync && !seen_sync;
 
     // ---- the hold -----------------------------------------------------------
-    typedef enum logic [2:0] {
+    typedef enum logic [1:0] {
         S_WAIT,     // armed or not, the core has not reached its vector
         S_HELD,     // the core is at its vector and we own the bus cycles
-        S_COLD_A,   // cold continue: DMA-write $3F3 = 0
-        S_COLD_B,   // cold continue: DMA-write $3F4 = 0, then release
         S_DONE      // released; nothing more until the next reset
     } state_t;
 
@@ -146,27 +136,20 @@ module boot_hold (
     // module hoped it would do.
     wire engage = (st == S_WAIT) && arm && master_active && first_fetch;
 
-    wire in_cold = (st == S_COLD_A) || (st == S_COLD_B);
-    assign ovr_en = engage || (st == S_HELD) || in_cold;
-    assign held   = (st == S_HELD) || in_cold;
+    assign ovr_en = engage || (st == S_HELD);
+    assign held   = (st == S_HELD);
 
     // ---- the keyboard reader ------------------------------------------------
     // IDLE presents $C000; a byte back with bit 7 set moves to CLEAR, which
-    // presents $C010 once and returns.  The cold-boot epilogue instead
-    // presents two writes.
+    // presents $C010 once and returns.
     logic clearing;
-    assign ovr_addr  = (st == S_COLD_A) ? SOFTEV_H :
-                       (st == S_COLD_B) ? PWREDUP  :
-                       clearing ? KBDSTRB : KBD;
-    assign ovr_rw    = ~in_cold;             // 1 = read (keyboard); 0 = write
-    assign ovr_wdata = 8'h00;                // the byte written to $3F3/$3F4
+    assign ovr_addr  = clearing ? KBDSTRB : KBD;
 
     // A release the host asked for, waiting for a safe cycle end - and the
     // record, made at op_present, that the cycle in flight was issued with
     // the request already known.  Only such a cycle may end the hold.
     logic release_pend;
     logic rel_seen;
-    logic cold_pend;                         // a cold-boot continue was asked
 
     always_ff @(posedge clk) begin
         if (cpu_rst) begin
@@ -175,7 +158,6 @@ module boot_hold (
             clearing     <= 1'b0;
             release_pend <= 1'b0;
             rel_seen     <= 1'b0;
-            cold_pend    <= 1'b0;
         end else begin
             if (op_present && op_sync) seen_sync <= 1'b1;
             if (op_present)            rel_seen  <= release_pend;
@@ -185,7 +167,6 @@ module boot_hold (
             // re-reset the core, say - does not queue a release for a hold
             // it has not yet been told about.
             if (release_req && st == S_HELD) release_pend <= 1'b1;
-            if (cold_req    && st == S_HELD) cold_pend    <= 1'b1;
 
             case (st)
                 S_WAIT: begin
@@ -204,26 +185,18 @@ module boot_hold (
                             if (din[7]) begin
                                 clearing <= 1'b1;        // a key: clear its strobe next
                             end else if (release_pend && rel_seen) begin
-                                // Safe to go.  A cold continue writes the two
-                                // power-up bytes first; a plain one releases.
-                                st           <= cold_pend ? S_COLD_A : S_DONE;
+                                st           <= S_DONE;  // safe to go
                                 release_pend <= 1'b0;
                             end
                         end else begin
                             clearing <= 1'b0;            // strobe cleared; back to reading
                             if (release_pend && rel_seen) begin
-                                st           <= cold_pend ? S_COLD_A : S_DONE;
+                                st           <= S_DONE;
                                 release_pend <= 1'b0;
                             end
                         end
                     end
                 end
-
-                // The cold-boot epilogue: one bus cycle per write, the core
-                // still held (not advanced), so RAM[$3F3] and RAM[$3F4] are
-                // zeroed before the reset handler ever reads them.
-                S_COLD_A: if (op_commit) st <= S_COLD_B;
-                S_COLD_B: if (op_commit) begin st <= S_DONE; cold_pend <= 1'b0; end
 
                 default: ;                               // S_DONE: until the next reset
             endcase

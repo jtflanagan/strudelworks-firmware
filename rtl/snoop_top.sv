@@ -73,10 +73,13 @@ module snoop_top #(
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (),          // nothing here can act on it
         .mb_slot_active (),             // nor on this
-        .boot_arm (), .boot_release (), .boot_cold (),  // nor hold a core
+        .boot_arm (), .boot_release (),  // nor hold a core
         .boot_held (1'b0),
         .hd_slot_active (),             // nor answer for a hard disk
         .hd_rom_loaded (1'b0), .hd_busy (1'b0), .hd_execs (8'd0),
+        .kbd_press (), .kbd_press_key (), .kbd_drop (),   // nor type at it
+        .kbd_strobe (1'b0), .kbd_taken (8'd0),
+        .pb_override (), .pb_hw (3'd0),                  // nor press a button
         .res_drive (),
         .app_msg_valid (), .app_msg_type (), .app_msg_free (),
         .app_msg_len (), .app_pay_data (), .app_pay_valid (),
@@ -112,6 +115,8 @@ module snoop_top #(
         .ev_valid          (real_valid),
         .sync_override     (1'b0),
         .sync_override_en  (1'b0),   // the instrument reports only what it saw
+        .data_override     (8'h00),
+        .data_override_en  (1'b0),
         .res_sync          (apple_res_sync),
         .irq_sync          (),
         .phi0_sync         (),

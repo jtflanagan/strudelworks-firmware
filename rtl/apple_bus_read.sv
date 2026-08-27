@@ -93,6 +93,15 @@ module apple_bus_read #(
     input  wire         sync_override,
     input  wire         sync_override_en,
 
+    // DATA SUBSTITUTION, likewise for a master build only.  While
+    // data_override_en, the event's data byte is data_override rather than
+    // the wire's: a key the host pressed, which rtl/kbd_inject.sv puts into
+    // the soft core's din on the same tap this samples.  The trace then shows
+    // what the CPU read, which is the property the SYNC case established.  A
+    // watching build ties both low.
+    input  wire [7:0]   data_override,
+    input  wire         data_override_en,
+
     // one event per phi0 cycle
     output logic [31:0] ev_data,
     output logic        ev_valid,
@@ -199,7 +208,8 @@ module apple_bus_read #(
             end
 
             if (data_snap && enable) begin
-                ev_data  <= {4'hf, data_clean, ctl_q, addr_q};
+                ev_data  <= {4'hf, data_override_en ? data_override : data_clean,
+                             ctl_q, addr_q};
                 ev_valid <= 1'b1;
             end
 

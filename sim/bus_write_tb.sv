@@ -93,6 +93,7 @@ module bus_write_tb;
         // proof that an idle claim changes nothing the checks below assert.
         .op_addr (), .op_rw (), .op_wdata (), .op_present (), .op_commit (),
         .slot_rd_claim (1'b0), .slot_rd_data (8'h00),
+        .din_sub_en (1'b0), .din_sub_data (8'h00),
         // No boot hold either: the override is idle, which is what every
         // cycle looks like once a machine has booted.
         .ovr_en (1'b0), .ovr_addr (16'h0000), .ovr_rw (1'b1), .ovr_wdata (8'h00), .op_ovr (),

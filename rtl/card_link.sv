@@ -80,7 +80,6 @@ module card_link #(
     // readback and for the CPU_HOLD notice.  A watching top ties held to 0.
     output wire        boot_arm,
     output wire        boot_release,
-    output wire        boot_cold,
     input  wire        boot_held,
 
     // The hard disk's slot (rtl/hd_card.sv), latched on the RES' edge like
@@ -90,6 +89,21 @@ module card_link #(
     input  wire        hd_rom_loaded,
     input  wire        hd_busy,
     input  wire [7:0]  hd_execs,
+
+    // Keyboard injection (rtl/kbd_inject.sv, in a mastering top): the
+    // KBD_INJECT register's press and drop pulses and the key out, its strobe
+    // and taken count back for the readback.  A watching top ties the inputs
+    // to 0.
+    output wire        kbd_press,
+    output wire [6:0]  kbd_press_key,
+    output wire        kbd_drop,
+    input  wire        kbd_strobe,
+    input  wire [7:0]  kbd_taken,
+
+    // The pushbuttons (rtl/pb_inject.sv): the BUTTONS register's word out,
+    // the hardware's levels back.  A watching top ties the input to 0.
+    output wire [5:0]  pb_override,
+    input  wire [2:0]  pb_hw,
 
     // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
     // mastering top wires it to the pin; a snooper leaves it unconnected.
@@ -458,12 +472,18 @@ module card_link #(
         .mb_slot_active    (mb_slot_active),
         .boot_arm          (boot_arm),
         .boot_release      (boot_release),
-        .boot_cold         (boot_cold),
         .boot_held         (boot_held),
         .hd_slot_active    (hd_slot_active),
         .hd_rom_loaded     (hd_rom_loaded),
         .hd_busy        (hd_busy),
         .hd_execs          (hd_execs),
+        .kbd_press         (kbd_press),
+        .kbd_press_key     (kbd_press_key),
+        .kbd_drop          (kbd_drop),
+        .kbd_strobe        (kbd_strobe),
+        .kbd_taken         (kbd_taken),
+        .pb_override       (pb_override),
+        .pb_hw             (pb_hw),
         .res_drive         (res_drive),
         .wb_cyc   (rwb_cyc),
         .wb_stb   (rwb_stb),

@@ -33,7 +33,9 @@ docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRA
             PROTOCOL.md (the FT601 message framing), MOCKINGBOARD.md (the VIA
             pair on the card, the sound on the host), BOOT_MENU.md (the soft
             core held at its reset vector for a host-drawn menu), HARDDISK.md
-            (the hard disk's slot on the card, the images on the host), and on this branch
+            (the hard disk's slot on the card, the images on the host),
+            KEYBOARD.md (a key from the host, on the keyboard the soft core
+            reads), and on this branch
             UCODE816.md - a first stab at a microcoded 65816, what it costs and
             what can verify it.  Exploratory, not on the milestone plan.
 ```
@@ -81,6 +83,7 @@ sim/run_mockingboard_tb.sh # the Mockingboard's VIAs behind the driver, ~2 s
 sim/run_cpu_irq_tb.sh      # a live hardware IRQ, taken between instructions, ~1 s
 sim/run_boot_hold_tb.sh    # the soft core held at its reset vector, ~1 s
 sim/run_hd_card_tb.sh      # the hard disk: busy, polled, a block in, a block out, ~1 s
+sim/run_kbd_inject_tb.sh   # a key from the host, read by the core and the capture alike, ~3 s
 python3 sim/gen_microcode.py --check   # microcode ROM matches its generator
 sim/run_cpu_cycles_tb.sh   # every opcode's cycle count vs the 65C02 table, ~5 s
 sim/run_cpu_tb.sh          # Klaus Dormann's two functional suites, ~16 s

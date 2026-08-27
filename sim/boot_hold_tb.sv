@@ -110,7 +110,8 @@ module boot_hold_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
         .slot_rd_claim (1'b0), .slot_rd_data (8'h00),
-        .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw_bh), .ovr_wdata (ovr_wdata_bh), .op_ovr (op_ovr),
+        .din_sub_en (1'b0), .din_sub_data (8'h00),
+        .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (1'b1), .ovr_wdata (8'h00), .op_ovr (op_ovr),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)
@@ -119,20 +120,16 @@ module boot_hold_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     // ---- the hold ---------------------------------------------------------
     reg  arm = 1'b0;
     reg  release_req = 1'b0;
-    reg  cold_req = 1'b0;
-    wire ovr_rw_bh;
-    wire [7:0] ovr_wdata_bh;
     wire held;
 
     boot_hold dut (
         .clk (clk), .cpu_rst (cpu_rst),
         .master_active (master_active),
-        .arm (arm), .release_req (release_req), .cold_req (cold_req),
+        .arm (arm), .release_req (release_req),
         .cpu_sync (cpu_sync),
         .op_present (op_present), .op_commit (op_commit),
         .op_sync (drv_sync), .op_ovr (op_ovr), .din (cpu_din),
         .ovr_en (ovr_en), .ovr_addr (ovr_addr),
-        .ovr_rw (ovr_rw_bh), .ovr_wdata (ovr_wdata_bh),
         .held (held)
     );
 
@@ -453,40 +450,6 @@ module boot_hold_tb #(parameter UCODE = "cpu65c02_ucode.hex");
 
         if (bad_ovr != 0) fail("an override op was presented as a write or a SYNC");
         else $display("  ok: every override op was a read and never a SYNC");
-
-        // --- cold continue: two DMA writes to $3F3/$3F4, then boot ----------
-        // A release asking for a cold boot must zero the power-up bytes on the
-        // bus before letting the core go, so the //e reset handler takes the
-        // cold path.
-        mem[16'h03F3] = 8'hA5; mem[16'h03F4] = 8'hFF;   // "valid" warm markers
-        mem[MARK] = 8'h00;
-        arm = 1'b1;                                     // hold at the next reset
-        machine_reset(4);
-        cycles(12);
-        if (held !== 1'b1) fail("cold: not held");
-        mark = nops;
-        @(negedge clk); release_req = 1'b1; cold_req = 1'b1;
-        @(negedge clk); release_req = 1'b0; cold_req = 1'b0;
-        cycles(40);
-        // The two writes must have appeared, in order, before the fetch.
-        begin : coldcheck
-            integer wa, wb_, fi;
-            wa = -1; wb_ = -1; fi = -1;
-            for (i = mark; i < nops; i = i + 1) begin
-                if (log_ovr[i] && log_addr[i] == 16'h03F3 && wa < 0) wa = i;
-                if (log_ovr[i] && log_addr[i] == 16'h03F4 && wb_ < 0) wb_ = i;
-                if (log_sync[i] && log_addr[i] == VECTOR && fi < 0) fi = i;
-            end
-            if (wa < 0 || wb_ < 0) fail("cold: the $3F3/$3F4 writes did not appear");
-            else if (wb_ < wa) fail("cold: $3F4 written before $3F3");
-            else if (fi < 0 || fi < wb_) fail("cold: the fetch came before the writes finished");
-            else $display("  ok: cold continue wrote $3F3 then $3F4, then let the core go");
-        end
-        if (mem[16'h03F3] !== 8'h00 || mem[16'h03F4] !== 8'h00)
-            fail("cold: the power-up bytes were not zeroed in memory");
-        else $display("  ok: $3F3 and $3F4 are zero - the warm-start check will fail, cold boot");
-        if (mem[MARK] !== 8'h42) fail("cold: the program did not run after the cold continue");
-        else $display("  ok: the core resumed and ran after the cold writes");
 
         $display("");
         if (errors == 0) $display("PASS");

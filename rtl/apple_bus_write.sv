@@ -155,6 +155,15 @@ module apple_bus_write #(
     input  wire        slot_rd_claim,
     input  wire [7:0]  slot_rd_data,
 
+    // A substitution for the core's din, from kbd_inject: while din_sub_en,
+    // the byte latched at T_DIN is din_sub_data instead of the bus's.  Nothing
+    // reaches the pins - the machine drives $C000 itself, and a claim there
+    // would fight it.  The reader takes the same pair for the captured event,
+    // on the same tap, so the CPU and the trace agree.  Combinational
+    // upstream, stable across the data phase.
+    input  wire        din_sub_en,
+    input  wire [7:0]  din_sub_data,
+
     // An override, from boot_hold or hd_card: while ovr_en, the next cycle
     // presents ovr_addr with ovr_rw (1 = read) and, for a write, ovr_wdata,
     // instead of the core's op, and the core is not advanced.  Sampled at
@@ -300,7 +309,7 @@ module apple_bus_write #(
                 end
 
                 if (t_emit)  emit_window <= 1'b1;
-                if (t_din)   cpu_din     <= data_sync;
+                if (t_din)   cpu_din     <= din_sub_en ? din_sub_data : data_sync;
                 if (t_din)   op_commit   <= 1'b1;
                 // The core advances only through cycles that were its own.
                 if (t_cycen && !drv_ovr) cyc_en <= 1'b1;

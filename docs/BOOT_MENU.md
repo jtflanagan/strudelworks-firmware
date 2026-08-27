@@ -1,7 +1,11 @@
 # The boot menu: holding the machine at its reset vector
 
 Status: **✅ works on hardware.** Master build of 2026-08-24 17:05, on a
-IIe: Ctrl-Reset lands in the splash, Return boots.
+IIe: Ctrl-Reset lands in the splash, Return boots. The cold boot moved to
+Open-Apple on 2026-08-26 (see "A cold boot, the machine's way") and ran on
+hardware the same day: with the disk disabled, continue lands at the
+`Apple //e` banner and the Applesoft prompt, not back in the program that
+was running.
 
 A menu the machine shows before it boots, without the machine running a byte
 of code to show it. The card stops the soft core at the one moment where
@@ -186,6 +190,28 @@ to a defaults file at boot (`--boot-config`, default `boot_menu.conf`) and
 loaded at startup, so they survive a restart of swhost. The disk is stored by
 name, not index, so it survives the directory listing changing.
 
+## A cold boot, the machine's way
+
+Continuing from the menu always cold-boots: the machine was reset to enter
+it, so it is going to boot fresh regardless, and a cold start is what runs
+the slot scan that auto-boots a disk - the card's when one is enabled, a
+physical controller when not. The first cut of this had the hold DMA-write
+zeros over `$3F3`/`$3F4` before releasing, so the reset handler's
+`PWREDUP == SOFTEV+1 EOR $A5` check failed - the card reaching into the
+machine's RAM with knowledge of its ROM's private convention. It does not
+any more. **The host holds Open-Apple down across the release** through
+`BUTTONS` (KEYBOARD.md): the //e's reset handler reads `$C061` after RES′
+releases, decides "cold" itself, and everything that follows is what a
+person holding Open-Apple-Ctrl-Reset gets. The host writes the button down
+before the release and back to hardware 50 ms after it - generous cover for
+the handler's reads, which are over within a millisecond or two, and
+harmless to what follows, which does not read Open-Apple. The hold itself
+is back to being purely keyboard reads until told to go.
+
+This is a //e mechanism. A ][+ has no Open-Apple, so an Autostart ROM
+warm-starts as it always did; the DMA route that worked there is in the
+history (`boot_hold`'s `S_COLD_A/B`) if it is ever wanted back.
+
 ## Choices that take effect this boot
 
 `MB_SLOT` and `HD_SLOT` latch their `active` value at the RES′ *assertion* -
@@ -223,6 +249,10 @@ release. A few polls of latency cost nothing against a machine that is parked.
   driver's override input is already the shape that needs; only the source of
   `ovr_addr` changes. Every op sent comes back as a captured event, so the
   capture stream is the acknowledgement and no flow-control message is needed.
+- ✅ **Be driven without the Apple's keyboard.** A key the host presses
+  through `KBD_INJECT` is what the hold's own `$C000` reads return, so an
+  injected Return continues the menu; see KEYBOARD.md. The host's
+  `continue` command does the same without a key.
 - **Switch the driving CPU.** Handing the bus back to the native 6502 is the
   one changeover kept to a reset, so it is not a menu item; `CPU_SOURCE` does
   not re-latch at a release.

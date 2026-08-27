@@ -97,7 +97,10 @@ module reg_map_tb;
     wire cpu_source_active;
     wire [2:0] mb_slot_active;
     // The boot hold's side of BOOT_HOLD: the tb plays the hold itself.
-    wire boot_arm, boot_release, boot_cold;
+    wire boot_arm, boot_release;
+    // The buttons' side of BUTTONS: the tb plays pb_inject.
+    wire [5:0] pb_override;
+    reg  [2:0] pb_hw = 3'd0;
     reg  boot_held = 1'b0;
     integer release_pulses = 0;
     always @(posedge clk) if (boot_release) release_pulses = release_pulses + 1;
@@ -107,15 +110,29 @@ module reg_map_tb;
     wire       res_drive;
     reg        hd_rom_loaded = 1'b0, hd_busy = 1'b0;
     reg  [7:0] hd_execs = 8'd0;
+    // Keyboard injection's side of KBD_INJECT: the tb plays kbd_inject.
+    wire       kbd_press, kbd_drop;
+    wire [6:0] kbd_press_key;
+    reg        kbd_strobe = 1'b0;
+    reg  [7:0] kbd_taken  = 8'd0;
+    integer    press_pulses = 0, drop_pulses = 0;
+    reg  [6:0] last_pressed = 7'd0;
+    always @(posedge clk) begin
+        if (kbd_press) begin press_pulses = press_pulses + 1; last_pressed = kbd_press_key; end
+        if (kbd_drop)  drop_pulses = drop_pulses + 1;
+    end
 
     wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME),
                  .CAN_MASTER (1'b1)) u_regs (
         .clk (clk), .rst (rst),
         .apple_res_sync (apple_res_sync), .cpu_source_active (cpu_source_active),
         .mb_slot_active (mb_slot_active),
-        .boot_arm (boot_arm), .boot_release (boot_release), .boot_cold (boot_cold), .boot_held (boot_held),
+        .boot_arm (boot_arm), .boot_release (boot_release), .boot_held (boot_held),
+        .pb_override (pb_override), .pb_hw (pb_hw),
         .hd_slot_active (hd_slot_active), .hd_rom_loaded (hd_rom_loaded),
         .hd_busy (hd_busy), .hd_execs (hd_execs), .res_drive (res_drive),
+        .kbd_press (kbd_press), .kbd_press_key (kbd_press_key), .kbd_drop (kbd_drop),
+        .kbd_strobe (kbd_strobe), .kbd_taken (kbd_taken),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
@@ -670,6 +687,72 @@ module reg_map_tb;
             $display("FAIL: RESET pulse count read back %0d, expected 1", out_mem[base+2][31:24]);
             errors = errors + 1;
         end else $display("  ok: the pulse count reads back");
+
+        // --- case 16 / KBD_INJECT: press and drop are pulses, the rest reads -
+        // The host's keypress.  Press carries the key and pulses once per
+        // write; drop pulses once per write; both read back as zero, because
+        // they are actions.  strobe and taken are the mechanism's, read back.
+        if (press_pulses !== 0 || drop_pulses !== 0) begin
+            $display("FAIL: KBD_INJECT pulsed before anyone wrote it"); errors = errors + 1;
+        end
+        do_write(32'h8000_001C, 32'h0000_00C1);           // press 'A' ($41 | press)
+        if (press_pulses !== 1 || last_pressed !== 7'h41) begin
+            $display("FAIL: press: %0d pulse(s), key $%02x - expected one pulse of $41",
+                     press_pulses, last_pressed);
+            errors = errors + 1;
+        end else if (drop_pulses !== 0) begin
+            $display("FAIL: a press also dropped"); errors = errors + 1;
+        end else $display("  ok: writing key|press pulses press once, carrying the key");
+
+        // The mechanism says a key is waiting and has taken two; the register
+        // says so, and the write-only bits read as zero.
+        kbd_strobe = 1'b1; kbd_taken = 8'd2;
+        base = out_n;
+        do_read(32'h8000_001C);
+        if (out_mem[base+2] !== 32'h0201_0000) begin
+            $display("FAIL: KBD_INJECT readback %08x, expected strobe=1 taken=2, key/press/drop 0",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: readback strobe=1 taken=2; key, press and drop read as 0");
+
+        do_write(32'h8000_001C, 32'h0000_0100);           // drop
+        if (drop_pulses !== 1 || press_pulses !== 1) begin
+            $display("FAIL: drop: drop=%0d press=%0d pulses, expected 1 and 1", drop_pulses, press_pulses);
+            errors = errors + 1;
+        end else $display("  ok: writing drop pulses drop once, and does not press");
+
+        // A write of the key without press is nothing.
+        do_write(32'h8000_001C, 32'h0000_0042);
+        if (press_pulses !== 1 || drop_pulses !== 1) begin
+            $display("FAIL: a write without press or drop pulsed something"); errors = errors + 1;
+        end else $display("  ok: a key written without press is not a press");
+        kbd_strobe = 1'b0; kbd_taken = 8'd0;
+
+        // --- case 17 / BUTTONS: a level, held as written, hw read back -------
+        if (pb_override !== 6'd0) begin
+            $display("FAIL: BUTTONS not all hardware at reset"); errors = errors + 1;
+        end else $display("  ok: BUTTONS starts with every button on hardware");
+        do_write(32'h8000_0020, 32'h0000_0026);           // PB2 down, PB1 up, PB0 down
+        if (pb_override !== 6'h26) begin
+            $display("FAIL: BUTTONS write did not land: %02x", pb_override); errors = errors + 1;
+        end else $display("  ok: writing BUTTONS sets the three fields");
+        pulse_reset_line;
+        if (pb_override !== 6'h26) begin
+            $display("FAIL: a RES' cleared BUTTONS - Open-Apple-Ctrl-Reset would be impossible");
+            errors = errors + 1;
+        end else $display("  ok: a RES' leaves the buttons as the host set them");
+        pb_hw = 3'b101;
+        base = out_n;
+        do_read(32'h8000_0020);
+        if (out_mem[base+2] !== 32'h0005_0026) begin
+            $display("FAIL: BUTTONS readback %08x, expected hw=101 over 0x26", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: readback carries the hardware's levels in [18:16]");
+        do_write(32'h8000_0020, 32'h0000_0000);
+        if (pb_override !== 6'd0) begin
+            $display("FAIL: BUTTONS did not clear"); errors = errors + 1;
+        end else $display("  ok: and back to hardware");
+        pb_hw = 3'd0;
 
         // --- case 7 / the parser never lost sync -----------------------------
         if (frame_error !== 1'b0) begin
