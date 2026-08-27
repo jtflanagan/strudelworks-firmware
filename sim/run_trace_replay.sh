@@ -5,7 +5,8 @@
 #
 #   sim/run_trace_replay.sh path/to/capture.bustrace [--skew=N] [...]
 #
-# The trace comes from strudelworks-host:  swhost --real --trace FILE.  That
+# The trace comes from strudelworks-host:  tools/pi.sh trace FILE --reset
+# (recorded on the desktop over TCP; nothing is written on the Pi).  That
 # capture arms on RES', so the file starts at a reset and the machine's state at
 # word 0 is known - which is the precondition for replaying it at all.
 #

@@ -243,7 +243,7 @@ tools/pi.sh type A            # the browser jumps to A
 tools/pi.sh reset             # what pkill -USR1 did
 ```
 
-Then `--trace` one run and look for the `$C000` read carrying `$8D` followed
+Then `tools/pi.sh trace out.swbt --reset` one run and look for the `$C000` read carrying `$8D` followed
 by the `$C010`; `tools/pi.sh ctl status` (and the exit line) reports pressed
 against taken, so a gap between them is a key the machine never consumed.
 Then a ProDOS boot and `type 'CATALOG\n'` at the prompt, which exercises

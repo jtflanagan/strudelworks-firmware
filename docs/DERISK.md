@@ -993,7 +993,8 @@ reason.
 
 *🟡 The instrument for closing it now exists.* `sim/run_trace_replay.sh` replays a
 captured Apple II bus trace against this core and compares the address and R/W on
-every cycle. Traces come from the host — `swhost --real --trace FILE` — which
+every cycle. Traces come from the host — `tools/pi.sh trace FILE --reset`, recorded
+on the desktop over TCP (once `swhost --real --trace FILE`, on the Pi) — which
 arms on RES′ so a capture begins at a reset and the machine's state at word 0 is
 known. What remains is a capture from a real machine; the tool is verified
 against a self-generated trace by `sim/run_trace_selftest.sh`, which also checks
@@ -1020,7 +1021,7 @@ names each rather than letting it be mistaken for a finding:
     The tool recognises that shape and says so.
 
 *✅ CLOSED, by a capture from a real Apple II.* `sim/trace_work/apple.bustrace`,
-64 MB from `swhost --real --trace`, replayed against this core: **9,397,687
+64 MB from the host's trace (then `swhost --real --trace`), replayed against this core: **9,397,687
 cycles in lockstep with the architectural state never parting company**, which
 is a far stronger statement about the core than either functional suite. Eleven
 distinct dummy-cycle sites drive a different address, and they are all the same

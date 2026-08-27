@@ -241,7 +241,7 @@ timeout, and the mock taking the messages without dropping the link. And
 ## Bring-up, when it happens
 
 The order that finds the most with the least: `--hdv` an image with
-`--trace`, Ctrl-Reset, and look for the slot scan reading `$C700`, the FIFO
+`tools/pi.sh trace out.swbt --reset`, and look for the slot scan reading `$C700`, the FIFO
 writes to `$C0FA`, and the poll loop's run of `$C0F0` reads ending in a
 status.
 The `disk` line at exit says how many EXECUTEs the decoder saw against how many
