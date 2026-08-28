@@ -1,15 +1,34 @@
-# Keyboard injection: a key from the host, on the keyboard the soft core reads
+# Keyboard injection: the keyboard the soft core reads, with the host on it
 
-Status: **✅ works on hardware.** Master build of 2026-08-26 21:15, on a
-IIe: an injected Return continued the boot menu into Total Replay, `type
-CHOP` walked its browser to "Lamb Chops!", and the trace shows each key as
-one `$C000` read carrying `$8D`/`$C1` and one `$C010` - the hold's own at
-+1, the launcher's RDKEY at +43. An Esc pressed as a game launched was
-flushed by that game's first `$C010`, unseen, as a physical one would be.
-The buttons (below) ran the same day: at the Applesoft prompt `PEEK(49249)`
-read 32, then 162 with Open-Apple held down from the host, then 32 again,
-and the boot menu's cold boot now rides on them - the trace shows the
-reset handler's one `$C061` read, 2.0 ms after the release, with bit 7 set.
+Status: **✅ on hardware, 2026-08-28.** Rebuilt that day with formal
+semantics - the first cut (2026-08-26) was a latch bolted beside the real
+keyboard with the host polling a strobe bit - and then run on a IIe from a
+fresh copy of the 800K ProDOS master by `tools/kbd_test.sh` (strudelworks-
+host): an injected Return continues the boot menu; `PRINT 6*7` typed at the
+prompt prints 42, a 42-key program typed and run prints its output, every key
+`taken` at 0.8 ms a key; a key pressed 50 ms into a machine-language delay
+loop that never reads it is `flushed` by the loop's `BIT $C010`; a key
+pressed into a BASIC `FOR` loop (Applesoft's Ctrl-C check reads it, nothing
+strobes it) is dropped by the typist after a second, and one pressed into
+the same loop before a RES′ is dropped by the reset, the menu engaging after
+it; BASIC typed under the lock arrives, keys pressed at the Apple under it
+do not - `touched` went to 1 with one notice, the screen stayed as it was,
+and the last of them (a Return) showed through the moment the lock lifted,
+exactly as the lock section below says. `replaced` stayed at zero
+throughout, as a one-in-flight host must keep it. The trace of the first run shows the injected Return as one
+`$C000` read carrying `$8D`, one `$C010`, then `$C000` reading `$0D` - the
+latch after its strobe. The buttons (below) are unchanged from the first cut
+and ran on 2026-08-26.
+
+Two things the bring-up taught, both in the test's comments: the //e's
+`VIDWAIT` (`$FB78`) reads `$C000` on every carriage return it prints,
+looking for Ctrl-S, so a key that lands within a millisecond or two of a
+Return is *seen* by the firmware itself - which is why the flushed case
+presses its key 50 ms in, and why "taken" is the honest count for a key
+typed straight after a line; and the card answers one register request at a
+time, so the host's reset pulse (and its button and lock writes) now wait
+for the typist's press or drop to be acknowledged, where before the fast
+typist could get the pulse dropped on the card.
 
 The boot menu runs keys one way: the card reads `$C000` on the host's behalf
 while the soft core is held, and every keypress reaches the host as a
@@ -19,12 +38,15 @@ encoder would have handed it over - so a script over SSH can continue the
 boot menu, drive a launcher, or type at a prompt with nobody at the Apple.
 
 - **The card carries the keyboard's own semantic** (`rtl/kbd_inject.sv`):
-  one key latch, one strobe, and the rules for what clears it. It does not
-  know what a string is.
+  the latch, the strobe, the rules for what clears it, the lock, and the
+  counts that say what became of each press. It does not know what a
+  string is.
+- **The card says when a press is resolved** (`rtl/kbd_notice.sv`): the
+  KBD_EVENT notice, two words, sent unasked once the host has asked for it.
 - **The host carries the typist** (strudelworks-host `src/key_typist.cpp`):
-  press a key, watch the strobe clear, press the next - and the character
-  conventions, the control socket the keys arrive on, and the commands
-  beside them.
+  press a key, wait for the notice that resolves it, press the next - and
+  the character conventions, the control socket the keys arrive on, and the
+  commands beside them.
 
 ## A substitution, not a claim
 
@@ -35,110 +57,222 @@ drives, which is what makes the floating bus float. `$C000` is not one. The
 IIe's IOU, or the ][+'s keyboard latch, drives the bus on every `$C00x`
 read, and a card that drove it too would be fighting the machine.
 
-So nothing here reaches the pins. An injected key is a **din substitution**:
-the byte the core latches at `T_DIN`, and the byte the capture records for
-that cycle, become the host's key, while the wire still carries whatever the
-real keyboard says. That is the SYNC substitution's precedent
-(`apple_bus_read`'s `sync_override`, BUS_MASTER.md) - *logically exact,
-electrically absent*. And it is clean for a reason worth stating: the
-driver samples `din` and the reader samples its event on the **same fabric
-clock** - `T_DIN = 44` in `apple_bus_write` and `DATA_TAP = 44` in
-`apple_bus_read`, both after phi0 rising - so one combinational decision on
-the presented op lands identically in the CPU and in the trace. The host's
-shadow of the machine sees what the machine saw. `sim/kbd_inject_tb.sv`
-instantiates the real reader, pins and synchronisers and all, and checks
-that agreement on every cycle, because it is the property the mechanism
-rests on.
+So nothing here reaches the pins. The keyboard the core reads is a **din
+substitution**: the byte the core latches at `T_DIN`, and the byte the
+capture records for that cycle, are this module's answer, while the wire
+still carries whatever the real keyboard says. That is the SYNC
+substitution's precedent (`apple_bus_read`'s `sync_override`,
+BUS_MASTER.md) - *logically exact, electrically absent*. And it is clean for
+a reason worth stating: the driver samples `din` and the reader samples its
+event on the **same fabric clock** - `T_DIN = 44` in `apple_bus_write` and
+`DATA_TAP = 44` in `apple_bus_read`, both after phi0 rising - so one
+combinational decision on the presented op lands identically in the CPU and
+in the trace. The host's shadow of the machine sees what the machine saw.
+`sim/kbd_inject_tb.sv` instantiates the real reader, pins and synchronisers
+and all, and checks that agreement on every cycle, because it is the
+property the mechanism rests on.
 
-## The machine's own semantic, and nothing more
+## The model: the IOU's latch and strobe, with two sources
 
-One key latch (`key[6:0]`) and one strobe - AppleWin's `keycode` and
-`keywaiting` (`source/Keyboard.cpp`; `KeybReadData` returns
-`keycode | (keywaiting ? 0x80 : 0)`). A press replaces whatever is in the
-latch and sets the strobe, consumed or not: **the newest key wins**, as it
-does when two physical keys land before a `$C010`. There is no queue on the
-card. Typing a string at the machine's pace is the host's job, which is also
-how AppleWin's own injection works: its clipboard paste
-(`ClipboardReadOrPeek`) hands the program `0x80 | char` on `$C000` and
-advances one character per strobe clear.
+The keyboard the machine reads is one byte - the last key, with the strobe
+in bit 7 - and `kbd_inject` holds that byte for the soft core:
 
-- **Substituted**: a read of `$C000-$C00F` while the strobe is set returns
-  `{1, key}` - on every such read until the strobe is cleared, a real key's
-  lifetime exactly. With the strobe clear nothing is substituted, and the
-  machine's own keyboard is what it reads. The core's own reads and the boot
-  hold's override reads alike: an injected `$0D` continues the menu.
+- **`last_read`** is the key the machine saw last, real or injected. A
+  `$C00x` read that finds no strobe anywhere returns `{0, last_read}`, which
+  is what the IOU returns after a `$C010`: the key is still in the latch,
+  the strobe is gone. It survives a reset, as the IOU's latch does.
+- **A real keypress** - the bus's byte with bit 7 set on a `$C00x` read - is
+  handed to the core as it is and becomes `last_read`.
+- **An injected key** is one latch (`key`) and one strobe - AppleWin's
+  `keycode` and `keywaiting` (`source/Keyboard.cpp`; `KeybReadData` returns
+  `keycode | (keywaiting ? 0x80 : 0)`). While its strobe is set every
+  `$C00x` read returns `{1, key}`, and it becomes `last_read`. A press
+  replaces whatever is in the latch, consumed or not: **the newest key
+  wins**, as it does when two physical keys land before a `$C010`. There is
+  no queue on the card. Typing a string at the machine's pace is the host's
+  job, which is also how AppleWin's own injection works: its clipboard
+  paste (`ClipboardReadOrPeek`) hands the program `0x80 | char` on `$C000`
+  and advances one character per strobe clear.
+- **Both ready at once, the injected key wins.** The real one is not lost:
+  its strobe is the motherboard's, still set, and shows through the moment
+  the injected one is cleared - unless the `$C010` that clears the injected
+  key clears it too, which is simply what that access means.
 - **Cleared** by any access to `$C010`, or a **write** to `$C011-$C01F`. That
   is the IIe's rule as AppleWin models it (`Memory.cpp`, `IORead_C01x` /
   `IOWrite_C01x`): a `$C011-$C01F` *read* returns a soft switch's state over
   the key and leaves the strobe alone. A ][+ clears on any `$C01x` read as
   well; the IIe rule is the safe one to share, because the failure the other
   way - a program polling `$C019` for VBL eating an injected key - is the
-  one that loses keys. That same access clears the machine's own strobe too,
-  which is simply what the access means.
+  one that loses keys.
 - **Untouched**: writes to `$C00x` (soft switches; the data is the core's),
-  and the data of `$C010-$C01F` reads (any-key-down and the switches, the
-  machine's own). Only `$C00x` reads change.
+  and reads of `$C011-$C01F` (a switch in bit 7, the machine's own). Only
+  `$C00x` reads change - and `$C010` reads under the lock, below.
 - **Dropped** by a reset - a press meant for the program that was running is
   not owed to the one the reset starts - and by the register's `drop`.
 - **A wire** with the native 6502 driving: there is no din of ours, and the
   capture must not lie.
 
-## The register
+## Every press is resolved exactly once
+
+A press leaves the latch by one of four routes, and the card counts three
+of them:
+
+| resolution | meaning |
+|---|---|
+| `taken` | a `$C010` cleared it after at least one `$C00x` read returned it: a program got the key |
+| `flushed` | a `$C010` cleared it and nothing had read it: a program cleared the strobe without looking - the Esc pressed as a game launches, eaten by its first `$C010`. Gone, unseen |
+| `replaced` | a second press landed on it first. Only a host that presses without waiting sees this |
+| *dropped* | the register's `drop`, or a RES′. Not counted: it is `pressed − strobe − taken − flushed − replaced` |
+
+`seen` is the flag underneath `taken` versus `flushed`: set when a `$C00x`
+read returns the waiting key, cleared by the next press.
+
+**The host presses one key and waits for its resolution before the next.**
+That is the whole discipline, and it is what makes the accounting simple:
+there is never more than one press in flight, so there is never more than
+one resolution owed, and "resolved" is a number - `pressed − strobe`. The
+reply to a press shows the register *before* the write (`reg_bridge` samples
+the readback on the same edge the write lands), so the press's own number
+is the `pressed` it reads back plus one, and the press is done when
+`pressed − strobe` reaches it. The typist never has to match a key to an
+event; it counts.
+
+## The notice
+
+`rtl/kbd_notice.sv` sends **KBD_EVENT** (type `0x1C`) on every resolution,
+and when the lock sees a real key - once the host has asked for it by
+setting KBD_CTRL's `notify`, which is the silent-until-asked rule
+(PROTOCOL.md) applied: a host that has not asked is not listening, and a
+notice queued for it would be the first word its successor reads.
+
+```
+header   {free, 0x1C, len=1}   free[0] strobe  [1] seen  [2] touched  [3] lock
+                               free[15:8] the key of the press resolved last
+payload  {replaced, flushed, taken, pressed}
+```
+
+**A level, not a pulse** - the CPU_HOLD notice's rule, kept for the same
+reason. The words carry the state as it is when each goes out, not as it was
+when the change fired, and one pending flag is the whole queue: a change
+while a notice waits is folded into it, and a change while it is being sent
+raises another after it. So the host always ends with the truth, and the
+card never holds more than one notice - which is all it needs to, because a
+host that presses one key at a time gets one resolution at a time. A host
+that presses without waiting can see two presses resolved by one notice;
+the counts still add up, and the attribution is forced: press *k* cannot be
+taken after *k+1* landed, and *k+1* cannot be replaced without a *k+2* the
+host never sent. `sim/reg_map_tb.sv` case 19 has the notice raised inside
+another message, the counts moving again while it waits, and one two-word
+notice coming out after the boundary with the newer counts.
+
+It goes through the message bus as its own master, below the CPU_HOLD
+notice and above the application messages and the capture, so it never
+lands inside another message and is never starved by the stream.
+
+## The lock
+
+`KBD_CTRL.lock` suppresses the machine's own keyboard: a real keypress
+neither reaches the core nor updates `last_read`, and the any-key-down flag
+a IIe returns in bit 7 of a `$C010` read is masked too (`{0, last_read}` -
+the same latch, the same clock). The core sees the injected keys and nothing
+else, which is what a scripted test wants: a stray key at the Apple cannot
+steer it. And because the capture records the substituted byte, **the trace
+goes blind to the physical keyboard too** - the CPU and the trace agree, as
+they must. `touched` is the witness: a real key arriving while locked sets
+it, sticky until the lock is next engaged, and raises the notice once. A
+test reads it at the end as "somebody touched the machine during the run."
+
+What the lock cannot do is clear the motherboard's own strobe - that takes a
+bus access, which is the machine's. A real key pressed while locked stays
+pending there. In practice it is cleared by the next `$C010` the machine
+makes, which every injected key it takes provides; only a real key pressed
+after the last injected one was taken lingers, and shows through when the
+lock lifts. The testbench has both: the pending `R` swept away by the
+`$C010` that took the injected `L`, and a later `S` reading through the
+moment the lock clears.
+
+The lock, like the buttons, **survives a RES′** - a test that resets the
+machine wants it kept - and is cleared by the card's reset, the watchdog's
+included, so a host that has gone leaves no keyboard locked behind it. It is
+the keyboard only: a test that wants the buttons quiet too sets them `up`.
+While locked, the boot menu cannot be driven from the Apple - its reader is
+substituted like everything else - and the host's `key return` or `continue`
+is the way through it.
+
+## The registers
 
 **`KBD_INJECT`, `0x8000_001C`** in `rtl/wb_regfile.sv`:
 
 ```
-[6:0]    key     W    the key, taken when press is set
-[7]      press   W1   put key on the keyboard, strobe set, replacing an
-                      unconsumed one; reads as 0
-[8]      drop    W1   clear the strobe without a $C010; reads as 0
-[16]     strobe  RO   a key is waiting that the machine has not taken
-[31:24]  taken   RO   strobes the machine consumed, wrapping
+[6:0]    key      W    the key, taken when press is set
+[7]      press    W1   put key on the keyboard, strobe set, replacing an
+                       unconsumed one; reads as 0
+[8]      drop     W1   clear the strobe without a $C010; reads as 0
+[16]     strobe   RO   a key is waiting that the machine has not taken
+[17]     seen     RO   ...and a $C00x read has returned it
+[31:24]  pressed  RO   presses, wrapping
 ```
 
-A register, not a message type: a `REG_WRITE` needs no change to
-`ft601_msg_rx`'s whitelist (where an unknown type drops the link), and every
-write is answered. **The reply to a press is its acknowledgement, not its
-state**: `reg_bridge` samples the readback on the same edge the write lands,
-so the reply shows the strobe as it was before the press (true of
-`BOOT_HOLD.arm` too). The state is in the read after it, which is what the
-host's typist polls. Not reset-latched, unlike its neighbours: a key is for
-the program running now.
+**`KBD_CTRL`, `0x8000_0028`**:
+
+```
+[0]      lock     RW   suppress the machine's own keyboard
+[1]      notify   RW   send KBD_EVENT on every resolution
+[7]      touched  RO   a real key arrived while locked; cleared when lock is
+                       next set
+[15:8]   taken    RO   resolved: read, then strobed
+[23:16]  flushed  RO   resolved: strobed unread
+[31:24]  replaced RO   resolved: pressed over
+```
+
+Two registers, not one, because a KBD_INJECT write *is* a press: sticky
+levels in the same word would make every press carry the lock's state, or
+cost a set/clear pair each. Registers, not message types: a `REG_WRITE`
+needs no change to `ft601_msg_rx`'s whitelist, and every write is answered.
+**The reply to a press is its acknowledgement, not its state** - it shows
+the register before the press, which is exactly what the typist wants (see
+above). Neither is reset-latched: a key is for the program running now.
 
 ## The host
 
 The card holds one key, so a string is typed the way a person types it. The
 **ingest thread**, which alone owns the transport, runs `KeyTypist`
-(`src/key_typist.cpp`) beside the boot menu's apply: press
-(`REG_WRITE key|press`), wait for the ack, then `REG_READ` every half a
-millisecond until `strobe` reads clear, and press the next in that same
-step. The register path is one request outstanding at a time, so it defers
-entirely while the menu's apply or a reset pulse is in flight. A key the
-machine has not taken after a second is counted and given up on - the next
-is pressed over it, which is the card's semantic and what a person would do
-with a program that is not listening. At exit, `drop`.
+(`src/key_typist.cpp`) beside the boot menu's apply: press (`REG_WRITE
+key|press`), take the ack's `pressed` as the press's number, then wait for
+the KBD_EVENT whose `pressed − strobe` reaches it, and press the next in
+that same step. No polling: the first cut read the register every half a
+millisecond while typing, two thousand round trips a second for nothing.
+The register path is one request outstanding at a time, so the typist
+defers entirely while the menu's apply or a reset pulse is in flight.
 
-**The Apple's "A" is not ASCII's.** The keyboard hands the program `$C1`,
-bit 7 being the strobe; the card's `{1, key[6:0]}` is that byte, and what
-the host must get right is the seven bits underneath and which ones a
-given machine could produce at all. `src/apple_keys.cpp` holds those rules,
-taken from AppleWin's `KeybQueueKeypress`: `CR LF` and a lone `LF` are one
-Return; a byte with bit 7 set is already the machine's and passes verbatim
-(`\x8a` is a real down arrow); a IIe types everything in `$00-$7F` with
-`a-z` uppercased under caps lock (on by default, as AppleWin's is); a ][+ has
-no lowercase and refuses `` ` { | } ~ `` and Delete. Refusals are counted and
-reported.
+A key the machine has not taken after a second is **dropped, then the next
+is pressed** - never pressed over, which would be a second press in flight.
+The drop resolves it (the notice says so, with `seen` clear: nobody read
+it), the count of keys not taken in time goes up, and the typist moves on.
+A card that answers no notice at all - `notify` refused, or gateware older
+than this - is given a short grace after the drop and then abandoned for
+that key, so the queue never wedges.
 
-**The keys arrive on the control socket** (`src/control_socket.cpp`, `--control
-PATH`, default `swhost.sock` in the working directory) - the one command
-channel into a running `swhost`, of which typing is the first customer. The
-two signals that used to reboot the machine and continue the boot menu are
-commands on it now, because a signal carries no argument and everything the
-host might be told to forward to the card wants one. Text lines in, one
-reply line per command: `type TEXT` (C escapes, `\xHH` for the Apple's own
-bytes), `key NAME`, `reset`, `continue`, `status`; replies `ok`, `ok WORDS`
-or `err REASON`. `tools/swctl` is the client, and `tools/pi.sh type|key|
-reset|continue|ctl` runs it on the Pi from here.
+At start the host sets `notify`; at exit it drops any key in flight and
+clears KBD_CTRL, so the next host - or the machine's own user - inherits
+nothing. **The Apple's "A" is not ASCII's**: `src/apple_keys.cpp` holds the
+character rules, taken from AppleWin's `KeybQueueKeypress` (`CR LF` is one
+Return, bit-7 bytes pass verbatim, a IIe uppercases under caps lock, a ][+
+refuses `` ` { | } ~ `` and Delete), unchanged from the first cut.
+
+**The keys arrive on the control socket** (`src/control_socket.cpp`,
+`--control PATH`, default `swhost.sock`) - the one command channel into a
+running `swhost`. Text lines in, one reply line per command: `type TEXT`,
+`key NAME`, `reset`, `continue`, `status`, `screen`, `pause MS`, and now:
+
+- `lock on|off` - the lock above. `status` reports `lock=` and `touched=`.
+- `wait [MS]` - block until the typist is idle: everything typed has been
+  resolved. `ok idle pressed=N taken=T flushed=F replaced=R dropped=D` on
+  success, `err timeout ...` after MS (default 5000). This is the sync
+  point a script needs between `type` and `screen`.
+
+`tools/swctl` is the client, and `tools/pi.sh type|key|reset|continue|ctl`
+runs it on the Pi from here.
 
 ## The buttons
 
@@ -161,9 +295,8 @@ the trace still agree; a write that lands mid-cycle decides only whether
 reset handler reads Open-Apple *after* RES′ releases - Open-Apple-Ctrl-Reset
 is a cold boot, both Apples the self-test - so an override a reset cleared
 could never do the one thing Open-Apple is for. That is exactly how the
-boot menu cold-boots now (BOOT_MENU.md): the host holds Open-Apple down
-across the release and the machine takes its own cold path, where the hold
-once DMA-wrote the power-up bytes.
+boot menu cold-boots (BOOT_MENU.md): the host holds Open-Apple down across
+the release and the machine takes its own cold path.
 
 **`BUTTONS`, `0x8000_0020`** in `rtl/wb_regfile.sv`:
 
@@ -185,12 +318,19 @@ at exit.
 - **A queue on the card.** The keyboard has none; a queue would be a second
   semantic for programs to meet, and the host paces better than the card
   could.
-- **A `$C010` any-key-down for an injected key.** Bit 7 of a `$C010` read
-  is the machine's own. Games that poll it see the physical keyboard.
+- **A queue of notices.** One press in flight means one resolution owed;
+  the notice is a level, so a second change folds into the one pending. A
+  FIFO here would be buffering for a host that breaks the one-in-flight
+  rule, and the answer to that is not more buffering on the card.
+- **A press notice.** The ack of the write is that.
+- **Polling on the host.** The notice replaced it.
 - **Auto-repeat.** A held key is a stream of presses from the host, if it
   wants one.
 - **An auto-release for a button.** A button is a level; a tap is two
   writes from the host, which is the only party that knows how long.
+- **Clearing the motherboard's strobe under the lock.** It takes a bus
+  access; the machine's next `$C010` does it, and `touched` records that
+  there was something to clear.
 - **The paddles and `PTRIG`.** Timers, a different problem.
 - **A scancode keymap.** `apple_keys` starts from characters; a USB keyboard
   on the Pi will have to produce characters first, then feed the same rules.
@@ -199,52 +339,13 @@ at exit.
   `$C011-$C01F`, which then leaves an injected key visible at `$C000` until
   its next `$C010`.
 
-## Verifying it
+## Running it
 
-```
-sim/run_kbd_inject_tb.sh     # card: the real core, driver, READER and hold; every property below
-sim/run_reg_map_tb.sh        # card: the register's pulses and readback (case 16)
-sim/run_boot_hold_tb.sh      # card: the hold, unchanged with the inputs idle
-sim/lint.sh
-```
-
-`kbd_inject_tb` puts the real reader in the loop, pins and synchronisers and
-all, and checks: idle, it is a wire and a real key is seen once; a pressed
-key is what the next `$C00x` read returns and every read after it until a
-`$C010`, then never again; a `$C010` write clears, a `$C015` write clears, a
-`$C019` read does not and returns the machine's byte; a `$C000` write does
-nothing; `din` and the captured event agree on every cycle; a second press
-replaces an unconsumed first and `taken` counts one; a press over a waiting
-real key replaces it and the one `$C010` clears both strobes; keys pressed
-one per consumption go through RDKEY-shaped code in order, at eight offsets
-across the bus cycle, never torn; held, an injected Return is one `$C000`
-event carrying `$8D` then one `$C010`; a RES′ drops it, `drop` drops it, and
-with `master_active` low nothing is substituted.
-
-`kbd_inject_tb` also carries the buttons: on hardware, `$C061-$C063` read
-the game port's levels and the substitution never asserts; PB0 down reads
-`$AA` and PB1 up reads `$2A` over a pressed hardware button, each over the
-bus's own low bits, with `$C060`/`$C064` untouched and the `hw` readback
-still telling the truth; Open-Apple held down is still down after a RES′;
-`master_active` low substitutes nothing.
-
-In strudelworks-host, `kbd_test`: the character rules against AppleWin's,
-the escapes and the named keys, the control commands and their replies, the
-register's layout, the typist pressing one key per consumption and giving up
-on one nobody takes, the mock card taking a press and showing the machine
-consume it in the captured stream, and the socket end to end.
-
-## Bring-up, when it happens
-
-```
-swhost --real --cpu soft --boot-menu --hdv TotalReplay.hdv
-tools/pi.sh key return        # continues the menu: TR boots
-tools/pi.sh type A            # the browser jumps to A
-tools/pi.sh reset             # what pkill -USR1 did
-```
-
-Then `tools/pi.sh trace out.swbt --reset` one run and look for the `$C000` read carrying `$8D` followed
-by the `$C010`; `tools/pi.sh ctl status` (and the exit line) reports pressed
-against taken, so a gap between them is a key the machine never consumed.
-Then a ProDOS boot and `type 'CATALOG\n'` at the prompt, which exercises
-RDKEY's real shape and the `$C1`-not-`$41` convention end to end.
+`tools/kbd_test.sh [--touch]` in strudelworks-host, with the Pi up, the card
+loaded and the Apple on: it restores `po_kbd.po` from `po_master.po`, boots
+it through the menu and provokes every resolution, checking the counts
+after each step against `status`. `--touch` adds the one step that needs a
+person: a key pressed at the Apple under the lock, which must not reach the
+prompt and must set `touched`. Total Replay is not a good vehicle for this -
+it reads and flushes the keyboard on its own schedule - which is why the
+test types BASIC at a ProDOS prompt and reads the screen back.

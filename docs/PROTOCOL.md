@@ -62,7 +62,8 @@ host reads; the receiver carries parser state across all of them.
 | `0x19` | HD_DONE | Host→card. `free[7:0]` = the status the EXECUTE port reads once busy clears; payload `[{count, addr}] [size] [bytes…]` to DMA into the Apple, or header only for none. |
 | `0x1A` | HD_FETCH | Host→card. Payload `[{count, addr}]`: read bytes out of the Apple's memory. |
 | `0x1B` | HD_DATA | Card→host. `free` = count; payload the bytes, answering HD_FETCH. Through the same boundary-respecting slot as a reply, whatever its length. |
-| `0x1C`–`0xFF` | — | Application, unassigned. |
+| `0x1C` | KBD_EVENT | Card→host, **unsolicited once asked** (KBD_CTRL `notify`). A press on the injected keyboard was resolved, or the lock saw a real key. `free[0]` strobe, `[1]` seen, `[2]` touched, `[3]` lock, `[15:8]` the key resolved last; payload one word `{replaced, flushed, taken, pressed}`. A level, like CPU_HOLD: the words carry the state as it is when they go out. See KEYBOARD.md. |
+| `0x1D`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -93,9 +94,10 @@ protocol.
 | `0x8000_0010` | BOOT_HOLD | RW bit 0, W1 bit 16 | hold the soft core at its reset vector; `arm`, `held`, `release`, `holds` — see BOOT_MENU.md |
 | `0x8000_0014` | HD_SLOT | RW bits 2:0 | the hard disk's slot, 0 = off; latched at RES', never MB_SLOT's; `rom`, `busy`, `execs` — see HARDDISK.md |
 | `0x8000_0018` | RESET | W1 bit 0, W bits 31:16 | pulse the Apple's RES' low, for a programmatic Ctrl-Reset; `pulsing`, `pulses` — see BUS_MASTER.md |
-| `0x8000_001C` | KBD_INJECT | W bits 6:0, W1 bits 7-8 | a key on the keyboard the soft core reads: `key`, `press`, `drop`; `strobe`, `taken` — see KEYBOARD.md |
+| `0x8000_001C` | KBD_INJECT | W bits 6:0, W1 bits 7-8 | a key on the keyboard the soft core reads: `key`, `press`, `drop`; `strobe`, `seen`, `pressed` — see KEYBOARD.md |
 | `0x8000_0020` | BUTTONS | RW bits 5:0 | Open-Apple, Closed-Apple and PB2 as the host holds them, two bits each (hardware / up / down); `hw` — see KEYBOARD.md |
 | `0x8000_0024` | RING_STATUS | RO | the DDR3 TX ring: `[21:0]` occupancy in lines, `[24]` full, `[25]` DDR3 calibrated, `[26]` a message was torn on the bus (sticky) — see TX_RING.md |
+| `0x8000_0028` | KBD_CTRL | RW bits 1:0 | `lock` the machine's own keyboard out, `notify` ask for KBD_EVENT; `touched`, `taken`, `flushed`, `replaced` — see KEYBOARD.md |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

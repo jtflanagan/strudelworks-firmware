@@ -97,14 +97,19 @@ module card_link #(
     input  wire [7:0]  hd_execs,
 
     // Keyboard injection (rtl/kbd_inject.sv, in a mastering top): the
-    // KBD_INJECT register's press and drop pulses and the key out, its strobe
-    // and taken count back for the readback.  A watching top ties the inputs
-    // to 0.
+    // KBD_INJECT register's press and drop pulses and the key out, the
+    // KBD_CTRL lock out; the flags {touched, seen, strobe}, the counts
+    // {replaced, flushed, taken, pressed}, the key resolved last and the
+    // `changed` pulse back - for the readback, and for the KBD_EVENT notice
+    // (rtl/kbd_notice.sv).  A watching top ties the inputs to 0.
     output wire        kbd_press,
     output wire [6:0]  kbd_press_key,
     output wire        kbd_drop,
-    input  wire        kbd_strobe,
-    input  wire [7:0]  kbd_taken,
+    output wire        kbd_lock,
+    input  wire [2:0]  kbd_flags,
+    input  wire [31:0] kbd_counts,
+    input  wire [6:0]  kbd_resolved_key,
+    input  wire        kbd_changed,
 
     // The pushbuttons (rtl/pb_inject.sv): the BUTTONS register's word out,
     // the hardware's levels back.  A watching top ties the input to 0.
@@ -565,6 +570,9 @@ module card_link #(
         .rsp_take  (rsp_take)
     );
 
+    // KBD_CTRL's notify: the host asking for KBD_EVENT notices.
+    wire kbd_notify;
+
     wb_regfile #(
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
@@ -585,8 +593,10 @@ module card_link #(
         .kbd_press         (kbd_press),
         .kbd_press_key     (kbd_press_key),
         .kbd_drop          (kbd_drop),
-        .kbd_strobe        (kbd_strobe),
-        .kbd_taken         (kbd_taken),
+        .kbd_lock          (kbd_lock),
+        .kbd_notify        (kbd_notify),
+        .kbd_flags         (kbd_flags),
+        .kbd_counts        (kbd_counts),
         .pb_override       (pb_override),
         .pb_hw             (pb_hw),
         .res_drive         (res_drive),
@@ -633,15 +643,38 @@ module card_link #(
         end
     end
 
+    // ---- the KBD_EVENT notice -----------------------------------------------
+    // The other thing the card says unasked - and only once asked, through
+    // KBD_CTRL's notify: a press was resolved, or the lock saw a real key.
+    // Two words, and a level like CPU_HOLD's: the words carry the counts and
+    // flags as they are when they go out, so a change while a notice waits
+    // still ends with the host knowing the truth.  rtl/kbd_notice.sv.
+    wire [31:0] kn_word;
+    wire        kn_valid, kn_take;
+
+    kbd_notice u_kbd_notice (
+        .clk          (clk_ctrl),
+        .rst          (rst),
+        .changed      (kbd_changed),
+        .notify       (kbd_notify),
+        .flags        ({kbd_lock, kbd_flags}),
+        .resolved_key (kbd_resolved_key),
+        .counts       (kbd_counts),
+        .word         (kn_word),
+        .valid        (kn_valid),
+        .take         (kn_take)
+    );
+
     // ---- the message bus ---------------------------------------------------
-    // A 32-bit Wishbone with four masters, in priority order: a register
-    // reply, the notice, the top's application message, the capture.  Each
-    // source is a stream, and msg_master makes it a master that holds CYC
-    // across its message; msg_arb grants per CYC; tx_ring is the one slave.
-    // Everything above the capture is rate-bounded by the host or the bus;
-    // the capture is the one continuous source and goes last.  See msg_arb
-    // for why that order is load-bearing.
-    localparam integer N_SRC = 4;
+    // A 32-bit Wishbone with five masters, in priority order: a register
+    // reply, the CPU_HOLD notice, the KBD_EVENT notice, the top's
+    // application message, the capture.  Each source is a stream, and
+    // msg_master makes it a master that holds CYC across its message;
+    // msg_arb grants per CYC; tx_ring is the one slave.  Everything above
+    // the capture is rate-bounded by the host or the bus; the capture is the
+    // one continuous source and goes last.  See msg_arb for why that order
+    // is load-bearing.
+    localparam integer N_SRC = 5;
 
     wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
     wire [N_SRC*32-1:0] mb_adr, mb_dat;
@@ -670,13 +703,17 @@ module card_link #(
     assign ms_valid[1]         = note_pending;
     assign note_take           = ms_take[1];
 
-    assign ms_word[2*32 +: 32] = aux_word;
-    assign ms_valid[2]         = aux_valid;
-    assign aux_take            = ms_take[2];
+    assign ms_word[2*32 +: 32] = kn_word;
+    assign ms_valid[2]         = kn_valid;
+    assign kn_take             = ms_take[2];
 
-    assign ms_word[3*32 +: 32] = cap_word;
-    assign ms_valid[3]         = cap_valid;
-    assign cap_take            = ms_take[3];
+    assign ms_word[3*32 +: 32] = aux_word;
+    assign ms_valid[3]         = aux_valid;
+    assign aux_take            = ms_take[3];
+
+    assign ms_word[4*32 +: 32] = cap_word;
+    assign ms_valid[4]         = cap_valid;
+    assign cap_take            = ms_take[4];
 
     genvar gm;
     generate

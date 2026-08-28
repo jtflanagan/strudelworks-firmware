@@ -110,11 +110,15 @@ module reg_map_tb;
     wire       res_drive;
     reg        hd_rom_loaded = 1'b0, hd_busy = 1'b0;
     reg  [7:0] hd_execs = 8'd0;
-    // Keyboard injection's side of KBD_INJECT: the tb plays kbd_inject.
-    wire       kbd_press, kbd_drop;
+    // Keyboard injection's side of KBD_INJECT and KBD_CTRL: the tb plays
+    // kbd_inject.  The flags are {touched, seen, strobe}, the counts
+    // {replaced, flushed, taken, pressed}.
+    wire       kbd_press, kbd_drop, kbd_lock, kbd_notify;
     wire [6:0] kbd_press_key;
-    reg        kbd_strobe = 1'b0;
-    reg  [7:0] kbd_taken  = 8'd0;
+    reg  [2:0]  kbd_flags  = 3'd0;
+    reg  [31:0] kbd_counts = 32'd0;
+    reg  [6:0]  kbd_resolved_key = 7'd0;
+    reg         kbd_changed = 1'b0;
     integer    press_pulses = 0, drop_pulses = 0;
     reg  [6:0] last_pressed = 7'd0;
     always @(posedge clk) begin
@@ -132,7 +136,8 @@ module reg_map_tb;
         .hd_slot_active (hd_slot_active), .hd_rom_loaded (hd_rom_loaded),
         .hd_busy (hd_busy), .hd_execs (hd_execs), .res_drive (res_drive),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key), .kbd_drop (kbd_drop),
-        .kbd_strobe (kbd_strobe), .kbd_taken (kbd_taken),
+        .kbd_lock (kbd_lock), .kbd_notify (kbd_notify),
+        .kbd_flags (kbd_flags), .kbd_counts (kbd_counts),
         .ring_status (32'h0200_1234),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
@@ -188,10 +193,26 @@ module reg_map_tb;
         aux_takes = aux_takes + 1;
     end
 
-    // The masters in card_link's order: reply, notice, application, capture -
-    // each a stream through msg_master onto the bus; the tb plays the slave.
-    wire [3:0]   ma_valid, ma_take;
-    wire [127:0] ma_word;
+    // The KBD_EVENT notice, the real module: fed by the tb's kbd_changed
+    // pulse and the register's notify, its words onto the bus like the rest.
+    wire [31:0] kn_word;
+    wire        kn_valid, kn_take;
+    integer     kn_takes = 0;
+    always @(posedge clk) if (kn_take) kn_takes = kn_takes + 1;
+
+    kbd_notice u_kn (
+        .clk (clk), .rst (rst),
+        .changed (kbd_changed), .notify (kbd_notify),
+        .flags ({kbd_lock, kbd_flags}), .resolved_key (kbd_resolved_key),
+        .counts (kbd_counts),
+        .word (kn_word), .valid (kn_valid), .take (kn_take)
+    );
+
+    // The masters in card_link's order: reply, the CPU_HOLD notice, the
+    // KBD_EVENT notice, application, capture - each a stream through
+    // msg_master onto the bus; the tb plays the slave.
+    wire [4:0]   ma_valid, ma_take;
+    wire [159:0] ma_word;
 
     reply_stream u_reply (
         .clk (clk), .rst (rst),
@@ -199,20 +220,21 @@ module reg_map_tb;
         .rsp_valid (rsp_valid), .rsp_take (rsp_take),
         .word (ma_word[31:0]), .valid (ma_valid[0]), .take (ma_take[0])
     );
-    assign ma_word[63:32]  = note_word;  assign ma_valid[1] = note_valid; assign note_take = ma_take[1];
-    assign ma_word[95:64]  = aux_word;   assign ma_valid[2] = aux_valid;  assign aux_take  = ma_take[2];
-    assign ma_word[127:96] = src_data;   assign ma_valid[3] = src_valid;  assign src_take  = ma_take[3];
+    assign ma_word[63:32]   = note_word;  assign ma_valid[1] = note_valid; assign note_take = ma_take[1];
+    assign ma_word[95:64]   = kn_word;    assign ma_valid[2] = kn_valid;   assign kn_take   = ma_take[2];
+    assign ma_word[127:96]  = aux_word;   assign ma_valid[3] = aux_valid;  assign aux_take  = ma_take[3];
+    assign ma_word[159:128] = src_data;   assign ma_valid[4] = src_valid;  assign src_take  = ma_take[4];
 
-    wire [3:0]   mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
-    wire [127:0] mb_adr, mb_dat;
-    wire [15:0]  mb_sel;
+    wire [4:0]   mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
+    wire [159:0] mb_adr, mb_dat;
+    wire [19:0]  mb_sel;
     wire         sb_cyc, sb_stb, sb_we;
     wire [31:0]  sb_adr, sb_dat;
     wire [3:0]   sb_sel;
     reg          sb_ack = 1'b0;
 
     genvar gm;
-    generate for (gm = 0; gm < 4; gm = gm + 1) begin : g_m
+    generate for (gm = 0; gm < 5; gm = gm + 1) begin : g_m
         msg_master u_m (
             .clk (clk), .rst (rst),
             .word (ma_word[gm*32 +: 32]), .valid (ma_valid[gm]), .take (ma_take[gm]),
@@ -222,7 +244,7 @@ module reg_map_tb;
         );
     end endgenerate
 
-    msg_arb #(.N (4)) u_arb (
+    msg_arb #(.N (5)) u_arb (
         .clk (clk), .rst (rst),
         .m_cyc (mb_cyc), .m_stb (mb_stb), .m_we (mb_we), .m_adr (mb_adr),
         .m_dat (mb_dat), .m_sel (mb_sel), .m_stall (mb_stall), .m_ack (mb_ack),
@@ -741,16 +763,17 @@ module reg_map_tb;
             $display("FAIL: a press also dropped"); errors = errors + 1;
         end else $display("  ok: writing key|press pulses press once, carrying the key");
 
-        // The mechanism says a key is waiting and has taken two; the register
-        // says so, and the write-only bits read as zero.
-        kbd_strobe = 1'b1; kbd_taken = 8'd2;
+        // The mechanism says a key is waiting, seen, and three have been
+        // pressed; the register says so, and the write-only bits read as
+        // zero.  The counts word is {replaced, flushed, taken, pressed}.
+        kbd_flags = 3'b011; kbd_counts = 32'h0403_0203;
         base = out_n;
         do_read(32'h8000_001C);
-        if (out_mem[base+2] !== 32'h0201_0000) begin
-            $display("FAIL: KBD_INJECT readback %08x, expected strobe=1 taken=2, key/press/drop 0",
+        if (out_mem[base+2] !== 32'h0303_0000) begin
+            $display("FAIL: KBD_INJECT readback %08x, expected pressed=3 seen=1 strobe=1, key/press/drop 0",
                      out_mem[base+2]);
             errors = errors + 1;
-        end else $display("  ok: readback strobe=1 taken=2; key, press and drop read as 0");
+        end else $display("  ok: readback pressed=3 seen=1 strobe=1; key, press and drop read as 0");
 
         do_write(32'h8000_001C, 32'h0000_0100);           // drop
         if (drop_pulses !== 1 || press_pulses !== 1) begin
@@ -763,7 +786,7 @@ module reg_map_tb;
         if (press_pulses !== 1 || drop_pulses !== 1) begin
             $display("FAIL: a write without press or drop pulsed something"); errors = errors + 1;
         end else $display("  ok: a key written without press is not a press");
-        kbd_strobe = 1'b0; kbd_taken = 8'd0;
+        kbd_flags = 3'd0; kbd_counts = 32'd0;
 
         // --- case 17 / BUTTONS: a level, held as written, hw read back -------
         if (pb_override !== 6'd0) begin
@@ -790,6 +813,79 @@ module reg_map_tb;
             $display("FAIL: BUTTONS did not clear"); errors = errors + 1;
         end else $display("  ok: and back to hardware");
         pb_hw = 3'd0;
+
+        // --- case 18 / KBD_CTRL: lock and notify are levels, the counts read back
+        if (kbd_lock !== 1'b0 || kbd_notify !== 1'b0) begin
+            $display("FAIL: KBD_CTRL not clear at reset"); errors = errors + 1;
+        end else $display("  ok: KBD_CTRL starts unlocked, notify off");
+        do_write(32'h8000_0028, 32'h0000_0003);           // lock, notify
+        if (kbd_lock !== 1'b1 || kbd_notify !== 1'b1) begin
+            $display("FAIL: KBD_CTRL write did not land: lock=%0d notify=%0d", kbd_lock, kbd_notify);
+            errors = errors + 1;
+        end else $display("  ok: writing KBD_CTRL sets lock and notify");
+        pulse_reset_line;
+        if (kbd_lock !== 1'b1 || kbd_notify !== 1'b1) begin
+            $display("FAIL: a RES' cleared KBD_CTRL - a test that resets the machine would lose its lock");
+            errors = errors + 1;
+        end else $display("  ok: a RES' leaves the lock and notify as the host set them");
+        kbd_flags = 3'b100; kbd_counts = 32'h0403_0203;   // touched; replaced 4 flushed 3 taken 2 pressed 3
+        base = out_n;
+        do_read(32'h8000_0028);
+        if (out_mem[base+2] !== 32'h0403_0283) begin
+            $display("FAIL: KBD_CTRL readback %08x, expected replaced=4 flushed=3 taken=2 touched lock notify",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: readback carries replaced, flushed, taken, touched over the two levels");
+        kbd_flags = 3'd0; kbd_counts = 32'd0;
+        do_write(32'h8000_0028, 32'h0000_0002);           // notify only, for the next case
+        if (kbd_lock !== 1'b0 || kbd_notify !== 1'b1) begin
+            $display("FAIL: KBD_CTRL did not clear the lock alone"); errors = errors + 1;
+        end else $display("  ok: and the lock clears on its own");
+
+        // --- case 19 / the KBD_EVENT notice: two words, whole, a level ------
+        // Raised mid-message, it waits for the boundary like the others; the
+        // counts move again while it waits, and the words that go out carry
+        // the newer value - one notice, the truth at the moment it went.
+        kbd_counts = 32'h0000_0101; kbd_resolved_key = 7'h42; kbd_flags = 3'b000;
+        base = out_n;
+        @(negedge clk);
+        offer(hdr(T_BUS_EVENTS, 8'd3, 16'd0));
+        @(negedge clk); kbd_changed = 1'b1;
+        @(negedge clk); kbd_changed = 1'b0;               // arrives mid-payload
+        kbd_counts = 32'h0000_0201;                       // ...and moves again while waiting
+        offer(32'hBBBB_0001);
+        offer(32'hBBBB_0002);
+        offer(32'hBBBB_0003);
+        repeat (40) @(posedge clk);
+
+        hdr_at = -1;
+        for (i = base; i < out_n - 5; i = i + 1) begin
+            if (out_mem[i] === hdr(T_BUS_EVENTS, 8'd3, 16'd0)) hdr_at = i;
+        end
+        if (hdr_at < 0) begin
+            $display("FAIL: the BUS_EVENTS message never came out (kbd notice case)");
+            errors = errors + 1;
+        end else begin
+            expect_word(hdr_at + 1, 32'hBBBB_0001, "event word 1 with a kbd notice pending");
+            expect_word(hdr_at + 2, 32'hBBBB_0002, "event word 2 with a kbd notice pending");
+            expect_word(hdr_at + 3, 32'hBBBB_0003, "event word 3 with a kbd notice pending");
+            expect_word(hdr_at + 4, 32'h4200_1C01, "the KBD_EVENT header: key $42, no flags, len 1");
+            expect_word(hdr_at + 5, 32'h0000_0201, "the KBD_EVENT payload: the counts as they are now");
+            if (kn_takes !== 2) begin
+                $display("FAIL: the kbd notice was taken %0d word(s), expected 2", kn_takes);
+                errors = errors + 1;
+            end else
+                $display("  ok: KBD_EVENT waited for the boundary, went out once, two words, the newer counts");
+        end
+
+        // With notify off, a change says nothing.
+        do_write(32'h8000_0028, 32'h0000_0000);
+        @(negedge clk); kbd_changed = 1'b1;
+        @(negedge clk); kbd_changed = 1'b0;
+        repeat (40) @(posedge clk);
+        if (kn_takes !== 2) begin
+            $display("FAIL: a change with notify off sent a notice"); errors = errors + 1;
+        end else $display("  ok: with notify off a change sends nothing - silent until asked");
 
         // --- case 7 / the parser never lost sync -----------------------------
         if (frame_error !== 1'b0) begin

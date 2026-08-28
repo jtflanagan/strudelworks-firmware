@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
-// kbd_inject - a key from the host, on the keyboard the soft core reads.
+// kbd_inject - the keyboard the soft core reads, with the host on it.
 //
 // The boot hold reads the keyboard for the host; this is the mirror.  The host
 // presses a key, and the next read of $C000 the machine makes returns it, bit
@@ -16,100 +16,217 @@
 // one: the IIe's IOU, or the ][+'s keyboard latch, drives the bus on every
 // $C00x read, and a card that drove it too would be fighting the machine.
 // So nothing here reaches the pins.  The byte the core latches as din, and
-// the byte the capture records, become the host's key; the wire carries
-// whatever the real keyboard says.  That is the SYNC substitution's precedent
-// (apple_bus_read's sync_override): logically exact, electrically absent.
-// The driver samples din and the reader samples its event on the same fabric
-// clock - T_DIN and DATA_TAP are the same tap - so one combinational decision
-// lands identically in the CPU and in the trace, and the host's shadow of the
-// machine sees what the machine saw.
+// the byte the capture records, become this module's answer; the wire
+// carries whatever the real keyboard says.  That is the SYNC substitution's
+// precedent (apple_bus_read's sync_override): logically exact, electrically
+// absent.  The driver samples din and the reader samples its event on the
+// same fabric clock - T_DIN and DATA_TAP are the same tap - so one
+// combinational decision lands identically in the CPU and in the trace, and
+// the host's shadow of the machine sees what the machine saw.
 //
-// THE MACHINE'S OWN SEMANTIC, AND NOTHING MORE.  One key latch and one
-// strobe - AppleWin's `keycode` and `keywaiting`.  A press replaces whatever
-// is in the latch and sets the strobe, consumed or not: the newest key wins,
-// as it does when two physical keys land before a $C010.  There is no queue.
-// Typing a string at the machine's pace is the host's job: press, watch the
-// strobe clear, press the next - which is also how AppleWin's own injection,
-// its clipboard paste, hands a program one character per strobe clear.
+// THE MODEL IS THE IOU'S OWN: A LATCH AND A STROBE.  The keyboard the machine
+// reads is one byte - the last key, with the strobe in bit 7 - and this
+// module holds that byte for the soft core with two sources feeding it.
+//
+//   * `last_read` is the key the machine saw last, real or injected.  A
+//     $C00x read that finds no strobe anywhere returns {0, last_read}, which
+//     is what the IOU returns after a $C010: the key is still in the latch,
+//     the strobe is gone.
+//   * A real keypress - the bus's byte with bit 7 set on a $C00x read - is
+//     handed to the core as it is and becomes last_read.
+//   * An injected key is one latch (`key`) and one strobe, AppleWin's
+//     `keycode` and `keywaiting`.  While its strobe is set a $C00x read
+//     returns {1, key}, and it becomes last_read.  A press replaces whatever
+//     is in the latch, consumed or not: the newest key wins, as it does when
+//     two physical keys land before a $C010.  There is no queue; typing a
+//     string at the machine's pace is the host's job.
+//   * Both ready at once, the injected key wins.  The real one is not lost:
+//     its strobe is the motherboard's, still set, and shows through the
+//     moment the injected one is cleared - unless the $C010 that clears the
+//     injected key clears it too, which is what that access means.
 //
 // WHAT CLEARS THE STROBE is the IIe's rule as AppleWin models it: any access
 // to $C010, or a WRITE to $C011-$C01F.  A read of $C011-$C01F returns a soft
 // switch's state over the key and leaves the strobe alone.  A ][+ clears on
 // any $C01x read as well; the IIe rule is the safe one to share, because the
 // failure the other way - a program polling $C019 for VBL eating an injected
-// key - is the one that loses keys.  That same access clears the machine's
-// own strobe too, which is simply what the access means.
+// key - is the one that loses keys.
 //
-// ONLY $C00x READS CHANGE.  A write to $C00x is a soft switch (80STORE and
-// friends) and its data is the core's; a read of $C010-$C01F carries
-// any-key-down or a switch in bit 7, the machine's own.  Neither is touched.
+// EVERY PRESS IS RESOLVED EXACTLY ONCE, and the counts say how.  `pressed`
+// counts presses; a press leaves the latch by one of four routes, and the
+// host, which presses one key and waits for it to be resolved before the
+// next, reads them as the acknowledgement it is waiting for:
 //
-// A RESET DROPS THE KEY: a press meant for the program that was running is
-// not owed to the one the reset starts.  So does the register's `drop`.
+//   taken     a $C010 cleared it after at least one $C00x read returned it:
+//             a program got the key.
+//   flushed   a $C010 cleared it and nothing had read it: a program cleared
+//             the strobe without looking - the Esc pressed as a game
+//             launches, eaten by its first $C010.  Gone, unseen.
+//   replaced  a second press landed on it first.  Only a host that presses
+//             without waiting sees this.
+//   dropped   the register's drop, or a RES': a key meant for the program
+//             that was running is not owed to the one the reset starts.
+//             Not counted separately - it is pressed - strobe - the others.
+//
+// `changed` pulses on every resolution and on `touched` (below), and the
+// link turns that into the KBD_EVENT notice when the host has asked for
+// one.  `resolved_key` is the key of the press resolved last, for the
+// notice to carry.
+//
+// THE LOCK.  With `lock` set the machine's own keyboard is suppressed: a
+// real keypress neither reaches the core nor updates last_read, and the
+// any-key-down flag a IIe returns in bit 7 of a $C010 read is masked too.
+// The core sees the injected keys and nothing else, which is what a
+// scripted test wants - a stray key at the Apple cannot steer it.  A real
+// key that arrives while locked sets `touched`, sticky until the lock is
+// next engaged: the record that somebody touched the machine during the
+// run.  The motherboard's own strobe is not this module's to clear; a real
+// key pressed while locked stays pending there, and is cleared by the next
+// $C010 the machine makes - which every injected key it takes provides - or
+// shows through when the lock lifts.
+//
+// ONLY $C00x READS CHANGE, and $C010 reads under the lock.  A write to $C00x
+// is a soft switch (80STORE and friends) and its data is the core's; a read
+// of $C011-$C01F carries a switch in bit 7, the machine's own.  Neither is
+// touched.
+//
+// A RESET DROPS THE KEY, and keeps last_read: the IOU's latch survives a
+// reset too.  So does the register's `drop`.  The counts, the lock and
+// `touched` are the card's, not the machine's, and only the card's reset
+// clears them.
 //
 // WITH THE NATIVE CPU DRIVING there is no din of ours to substitute into and
 // the capture must not lie, so master_active low makes this a wire.
 //////////////////////////////////////////////////////////////////////////////////
 module kbd_inject (
     input  wire        clk,
-    input  wire        rst,             // the card's reset: counters
+    input  wire        rst,             // the card's reset: counts, lock state
     input  wire        cpu_rst,         // the core's: the card's OR RES' asserted
     input  wire        master_active,   // 1 while the card is the CPU
 
     // From the KBD_INJECT register.  press latches press_key and sets the
-    // strobe; drop clears the strobe.  Both are one-clock pulses.
+    // strobe; drop clears the strobe.  Both are one-clock pulses.  lock is
+    // a level, from KBD_CTRL.
     input  wire        press,
     input  wire [6:0]  press_key,
     input  wire        drop,
+    input  wire        lock,
 
     // The presented op, from apple_bus_write: one stable value per bus
-    // cycle, and op_commit at its data phase.
+    // cycle, and op_commit at its data phase.  data_sync is the bus's byte
+    // as both consumers sample it at T_DIN, the clock before op_commit.
     input  wire [15:0] op_addr,
     input  wire        op_rw,
     input  wire        op_commit,
+    input  wire [7:0]  data_sync,
 
     // The substitution: while sub_en, the byte the core latches and the byte
-    // the capture records is sub_data.  Combinational from the latch, the
-    // strobe and the presented op, so both consumers see one answer.
+    // the capture records is sub_data.  Combinational from the state and the
+    // presented op, so both consumers see one answer.
     output wire        sub_en,
     output wire [7:0]  sub_data,
 
-    // Read back through the register.
-    output logic       strobe,          // a key is waiting, not yet consumed
-    output logic [7:0] taken            // strobes the machine consumed, wrapping
+    // Read back through the registers, and carried by the notice.
+    output logic       strobe,          // an injected key is waiting
+    output logic       seen,            // ...and a $C00x read has returned it
+    output logic       touched,         // a real key arrived while locked
+    output logic [7:0] pressed,         // presses, wrapping
+    output logic [7:0] taken,           // resolved: read, then strobed
+    output logic [7:0] flushed,         // resolved: strobed unread
+    output logic [7:0] replaced,        // resolved: pressed over
+    output logic [6:0] resolved_key,    // the key of the press resolved last
+    output logic       changed          // one clock: a count or touched moved
 );
 
     logic [6:0] key;
+    logic [6:0] last_read;
+    logic [7:0] data_q;                 // data_sync a clock ago: the T_DIN sample
+    logic       lock_q;
 
-    // A read of $C000-$C00F is the keyboard.
-    wire kbd_read = op_rw && (op_addr[15:4] == 12'hC00);
+    // A read of $C000-$C00F is the keyboard; a read of $C010 is the strobe
+    // register, any-key-down in bit 7 on a IIe.
+    wire kbd_read  = op_rw && (op_addr[15:4] == 12'hC00);
+    wire strb_read = op_rw && (op_addr == 16'hC010);
     // Any access to $C010, or a write to $C011-$C01F, clears the strobe.
     wire kbd_clear = (op_addr == 16'hC010) ||
                      (!op_rw && (op_addr[15:4] == 12'hC01));
 
-    assign sub_en   = master_active && strobe && kbd_read;
-    assign sub_data = {1'b1, key};
+    // What a $C00x read returns: the injected key first, the real one if it
+    // is allowed through, the latch otherwise.
+    wire [7:0] kbd_byte = strobe                  ? {1'b1, key} :
+                          (data_sync[7] && !lock) ? data_sync :
+                                                    {1'b0, last_read};
 
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            taken <= 8'd0;
-        end else if (op_commit && master_active && kbd_clear && strobe) begin
-            taken <= taken + 8'd1;
-        end
-    end
+    assign sub_en   = master_active && (kbd_read || (lock && strb_read));
+    assign sub_data = kbd_read ? kbd_byte : {1'b0, last_read};
 
+    // The same decision at the data phase, on the byte the core took.
+    wire commit     = op_commit && master_active;
+    wire real_q     = data_q[7];
+    wire clear_now  = commit && kbd_clear && strobe;
+    // A press over a waiting key that is not being cleared or dropped this
+    // same clock replaces it.
+    wire replace_now = press && strobe && !clear_now && !drop;
+    wire drop_now    = (drop || cpu_rst) && strobe && !clear_now;
+
+    // ---- the machine's keyboard: key, strobe, seen, last_read --------------
     always_ff @(posedge clk) begin
+        data_q <= data_sync;
         if (cpu_rst) begin
             key    <= 7'd0;
             strobe <= 1'b0;
+            seen   <= 1'b0;
         end else begin
-            if (op_commit && master_active && kbd_clear) strobe <= 1'b0;
-            if (drop)                                    strobe <= 1'b0;
+            if (commit && kbd_clear) strobe <= 1'b0;
+            if (drop)                strobe <= 1'b0;
+            if (commit && kbd_read && strobe) seen <= 1'b1;
             // Last, so a press in the same clock as a clear is a new key,
             // not a lost one.
             if (press) begin
                 key    <= press_key;
                 strobe <= 1'b1;
+                seen   <= 1'b0;
+            end
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            last_read <= 7'd0;
+        end else if (commit && kbd_read) begin
+            if (strobe)                 last_read <= key;
+            else if (real_q && !lock)   last_read <= data_q[6:0];
+        end
+    end
+
+    // ---- the card's: counts, touched, changed -------------------------------
+    always_ff @(posedge clk) begin
+        lock_q <= lock;
+        if (rst) begin
+            pressed      <= 8'd0;
+            taken        <= 8'd0;
+            flushed      <= 8'd0;
+            replaced     <= 8'd0;
+            resolved_key <= 7'd0;
+            touched      <= 1'b0;
+            changed      <= 1'b0;
+        end else begin
+            changed <= 1'b0;
+            if (press) pressed <= pressed + 8'd1;
+            if (clear_now) begin
+                if (seen) taken   <= taken + 8'd1;
+                else      flushed <= flushed + 8'd1;
+            end
+            if (replace_now) replaced <= replaced + 8'd1;
+            if (clear_now || replace_now || drop_now) begin
+                resolved_key <= key;
+                changed      <= 1'b1;
+            end
+            // A fresh lock starts a fresh record.
+            if (lock && !lock_q) touched <= 1'b0;
+            else if (commit && kbd_read && !strobe && real_q && lock && !touched) begin
+                touched <= 1'b1;
+                changed <= 1'b1;
             end
         end
     end

@@ -120,9 +120,11 @@ module master_top #(
     wire        boot_arm, boot_release, boot_held;
     wire        hd_rom_loaded, hd_busy;
     wire [7:0]  hd_execs;
-    wire        kbd_press, kbd_drop, kbd_strobe;
+    wire        kbd_press, kbd_drop, kbd_lock;
     wire [6:0]  kbd_press_key;
-    wire [7:0]  kbd_taken;
+    wire        kbd_strobe, kbd_seen, kbd_touched, kbd_changed;
+    wire [7:0]  kbd_pressed, kbd_taken, kbd_flushed, kbd_replaced;
+    wire [6:0]  kbd_resolved_key;
     wire        kbd_sub_en, pb_sub_en;
     wire [7:0]  kbd_sub_data, pb_sub_data;
     wire [5:0]  pb_override;
@@ -159,8 +161,10 @@ module master_top #(
         .hd_rom_loaded (hd_rom_loaded), .hd_busy (hd_busy),
         .hd_execs (hd_execs),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key),
-        .kbd_drop (kbd_drop),
-        .kbd_strobe (kbd_strobe), .kbd_taken (kbd_taken),
+        .kbd_drop (kbd_drop), .kbd_lock (kbd_lock),
+        .kbd_flags ({kbd_touched, kbd_seen, kbd_strobe}),
+        .kbd_counts ({kbd_replaced, kbd_flushed, kbd_taken, kbd_pressed}),
+        .kbd_resolved_key (kbd_resolved_key), .kbd_changed (kbd_changed),
         .pb_override (pb_override), .pb_hw (pb_hw),
         .res_drive (res_drive),
         .app_msg_valid (app_msg_valid), .app_msg_type (app_msg_type),
@@ -320,8 +324,9 @@ module master_top #(
     );
 
     // ---- keyboard injection -------------------------------------------------
-    // One key latch and one strobe, the host's; substituted into the core's
-    // din and the capture on a $C00x read.  See rtl/kbd_inject.sv.
+    // The keyboard the core reads: the machine's latch and strobe, with the
+    // host's key on it, substituted into the core's din and the capture on a
+    // $C00x read.  See rtl/kbd_inject.sv.
     kbd_inject u_kbd (
         .clk           (apple_clk),
         .rst           (apple_rst),
@@ -330,13 +335,22 @@ module master_top #(
         .press         (kbd_press),
         .press_key     (kbd_press_key),
         .drop          (kbd_drop),
+        .lock          (kbd_lock),
         .op_addr       (op_addr),
         .op_rw         (op_rw),
         .op_commit     (op_commit),
+        .data_sync     (apple_data_sync),
         .sub_en        (kbd_sub_en),
         .sub_data      (kbd_sub_data),
         .strobe        (kbd_strobe),
-        .taken         (kbd_taken)
+        .seen          (kbd_seen),
+        .touched       (kbd_touched),
+        .pressed       (kbd_pressed),
+        .taken         (kbd_taken),
+        .flushed       (kbd_flushed),
+        .replaced      (kbd_replaced),
+        .resolved_key  (kbd_resolved_key),
+        .changed       (kbd_changed)
     );
 
     // ---- the pushbuttons ----------------------------------------------------

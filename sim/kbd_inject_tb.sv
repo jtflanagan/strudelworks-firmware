@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
-// kbd_inject_tb - a key from the host, read by the soft core as the keyboard.
+// kbd_inject_tb - the keyboard the soft core reads, with the host on it.
 //
 // The real core, the real driver, the real READER and the hold, wired as
 // master_top wires them, against an Apple-shaped phi0 and a bus model with a
@@ -13,28 +13,36 @@
 //
 // THE PROPERTIES, each a way this is or could be wrong:
 //
-//   * idle, it is a wire: a real key is seen once, bit for bit, $C010 clears
-//     it, and the substitution never asserts.
+//   * idle, a real key is seen once, bit for bit, $C010 clears it, and the
+//     counts do not move.
 //   * a pressed key is what the next $C00x read returns, bit 7 set, and what
-//     every read after it returns until a $C010 access - then never again,
-//     and the machine's own byte is what reads after that.
+//     every read after it returns until a $C010 access - then never again:
+//     the reads after that return the key with bit 7 clear, the IOU's
+//     latch after its strobe.
 //   * a $C010 access clears; a write to $C015 clears; a read of $C019 does
 //     not, and returns the machine's byte; a write to $C000 does nothing.
 //   * din and the captured event agree on every cycle, injected or not.
-//   * a second press before the first is consumed replaces it: the machine
-//     sees the newer key, once, and `taken` counts one.
-//   * a press over a real key waiting replaces that too, and a real key
-//     pressed after the injected one was consumed reads normally.
+//   * every press is resolved exactly once, and the counts say how: taken
+//     when read then strobed, flushed when strobed unread, replaced by a
+//     second press, dropped by `drop` or a RES' - and `changed` pulses once
+//     per resolution, with the key that was resolved.
+//   * a press over a real key waiting wins, and a real key pressed after the
+//     injected one was consumed reads normally.
 //   * keys pressed one per consumption go through RDKEY-shaped code in
 //     order, exactly once each - at every offset across the bus cycle, and
 //     never torn.
 //   * held by the boot hold, an injected $0D is one $C000 event with bit 7
 //     set, followed by exactly one $C010.
-//   * a RES' drops it; `drop` drops it; with master_active low nothing is
-//     substituted.
+//   * locked, a real key never reaches the program and `touched` says it
+//     came; an injected key does; any-key-down is masked; the real key
+//     shows through when the lock lifts; a fresh lock clears `touched`.
+//   * with master_active low nothing is substituted.
+//
+// The buttons (rtl/pb_inject.sv) ride along, on the same substitution.
 //////////////////////////////////////////////////////////////////////////////////
+module kbd_inject_tb;
 
-module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
+    parameter UCODE = "cpu65c02_ucode.hex";
 
     localparam integer T_PRESENT = 2;
     localparam integer T_EMIT    = 2;
@@ -167,10 +175,11 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     assign ovr_wdata = 8'h00;
 
     // ---- the DUTs: the keyboard, and the buttons beside it ------------------
-    reg        press = 1'b0, drop = 1'b0;
+    reg        press = 1'b0, drop = 1'b0, lock = 1'b0;
     reg  [6:0] press_key = 7'h00;
-    wire       strobe;
-    wire [7:0] taken;
+    wire       strobe, seen, touched, changed;
+    wire [7:0] pressed, taken, flushed, replaced;
+    wire [6:0] resolved_key;
     wire       kbd_sub_en, pb_sub_en;
     wire [7:0] kbd_sub_data, pb_sub_data;
     reg  [5:0] pb_sel = 6'd0;
@@ -179,10 +188,13 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     kbd_inject dut (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .master_active (master_active),
-        .press (press), .press_key (press_key), .drop (drop),
+        .press (press), .press_key (press_key), .drop (drop), .lock (lock),
         .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
+        .data_sync (data_s),
         .sub_en (kbd_sub_en), .sub_data (kbd_sub_data),
-        .strobe (strobe), .taken (taken)
+        .strobe (strobe), .seen (seen), .touched (touched),
+        .pressed (pressed), .taken (taken), .flushed (flushed), .replaced (replaced),
+        .resolved_key (resolved_key), .changed (changed)
     );
 
     pb_inject dut_pb (
@@ -199,8 +211,25 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     assign sub_en   = kbd_sub_en | pb_sub_en;
     assign sub_data = kbd_sub_en ? kbd_sub_data : pb_sub_data;
 
-    integer sub_clocks = 0;                     // clocks with sub_en high
-    always @(posedge clk) if (sub_en) sub_clocks = sub_clocks + 1;
+    integer kbd_subs = 0, pb_subs = 0;         // clocks with each sub_en high
+    integer changes  = 0;                       // changed pulses, ever
+    integer touches  = 0;                       // rising edges of touched
+    reg       touched_q = 1'b0;
+    reg [6:0] last_resolved = 7'd0;             // resolved_key at the last pulse
+    always @(posedge clk) begin
+        if (kbd_sub_en) kbd_subs = kbd_subs + 1;
+        if (pb_sub_en)  pb_subs  = pb_subs + 1;
+        if (changed) begin changes = changes + 1; last_resolved = resolved_key; end
+        if (touched && !touched_q) touches = touches + 1;
+        touched_q = touched;
+    end
+
+    // Presses resolved by a drop or a RES': not counted on the card, derived
+    // the way the host derives it.
+    function [7:0] dropped;
+        input dummy;
+        begin dropped = pressed - {7'd0, strobe} - taken - flushed - replaced; end
+    endfunction
 
     // ---- the machine: ROM, RAM, a keyboard and the IIe's $C01x ---------------
     localparam integer BUS_AT = 70;
@@ -216,8 +245,9 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
             if (addr_drive[15:4] == 12'hC00)
                 bus_data <= {kbd_strobe, kbd_key};
             else if (addr_drive == 16'hC010) begin
-                // Any-key-down in bit 7, the key beneath; the strobe clears.
-                bus_data   <= {1'b1, kbd_key};
+                // Any-key-down in bit 7 - a key is down whenever one is
+                // waiting, here - the key beneath; the strobe clears.
+                bus_data   <= {kbd_strobe, kbd_key};
                 kbd_strobe <= 1'b0;
             end else if (addr_drive[15:4] == 12'hC01)
                 // A soft switch in bit 7 (0 here), the key beneath; NOT a
@@ -359,6 +389,19 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         end
     endtask
 
+    // The counts, all at once.
+    task check_counts(input [7:0] p, input [7:0] t, input [7:0] f, input [7:0] r,
+                      input [7:0] d, input [8*48-1:0] what);
+        begin
+            if (pressed !== p || taken !== t || flushed !== f || replaced !== r ||
+                dropped(1'b0) !== d) begin
+                $display("FAIL: %0s: counts pressed=%0d taken=%0d flushed=%0d replaced=%0d dropped=%0d, expected %0d %0d %0d %0d %0d",
+                         what, pressed, taken, flushed, replaced, dropped(1'b0), p, t, f, r, d);
+                errors = errors + 1;
+            end
+        end
+    endtask
+
     // Count $C00x reads since `from` whose byte had bit 7 set.
     function integer key_reads(input integer from);
         integer i;
@@ -372,13 +415,13 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
 
     // The index of the n-th (from 0) $C00x read since `from`, or -1.
     function integer nth_kbd_read(input integer from, input integer n);
-        integer i, seen;
+        integer i, seen_n;
         begin
-            nth_kbd_read = -1; seen = 0;
+            nth_kbd_read = -1; seen_n = 0;
             for (i = from; i < ncommit; i = i + 1)
                 if (log_rw[i] && log_addr[i][15:4] == 12'hC00) begin
-                    if (seen == n && nth_kbd_read < 0) nth_kbd_read = i;
-                    seen = seen + 1;
+                    if (seen_n == n && nth_kbd_read < 0) nth_kbd_read = i;
+                    seen_n = seen_n + 1;
                 end
         end
     endfunction
@@ -399,14 +442,16 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     localparam [15:0] P_LATE  = 16'hF200;   // a long delay, then one read
     localparam [15:0] P_SPIN  = 16'hF300;   // never reads the keyboard
     localparam [15:0] P_PB    = 16'hF400;   // the buttons, and their neighbours
+    localparam [15:0] P_FLUSH = 16'hF500;   // a long delay, then $C010 unread
+    localparam [15:0] P_AKD   = 16'hF600;   // read $C010, then $C000, once each
 
-    integer i, k, idx, mark, mark_cap, n, subs_before;
+    integer i, k, idx, mark, mark_cap, n, subs_before, changes_before;
     reg [7:0] tk;
     reg [6:0] keys [0:7];
     integer   offs [0:7];
 
     initial begin
-        $display("kbd_inject_tb: a key from the host, on the keyboard the soft core reads\n");
+        $display("kbd_inject_tb: the keyboard the soft core reads, with the host on it\n");
 
         for (i = 0; i < 65536; i = i + 1) mem[i] = 8'hEA;   // NOP background
         // P_RDKEY:
@@ -430,9 +475,9 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         //   F106  LDA $C019       VBL - must not clear
         //   F109  LDA $C000       r2: still the key
         //   F10C  STA $C015       a $C01x write clears
-        //   F10F  LDA $C000       r3: the machine's byte
+        //   F10F  LDA $C000       r3: the key, strobe gone
         //   F112  STA $C000       80STOREOFF: nothing
-        //   F115  LDA $C000       r4: the machine's byte
+        //   F115  LDA $C000       r4: the same
         //   F118  JMP $F118
         mem[16'hF100] = 8'hAD; mem[16'hF101] = 8'h00; mem[16'hF102] = 8'hC0;
         mem[16'hF103] = 8'hAD; mem[16'hF104] = 8'h00; mem[16'hF105] = 8'hC0;
@@ -473,13 +518,32 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
             end
             mem[a] = 8'h4C; mem[a+1] = a[7:0]; mem[a+2] = a[15:8];           // JMP *
         end
+        // P_FLUSH: the delay, then a $C010 with no $C000 before it - a game
+        // clearing the buffer as it starts.
+        //   F500  LDX #$00 / DEX / BNE      as P_LATE
+        //   F505  BIT $C010       2C 10 C0
+        //   F508  JMP $F508
+        mem[16'hF500] = 8'hA2; mem[16'hF501] = 8'h00;
+        mem[16'hF502] = 8'hCA;
+        mem[16'hF503] = 8'hD0; mem[16'hF504] = 8'hFD;
+        mem[16'hF505] = 8'h2C; mem[16'hF506] = 8'h10; mem[16'hF507] = 8'hC0;
+        mem[16'hF508] = 8'h4C; mem[16'hF509] = 8'h08; mem[16'hF50A] = 8'hF5;
+        // P_AKD: any-key-down, then the keyboard, stored.
+        //   F600  LDA $C010 / STA $0300
+        //   F606  LDA $C000 / STA $0301
+        //   F60C  JMP $F60C
+        mem[16'hF600] = 8'hAD; mem[16'hF601] = 8'h10; mem[16'hF602] = 8'hC0;
+        mem[16'hF603] = 8'h8D; mem[16'hF604] = 8'h00; mem[16'hF605] = 8'h03;
+        mem[16'hF606] = 8'hAD; mem[16'hF607] = 8'h00; mem[16'hF608] = 8'hC0;
+        mem[16'hF609] = 8'h8D; mem[16'hF60A] = 8'h01; mem[16'hF60B] = 8'h03;
+        mem[16'hF60C] = 8'h4C; mem[16'hF60D] = 8'h0C; mem[16'hF60E] = 8'hF6;
         for (i = 0; i < 16; i = i + 1) mem[KEYS + i] = 8'h00;
 
         repeat (8) @(posedge clk);
         rst = 0;
         cycles(3);
 
-        // --- case 1 / idle, a real key: a wire -------------------------------
+        // --- case 1 / idle, a real key: through unchanged --------------------
         machine_reset(P_RDKEY);
         cycles(12);
         mark = ncommit;
@@ -489,20 +553,22 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         else $display("  ok: idle, a real 'A' reads as $C1 and is stored by the program");
         if (kbd_strobe !== 1'b0) fail("wire: the program's $C010 did not clear the real strobe");
         if (key_reads(mark) != 1) fail("wire: the real key was seen other than exactly once");
-        if (sub_clocks != 0) fail("wire: the substitution asserted with nothing pressed");
-        else $display("  ok: the substitution never asserted");
-        if (taken !== 8'd0 || strobe !== 1'b0) fail("wire: taken or strobe moved with nothing pressed");
+        check_counts(0, 0, 0, 0, 0, "wire");
+        if (strobe !== 1'b0 || changes != 0) fail("wire: strobe or changed moved with nothing pressed");
+        else $display("  ok: nothing pressed, nothing counted");
         check_agree(0, "wire");
 
         // --- case 2 / a press: the next $C000 read returns it ----------------
         mark = ncommit;
         host_press(7'h42);
-        if (strobe !== 1'b1) fail("press: strobe not set by the press");
+        if (strobe !== 1'b1 || seen !== 1'b0) fail("press: strobe not set, or seen set, by the press");
         wait_consumed("press");
         cycles(3);
         if (mem[KEYS+1] !== 8'hC2) fail("press: the program did not store $C2");
         else $display("  ok: the host's 'B' reads as $C2, bit 7 set, and the program stored it");
-        if (taken !== 8'd1) fail("press: taken is not 1");
+        check_counts(1, 1, 0, 0, 0, "press");
+        if (changes != 1 || last_resolved !== 7'h42) fail("press: one taken did not pulse changed once with the key");
+        else $display("  ok: pressed 1, taken 1, changed once carrying 'B'");
         if (key_reads(mark) != 1) fail("press: the key was seen other than exactly once");
         else $display("  ok: seen exactly once - the $C010 that followed cleared it");
         if (kbd_strobe !== 1'b0 || kbd_key !== 7'h41) fail("press: the machine's own keyboard was disturbed");
@@ -519,7 +585,8 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
             fail("string: HI<CR> did not arrive as $C8 $C9 $8D");
         else $display("  ok: 'HI' and Return typed one per consumption arrive in order as $C8 $C9 $8D");
         if (key_reads(mark) != 3) fail("string: a key was seen other than exactly once");
-        if (taken !== 8'd4) fail("string: taken is not 4");
+        check_counts(4, 4, 0, 0, 0, "string");
+        if (changes != 4) fail("string: changed did not pulse once per key");
         check_agree(mark, "string");
 
         // --- case 4 / a press at every offset across the bus cycle -----------
@@ -553,7 +620,7 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
                 for (k = 0; k < 8; k = k + 1) if (log_din[i][6:0] == keys[k]) n = 1;
                 if (!n) fail("offsets: a key read carried a byte that was never pressed");
             end
-        if (taken !== 8'd12) fail("offsets: taken is not 12");
+        check_counts(12, 12, 0, 0, 0, "offsets");
         check_agree(mark, "offsets");
 
         // --- case 5 / a real key after the injected ones reads normally ------
@@ -562,7 +629,7 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         cycles(20);
         if (mem[KEYS+13] !== 8'hD2) fail("after: a real 'R' after the injected keys did not read as $D2");
         else $display("  ok: a real 'R' afterwards reads as $D2 - the keyboard is the machine's again");
-        if (taken !== 8'd12) fail("after: a real key counted as taken");
+        check_counts(12, 12, 0, 0, 0, "after");
         check_agree(mark, "after");
 
         // --- case 6 / the strobe-clear rules, one read at a time -------------
@@ -583,13 +650,12 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         if (idx < 0 || log_din[idx] !== 8'hCB) fail("rules: r2 - a $C019 read cleared the strobe");
         else $display("  ok: and does not clear the strobe - r2 still returns the key");
         idx = nth_kbd_read(0, 3);
-        if (idx < 0 || log_din[idx][7] !== 1'b0) fail("rules: r3 - a $C015 write did not clear the strobe");
-        else if (log_din[idx] !== {1'b0, kbd_key}) fail("rules: r3 - after the clear the byte is not the machine's");
-        else $display("  ok: a write to $C015 clears it - r3 reads the machine's own byte");
+        if (idx < 0 || log_din[idx] !== 8'h4B) fail("rules: r3 - after a $C015 write the byte is not the key with bit 7 clear");
+        else $display("  ok: a write to $C015 clears it - r3 reads $4B, the latch after its strobe");
         idx = nth_kbd_read(0, 4);
-        if (idx < 0 || log_din[idx][7] !== 1'b0) fail("rules: r4 - a $C000 write changed something");
+        if (idx < 0 || log_din[idx] !== 8'h4B) fail("rules: r4 - a $C000 write changed something");
         else $display("  ok: a write to $C000 (80STOREOFF) does nothing");
-        if (taken !== 8'd13) fail("rules: taken is not 13");
+        check_counts(13, 13, 0, 0, 0, "rules");
         if (strobe !== 1'b0) fail("rules: strobe still set");
         check_agree(0, "rules");
 
@@ -598,27 +664,30 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         machine_reset(P_LATE);
         cycles(3);  host_press(7'h41);          // 'A', during the delay loop
         cycles(3);  host_press(7'h42);          // 'B', before anything read 'A'
+        repeat (3) @(posedge clk);              // changed is registered, counted a clock later
+        if (last_resolved !== 7'h41 || changes != 14) fail("replace: the replaced 'A' was not resolved at the press");
         cycles(1400);
         if (mem[KEYS] !== 8'hC2) fail("replace: the program did not get the newer key");
         else $display("  ok: a second press before the first is consumed replaces it - the program got 'B'");
         for (i = 0; i < ncommit; i = i + 1)
             if (log_rw[i] && log_addr[i][15:4] == 12'hC00 && log_din[i] == 8'hC1)
                 fail("replace: the replaced key was seen");
-        if (taken !== 8'd14) fail("replace: taken is not 14 - one key, one consumption");
-        else $display("  ok: taken counts one");
+        check_counts(15, 14, 0, 1, 0, "replace");
+        if (changes != 15 || last_resolved !== 7'h42) fail("replace: two resolutions did not make two changes");
+        else $display("  ok: 'A' resolved as replaced at the press, 'B' as taken - two presses, two resolutions");
         check_agree(0, "replace");
 
-        // --- case 8 / a press over a real key waiting: newest wins -----------
+        // --- case 8 / a press over a real key waiting: injected wins ---------
         mem[KEYS] = 8'h00;
         machine_reset(P_LATE);
         real_press(7'h52, 20);                  // 'R' at the Apple, during the delay
         cycles(3);  host_press(7'h49);          // 'I' from the host, over it
         cycles(1400);
         if (mem[KEYS] !== 8'hC9) fail("over: the program did not get the host's key");
-        else $display("  ok: a press over a waiting real key replaces it - the program got 'I'");
+        else $display("  ok: a press over a waiting real key wins - the program got 'I'");
         if (kbd_strobe !== 1'b0) fail("over: the program's $C010 did not clear the real strobe too");
         else $display("  ok: the one $C010 cleared the machine's strobe as well");
-        if (taken !== 8'd15) fail("over: taken is not 15");
+        check_counts(16, 15, 0, 1, 0, "over");
         check_agree(0, "over");
 
         // --- case 9 / held by the boot hold: Return continues the menu -------
@@ -641,7 +710,7 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         if (n != 1) begin
             $display("FAIL: hold: %0d key events for one injected Return", n); errors = errors + 1;
         end else $display("  ok: held, an injected Return is one $C000 event carrying $8D, then one $C010");
-        if (taken !== 8'd16) fail("hold: taken is not 16");
+        check_counts(17, 16, 0, 1, 0, "hold");
         check_agree(mark, "hold");
         arm = 1'b0;
         pulse_release;
@@ -654,13 +723,17 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         host_press(7'h5A);
         cycles(5);
         if (strobe !== 1'b1) fail("reset: the key is not waiting");
+        changes_before = changes;
         mem[KEYS] = 8'h00;
         machine_reset(P_RDKEY);
         if (strobe !== 1'b0) fail("reset: the strobe survived the reset");
         cycles(30);
         if (key_reads(0) != 0 || mem[KEYS] !== 8'h00) fail("reset: the dropped key was read after the reset");
         else $display("  ok: a RES' drops a waiting key - the program after the reset never sees it");
-        if (taken !== 8'd16) fail("reset: a dropped key counted as taken");
+        check_counts(18, 16, 0, 1, 1, "reset");
+        if (changes != changes_before + 1 || last_resolved !== 7'h5A)
+            fail("reset: the drop was not one resolution carrying 'Z'");
+        else $display("  ok: resolved as dropped - pressed - strobe - the rest - and changed once");
         check_agree(0, "reset");
 
         // --- case 11 / drop --------------------------------------------------
@@ -668,13 +741,16 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         cycles(12);
         host_press(7'h59);
         cycles(2);
+        changes_before = changes;
         host_drop;
+        repeat (3) @(posedge clk);
         if (strobe !== 1'b0) fail("drop: the strobe survived drop");
         else $display("  ok: drop clears a waiting key");
+        if (changes != changes_before + 1 || last_resolved !== 7'h59) fail("drop: not one resolution carrying 'Y'");
         machine_reset(P_RDKEY);
         cycles(30);
         if (key_reads(0) != 0) fail("drop: the dropped key was read");
-        if (taken !== 8'd16) fail("drop: a dropped key counted as taken");
+        check_counts(19, 16, 0, 1, 2, "drop");
         check_agree(0, "drop");
 
         // --- case 12 / master_active low: a wire ----------------------------
@@ -682,24 +758,25 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         cycles(12);
         master_active = 1'b0;
         cycles(2);
-        subs_before = sub_clocks;
+        subs_before = kbd_subs;
         host_press(7'h58);
         cycles(10);
-        if (sub_clocks != subs_before) fail("inactive: the substitution asserted with the native CPU driving");
+        if (kbd_subs != subs_before) fail("inactive: the substitution asserted with the native CPU driving");
         else $display("  ok: with master_active low nothing is substituted");
         if (strobe !== 1'b1) fail("inactive: the key did not wait");
         host_drop;
         master_active = 1'b1;
+        check_counts(20, 16, 0, 1, 3, "inactive");
 
         // --- case 13 / the buttons on hardware: a wire, and the levels read back
         btn_hw = 3'b101;                        // PB0 and PB2 down at the game port
-        subs_before = sub_clocks;
+        subs_before = pb_subs;
         machine_reset(P_PB);
         cycles(40);
         if (mem[KEYS] !== 8'hAA || mem[KEYS+1] !== 8'h2A || mem[KEYS+2] !== 8'hAA)
             fail("buttons hw: $C061-$C063 did not read the game port's levels");
         else $display("  ok: on hardware, $C061-$C063 read the game port's own levels over the bus's low bits");
-        if (sub_clocks != subs_before) fail("buttons hw: the substitution asserted with every button on hardware");
+        if (pb_subs != subs_before) fail("buttons hw: the substitution asserted with every button on hardware");
         if (pb_hw !== 3'b101) fail("buttons hw: the readback of the hardware levels is wrong");
         else $display("  ok: the register's hw field reads back what the bus said");
         check_agree(0, "buttons hw");
@@ -731,15 +808,101 @@ module kbd_inject_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         if (mem[KEYS+1] !== 8'h2A) fail("buttons reset: Closed-Apple changed");
         check_agree(0, "buttons reset");
 
-        // --- case 16 / master_active low: a wire --------------------------------
+        // --- case 16 / master_active low: the buttons are a wire too ---------
         master_active = 1'b0;
-        subs_before = sub_clocks;
+        subs_before = pb_subs;
         machine_reset(P_PB);
         cycles(40);
-        if (sub_clocks != subs_before) fail("buttons inactive: substituted with the native CPU driving");
+        if (pb_subs != subs_before) fail("buttons inactive: substituted with the native CPU driving");
         else $display("  ok: with master_active low the buttons are a wire too");
         master_active = 1'b1;
         pb_sel = 6'd0;
+
+        // --- case 17 / flushed: a $C010 with nothing having read the key ----
+        machine_reset(P_FLUSH);
+        cycles(3);  host_press(7'h46);          // 'F', during the delay loop
+        cycles(3);
+        if (seen !== 1'b0) fail("flush: seen set before any read");
+        changes_before = changes;
+        cycles(1400);                           // the delay loop, then the $C010
+        if (strobe !== 1'b0) fail("flush: the $C010 did not clear the strobe");
+        if (key_reads(0) != 0) fail("flush: the key was read");
+        check_counts(21, 16, 1, 1, 3, "flush");
+        if (changes != changes_before + 1 || last_resolved !== 7'h46) fail("flush: not one resolution carrying 'F'");
+        else $display("  ok: a $C010 with no read before it resolves the key as flushed, not taken");
+        check_agree(0, "flush");
+
+        // --- case 18 / the latch after a real key: bit 7 clear, the key beneath
+        machine_reset(P_RULES);
+        cycles(1);
+        real_press(7'h4D, 30);                  // a real 'M', before the first read
+        cycles(40);
+        idx = nth_kbd_read(0, 0);
+        if (idx < 0 || log_din[idx] !== 8'hCD) fail("latch: r0 did not return the real key");
+        idx = nth_kbd_read(0, 3);
+        if (idx < 0 || log_din[idx] !== 8'h4D) fail("latch: r3 after the clear is not $4D");
+        else $display("  ok: a real key, once cleared, still reads as the key with bit 7 clear");
+        check_counts(21, 16, 1, 1, 3, "latch");
+        check_agree(0, "latch");
+
+        // --- case 19 / the lock: the machine's keyboard is not the program's -
+        lock = 1'b1;
+        cycles(1);
+        if (touched !== 1'b0) fail("lock: touched set with nothing suppressed");
+        mem[KEYS] = 8'h00; mem[KEYS+1] = 8'h00;
+        machine_reset(P_RDKEY);
+        cycles(12);
+        changes_before = changes;
+        real_press(7'h52, 30);                  // 'R' at the Apple
+        cycles(30);
+        if (mem[KEYS] !== 8'h00 || key_reads(0) != 0) fail("lock: the real key reached the program");
+        else $display("  ok: locked, a real 'R' never reaches the program - RDKEY keeps waiting");
+        if (touched !== 1'b1 || changes != changes_before + 1) fail("lock: touched not set, once, by the suppressed key");
+        else $display("  ok: touched says it came, and changed pulsed once");
+        if (kbd_strobe !== 1'b1) fail("lock: the machine's own strobe did not stay pending");
+        mark = ncommit;
+        host_press(7'h4C);                      // 'L' from the host, under the lock
+        wait_consumed("lock");
+        cycles(3);
+        if (mem[KEYS] !== 8'hCC) fail("lock: the injected key did not reach the program");
+        else $display("  ok: an injected 'L' does reach it, as $CC");
+        if (kbd_strobe !== 1'b0) fail("lock: the $C010 that took 'L' did not clear the pending real strobe");
+        else $display("  ok: and the $C010 that took it cleared the pending real key too");
+        check_counts(22, 17, 1, 1, 3, "lock");
+        changes_before = changes;
+        real_press(7'h53, 30);                  // 'S' at the Apple, still locked
+        cycles(20);
+        if (mem[KEYS+1] !== 8'h00) fail("lock: a second real key reached the program");
+        if (changes != changes_before) fail("lock: touched pulsed changed twice");
+        else $display("  ok: a second real key is suppressed silently - touched is sticky");
+        lock = 1'b0;
+        cycles(20);
+        if (mem[KEYS+1] !== 8'hD3) fail("unlock: the pending real key did not show through");
+        else $display("  ok: the lock lifted, the pending 'S' reads as $D3");
+        if (touched !== 1'b1) fail("unlock: touched cleared by the unlock");
+        check_agree(0, "lock");
+
+        // --- case 20 / locked, any-key-down is masked; a fresh lock clears touched
+        lock = 1'b1;
+        cycles(1);
+        if (touched !== 1'b0) fail("relock: a fresh lock did not clear touched");
+        else $display("  ok: a fresh lock clears touched");
+        mem[KEYS] = 8'h00; mem[KEYS+1] = 8'h00;
+        machine_reset(P_AKD);
+        real_press(7'h54, 30);                  // 'T' down at the Apple
+        cycles(40);
+        if (mem[KEYS] !== 8'h53) fail("akd: a locked $C010 read did not return {0, last key}");
+        else $display("  ok: locked, a $C010 read returns bit 7 clear with the last key beneath - no any-key-down");
+        if (mem[KEYS+1] !== 8'h53) fail("akd: the $C000 read after it leaked the real key");
+        else $display("  ok: the $C000 read after it is the latch, not the real 'T'");
+        check_agree(0, "akd");
+        lock = 1'b0;
+        kbd_strobe = 1'b0;
+
+        // --- case 21 / every resolution, and every touch, pulsed changed once
+        if (changes != taken + flushed + replaced + dropped(1'b0) + touches)
+            fail("changed: pulses do not equal resolutions plus touches");
+        else $display("  ok: changed pulsed once per resolution and once per touch, %0d in all", changes);
 
         $display("");
         if (errors == 0) $display("PASS");

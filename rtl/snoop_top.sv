@@ -96,7 +96,8 @@ module snoop_top #(
         .hd_slot_active (),             // nor answer for a hard disk
         .hd_rom_loaded (1'b0), .hd_busy (1'b0), .hd_execs (8'd0),
         .kbd_press (), .kbd_press_key (), .kbd_drop (),   // nor type at it
-        .kbd_strobe (1'b0), .kbd_taken (8'd0),
+        .kbd_lock (), .kbd_flags (3'd0), .kbd_counts (32'd0),
+        .kbd_resolved_key (7'd0), .kbd_changed (1'b0),
         .pb_override (), .pb_hw (3'd0),                  // nor press a button
         .res_drive (),
         .app_msg_valid (), .app_msg_type (), .app_msg_free (),

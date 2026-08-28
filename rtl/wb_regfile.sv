@@ -81,13 +81,18 @@ module wb_regfile #(
 
     // Keyboard injection (rtl/kbd_inject.sv).  press and drop are one-cycle
     // pulses per write of their bits, press_key the key that write carried;
-    // strobe and taken come back for the readback.  A watching top ties the
-    // inputs to 0 and leaves the outputs unconnected.
+    // lock and notify are levels the host holds.  The flags and the counts
+    // come back for the readback: kbd_flags is {touched, seen, strobe},
+    // kbd_counts is {replaced, flushed, taken, pressed} - the notice's
+    // payload word, and the two registers slice it.  A watching top ties
+    // the inputs to 0 and leaves the outputs unconnected.
     output logic           kbd_press,
     output logic [6:0]     kbd_press_key,
     output logic           kbd_drop,
-    input  wire            kbd_strobe,
-    input  wire [7:0]      kbd_taken,
+    output logic           kbd_lock,
+    output logic           kbd_notify,
+    input  wire [2:0]      kbd_flags,
+    input  wire [31:0]     kbd_counts,
 
     // The pushbuttons (rtl/pb_inject.sv): the host's word per button out,
     // the hardware's level back for the readback.
@@ -136,6 +141,7 @@ module wb_regfile #(
     localparam [13:0] R_KBD_INJECT = 'd7;   // 0x8000_001C, W bits 6:0, W1 bits 7-8
     localparam [13:0] R_BUTTONS    = 'd8;   // 0x8000_0020, RW bits 5:0
     localparam [13:0] R_RING_STATUS = 'd9;  // 0x8000_0024, RO
+    localparam [13:0] R_KBD_CTRL   = 'd10;  // 0x8000_0028, RW bits 1:0
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -365,15 +371,19 @@ module wb_regfile #(
     //                           an unconsumed one; reads as 0
     //   [8]      drop      W1   clear the strobe without a $C010; reads as 0
     //   [16]     strobe    RO   a key is waiting that the machine has not taken
-    //   [31:24]  taken     RO   strobes the machine consumed, wrapping
+    //   [17]     seen      RO   ...and a $C00x read has returned it
+    //   [31:24]  pressed   RO   presses, wrapping
     //
     // The machine's keyboard has one latch and one strobe, and so does this:
     // a press is a keypress, it always lands, and the newest wins.  Typing a
-    // string at the machine's pace is the host's job - press, read back until
-    // strobe clears, press the next.  The reply to the press itself is the
-    // acknowledgement that it arrived; the state is in the read after it.
-    // Nothing here is reset-latched: a key is for the program running now,
-    // and rtl/kbd_inject.sv drops it if a reset comes first.  Not gated by
+    // string at the machine's pace is the host's job - press, wait for the
+    // press to be resolved, press the next - and KBD_CTRL and the KBD_EVENT
+    // notice are how it learns that.  The reply to the press itself is the
+    // acknowledgement that it arrived, showing the state BEFORE it: the
+    // press's own number is the `pressed` it reads plus one, and `strobe`
+    // says whether it landed on a key still waiting.  Nothing here is
+    // reset-latched: a key is for the program running now, and
+    // rtl/kbd_inject.sv drops it if a reset comes first.  Not gated by
     // CAN_MASTER - the pulses simply go nowhere in a watching build, and the
     // readback there says strobe=0, which is the truth.
     always_ff @(posedge clk) begin
@@ -388,7 +398,43 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] kbd_inject_rd = {kbd_taken, 7'd0, kbd_strobe, 16'd0};
+    wire [31:0] kbd_inject_rd = {kbd_counts[7:0], 6'd0, kbd_flags[1:0], 16'd0};
+
+    // ---- KBD_CTRL -----------------------------------------------------------
+    //
+    //   [0]      lock      RW   suppress the machine's own keyboard: the core
+    //                           reads the injected keys and nothing else
+    //   [1]      notify    RW   send a KBD_EVENT notice on every resolution
+    //   [7]      touched   RO   a real key arrived while locked; cleared when
+    //                           lock is next set
+    //   [15:8]   taken     RO   presses resolved: read, then strobed
+    //   [23:16]  flushed   RO   presses resolved: strobed unread
+    //   [31:24]  replaced  RO   presses resolved: pressed over
+    //
+    // A press is resolved by exactly one of taken, flushed, replaced, or a
+    // drop (the register's, or a RES'), which is not counted: it is
+    // pressed - strobe - the three above.  The host that presses one key and
+    // waits reads "resolved" as pressed - strobe, and its press is done when
+    // that reaches the number the ack gave it.  `notify` is the host asking
+    // to be told unasked - the silent-until-asked rule, docs/PROTOCOL.md -
+    // and the notice carries the same words these two registers do.
+    //
+    // Both levels are the host's standing intention and survive a RES', as
+    // BUTTONS does: a test that resets the machine wants its lock kept.
+    // The card's reset - the watchdog's included - clears them, so a host
+    // that has gone leaves no keyboard locked behind it.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            kbd_lock   <= 1'b0;
+            kbd_notify <= 1'b0;
+        end else if (wr_kbd_ctrl) begin
+            kbd_lock   <= wb_dat_w[0];
+            kbd_notify <= wb_dat_w[1];
+        end
+    end
+
+    wire [31:0] kbd_ctrl_rd = {kbd_counts[31:8], kbd_flags[2], 5'd0,
+                               kbd_notify, kbd_lock};
 
     // ---- BUTTONS ------------------------------------------------------------
     //
@@ -439,6 +485,7 @@ module wb_regfile #(
                         R_KBD_INJECT: wb_dat_r <= kbd_inject_rd;
                         R_BUTTONS:    wb_dat_r <= buttons_rd;
                         R_RING_STATUS: wb_dat_r <= ring_status;
+                        R_KBD_CTRL:   wb_dat_r <= kbd_ctrl_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -468,6 +515,8 @@ module wb_regfile #(
                          (word == R_KBD_INJECT);
     wire wr_buttons    = access && !wb_ack && in_region && wb_we &&
                          (word == R_BUTTONS);
+    wire wr_kbd_ctrl   = access && !wb_ack && in_region && wb_we &&
+                         (word == R_KBD_CTRL);
 
     // A boot-hold RELEASE re-latches MB_SLOT and HD_SLOT above, so the menu's
     // choices reach the boot it releases into.  Same qualification as the

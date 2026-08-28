@@ -18,6 +18,7 @@ iverilog -g2012 -o "$root/sim/reg_map_tb.out" -s reg_map_tb \
     "$root/rtl/wb_regfile.sv" \
     "$root/rtl/msg_arb.sv" \
     "$root/rtl/msg_master.sv" \
+    "$root/rtl/kbd_notice.sv" \
     "$root/rtl/reply_stream.sv"
 
 exec vvp -n "$root/sim/reg_map_tb.out"
