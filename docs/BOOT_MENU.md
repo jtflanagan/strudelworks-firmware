@@ -8,7 +8,9 @@ hardware the same day: with the disk disabled, continue lands at the
 was running.
 
 A menu the machine shows before it boots, without the machine running a byte
-of code to show it. The card stops the soft core at the one moment where
+of code to show it. (The same hold has since grown a second door - a key
+that stops a *running* program for a menu of its own, and lets it go where
+it was - which is RUNTIME_MENU.md; the mechanism below is shared.) The card stops the soft core at the one moment where
 nothing has happened yet, reads the keyboard on its behalf, and the host - which
 already receives every bus cycle to rebuild the display - draws the menu on the
 HDMI panel and decides what to do. When it has decided, one register write
@@ -222,8 +224,10 @@ release path gets its own latch point, or the menu says press Reset."* It now
 has the latch point.
 
 `wb_regfile` re-latches `MB_SLOT.active` and `HD_SLOT.active` from `desired` on
-the **boot-hold release** as well as on a reset assertion (`boot_relatch`), so
-the sequence is: the host writes `MB_SLOT`/`HD_SLOT` `desired` during the hold,
+the **boot-hold release** as well as on a reset assertion (`boot_relatch`) -
+and only the boot hold's: a release from the runtime hold leaves them alone,
+for the reason the reset-latched contract exists (RUNTIME_MENU.md). So the
+sequence is: the host writes `MB_SLOT`/`HD_SLOT` `desired` during the hold,
 then writes the release, and the same write copies `desired` into `active`
 before the core is let go. The slot-clash rule applies at both latch points -
 the disk yields the Mockingboard's slot at a release too. `CPU_SOURCE`
@@ -256,6 +260,9 @@ release. A few polls of latency cost nothing against a machine that is parked.
 - **Switch the driving CPU.** Handing the bus back to the native 6502 is the
   one changeover kept to a reset, so it is not a menu item; `CPU_SOURCE` does
   not re-latch at a release.
+- ✅ **Be reached without a reset.** Control-6 on a running machine holds it
+  at its next instruction boundary for a runtime menu, whose *reset* item
+  is the way back here: RUNTIME_MENU.md. The floppy items are on both.
 - **A mock.** `MockCard` does not model `BOOT_HOLD` or `CPU_HOLD`, so the menu
   cannot be seen without the card. The mock would need to answer the register,
   emit the notice on arm, and turn its event source into keyboard polls - a
@@ -274,3 +281,7 @@ release. A few polls of latency cost nothing against a machine that is parked.
   release-and-disarm write, and the notice never landing inside a message.
 - `sim/run_bus_write_tb.sh` and `sim/run_mockingboard_tb.sh` - unchanged
   behaviour with the override idle.
+- The hard disk's override now comes *first* in `master_top`'s mux (it used
+  to be the hold's), because a runtime hold can have a transfer outstanding;
+  the boot hold never does - `hd_card` is reset with the core - so nothing
+  here changes. `boot_hold_tb` case 14 covers the interleaving.

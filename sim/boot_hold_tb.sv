@@ -28,6 +28,20 @@
 //   * a RES' bounce while held drops the hold and it re-engages at the next
 //     vector fetch.
 //   * arming a running machine holds nothing until the next reset.
+//
+// And the runtime door (docs/RUNTIME_MENU.md), from case 9 on:
+//
+//   * the hotkey (kbd_inject's pulse, played here) holds a RUNNING program
+//     at its next opcode fetch, the first cycle a $C010 - the key's strobe
+//     cleared before any read could show it - then $C000 reads; the core
+//     does not move; released, the very next cycle is the fetch the core
+//     was at, and the program goes on from there without a beat lost.
+//   * the register's trigger does the same, starting with $C000: no key.
+//   * a RES' while runtime-held drops it and the BOOT hold takes the vector.
+//   * the disk's override comes first: its cycles interleave with the
+//     hold's, the hold neither reads a key nor releases on one of them, and
+//     a runtime hold asked for while the disk is moving waits for it.
+//   * a knock while the boot menu is showing is nothing.
 //////////////////////////////////////////////////////////////////////////////////
 
 module boot_hold_tb #(parameter UCODE = "cpu65c02_ucode.hex");
@@ -94,8 +108,14 @@ module boot_hold_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire [15:0] op_addr;
     wire        op_rw, op_present, op_commit, op_ovr;
     wire [7:0]  op_wdata;
-    wire        ovr_en;
-    wire [15:0] ovr_addr;
+    wire        hold_ovr_en;
+    wire [15:0] hold_ovr_addr;
+    // A stand-in for the disk's override, and master_top's mux: the disk
+    // first.
+    reg         hd_ovr_en = 1'b0;
+    reg  [15:0] hd_ovr_addr = 16'h0200;
+    wire        ovr_en   = hold_ovr_en | hd_ovr_en;
+    wire [15:0] ovr_addr = hd_ovr_en ? hd_ovr_addr : hold_ovr_addr;
 
     apple_bus_write #(
         .T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT),
@@ -120,18 +140,38 @@ module boot_hold_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     // ---- the hold ---------------------------------------------------------
     reg  arm = 1'b0;
     reg  release_req = 1'b0;
-    wire held;
+    reg  menu_trigger = 1'b0, hotkey_hit = 1'b0;
+    wire held, runtime;
 
     boot_hold dut (
         .clk (clk), .cpu_rst (cpu_rst),
         .master_active (master_active),
         .arm (arm), .release_req (release_req),
+        .menu_trigger (menu_trigger), .hotkey_hit (hotkey_hit),
         .cpu_sync (cpu_sync),
         .op_present (op_present), .op_commit (op_commit),
-        .op_sync (drv_sync), .op_ovr (op_ovr), .din (cpu_din),
-        .ovr_en (ovr_en), .ovr_addr (ovr_addr),
-        .held (held)
+        .op_sync (drv_sync), .op_ovr (op_ovr),
+        .op_addr (op_addr), .op_rw (op_rw), .din (cpu_din),
+        .ovr_en (hold_ovr_en), .ovr_addr (hold_ovr_addr),
+        .held (held), .runtime (runtime)
     );
+
+    // kbd_inject's part, played here: the hotkey on the bus at a committed
+    // $C000 read of the program's while not held is eaten, and the hold is
+    // told.  The bus model still returns it (the tb reads
+    // the raw byte), which is fine: what the hold does with din[7] while
+    // not held is nothing.
+    localparam [6:0] HOTKEY = 7'h1E;
+    reg  hotkey_en = 1'b0;
+    integer hits = 0;
+    always @(posedge clk) begin
+        hotkey_hit <= 1'b0;
+        if (op_commit && op_rw && op_addr == 16'hC000 && !held && hotkey_en &&
+            cpu_din[7] && cpu_din[6:0] == HOTKEY) begin
+            hotkey_hit <= 1'b1;
+            hits = hits + 1;
+        end
+    end
 
     integer held_edges = 0;
     reg     held_prev = 1'b0;
@@ -239,6 +279,37 @@ module boot_hold_tb #(parameter UCODE = "cpu65c02_ucode.hex");
             @(negedge clk); release_req = 1'b0;
         end
     endtask
+
+    task pulse_trigger;
+        begin
+            @(negedge clk); menu_trigger = 1'b1;
+            @(negedge clk); menu_trigger = 1'b0;
+        end
+    endtask
+
+    // The index of the first override op at or after `from`, or -1.
+    function integer first_ovr(input integer from);
+        integer i;
+        begin
+            first_ovr = -1;
+            for (i = from; i < nops; i = i + 1)
+                if (first_ovr < 0 && log_ovr[i]) first_ovr = i;
+        end
+    endfunction
+
+    // Override ops in [from, to).
+    function integer count_ovr(input integer from, input integer to);
+        integer i;
+        begin
+            count_ovr = 0;
+            for (i = from; i < to && i < nops; i = i + 1)
+                if (log_ovr[i]) count_ovr = count_ovr + 1;
+        end
+    endfunction
+
+    // The address the core will fetch next: what it shows while held.
+    reg [15:0] held_at;
+    integer    ovr_at, j, hd_seen;
 
     // The first SYNC in the log, or -1.
     function integer first_sync(input integer from);
@@ -447,6 +518,223 @@ module boot_hold_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         if (held !== 1'b0) fail("disarmed: held");
         else if (mem[MARK] !== 8'h42) fail("disarmed: the program did not run");
         else $display("  ok: disarmed - the next reset boots straight through");
+
+        // ====================================================================
+        // The runtime door.  The program from here on is a counting loop:
+        //   F000  LDA #$42 / STA $0300       as before
+        //   F005  INC $0301      EE 01 03    6 cycles
+        //   F008  JMP $F005      4C 05 F0    3 cycles
+        // so a fetch is at $F005 or $F008, and $0301 says the loop is
+        // running.  Nothing in it reads the keyboard.
+        mem[16'hF005] = 8'hEE; mem[16'hF006] = 8'h01; mem[16'hF007] = 8'h03;
+        mem[16'hF008] = 8'h4C; mem[16'hF009] = 8'h05; mem[16'hF00A] = 8'hF0;
+        mem[16'h0301] = 8'h00;
+        arm = 1'b0;
+        $display("");
+
+        // --- case 9 / the hotkey holds a running program at its next fetch --
+        machine_reset(4);
+        cycles(40);
+        if (held !== 1'b0 || mem[16'h0301] == 8'h00) fail("hotkey: the program is not running unheld");
+        hotkey_en = 1'b1;
+        // The program never reads $C000, so the pulse is the tb's, at an
+        // arbitrary point: the key's strobe is set as kbd_inject would have
+        // left it.
+        mark = nops;
+        at_offset(20);
+        kbd_key = HOTKEY; kbd_strobe = 1'b1;
+        @(negedge clk); hotkey_hit = 1'b1;
+        @(negedge clk); hotkey_hit = 1'b0;
+        cycles(12);
+        if (held !== 1'b1) fail("hotkey: not held");
+        else if (runtime !== 1'b1) fail("hotkey: held, but not by the runtime door");
+        else $display("  ok: hotkey - a running program is held, runtime=1");
+        ovr_at = first_ovr(mark);
+        if (ovr_at < 0) fail("hotkey: no override op after the trigger");
+        else begin
+            // Every op before the hold's first was the core's, and the last
+            // of them was NOT a SYNC: the hold took the fetch's cycle.
+            for (i = mark; i < ovr_at; i = i + 1)
+                if (log_ovr[i]) fail("hotkey: an override before the hold engaged");
+            if (log_addr[ovr_at] !== 16'hC010)
+                fail("hotkey: the first held cycle is not the $C010 that clears the key");
+            else if (log_addr[ovr_at+1] !== 16'hC000)
+                fail("hotkey: the $C010 was not followed by a $C000 read");
+            else $display("  ok: the first held cycle is one $C010 - the hotkey's strobe cleared before any read");
+            if (kbd_strobe !== 1'b0) fail("hotkey: the strobe was left set");
+            for (i = ovr_at + 1; i < ncommit; i = i + 1)
+                if (log_addr[i] == 16'hC000 && log_din[i][7]) fail("hotkey: the hotkey showed as a key while held");
+            if (ovr_at - mark > 12) fail("hotkey: the hold took more than one instruction to engage");
+        end
+        if (cpu_sync !== 1'b1 || (cpu_addr !== 16'hF005 && cpu_addr !== 16'hF008))
+            fail("hotkey: the core is not sitting at a fetch of the loop");
+        else $display("  ok: the core's outputs show the fetch at $%04x - an instruction boundary", cpu_addr);
+        held_at = cpu_addr;
+        steps_before = core_steps;
+        k = mem[16'h0301];
+        cycles(50);
+        if (core_steps != steps_before) fail("hotkey: the core advanced while held");
+        if (mem[16'h0301] !== k[7:0]) fail("hotkey: the program ran while held");
+        else $display("  ok: the core did not advance and the loop did not count while held");
+        if (hits != 0) fail("hotkey: the tb's kbd_inject saw a read of the key - this program reads no keyboard");
+
+        // Keys reach the host while held, as in the boot hold.
+        mark = ncommit;
+        press(7'h41, 30);
+        cycles(4);
+        keys_seen = 0;
+        for (i = mark; i < ncommit; i = i + 1)
+            if (log_addr[i] == 16'hC000 && log_din[i][7]) begin
+                keys_seen = keys_seen + 1;
+                if (log_din[i][6:0] !== 7'h41) fail("hotkey: wrong key while held");
+                if (log_addr[i+1] !== 16'hC010) fail("hotkey: a key while held was not followed by $C010");
+            end
+        if (keys_seen != 1) fail("hotkey: a key pressed while runtime-held was not seen exactly once");
+        else $display("  ok: a key pressed while held is one $C000 event, then one $C010");
+
+        // --- case 10 / release: the program continues from that fetch ------
+        mark = nops;
+        pulse_release;
+        cycles(40);
+        if (held !== 1'b0 || runtime !== 1'b0) fail("resume: still held, or runtime still set");
+        idx = first_sync(mark);
+        if (idx < 0) fail("resume: the core never fetched");
+        else if (log_addr[idx] !== held_at) fail("resume: the first fetch is not where the core was held");
+        else if (log_ovr[idx-1] !== 1'b1) fail("resume: something other than the hold's read preceded the fetch");
+        else if (count_ovr(idx, nops) != 0) fail("resume: an override after the fetch");
+        else $display("  ok: released - the next cycle is the fetch at $%04x the core was held at", held_at);
+        // ...and the loop's fetches alternate as they would have: INC then
+        // JMP, 6 and 3 cycles, no instruction lost or doubled.
+        j = idx;
+        for (i = idx + 1; i < nops; i = i + 1) begin
+            if (log_sync[i]) begin
+                if (log_addr[j] == 16'hF005 && (i - j != 6 || log_addr[i] !== 16'hF008))
+                    fail("resume: the INC was not followed by the JMP six cycles on");
+                if (log_addr[j] == 16'hF008 && (i - j != 3 || log_addr[i] !== 16'hF005))
+                    fail("resume: the JMP was not followed by the INC three cycles on");
+                j = i;
+            end
+        end
+        if (mem[16'h0301] == k[7:0]) fail("resume: the loop did not go on counting");
+        else $display("  ok: the loop went on - INC, JMP, INC - with no beat lost");
+
+        // --- case 11 / the register's trigger: no key, no $C010 -----------
+        mark = nops;
+        pulse_trigger;
+        cycles(12);
+        if (held !== 1'b1 || runtime !== 1'b1) fail("trigger: not runtime-held");
+        ovr_at = first_ovr(mark);
+        if (ovr_at < 0 || log_addr[ovr_at] !== 16'hC000)
+            fail("trigger: the first held cycle is not a $C000 read");
+        else $display("  ok: the register's knock holds too, and starts reading straight away");
+        pulse_release;
+        cycles(20);
+        if (held !== 1'b0) fail("trigger: not released");
+
+        // --- case 12 / no scan: a program that never reads the keyboard is
+        // never paused by the key.  By decision (docs/RUNTIME_MENU.md): the
+        // machine's timing is not the menu's to spend.
+        mark = nops;
+        steps_before = core_steps;
+        at_offset(10);
+        kbd_key = HOTKEY; kbd_strobe = 1'b1;
+        cycles(700);
+        if (held !== 1'b0) fail("no scan: held with nobody reading the keyboard");
+        else if (count_ovr(mark, nops) != 0) fail("no scan: an override op with nobody asking");
+        else if (core_steps - steps_before < 700) fail("no scan: the core lost a cycle");
+        else $display("  ok: no scan - the key waits unread, the core lost not one cycle in 700");
+        kbd_strobe = 1'b0;
+        // ...and the register's knock is what is left.
+        pulse_trigger;
+        cycles(12);
+        if (held !== 1'b1 || runtime !== 1'b1) fail("no scan: the register's knock did not hold");
+        else $display("  ok: the register's knock still does");
+        mark = nops;
+        cycles(300);
+        for (i = mark; i < nops; i = i + 1)
+            if (!log_ovr[i] || (log_addr[i] !== 16'hC000 && log_addr[i] !== 16'hC010))
+                fail("held: something other than a keyboard read while held");
+
+        // --- case 13 / a RES' while runtime-held: the boot hold takes over --
+        arm = 1'b1;
+        machine_reset(4);
+        cycles(12);
+        if (held !== 1'b1) fail("reset: not held after the reset");
+        else if (runtime !== 1'b0) fail("reset: held, but runtime is still set - the boot hold should own this");
+        else if (log_ovr[7] !== 1'b1 || log_addr[6] !== 16'hFFFD) fail("reset: not held at the vector fetch");
+        else $display("  ok: a RES' while runtime-held drops it, and the boot hold engages at the vector");
+        // A knock while the boot menu is showing is nothing.
+        pulse_trigger;
+        cycles(10);
+        if (runtime !== 1'b0 || held !== 1'b1) fail("reset: a knock during the boot hold changed it");
+        else $display("  ok: a knock while the boot menu is showing is nothing");
+        pulse_release;
+        cycles(30);
+        if (held !== 1'b0) fail("reset: the boot hold did not release");
+        arm = 1'b0;
+
+        // --- case 14 / the disk's override comes first ----------------------
+        // Held at runtime, the disk moves bytes: its ops go out, the hold's
+        // wait, the core stays put, and a release asked for during the
+        // transfer lands on the hold's own read after it.
+        pulse_trigger;
+        cycles(12);
+        if (held !== 1'b1 || runtime !== 1'b1) fail("disk: not runtime-held");
+        held_at = cpu_addr;
+        steps_before = core_steps;
+        mark = nops;
+        at_offset(0);
+        hd_ovr_en = 1'b1;
+        cycles(4);
+        pulse_release;                          // arrives mid-transfer
+        cycles(4);
+        at_offset(0);
+        hd_ovr_en = 1'b0;
+        cycles(30);
+        hd_seen = 0;
+        for (i = mark; i < nops; i = i + 1)
+            if (log_ovr[i] && log_addr[i] == 16'h0200) hd_seen = hd_seen + 1;
+        if (hd_seen < 6) begin
+            $display("FAIL: disk: %0d of the disk's ops went out over the hold", hd_seen); errors = errors + 1;
+        end else $display("  ok: the disk's %0d override cycles went out with the machine held", hd_seen);
+        idx = first_sync(mark);
+        if (idx < 0) fail("disk: never released");
+        else if (log_addr[idx] !== held_at) fail("disk: resumed somewhere else");
+        else begin
+            // The release waited for the disk: the fetch is preceded by a
+            // read of the HOLD's, after the last disk op.
+            j = -1;
+            for (i = mark; i < idx; i = i + 1) if (log_addr[i] == 16'h0200) j = i;
+            if (log_addr[idx-1] !== 16'hC000 || idx - 1 <= j)
+                fail("disk: the release did not wait for a read of the hold's own after the transfer");
+            else $display("  ok: the release landed on the hold's own read, after the transfer, and the program resumed");
+        end
+        for (i = mark; i < idx; i = i + 1) if (log_sync[i]) fail("disk: the core moved during the transfer");
+
+        // A runtime hold asked for while the disk is moving waits for it.
+        mark = nops;
+        at_offset(0);
+        hd_ovr_en = 1'b1;
+        cycles(3);
+        pulse_trigger;
+        cycles(6);
+        if (held !== 1'b0) fail("disk: the hold engaged over the disk's transfer");
+        at_offset(0);
+        hd_ovr_en = 1'b0;
+        cycles(12);
+        if (held !== 1'b1 || runtime !== 1'b1) fail("disk: the hold did not engage once the disk was done");
+        else begin
+            ovr_at = -1;
+            for (i = mark; i < nops; i = i + 1)
+                if (ovr_at < 0 && log_ovr[i] && log_addr[i] == 16'hC000) ovr_at = i;
+            j = -1;
+            for (i = mark; i < nops; i = i + 1) if (log_addr[i] == 16'h0200) j = i;
+            if (ovr_at < j) fail("disk: the hold's first read came before the disk's last op");
+            else $display("  ok: a knock during a transfer waits: the hold's first read follows the disk's last op");
+        end
+        pulse_release;
+        cycles(20);
+        if (held !== 1'b0) fail("disk: not released at the end");
 
         if (bad_ovr != 0) fail("an override op was presented as a write or a SYNC");
         else $display("  ok: every override op was a read and never a SYNC");

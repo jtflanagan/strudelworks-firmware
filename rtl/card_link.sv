@@ -87,6 +87,15 @@ module card_link #(
     output wire        boot_arm,
     output wire        boot_release,
     input  wire        boot_held,
+    input  wire        hold_runtime,
+
+    // The runtime menu's door into the same hold (docs/RUNTIME_MENU.md):
+    // MENU_HOLD's enable, hotkey and the host's knock, for the top's
+    // kbd_inject and boot_hold.  A watching top leaves them
+    // unconnected and ties hold_runtime to 0.
+    output wire        menu_en,
+    output wire [6:0]  menu_hotkey,
+    output wire        menu_trigger,
 
     // The hard disk's slot (rtl/hd_card.sv), latched on the RES' edge like
     // the Mockingboard's, and its status back for the HD_SLOT readback.  A
@@ -586,6 +595,10 @@ module card_link #(
         .boot_arm          (boot_arm),
         .boot_release      (boot_release),
         .boot_held         (boot_held),
+        .hold_runtime      (hold_runtime),
+        .menu_en           (menu_en),
+        .menu_hotkey       (menu_hotkey),
+        .menu_trigger      (menu_trigger),
         .hd_slot_active    (hd_slot_active),
         .hd_rom_loaded     (hd_rom_loaded),
         .hd_busy        (hd_busy),
@@ -613,11 +626,13 @@ module card_link #(
     );
 
     // ---- the CPU_HOLD notice --------------------------------------------------
-    // The one thing the card says unasked: the boot hold engaged, or let go.
-    // A header-only message, free[0] = held, sent on every edge of `held` -
-    // and carrying the level as it is when the word goes out, so a bounce
-    // that flips it twice while a notice waits still ends with the host
-    // knowing the truth.  An edge and a take in the same cycle keep the
+    // The one thing the card says unasked: the hold engaged, or let go.  A
+    // header-only message, free[0] = held, free[1] = by the runtime door,
+    // sent on every edge of `held` - and carrying the levels as they are
+    // when the word goes out, so a bounce that flips it twice while a notice
+    // waits still ends with the host knowing the truth.  `runtime` moves on
+    // the same edge as `held` (boot_hold), so the word never says one
+    // without the other.  An edge and a take in the same cycle keep the
     // notice pending, for the same reason.
     //
     // Gated on the capture being enabled, which is the silent-until-asked
@@ -699,7 +714,7 @@ module card_link #(
         .take      (ms_take[0])
     );
 
-    assign ms_word[1*32 +: 32] = {15'd0, boot_held, T_CPU_HOLD, 8'd0};
+    assign ms_word[1*32 +: 32] = {14'd0, hold_runtime, boot_held, T_CPU_HOLD, 8'd0};
     assign ms_valid[1]         = note_pending;
     assign note_take           = ms_take[1];
 

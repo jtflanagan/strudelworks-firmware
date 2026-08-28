@@ -112,6 +112,13 @@ in bit 7 - and `kbd_inject` holds that byte for the soft core:
 - **A wire** with the native 6502 driving: there is no din of ours, and the
   capture must not lie.
 
+**One real key is the card's**: the hotkey that opens the runtime menu
+(RUNTIME_MENU.md). A `$C00x` read that would have returned it returns
+`{0, last_read}` instead and tells the hold; the program never sees it, the
+capture never records it, `last_read` does not learn it. Only the program's
+own reads find it - the card reads nothing on its own account, because a
+stolen cycle is the machine's timing spent (that document says why).
+
 ## Every press is resolved exactly once
 
 A press leaves the latch by one of four routes, and the card counts three
@@ -197,7 +204,9 @@ included, so a host that has gone leaves no keyboard locked behind it. It is
 the keyboard only: a test that wants the buttons quiet too sets them `up`.
 While locked, the boot menu cannot be driven from the Apple - its reader is
 substituted like everything else - and the host's `key return` or `continue`
-is the way through it.
+is the way through it. Nor is the runtime menu's hotkey looked for under
+the lock: it is a `touched` like any other key, and the host's `menu` knocks
+through the register instead.
 
 ## The registers
 

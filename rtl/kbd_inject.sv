@@ -95,6 +95,26 @@
 // `touched` are the card's, not the machine's, and only the card's reset
 // clears them.
 //
+// THE HOTKEY.  One real key is the card's, not the program's: the one that
+// opens the runtime menu (docs/RUNTIME_MENU.md).  A $C00x read that would
+// have returned it - a real key, bit 7 set, no injected key ahead of it,
+// the lock off - returns {0, last_read} instead, the IOU's answer to "no
+// key", and pulses `hotkey_hit` for the hold.  The program never sees it,
+// the capture never records it, and last_read does not learn it: it was
+// never handed over.  Its strobe stays set in the IOU, because only a bus
+// access to $C010 clears that, and the hold makes one first thing (see
+// boot_hold).  While the hold is on the key passes through like any other:
+// the reads are the card's own, for the host, and the host may want the
+// same key to mean "leave".  Under the lock a real key is not the
+// program's either, so the hotkey is not looked for there - the lock is
+// for a scripted run, and the host has the register to knock with.
+//
+// ONLY THE PROGRAM'S OWN READS.  A program that never reads the keyboard
+// never hands the hotkey over, and that is left so: the card does not read
+// $C000 on its own account to find it, because that would cost the machine
+// a bus cycle, and the machine's timing is not the menu's to spend (see
+// boot_hold).
+//
 // WITH THE NATIVE CPU DRIVING there is no din of ours to substitute into and
 // the capture must not lie, so master_active low makes this a wire.
 //////////////////////////////////////////////////////////////////////////////////
@@ -111,6 +131,12 @@ module kbd_inject (
     input  wire [6:0]  press_key,
     input  wire        drop,
     input  wire        lock,
+
+    // The hotkey, from MENU_HOLD: look for it at all, and which key.  And
+    // from boot_hold: the machine is held, so the reads are the card's.
+    input  wire        hotkey_en,
+    input  wire [6:0]  hotkey,
+    input  wire        held,
 
     // The presented op, from apple_bus_write: one stable value per bus
     // cycle, and op_commit at its data phase.  data_sync is the bus's byte
@@ -135,12 +161,14 @@ module kbd_inject (
     output logic [7:0] flushed,         // resolved: strobed unread
     output logic [7:0] replaced,        // resolved: pressed over
     output logic [6:0] resolved_key,    // the key of the press resolved last
-    output logic       changed          // one clock: a count or touched moved
+    output logic       changed,         // one clock: a count or touched moved
+    output logic       hotkey_hit       // one clock: the hotkey was read and eaten
 );
 
     logic [6:0] key;
     logic [6:0] last_read;
     logic [7:0] data_q;                 // data_sync a clock ago: the T_DIN sample
+    logic       hot_q;                  // ...and the hotkey decision made on it
     logic       lock_q;
 
     // A read of $C000-$C00F is the keyboard; a read of $C010 is the strobe
@@ -151,10 +179,15 @@ module kbd_inject (
     wire kbd_clear = (op_addr == 16'hC010) ||
                      (!op_rw && (op_addr[15:4] == 12'hC01));
 
+    // The real byte on the bus is the hotkey, and this is a read that would
+    // have handed it to the program.
+    wire hot_byte  = hotkey_en && !held && !lock && data_sync[7] &&
+                     (data_sync[6:0] == hotkey);
+
     // What a $C00x read returns: the injected key first, the real one if it
-    // is allowed through, the latch otherwise.
+    // is allowed through and is not the card's, the latch otherwise.
     wire [7:0] kbd_byte = strobe                  ? {1'b1, key} :
-                          (data_sync[7] && !lock) ? data_sync :
+                          (data_sync[7] && !lock && !hot_byte) ? data_sync :
                                                     {1'b0, last_read};
 
     assign sub_en   = master_active && (kbd_read || (lock && strb_read));
@@ -163,6 +196,7 @@ module kbd_inject (
     // The same decision at the data phase, on the byte the core took.
     wire commit     = op_commit && master_active;
     wire real_q     = data_q[7];
+    wire kbd_take   = commit && kbd_read;
     wire clear_now  = commit && kbd_clear && strobe;
     // A press over a waiting key that is not being cleared or dropped this
     // same clock replaces it.
@@ -172,6 +206,10 @@ module kbd_inject (
     // ---- the machine's keyboard: key, strobe, seen, last_read --------------
     always_ff @(posedge clk) begin
         data_q <= data_sync;
+        // The hotkey is the card's only when the real byte is what the read
+        // returns: an injected key ahead of it is what the program gets, and
+        // the hotkey is found by the next read after that one is cleared.
+        hot_q  <= hot_byte && !strobe;
         if (cpu_rst) begin
             key    <= 7'd0;
             strobe <= 1'b0;
@@ -179,7 +217,7 @@ module kbd_inject (
         end else begin
             if (commit && kbd_clear) strobe <= 1'b0;
             if (drop)                strobe <= 1'b0;
-            if (commit && kbd_read && strobe) seen <= 1'b1;
+            if (kbd_take && strobe)  seen <= 1'b1;
             // Last, so a press in the same clock as a clear is a new key,
             // not a lost one.
             if (press) begin
@@ -193,10 +231,18 @@ module kbd_inject (
     always_ff @(posedge clk) begin
         if (rst) begin
             last_read <= 7'd0;
-        end else if (commit && kbd_read) begin
-            if (strobe)                 last_read <= key;
-            else if (real_q && !lock)   last_read <= data_q[6:0];
+        end else if (kbd_take) begin
+            if (strobe)                           last_read <= key;
+            else if (real_q && !lock && !hot_q)   last_read <= data_q[6:0];
         end
+    end
+
+    // The hotkey was read and eaten.  A pulse for boot_hold, the card's
+    // reset its only reset: the hold that it opens is the card's business,
+    // not the machine's.
+    always_ff @(posedge clk) begin
+        if (rst) hotkey_hit <= 1'b0;
+        else     hotkey_hit <= commit && kbd_read && hot_q;
     end
 
     // ---- the card's: counts, touched, changed -------------------------------
@@ -224,7 +270,7 @@ module kbd_inject (
             end
             // A fresh lock starts a fresh record.
             if (lock && !lock_q) touched <= 1'b0;
-            else if (commit && kbd_read && !strobe && real_q && lock && !touched) begin
+            else if (kbd_take && !strobe && real_q && lock && !touched) begin
                 touched <= 1'b1;
                 changed <= 1'b1;
             end

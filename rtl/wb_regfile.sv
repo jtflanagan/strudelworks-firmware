@@ -70,6 +70,18 @@ module wb_regfile #(
     output wire            boot_arm,
     output logic           boot_release,
     input  wire            boot_held,
+    // ...and which door the hold in progress came in by (rtl/boot_hold.sv):
+    // 1 for the runtime menu's, 0 for the boot's.  Read back beside `held`,
+    // and it decides whether a release re-latches the slots.
+    input  wire            hold_runtime,
+
+    // The runtime menu's door (rtl/boot_hold.sv, docs/RUNTIME_MENU.md):
+    // watch for the hotkey, which key, and the host's own knock - a
+    // one-cycle pulse per write of the trigger bit.  A watching top leaves
+    // them unconnected.
+    output logic           menu_en,
+    output logic [6:0]     menu_hotkey,
+    output logic           menu_trigger,
 
     // The hard disk (rtl/hd_card.sv).  The slot is latched at RES' like the
     // Mockingboard's; the rest is status coming back for the readback.  A
@@ -142,6 +154,7 @@ module wb_regfile #(
     localparam [13:0] R_BUTTONS    = 'd8;   // 0x8000_0020, RW bits 5:0
     localparam [13:0] R_RING_STATUS = 'd9;  // 0x8000_0024, RO
     localparam [13:0] R_KBD_CTRL   = 'd10;  // 0x8000_0028, RW bits 1:0
+    localparam [13:0] R_MENU_HOLD  = 'd11;  // 0x8000_002C, RW bits 7:0, W1 bit 8
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -246,8 +259,9 @@ module wb_regfile #(
     //   [0]      arm       RW   hold the soft core at its reset vector, at the
     //                           next reset and every one after, until cleared
     //   [8]      held      RO   the core is held now
-    //   [16]     release   W1   let a held core go; reads as 0
-    //   [31:24]  holds     RO   times the hold has engaged, wrapping
+    //   [9]      runtime   RO   ...by the runtime menu's door, not the boot's
+    //   [16]     release   W1   let a held core go, whichever door; reads as 0
+    //   [31:24]  holds     RO   times the hold has engaged, either door, wrapping
     //
     // NOT reset-latched, unlike its neighbours, and deliberately: `arm` is the
     // standing intention "stop at the next boot", which is exactly what a
@@ -255,6 +269,9 @@ module wb_regfile #(
     // at a point the core defines - the first opcode fetch after reset - and
     // rtl/boot_hold.sv is where that is recognised; this register only carries
     // the host's wishes in and the state back out.  See docs/BOOT_MENU.md.
+    // The same hold has a second door, MENU_HOLD below, and the same release
+    // lets go of either; `runtime` says which is in progress, for a host
+    // that attached to a hold it did not see engage.
     //
     // `holds` is the counterpart of CPU_SOURCE's `latches`: it lets a host
     // that missed a CPU_HOLD notice - or attached after it - tell a hold that
@@ -282,7 +299,47 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] boot_hold_rd = {boot_holds, 15'd0, boot_held, 7'd0, boot_arm_q};
+    wire [31:0] boot_hold_rd = {boot_holds, 14'd0, hold_runtime, boot_held, 7'd0, boot_arm_q};
+
+    // ---- MENU_HOLD ----------------------------------------------------------
+    //
+    //   [0]      enable    RW   watch for the hotkey on the program's reads
+    //   [7:1]    hotkey    RW   the key that opens the menu; $1E (Ctrl-6 on a
+    //                           IIe) at the card's reset
+    //   [8]      trigger   W1   open the menu now, as the hotkey would; reads
+    //                           as 0
+    //   [31:24]  menus     RO   times the runtime door has opened, wrapping
+    //
+    // The runtime menu's door into the hold BOOT_HOLD arms for a boot (see
+    // docs/RUNTIME_MENU.md).  The key is eaten on the card - the program
+    // never sees it - and the hold engages at the program's next opcode
+    // fetch; BOOT_HOLD's release lets it go, and the program continues from
+    // that fetch.  `enable` is a level like `arm`, and the same reasoning
+    // applies: the host's standing wish, and a RES' does not change it.  It
+    // is the card's reset - the watchdog's included - that clears it, so a
+    // host that has gone leaves no door open that nobody would answer.
+    // `trigger` is the host's own knock: the control socket's `menu`, a
+    // scripted test, a run with the Apple's keyboard locked.  Not gated by
+    // CAN_MASTER: the pulse simply goes nowhere in a watching build.
+    logic [7:0] menu_count;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            menu_en      <= 1'b0;
+            menu_hotkey  <= 7'h1E;
+            menu_trigger <= 1'b0;
+            menu_count   <= 8'd0;
+        end else begin
+            if (boot_held && !boot_held_prev && hold_runtime) menu_count <= menu_count + 8'd1;
+            menu_trigger <= wr_menu_hold && wb_dat_w[8];
+            if (wr_menu_hold) begin
+                menu_en     <= wb_dat_w[0];
+                menu_hotkey <= wb_dat_w[7:1];
+            end
+        end
+    end
+
+    wire [31:0] menu_hold_rd = {menu_count, 16'd0, menu_hotkey, menu_en};
 
     // ---- HD_SLOT ------------------------------------------------------------
     //
@@ -486,6 +543,7 @@ module wb_regfile #(
                         R_BUTTONS:    wb_dat_r <= buttons_rd;
                         R_RING_STATUS: wb_dat_r <= ring_status;
                         R_KBD_CTRL:   wb_dat_r <= kbd_ctrl_rd;
+                        R_MENU_HOLD:  wb_dat_r <= menu_hold_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -517,13 +575,18 @@ module wb_regfile #(
                          (word == R_BUTTONS);
     wire wr_kbd_ctrl   = access && !wb_ack && in_region && wb_we &&
                          (word == R_KBD_CTRL);
+    wire wr_menu_hold  = access && !wb_ack && in_region && wb_we &&
+                         (word == R_MENU_HOLD);
 
     // A boot-hold RELEASE re-latches MB_SLOT and HD_SLOT above, so the menu's
     // choices reach the boot it releases into.  Same qualification as the
     // release pulse itself; CPU_SOURCE deliberately does NOT re-latch here -
     // switching the driving CPU mid-hold is the one changeover BOOT_MENU.md
-    // keeps to a reset.
-    wire boot_relatch  = wr_boot_hold && wb_dat_w[16];
+    // keeps to a reset.  A release from the RUNTIME hold re-latches nothing:
+    // the program it resumes has already decided about its slots, and a card
+    // that moved under it would be the mid-run changeover this file exists
+    // to prevent.
+    wire boot_relatch  = wr_boot_hold && wb_dat_w[16] && !hold_runtime;
 
     // wb_adr[1:0] are byte lanes within a word and are deliberately not decoded.
     wire _unused_ok = &{1'b0, wb_dat_w[31:1], wb_sel, wb_adr[1:0], 1'b0};

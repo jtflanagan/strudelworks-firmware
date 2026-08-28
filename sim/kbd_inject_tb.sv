@@ -37,6 +37,14 @@
 //     came; an injected key does; any-key-down is masked; the real key
 //     shows through when the lock lifts; a fresh lock clears `touched`.
 //   * with master_active low nothing is substituted.
+//   * the hotkey (docs/RUNTIME_MENU.md): read by the program, it is eaten -
+//     the program gets the latch with no strobe, the capture records the
+//     same, last_read does not learn it, hotkey_hit pulses once and the
+//     hold engages with one $C010 first; not looked for when the door is
+//     shut, nor under the lock; an injected key ahead of it wins; a
+//     program that never reads the keyboard is never paused by it (no
+//     scan, by decision); while held it passes through to the host like
+//     any key.
 //
 // The buttons (rtl/pb_inject.sv) ride along, on the same substitution.
 //////////////////////////////////////////////////////////////////////////////////
@@ -158,19 +166,27 @@ module kbd_inject_tb;
     );
 
     // ---- the hold, so an injected key can continue the menu -----------------
+    // ...and the runtime door, which this module opens with the hotkey.
     reg  arm = 1'b0, release_req = 1'b0;
-    wire held;
+    reg  menu_en = 1'b0;
+    wire held, runtime, hotkey_hit;
+    localparam [6:0] HOTKEY = 7'h1E;            // Ctrl-6 on a IIe
 
     boot_hold u_hold (
         .clk (clk), .cpu_rst (cpu_rst),
         .master_active (master_active),
         .arm (arm), .release_req (release_req),
+        .menu_trigger (1'b0), .hotkey_hit (hotkey_hit),
         .cpu_sync (cpu_sync),
         .op_present (op_present), .op_commit (op_commit),
-        .op_sync (drv_sync), .op_ovr (op_ovr), .din (cpu_din),
+        .op_sync (drv_sync), .op_ovr (op_ovr),
+        .op_addr (op_addr), .op_rw (op_rw), .din (cpu_din),
         .ovr_en (ovr_en), .ovr_addr (ovr_addr),
-        .held (held)
+        .held (held), .runtime (runtime)
     );
+
+    integer hits = 0;                           // hotkey_hit pulses, ever
+    always @(posedge clk) if (hotkey_hit) hits = hits + 1;
     assign ovr_rw = 1'b1;
     assign ovr_wdata = 8'h00;
 
@@ -189,12 +205,14 @@ module kbd_inject_tb;
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .master_active (master_active),
         .press (press), .press_key (press_key), .drop (drop), .lock (lock),
+        .hotkey_en (menu_en), .hotkey (HOTKEY), .held (held),
         .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
         .data_sync (data_s),
         .sub_en (kbd_sub_en), .sub_data (kbd_sub_data),
         .strobe (strobe), .seen (seen), .touched (touched),
         .pressed (pressed), .taken (taken), .flushed (flushed), .replaced (replaced),
-        .resolved_key (resolved_key), .changed (changed)
+        .resolved_key (resolved_key), .changed (changed),
+        .hotkey_hit (hotkey_hit)
     );
 
     pb_inject dut_pb (
@@ -903,6 +921,140 @@ module kbd_inject_tb;
         if (changes != taken + flushed + replaced + dropped(1'b0) + touches)
             fail("changed: pulses do not equal resolutions plus touches");
         else $display("  ok: changed pulsed once per resolution and once per touch, %0d in all", changes);
+
+
+        // ====================================================================
+        // The hotkey: the one real key that is the card's.
+        $display("");
+        begin : hotkey_cases
+            integer hits0, p0, t0, f0, r0, d0, ovr_at, c010_at;
+            p0 = pressed; t0 = taken; f0 = flushed; r0 = replaced; d0 = dropped(1'b0);
+
+            // --- case 22 / read by the program: eaten, and the hold engages --
+            menu_en = 1'b1;
+            mem[KEYS] = 8'h00;
+            machine_reset(P_RDKEY);
+            cycles(12);
+            mark = ncommit;
+            hits0 = hits;
+            real_press(HOTKEY, 30);
+            cycles(20);
+            if (held !== 1'b1 || runtime !== 1'b1) fail("hotkey: the program's read did not open the hold");
+            else if (hits != hits0 + 1) fail("hotkey: hotkey_hit did not pulse exactly once");
+            else $display("  ok: the program read the hotkey, hotkey_hit pulsed once, and the machine is held (runtime)");
+            if (mem[KEYS] !== 8'h00) fail("hotkey: the program stored the hotkey");
+            if (key_reads(mark) != 0) fail("hotkey: a $C00x read returned the hotkey with bit 7 set");
+            else $display("  ok: no read - the program's or the hold's - ever returned it: the program saw the latch, no strobe");
+            ovr_at = -1;
+            for (i = mark; i < ncommit; i = i + 1)
+                if (ovr_at < 0 && log_ovr[i]) ovr_at = i;
+            if (ovr_at < 0 || log_addr[ovr_at] !== 16'hC010) fail("hotkey: the hold's first cycle is not the $C010");
+            else if (kbd_strobe !== 1'b0) fail("hotkey: the strobe was left set");
+            else $display("  ok: the hold's first cycle cleared the hotkey's strobe");
+            check_counts(p0, t0, f0, r0, d0, "hotkey");
+            check_agree(mark, "hotkey");
+            // A real key while held reaches the host - and is last_read now.
+            mark = ncommit;
+            real_press(7'h41, 30);
+            cycles(4);
+            if (key_reads(mark) != 1) fail("hotkey: a key pressed while held was not seen once");
+            check_agree(mark, "hotkey/held key");
+            // Released, the program goes on: the next key is stored.
+            pulse_release;
+            cycles(10);
+            if (held !== 1'b0) fail("hotkey: not released");
+            real_press(7'h42, 30);
+            cycles(20);
+            if (mem[KEYS] !== 8'hC2) fail("hotkey: after the release the program did not take the next key");
+            else $display("  ok: released, the program went on and took the next key");
+            check_counts(p0, t0, f0, r0, d0, "hotkey/after");
+
+            // --- case 23 / the door shut: an ordinary key ---------------------
+            menu_en = 1'b0;
+            mem[KEYS] = 8'h00;
+            machine_reset(P_RDKEY);
+            cycles(12);
+            hits0 = hits;
+            real_press(HOTKEY, 30);
+            cycles(20);
+            if (held !== 1'b0) fail("shut: the hotkey held with the door shut");
+            else if (mem[KEYS] !== 8'h9E) fail("shut: the program did not get the key as an ordinary key");
+            else if (hits != hits0) fail("shut: hotkey_hit pulsed with the door shut");
+            else $display("  ok: with the door shut, Ctrl-6 is a key like any other");
+
+            // --- case 24 / under the lock: not looked for -------------------
+            menu_en = 1'b1;
+            mem[KEYS] = 8'h00;
+            machine_reset(P_RDKEY);
+            cycles(12);
+            @(negedge clk); lock = 1'b1;
+            cycles(2);
+            hits0 = hits;
+            real_press(HOTKEY, 30);
+            cycles(20);
+            if (held !== 1'b0 || hits != hits0) fail("lock: the hotkey opened the hold under the lock");
+            else if (touched !== 1'b1) fail("lock: the hotkey under the lock did not count as a touch");
+            else if (mem[KEYS] !== 8'h00) fail("lock: the program got the key under the lock");
+            else $display("  ok: under the lock the hotkey is just a touch - the host has the register to knock with");
+            @(negedge clk); kbd_strobe = 1'b0; lock = 1'b0;     // the key taken away before the lock lifts
+            cycles(4);
+
+            // --- case 25 / an injected key ahead of it wins -------------------
+            // P_LATE reads once, late: both keys are waiting by then.  The
+            // injected key is what the read returns; the $C010 that takes it
+            // clears the motherboard's strobe too, and the hotkey is gone
+            // with it - what that access means.
+            mem[KEYS] = 8'h00;
+            machine_reset(P_LATE);
+            cycles(12);
+            hits0 = hits;
+            host_press(7'h51);
+            real_press(HOTKEY, 30);
+            cycles(1400);                                   // P_LATE's delay, then its one read
+            if (strobe !== 1'b0) fail("ahead: the injected key was never consumed");
+            if (mem[KEYS] !== 8'hD1) fail("ahead: the program did not get the injected key");
+            else if (held !== 1'b0 || hits != hits0) fail("ahead: the hotkey behind an injected key opened the hold");
+            else $display("  ok: an injected key ahead of the hotkey is what the program gets; the hotkey went with the $C010");
+            check_counts(p0 + 1, t0 + 1, f0, r0, d0, "ahead");
+            check_agree(0, "ahead");
+
+            // --- case 26 / no scan: a program that never reads is never paused
+            machine_reset(P_SPIN);
+            cycles(12);
+            mark = ncommit;
+            hits0 = hits;
+            real_press(HOTKEY, 30);
+            cycles(300);
+            if (held !== 1'b0 || hits != hits0) fail("no scan: the hotkey held a program that never reads");
+            else if (kbd_subs != 0 && ncommit > mark && key_reads(mark) != 0) fail("no scan: a read showed it");
+            else $display("  ok: a program that never reads the keyboard is never paused by the key - no scan");
+            n = 0;
+            for (i = mark; i < ncommit; i = i + 1) if (log_ovr[i]) n = n + 1;
+            if (n != 0) fail("no scan: an override op went out");
+            check_agree(mark, "no scan");
+            @(negedge clk); kbd_strobe = 1'b0;
+            // The register's knock is the way in; from there case 27.
+            machine_reset(P_SPIN);
+            cycles(12);
+            @(negedge clk); u_hold.menu_pend = 1'b1;   // as MENU_HOLD's trigger would
+            cycles(12);
+            if (held !== 1'b1 || runtime !== 1'b1) fail("no scan: the knock did not hold");
+            check_counts(p0 + 1, t0 + 1, f0, r0, d0, "no scan");
+
+            // --- case 27 / while held, the hotkey passes through ------------
+            mark = ncommit;
+            hits0 = hits;
+            real_press(HOTKEY, 30);
+            cycles(4);
+            if (key_reads(mark) != 1) fail("held: the hotkey pressed while held was not one key event");
+            else if (hits != hits0) fail("held: the hotkey pressed while held was eaten");
+            else $display("  ok: while held the hotkey reaches the host like any key - the host may make it 'leave'");
+            check_agree(mark, "held/hotkey");
+            pulse_release;
+            cycles(20);
+            if (held !== 1'b0) fail("held: not released");
+            menu_en = 1'b0;
+        end
 
         $display("");
         if (errors == 0) $display("PASS");

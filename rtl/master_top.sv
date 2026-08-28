@@ -117,7 +117,9 @@ module master_top #(
     wire [7:0]  apple_data_sync;
     wire        cpu_source_active;
     wire [2:0]  mb_slot_active, hd_slot_active;
-    wire        boot_arm, boot_release, boot_held;
+    wire        boot_arm, boot_release, boot_held, hold_runtime;
+    wire        menu_en, menu_trigger, hotkey_hit;
+    wire [6:0]  menu_hotkey;
     wire        hd_rom_loaded, hd_busy;
     wire [7:0]  hd_execs;
     wire        kbd_press, kbd_drop, kbd_lock;
@@ -156,7 +158,9 @@ module master_top #(
         .cpu_source_active (cpu_source_active),
         .mb_slot_active (mb_slot_active),
         .boot_arm (boot_arm), .boot_release (boot_release),
-        .boot_held (boot_held),
+        .boot_held (boot_held), .hold_runtime (hold_runtime),
+        .menu_en (menu_en), .menu_hotkey (menu_hotkey),
+        .menu_trigger (menu_trigger),
         .hd_slot_active (hd_slot_active),
         .hd_rom_loaded (hd_rom_loaded), .hd_busy (hd_busy),
         .hd_execs (hd_execs),
@@ -259,12 +263,17 @@ module master_top #(
     wire [7:0]  hd_ovr_wdata;
 
     // Two overrides into one driver: the hold's is always a read of its
-    // keyboard address, the disk's may be a write.  Two peripherals into one
-    // claim: they answer for different slots (wb_regfile refuses to latch
-    // the same one for both), so at most one claims any cycle.
+    // keyboard address, the disk's may be a write.  THE DISK'S COMES FIRST:
+    // a runtime hold can have a transfer outstanding, and a transfer that
+    // waited behind a menu would time out on the card and the host alike.
+    // The hold acts only on cycles it recognises as its own, so a cycle the
+    // disk takes costs it nothing - the core moves for neither.  Two
+    // peripherals into one claim: they answer for different slots
+    // (wb_regfile refuses to latch the same one for both), so at most one
+    // claims any cycle.
     wire        ovr_en    = boot_ovr_en | hd_ovr_en;
-    wire [15:0] ovr_addr  = boot_ovr_en ? boot_ovr_addr : hd_ovr_addr;
-    wire        ovr_rw    = boot_ovr_en ? 1'b1          : hd_ovr_rw;
+    wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : boot_ovr_addr;
+    wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : 1'b1;
     wire [7:0]  ovr_wdata = hd_ovr_wdata;
     wire        slot_rd_claim = mb_rd_claim | hd_rd_claim;
     wire [7:0]  slot_rd_data  = hd_rd_claim ? hd_rd_data : mb_rd_data;
@@ -305,22 +314,27 @@ module master_top #(
         .driving       ()
     );
 
-    // ---- the boot hold ------------------------------------------------------
+    // ---- the hold: the boot menu's door and the runtime menu's -------------
     boot_hold u_hold (
         .clk           (apple_clk),
         .cpu_rst       (cpu_rst),
         .master_active (cpu_source_active),
         .arm           (boot_arm),
         .release_req   (boot_release),
+        .menu_trigger  (menu_trigger),
+        .hotkey_hit    (hotkey_hit),
         .cpu_sync      (cpu_sync),
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_sync       (drv_sync),
         .op_ovr        (op_ovr),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
         .din           (cpu_din),
         .ovr_en        (boot_ovr_en),
         .ovr_addr      (boot_ovr_addr),
-        .held          (boot_held)
+        .held          (boot_held),
+        .runtime       (hold_runtime)
     );
 
     // ---- keyboard injection -------------------------------------------------
@@ -336,6 +350,9 @@ module master_top #(
         .press_key     (kbd_press_key),
         .drop          (kbd_drop),
         .lock          (kbd_lock),
+        .hotkey_en     (menu_en),
+        .hotkey        (menu_hotkey),
+        .held          (boot_held),
         .op_addr       (op_addr),
         .op_rw         (op_rw),
         .op_commit     (op_commit),
@@ -350,7 +367,8 @@ module master_top #(
         .flushed       (kbd_flushed),
         .replaced      (kbd_replaced),
         .resolved_key  (kbd_resolved_key),
-        .changed       (kbd_changed)
+        .changed       (kbd_changed),
+        .hotkey_hit    (hotkey_hit)
     );
 
     // ---- the pushbuttons ----------------------------------------------------

@@ -57,7 +57,7 @@ host reads; the receiver carries parser state across all of them.
 | `0x14` | REG_READ | Host→card. Payload `[addr]`. Answered with REG_VALUE. |
 | `0x15` | REG_WRITE | Host→card. Payload `[addr][data]`. Also answered with REG_VALUE. |
 | `0x16` | REG_VALUE | Card→host. Payload `[addr][data]`, answering either of the above. |
-| `0x17` | CPU_HOLD | Card→host, **unsolicited**. Header only; `free[0]` = the soft core is held at its reset vector. Sent on every change while a capture is enabled, through the same boundary-respecting slot as a REG_VALUE. See BOOT_MENU.md. |
+| `0x17` | CPU_HOLD | Card→host, **unsolicited**. Header only; `free[0]` = the soft core is held, `free[1]` = by the runtime menu's door rather than at its reset vector. Sent on every change of `held` while a capture is enabled, through the same boundary-respecting slot as a REG_VALUE. See BOOT_MENU.md and RUNTIME_MENU.md. |
 | `0x18` | HD_ROM | Host→card. Payload 64 words: the hard disk's 256-byte slot ROM. See HARDDISK.md. |
 | `0x19` | HD_DONE | Host→card. `free[7:0]` = the status the EXECUTE port reads once busy clears; payload `[{count, addr}] [size] [bytes…]` to DMA into the Apple, or header only for none. |
 | `0x1A` | HD_FETCH | Host→card. Payload `[{count, addr}]`: read bytes out of the Apple's memory. |
@@ -91,13 +91,14 @@ protocol.
 | `0x8000_0004` | BUILD_TIME | RO | `HHMMSS` as a decimal integer |
 | `0x8000_0008` | CPU_SOURCE | RW bit 0 | which CPU drives the Apple bus; latched at RES' — see BUS_MASTER.md |
 | `0x8000_000C` | MB_SLOT | RW bits 2:0 | the Mockingboard's slot, 0 = off; latched at RES' — see MOCKINGBOARD.md |
-| `0x8000_0010` | BOOT_HOLD | RW bit 0, W1 bit 16 | hold the soft core at its reset vector; `arm`, `held`, `release`, `holds` — see BOOT_MENU.md |
+| `0x8000_0010` | BOOT_HOLD | RW bit 0, W1 bit 16 | hold the soft core at its reset vector; `arm`, `held`, `runtime`, `release`, `holds` — see BOOT_MENU.md; the release serves the runtime door too — see RUNTIME_MENU.md |
 | `0x8000_0014` | HD_SLOT | RW bits 2:0 | the hard disk's slot, 0 = off; latched at RES', never MB_SLOT's; `rom`, `busy`, `execs` — see HARDDISK.md |
 | `0x8000_0018` | RESET | W1 bit 0, W bits 31:16 | pulse the Apple's RES' low, for a programmatic Ctrl-Reset; `pulsing`, `pulses` — see BUS_MASTER.md |
 | `0x8000_001C` | KBD_INJECT | W bits 6:0, W1 bits 7-8 | a key on the keyboard the soft core reads: `key`, `press`, `drop`; `strobe`, `seen`, `pressed` — see KEYBOARD.md |
 | `0x8000_0020` | BUTTONS | RW bits 5:0 | Open-Apple, Closed-Apple and PB2 as the host holds them, two bits each (hardware / up / down); `hw` — see KEYBOARD.md |
 | `0x8000_0024` | RING_STATUS | RO | the DDR3 TX ring: `[21:0]` occupancy in lines, `[24]` full, `[25]` DDR3 calibrated, `[26]` a message was torn on the bus (sticky) — see TX_RING.md |
 | `0x8000_0028` | KBD_CTRL | RW bits 1:0 | `lock` the machine's own keyboard out, `notify` ask for KBD_EVENT; `touched`, `taken`, `flushed`, `replaced` — see KEYBOARD.md |
+| `0x8000_002C` | MENU_HOLD | RW bits 7:0, W1 bit 8 | the runtime menu's door into the same hold: `enable`, `hotkey`, `trigger`, `menus` — see RUNTIME_MENU.md |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

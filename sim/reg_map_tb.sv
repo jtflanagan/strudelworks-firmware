@@ -102,8 +102,14 @@ module reg_map_tb;
     wire [5:0] pb_override;
     reg  [2:0] pb_hw = 3'd0;
     reg  boot_held = 1'b0;
+    reg  hold_runtime = 1'b0;
     integer release_pulses = 0;
     always @(posedge clk) if (boot_release) release_pulses = release_pulses + 1;
+    // The runtime menu's side of MENU_HOLD.
+    wire       menu_en, menu_trigger;
+    wire [6:0] menu_hotkey;
+    integer trigger_pulses = 0;
+    always @(posedge clk) if (menu_trigger) trigger_pulses = trigger_pulses + 1;
 
     // The hard disk's side of HD_SLOT: the tb plays the disk.
     wire [2:0] hd_slot_active;
@@ -132,6 +138,9 @@ module reg_map_tb;
         .apple_res_sync (apple_res_sync), .cpu_source_active (cpu_source_active),
         .mb_slot_active (mb_slot_active),
         .boot_arm (boot_arm), .boot_release (boot_release), .boot_held (boot_held),
+        .hold_runtime (hold_runtime),
+        .menu_en (menu_en), .menu_hotkey (menu_hotkey),
+        .menu_trigger (menu_trigger),
         .pb_override (pb_override), .pb_hw (pb_hw),
         .hd_slot_active (hd_slot_active), .hd_rom_loaded (hd_rom_loaded),
         .hd_busy (hd_busy), .hd_execs (hd_execs), .res_drive (res_drive),
@@ -560,7 +569,7 @@ module reg_map_tb;
         // The CPU_HOLD notice is one header-only word injected through the
         // same slot a reply uses, so it has the same obligation.
         base = out_n;
-        note_word = {15'd0, 1'b1, 8'h17, 8'd0};
+        note_word = {14'd0, 1'b1, 1'b1, 8'h17, 8'd0};      // held, by the runtime door
         @(negedge clk);
         offer(hdr(T_BUS_EVENTS, 8'd3, 16'd0));
         note_valid = 1'b1;                                // arrives mid-payload
@@ -580,7 +589,7 @@ module reg_map_tb;
             expect_word(hdr_at + 1, 32'hAAAA_0001, "event word 1 with a notice pending");
             expect_word(hdr_at + 2, 32'hAAAA_0002, "event word 2 with a notice pending");
             expect_word(hdr_at + 3, 32'hAAAA_0003, "event word 3 with a notice pending");
-            if (out_mem[hdr_at + 4] !== {15'd0, 1'b1, 8'h17, 8'd0}) begin
+            if (out_mem[hdr_at + 4] !== {14'd0, 1'b1, 1'b1, 8'h17, 8'd0}) begin
                 $display("FAIL: the notice did not follow the message: word %0d = %08x",
                          hdr_at + 4, out_mem[hdr_at + 4]);
                 errors = errors + 1;
@@ -886,6 +895,74 @@ module reg_map_tb;
         if (kn_takes !== 2) begin
             $display("FAIL: a change with notify off sent a notice"); errors = errors + 1;
         end else $display("  ok: with notify off a change sends nothing - silent until asked");
+
+        // --- case 20 / MENU_HOLD: levels, a pulse, and no re-latch on its release
+        // The runtime menu's door.  See docs/RUNTIME_MENU.md.
+        base = out_n;
+        do_read(32'h8000_002C);
+        if (out_mem[base+2] !== 32'h0000_003C) begin
+            $display("FAIL: MENU_HOLD reads %08x at reset, expected enable=0 hotkey=$1E",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: MENU_HOLD starts shut, hotkey $1E (Ctrl-6)");
+        if (menu_en !== 1'b0 || trigger_pulses !== 0) begin
+            $display("FAIL: the runtime door is open, or knocked on, before anyone asked");
+            errors = errors + 1;
+        end
+        do_write(32'h8000_002C, 32'h0010_0137);           // trigger, hotkey=$1B, enable; bits 23:16 nothing
+        if (menu_en !== 1'b1 || menu_hotkey !== 7'h1B) begin
+            $display("FAIL: MENU_HOLD write did not land: en=%0d hotkey=%02x",
+                     menu_en, menu_hotkey);
+            errors = errors + 1;
+        end else if (trigger_pulses !== 1) begin
+            $display("FAIL: trigger pulsed %0d time(s), expected exactly 1", trigger_pulses);
+            errors = errors + 1;
+        end else $display("  ok: enable and hotkey are levels; trigger is one pulse");
+        base = out_n;
+        do_read(32'h8000_002C);
+        if (out_mem[base+2] !== 32'h0000_0037) begin
+            $display("FAIL: MENU_HOLD reads %08x, expected hotkey=$1B enable=1, trigger 0, nothing else",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: trigger reads back as 0; the rest as written");
+
+        // A runtime hold engages: BOOT_HOLD says held AND runtime, `menus`
+        // counts it, and a release re-latches NOTHING - the program it
+        // resumes has already decided about its slots.
+        hold_runtime = 1'b1;
+        boot_held = 1'b1;
+        repeat (2) @(posedge clk);
+        base = out_n;
+        do_read(32'h8000_0010);
+        if (out_mem[base+2][8] !== 1'b1 || out_mem[base+2][9] !== 1'b1) begin
+            $display("FAIL: BOOT_HOLD reads %08x during a runtime hold, expected held=1 runtime=1",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: BOOT_HOLD reads held=1 runtime=1 during a runtime hold");
+        base = out_n;
+        do_read(32'h8000_002C);
+        if (out_mem[base+2][31:24] !== 8'd1) begin
+            $display("FAIL: MENU_HOLD menus=%0d after one runtime hold", out_mem[base+2][31:24]);
+            errors = errors + 1;
+        end else $display("  ok: menus counts the runtime hold");
+        do_write(32'h8000_000C, 32'h0000_0002);           // MB desired = 2, mid-run
+        do_write(32'h8000_0010, 32'h0001_0001);           // release the runtime hold
+        if (mb_slot_active === 3'd2) begin
+            $display("FAIL: a runtime release re-latched MB_SLOT under a running program");
+            errors = errors + 1;
+        end else $display("  ok: a runtime release re-latches nothing (MB active still %0d)", mb_slot_active);
+        boot_held = 1'b0; hold_runtime = 1'b0;
+        repeat (2) @(posedge clk);
+        // ...where a BOOT release does.
+        boot_held = 1'b1;
+        repeat (2) @(posedge clk);
+        do_write(32'h8000_0010, 32'h0001_0001);
+        if (mb_slot_active !== 3'd2) begin
+            $display("FAIL: the boot release after it did not re-latch MB_SLOT: active=%0d", mb_slot_active);
+            errors = errors + 1;
+        end else $display("  ok: and the next boot release does");
+        boot_held = 1'b0;
+        do_write(32'h8000_002C, 32'h0000_0000);           // shut again
 
         // --- case 7 / the parser never lost sync -----------------------------
         if (frame_error !== 1'b0) begin
