@@ -16,6 +16,8 @@ iverilog -g2012 -o "$root/sim/reg_map_tb.out" -s reg_map_tb \
     "$root/rtl/ft601_msg_rx.sv" \
     "$root/rtl/reg_bridge.sv" \
     "$root/rtl/wb_regfile.sv" \
-    "$root/rtl/tx_arb.sv"
+    "$root/rtl/msg_arb.sv" \
+    "$root/rtl/msg_master.sv" \
+    "$root/rtl/reply_stream.sv"
 
 exec vvp -n "$root/sim/reg_map_tb.out"

@@ -5,7 +5,7 @@
 // reg_bridge - REG_READ / REG_WRITE messages in, a Wishbone cycle, REG_VALUE out.
 //
 // Sits between ft601_msg_rx and the register Wishbone, and hands its reply to
-// tx_arb rather than to the TX FIFO directly - see that module for why a reply
+// msg_arb rather than to the TX FIFO directly - see that module for why a reply
 // cannot simply be pushed whenever it is ready.
 //
 // THE SHAPE OF A REQUEST.  Both request types carry their address as the first
@@ -54,7 +54,7 @@ module reg_bridge #(
     input  wire         wb_stall,
     input  wire  [31:0] wb_dat_r,
 
-    // TO tx_arb: a two-word reply, offered as a whole and taken when the
+    // TO reply_stream, and through it msg_arb: a two-word reply, offered as a whole and taken when the
     // outgoing stream is between messages.
     output logic [31:0] rsp_addr,
     output logic [31:0] rsp_data,
@@ -69,7 +69,7 @@ module reg_bridge #(
         S_ADDR,      // header seen, waiting for the address word
         S_DATA,      // write only, waiting for the data word
         S_BUS,       // driving the Wishbone cycle
-        S_RSP        // reply formed, waiting for tx_arb to take it
+        S_RSP        // reply formed, waiting for reply_stream to take it
     } state_t;
 
     state_t state = S_IDLE;

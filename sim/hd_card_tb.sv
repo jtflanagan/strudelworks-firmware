@@ -189,20 +189,57 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     );
 
     // ---- card -> host: through the real arbiter -----------------------------
-    reg  [31:0] src_data = 32'd0;
-    reg         src_push = 1'b0;
-    wire        src_full;
+    // The capture's port, played by the tb: a word offered on a level and
+    // held until taken.
+    reg  [31:0] src_data  = 32'd0;
+    reg         src_valid = 1'b0;
+    wire        src_take;
+    reg         src_took  = 1'b0;
+    always @(posedge clk) src_took <= src_valid && src_take;
+
+    task offer(input [31:0] w);
+        begin
+            src_data  = w;
+            src_valid = 1'b1;
+            @(negedge clk);
+            while (!src_took) @(negedge clk);
+            src_valid = 1'b0;
+        end
+    endtask
+
     wire [31:0] tx_data;
     wire        tx_push;
 
-    tx_arb u_arb (
-        .clk (clk), .rst (rst),
-        .src_data (src_data), .src_push (src_push), .src_full (src_full),
-        .rsp_addr (32'd0), .rsp_data (32'd0), .rsp_valid (1'b0), .rsp_take (),
-        .note_word (32'd0), .note_valid (1'b0), .note_take (),
-        .aux_word (tx_word), .aux_valid (tx_valid), .aux_take (tx_take),
-        .tx_data (tx_data), .tx_push (tx_push), .tx_full (1'b0)
+    // The disk's master above the capture's, as in card_link; the tb plays
+    // the slave and never stalls.
+    wire [1:0]  mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
+    wire [63:0] mb_adr, mb_dat;
+    wire [7:0]  mb_sel;
+    wire        sb_cyc, sb_stb, sb_we;
+    wire [31:0] sb_adr, sb_dat;
+    wire [3:0]  sb_sel;
+    reg         sb_ack = 1'b0;
+
+    msg_master u_m_hd (
+        .clk (clk), .rst (rst), .word (tx_word), .valid (tx_valid), .take (tx_take),
+        .cyc (mb_cyc[0]), .stb (mb_stb[0]), .we (mb_we[0]), .adr (mb_adr[31:0]),
+        .dat (mb_dat[31:0]), .sel (mb_sel[3:0]), .stall (mb_stall[0]), .ack (mb_ack[0])
     );
+    msg_master u_m_cap (
+        .clk (clk), .rst (rst), .word (src_data), .valid (src_valid), .take (src_take),
+        .cyc (mb_cyc[1]), .stb (mb_stb[1]), .we (mb_we[1]), .adr (mb_adr[63:32]),
+        .dat (mb_dat[63:32]), .sel (mb_sel[7:4]), .stall (mb_stall[1]), .ack (mb_ack[1])
+    );
+    msg_arb #(.N (2)) u_arb (
+        .clk (clk), .rst (rst),
+        .m_cyc (mb_cyc), .m_stb (mb_stb), .m_we (mb_we), .m_adr (mb_adr),
+        .m_dat (mb_dat), .m_sel (mb_sel), .m_stall (mb_stall), .m_ack (mb_ack),
+        .s_cyc (sb_cyc), .s_stb (sb_stb), .s_we (sb_we), .s_adr (sb_adr),
+        .s_dat (sb_dat), .s_sel (sb_sel), .s_stall (1'b0), .s_ack (sb_ack)
+    );
+    assign tx_data = sb_dat;
+    assign tx_push = sb_cyc && sb_stb;
+    always @(posedge clk) sb_ack <= !rst && sb_cyc && sb_stb;
 
     reg [31:0] out_mem [0:1023];
     integer    out_n = 0;
@@ -515,10 +552,9 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         // Capture traffic while the block is being sent, to try to interleave.
         wait (tx_valid);
         @(negedge clk);
-        src_data = hdr(T_BUS_EVENTS, 8'd2, 16'd0); src_push = 1'b1;
-        @(negedge clk); src_data = 32'hEEEE_0001;
-        @(negedge clk); src_data = 32'hEEEE_0002;
-        @(negedge clk); src_push = 1'b0;
+        offer(hdr(T_BUS_EVENTS, 8'd2, 16'd0));
+        offer(32'hEEEE_0001);
+        offer(32'hEEEE_0002);
         wait (!tx_valid);
         repeat (20) @(posedge clk);
         if (busy !== 1'b1) fail("busy dropped with the fetch - HD_DONE is still owed");

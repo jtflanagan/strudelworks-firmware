@@ -119,7 +119,12 @@ if {$snoop || $master} {
         [file join $root rtl bus_event_capture.sv] \
         [file join $root rtl wb_regfile.sv] \
         [file join $root rtl reg_bridge.sv] \
-        [file join $root rtl tx_arb.sv] \
+        [file join $root rtl msg_arb.sv] \
+        [file join $root rtl reply_stream.sv] \
+        [file join $root rtl msg_master.sv] \
+        [file join $root rtl ddr3_wrapper.sv] \
+        [file join $root rtl wb_arb.sv] \
+        [file join $root rtl tx_ring.sv] \
         [file join $root rtl uart_tx.v] \
         [file join $root rtl uart_rx.v] \
         [file join $root rtl card_link.sv] \
@@ -203,10 +208,12 @@ if {$stamp_date != 0 || $stamp_time != 0} {
 # builds with ft_* ports, apple_bus.xdc to the two Apple-facing ones, and
 # apple_bus_master.xdc to the one that actually drives them.
 if {$snoop || $master} {
+    # ddr3.xdc too: the outgoing stream crosses the DDR3 in both (rtl/tx_ring.sv).
     add_files -fileset constrs_1 -norecurse [list \
         [file join $root constr alchitry_au.xdc] \
         [file join $root constr ft601.xdc] \
         [file join $root constr apple_bus.xdc] \
+        [file join $root constr ddr3.xdc] \
     ]
     # The output direction exists only in the build that drives.  An XDC naming
     # a path that cannot exist is an error, not a warning, so a set_false_path

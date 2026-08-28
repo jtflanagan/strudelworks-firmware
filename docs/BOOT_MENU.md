@@ -117,7 +117,7 @@ no fetch of ours to stop at, and a hold that waited for one would wait forever.
 
 **`CPU_HOLD`, type `0x17`**, card→host, header only, `free[0]` = held. Sent
 on every change of `held`, through the same boundary-respecting slot in
-`tx_arb` that a register reply uses - so it never lands inside a `BUS_EVENTS`
+`msg_arb` that a register reply uses - so it never lands inside a `BUS_EVENTS`
 payload (checked in `sim/reg_map_tb.sv`). The word carries the level as it is
 when it goes out, so a bounce that flips it twice while a notice waits still
 ends with the host knowing the truth.

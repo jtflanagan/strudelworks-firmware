@@ -24,6 +24,12 @@
 // CPU_SOURCE register then cannot latch itself into "the soft core is driving"
 // no matter what the host writes to it.
 //
+// THE DDR3 IS HERE TOO.  Everything the card says to the host goes through
+// 32 MB of it on the way (rtl/tx_ring.sv, docs/TX_RING.md), so the controller
+// and its one Wishbone port live on this side of the seam, behind wb_arb.
+// There is no path around it: a board whose DDR3 does not calibrate has no
+// link, and says so on the UART - "D=0" - which is the diagnostic.
+//
 // The link's own design notes - the framing, the errata, the crossings - are in
 // docs/PROTOCOL.md and in the modules themselves.
 //////////////////////////////////////////////////////////////////////////////////
@@ -121,9 +127,8 @@ module card_link #(
     output wire [31:0] app_pay_data,
     output wire        app_pay_valid,
 
-    // Card -> host: a whole message a word at a time, taken between the
-    // capture's frames by tx_arb.  A top with nothing to send ties aux_valid
-    // low.
+    // Card -> host: a whole message a word at a time, a port of msg_arb.  A
+    // top with nothing to send ties aux_valid low.
     input  wire [31:0] aux_word,
     input  wire        aux_valid,
     output wire        aux_take,
@@ -138,20 +143,37 @@ module card_link #(
     output wire        ft_wakeup,
     output wire        ft_reset,
     inout  wire [31:0] ft_data,
-    inout  wire [3:0]  ft_be
+    inout  wire [3:0]  ft_be,
+
+    // DDR3 (constr/ddr3.xdc) - names match au_top's, which match MIG's.
+    output wire [13:0] ddr3_addr,
+    output wire [2:0]  ddr3_ba,
+    output wire        ddr3_ras_n,
+    output wire        ddr3_cas_n,
+    output wire        ddr3_we_n,
+    output wire        ddr3_reset_n,
+    output wire [0:0]  ddr3_ck_p,
+    output wire [0:0]  ddr3_ck_n,
+    output wire [0:0]  ddr3_cke,
+    output wire [0:0]  ddr3_cs_n,
+    output wire [1:0]  ddr3_dm,
+    output wire [0:0]  ddr3_odt,
+    inout  wire [15:0] ddr3_dq,
+    inout  wire [1:0]  ddr3_dqs_p,
+    inout  wire [1:0]  ddr3_dqs_n
 );
 
     // ---- clocks -----------------------------------------------------------
-    wire clk_ctrl, clk_ddr3_unused, clk_ddr3_90_unused, clk_ref_unused;
+    wire clk_ctrl, clk_ddr3, clk_ddr3_90, clk_ref;
     wire clk_locked;
 
     clk_gen u_clk (
         .clk_in      (clk_pin),
         .rst         (~rst_n),
         .clk_ctrl    (clk_ctrl),
-        .clk_ddr3    (clk_ddr3_unused),
-        .clk_ddr3_90 (clk_ddr3_90_unused),
-        .clk_ref     (clk_ref_unused),
+        .clk_ddr3    (clk_ddr3),
+        .clk_ddr3_90 (clk_ddr3_90),
+        .clk_ref     (clk_ref),
         .locked      (clk_locked)
     );
 
@@ -201,6 +223,69 @@ module card_link #(
 
     wire fifo_rst = rst | (tickcount_ft != 5'd16);
 
+    // ---- DDR3 ---------------------------------------------------------------
+    // The controller's reset is the clock-lock reset, as in au_top, and NOT
+    // the link's: a watchdog expiry or a host 'R' must not cost a
+    // recalibration.  The ring's clients drain their outstanding requests
+    // through the link's reset instead; see tx_ring.
+    reg [1:0] ddr3_rst_sync;
+    always @(posedge clk_ctrl or negedge clk_locked) begin
+        if (!clk_locked) ddr3_rst_sync <= 2'b00;
+        else             ddr3_rst_sync <= {ddr3_rst_sync[0], rst_n};
+    end
+    wire ddr3_rst_n = ddr3_rst_sync[1];
+
+    wire         wb_cyc, wb_stb, wb_we, wb_stall, wb_ack;
+    wire [23:0]  wb_addr;
+    wire [127:0] wb_data, wb_rdata;
+    wire [15:0]  wb_sel;
+    wire [3:0]   wb_aux, wb_rdata_aux;
+    wire         calib_complete;
+
+    // BIST_MODE 0: au_top's memory test at every power-up would hold the link
+    // for seconds, and the memory it tested has since done 123 million
+    // accesses without an error (docs/DERISK.md).  Calibration alone is
+    // milliseconds.
+    ddr3_wrapper #(.BIST_MODE (0)) u_ddr3 (
+        .clk_ctrl    (clk_ctrl),
+        .clk_ddr3    (clk_ddr3),
+        .clk_ddr3_90 (clk_ddr3_90),
+        .clk_ref     (clk_ref),
+        .rst_n       (ddr3_rst_n),
+        .wb_cyc      (wb_cyc),
+        .wb_stb      (wb_stb),
+        .wb_we       (wb_we),
+        .wb_addr     (wb_addr),
+        .wb_data     (wb_data),
+        .wb_sel      (wb_sel),
+        .wb_aux      (wb_aux),
+        .wb_stall    (wb_stall),
+        .wb_ack      (wb_ack),
+        .wb_rdata    (wb_rdata),
+        .wb_rdata_aux(wb_rdata_aux),
+        .calib_complete (calib_complete),
+        .ddr3_debug     (),
+        // Refresh is the controller's own until an Apple-side client exists
+        // to say when a window is free; low is upstream behaviour and safe.
+        .user_self_refresh (1'b0),
+        .refresh_ok        (1'b0),
+        .ddr3_addr   (ddr3_addr),
+        .ddr3_ba     (ddr3_ba),
+        .ddr3_ras_n  (ddr3_ras_n),
+        .ddr3_cas_n  (ddr3_cas_n),
+        .ddr3_we_n   (ddr3_we_n),
+        .ddr3_reset_n(ddr3_reset_n),
+        .ddr3_ck_p   (ddr3_ck_p),
+        .ddr3_ck_n   (ddr3_ck_n),
+        .ddr3_cke    (ddr3_cke),
+        .ddr3_cs_n   (ddr3_cs_n),
+        .ddr3_dm     (ddr3_dm),
+        .ddr3_odt    (ddr3_odt),
+        .ddr3_dq     (ddr3_dq),
+        .ddr3_dqs_p  (ddr3_dqs_p),
+        .ddr3_dqs_n  (ddr3_dqs_n)
+    );
+
     // ---- FT601 controller -------------------------------------------------
     wire [31:0] ft_dout;
     wire        ft_dout_valid;
@@ -241,11 +326,13 @@ module card_link #(
     wire        tx_push;
     wire        hb_sent;
 
-    // bus_event_capture -> tx_arb -> tx_fifo.  The arbiter is in the middle so a
-    // register reply can be slipped in between whole messages; see tx_arb.
+    // Every source -> the message bus (msg_arb) -> tx_ring -> tx_fifo.  A
+    // message is one Wishbone burst, so nothing can land inside another
+    // source's; the ring is 32 MB of DDR3 the stream crosses on its way.
+    // See msg_arb, msg_master, tx_ring and docs/TX_RING.md.
     wire [31:0] cap_word;
-    wire        cap_push;
-    wire        cap_full;
+    wire        cap_valid;
+    wire        cap_take;
     wire [31:0] rsp_addr, rsp_data;
     wire        rsp_valid, rsp_take;
     // Driven by the synchronizer further down, next to the control-domain
@@ -381,11 +468,29 @@ module card_link #(
     always @(posedge clk_ctrl) status_req <= !rst && bus_enable_msg;
 
     // ---- watchdog -----------------------------------------------------------
+    // A clean stop disarms it - but only once the ring is EMPTY.  The stop's
+    // own acknowledgement is the last thing queued, so a host that reads
+    // everything disarms the watchdog the moment it has; a host that says
+    // stop and then walks away with megabytes unread is, to the card, a host
+    // that died, and the reset that follows clears the ring for the next
+    // session instead of queueing that session's capture behind the last
+    // one's leftovers.  Measured: a shutdown that stalled mid-drain left
+    // 1.28 M lines for the next capture to sit behind.
+    wire ring_empty = (ring_status[21:0] == 22'd0);
+    reg  stop_pending = 1'b0;
+    always @(posedge clk_ctrl) begin
+        if (rst)               stop_pending <= 1'b0;
+        else if (want_enable)  stop_pending <= 1'b0;
+        else if (want_disable) stop_pending <= 1'b1;
+        else if (ring_empty)   stop_pending <= 1'b0;
+    end
+    wire wd_disarm = stop_pending && ring_empty;
+
     link_watchdog u_wd (
         .clk    (clk_ctrl),
         .rst    (rst),
         .arm    (want_enable),
-        .disarm (want_disable),
+        .disarm (wd_disarm),
         .kick   (msg_valid),        // ANY well-formed message, not only heartbeats
         .armed  (),
         .fired  (watchdog_fired)
@@ -425,8 +530,8 @@ module card_link #(
         .ev_data    (ev_data),
         .ev_valid   (ev_valid),
         .tx_data    (cap_word),
-        .tx_push    (cap_push),
-        .tx_full    (cap_full),
+        .tx_valid   (cap_valid),
+        .tx_take    (cap_take),
         .overflow   (overflow),
         .captured   (captured)
     );
@@ -485,6 +590,7 @@ module card_link #(
         .pb_override       (pb_override),
         .pb_hw             (pb_hw),
         .res_drive         (res_drive),
+        .ring_status       (ring_status),
         .wb_cyc   (rwb_cyc),
         .wb_stb   (rwb_stb),
         .wb_we    (rwb_we),
@@ -527,26 +633,142 @@ module card_link #(
         end
     end
 
-    tx_arb u_tx_arb (
+    // ---- the message bus ---------------------------------------------------
+    // A 32-bit Wishbone with four masters, in priority order: a register
+    // reply, the notice, the top's application message, the capture.  Each
+    // source is a stream, and msg_master makes it a master that holds CYC
+    // across its message; msg_arb grants per CYC; tx_ring is the one slave.
+    // Everything above the capture is rate-bounded by the host or the bus;
+    // the capture is the one continuous source and goes last.  See msg_arb
+    // for why that order is load-bearing.
+    localparam integer N_SRC = 4;
+
+    wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
+    wire [N_SRC*32-1:0] mb_adr, mb_dat;
+    wire [N_SRC*4-1:0]  mb_sel;
+    wire [N_SRC-1:0]    ms_valid, ms_take;
+    wire [N_SRC*32-1:0] ms_word;
+    wire                sb_cyc, sb_stb, sb_we, sb_stall, sb_ack;
+    wire [31:0]         sb_adr, sb_dat;
+    wire [3:0]          sb_sel;
+    wire                out_valid;
+    wire [31:0]         ring_status;
+
+    reply_stream u_reply (
         .clk       (clk_ctrl),
         .rst       (rst),
-        .src_data  (cap_word),
-        .src_push  (cap_push),
-        .src_full  (cap_full),
         .rsp_addr  (rsp_addr),
         .rsp_data  (rsp_data),
         .rsp_valid (rsp_valid),
         .rsp_take  (rsp_take),
-        .note_word ({15'd0, boot_held, T_CPU_HOLD, 8'd0}),
-        .note_valid (note_pending),
-        .note_take (note_take),
-        .aux_word  (aux_word),
-        .aux_valid (aux_valid),
-        .aux_take  (aux_take),
-        .tx_data   (tx_word),
-        .tx_push   (tx_push),
-        .tx_full   (txc_full)
+        .word      (ms_word[0*32 +: 32]),
+        .valid     (ms_valid[0]),
+        .take      (ms_take[0])
     );
+
+    assign ms_word[1*32 +: 32] = {15'd0, boot_held, T_CPU_HOLD, 8'd0};
+    assign ms_valid[1]         = note_pending;
+    assign note_take           = ms_take[1];
+
+    assign ms_word[2*32 +: 32] = aux_word;
+    assign ms_valid[2]         = aux_valid;
+    assign aux_take            = ms_take[2];
+
+    assign ms_word[3*32 +: 32] = cap_word;
+    assign ms_valid[3]         = cap_valid;
+    assign cap_take            = ms_take[3];
+
+    genvar gm;
+    generate
+        for (gm = 0; gm < N_SRC; gm = gm + 1) begin : g_master
+            msg_master u_m (
+                .clk   (clk_ctrl),
+                .rst   (rst),
+                .word  (ms_word[gm*32 +: 32]),
+                .valid (ms_valid[gm]),
+                .take  (ms_take[gm]),
+                .cyc   (mb_cyc[gm]),
+                .stb   (mb_stb[gm]),
+                .we    (mb_we[gm]),
+                .adr   (mb_adr[gm*32 +: 32]),
+                .dat   (mb_dat[gm*32 +: 32]),
+                .sel   (mb_sel[gm*4 +: 4]),
+                .stall (mb_stall[gm]),
+                .ack   (mb_ack[gm])
+            );
+        end
+    endgenerate
+
+    msg_arb #(.N (N_SRC)) u_msg_arb (
+        .clk     (clk_ctrl),
+        .rst     (rst),
+        .m_cyc   (mb_cyc),
+        .m_stb   (mb_stb),
+        .m_we    (mb_we),
+        .m_adr   (mb_adr),
+        .m_dat   (mb_dat),
+        .m_sel   (mb_sel),
+        .m_stall (mb_stall),
+        .m_ack   (mb_ack),
+        .s_cyc   (sb_cyc),
+        .s_stb   (sb_stb),
+        .s_we    (sb_we),
+        .s_adr   (sb_adr),
+        .s_dat   (sb_dat),
+        .s_sel   (sb_sel),
+        .s_stall (sb_stall),
+        .s_ack   (sb_ack)
+    );
+
+    // ---- the ring, and the memory port behind it ----------------------------
+    // Two clients of wb_arb: the ring's reader at 0 and its writer at 1.  The
+    // Apple's memory, when it comes, goes in a strict-priority slot above
+    // both; see wb_arb.
+    wire [1:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;
+    wire [47:0]  c_addr;
+    wire [255:0] c_data;
+    wire [127:0] c_rdata;
+
+    wb_arb #(.N (2)) u_wb_arb (
+        .clk (clk_ctrl), .rst (rst),
+        .c_req (c_req), .c_gnt (c_gnt), .c_cyc (c_cyc), .c_stb (c_stb),
+        .c_we (c_we), .c_addr (c_addr), .c_data (c_data),
+        .c_sel ({16'hFFFF, 16'hFFFF}),
+        .c_stall (c_stall), .c_ack (c_ack), .c_rdata (c_rdata),
+        .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
+        .wb_addr (wb_addr), .wb_data (wb_data), .wb_sel (wb_sel),
+        .wb_aux (wb_aux), .wb_stall (wb_stall), .wb_ack (wb_ack),
+        .wb_rdata (wb_rdata), .wb_rdata_aux (wb_rdata_aux)
+    );
+
+    assign c_we          = 2'b10;           // the reader reads, the writer writes
+    assign c_data[127:0] = 128'd0;          // the reader carries no data
+
+    tx_ring u_ring (
+        .clk            (clk_ctrl),
+        .rst            (rst),
+        .calib_complete (calib_complete),
+        .s_cyc          (sb_cyc),
+        .s_stb          (sb_stb),
+        .s_we           (sb_we),
+        .s_adr          (sb_adr),
+        .s_dat          (sb_dat),
+        .s_sel          (sb_sel),
+        .s_stall        (sb_stall),
+        .s_ack          (sb_ack),
+        .out_word       (tx_word),
+        .out_valid      (out_valid),
+        .out_take       (!txc_full),
+        .rd_req   (c_req[0]),  .rd_gnt (c_gnt[0]),  .rd_cyc (c_cyc[0]),
+        .rd_stb   (c_stb[0]),  .rd_addr (c_addr[23:0]),
+        .rd_stall (c_stall[0]), .rd_ack (c_ack[0]), .rd_data (c_rdata),
+        .wr_req   (c_req[1]),  .wr_gnt (c_gnt[1]),  .wr_cyc (c_cyc[1]),
+        .wr_stb   (c_stb[1]),  .wr_addr (c_addr[47:24]), .wr_data (c_data[255:128]),
+        .wr_stall (c_stall[1]), .wr_ack (c_ack[1]),
+        .status   (ring_status)
+    );
+
+    assign tx_push = out_valid && !txc_full;
 
     // ---- host command channel ---------------------------------------------
     // 'R' resets the FT601, over the Au's own serial bridge - a separate USB
@@ -562,28 +784,38 @@ module card_link #(
     assign cmd_reset_strobe = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
 
     // ---- status over UART -------------------------------------------------
-    // "C=xxxxxxxx E=x O=x P=x" - events captured, capture enabled, overflow, and
-    // whether phi0 is ticking.  P is the one that answers "is this card actually
-    // in a machine?", which no amount of staring at the USB side will tell you.
-    // The
-    // UART is the only way to see the card's own view when the FT601 link is the
-    // thing under suspicion.
+    // "C=xxxxxxxx E=x O=x P=x D=x T=x R=xxxxxx" - events captured, capture
+    // enabled, overflow, whether phi0 is ticking, whether the DDR3
+    // calibrated, whether a message was ever torn on the bus, and the lines
+    // the DDR3 ring holds right now.  R is the one number the host cannot
+    // report about its own stall - it is the observer that is not stalled.  P is the one that answers
+    // "is this card actually in a machine?", which no amount of staring at the
+    // USB side will tell you; D answers "is there a link at all?", since every
+    // word to the host crosses the DDR3 and a board that cannot calibrate has
+    // nothing to say there; T is a can't-happen, reported because can't-
+    // happens have to be seen to be fixed.  The UART is the only way to see
+    // the card's own view when the FT601 link is the thing under suspicion.
     localparam [7:0] CH_C = 8'h43, CH_E = 8'h45, CH_O = 8'h4F, CH_EQ = 8'h3D;
-    localparam [7:0] CH_P = 8'h50;
+    localparam [7:0] CH_P = 8'h50, CH_D = 8'h44, CH_T = 8'h54;
     localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
-    localparam [4:0] RPT_LAST = 5'd23;
-    localparam [4:0] RPT_IDLE = 5'd24;
+    localparam [7:0] CH_R = 8'h52;
+
+    localparam [5:0] RPT_LAST = 6'd40;
+    localparam [5:0] RPT_IDLE = 6'd41;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
 
     reg [21:0] rpt_div  = 22'd0;
-    reg [4:0]  rpt_idx  = RPT_IDLE;
+    reg [5:0]  rpt_idx  = RPT_IDLE;
     reg [31:0] rpt_cnt  = 32'd0;
     reg        rpt_en   = 1'b0;
     reg        rpt_ovf  = 1'b0;
     reg        rpt_phi  = 1'b0;
+    reg        rpt_cal  = 1'b0;
+    reg        rpt_torn = 1'b0;
+    reg [23:0] rpt_ring = 24'd0;
 
     always @(posedge clk_ctrl) begin
         if (!clk_locked) begin
@@ -596,10 +828,13 @@ module card_link #(
                 rpt_en  <= capture_enable;
                 rpt_ovf <= overflow;
                 rpt_phi <= phi0_live;
-                rpt_idx <= 5'd0;
+                rpt_cal <= calib_complete;
+                rpt_torn <= ring_status[26];
+                rpt_ring <= {2'd0, ring_status[21:0]};
+                rpt_idx <= 6'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
-                else                     rpt_idx <= rpt_idx + 5'd1;
+                else                     rpt_idx <= rpt_idx + 6'd1;
             end
         end
     end
@@ -607,17 +842,25 @@ module card_link #(
     reg [3:0] nib;
     always @(*) begin
         case (rpt_idx)
-            5'd2:  nib = rpt_cnt[31:28];
-            5'd3:  nib = rpt_cnt[27:24];
-            5'd4:  nib = rpt_cnt[23:20];
-            5'd5:  nib = rpt_cnt[19:16];
-            5'd6:  nib = rpt_cnt[15:12];
-            5'd7:  nib = rpt_cnt[11:8];
-            5'd8:  nib = rpt_cnt[7:4];
-            5'd9:  nib = rpt_cnt[3:0];
-            5'd13: nib = {3'b000, rpt_en};
-            5'd17: nib = {3'b000, rpt_ovf};
-            5'd21: nib = {3'b000, rpt_phi};
+            6'd2:  nib = rpt_cnt[31:28];
+            6'd3:  nib = rpt_cnt[27:24];
+            6'd4:  nib = rpt_cnt[23:20];
+            6'd5:  nib = rpt_cnt[19:16];
+            6'd6:  nib = rpt_cnt[15:12];
+            6'd7:  nib = rpt_cnt[11:8];
+            6'd8:  nib = rpt_cnt[7:4];
+            6'd9:  nib = rpt_cnt[3:0];
+            6'd13: nib = {3'b000, rpt_en};
+            6'd17: nib = {3'b000, rpt_ovf};
+            6'd21: nib = {3'b000, rpt_phi};
+            6'd25: nib = {3'b000, rpt_cal};
+            6'd29: nib = {3'b000, rpt_torn};
+            6'd33: nib = rpt_ring[23:20];
+            6'd34: nib = rpt_ring[19:16];
+            6'd35: nib = rpt_ring[15:12];
+            6'd36: nib = rpt_ring[11:8];
+            6'd37: nib = rpt_ring[7:4];
+            6'd38: nib = rpt_ring[3:0];
             default: nib = 4'd0;
         endcase
     end
@@ -628,19 +871,28 @@ module card_link #(
     reg [7:0] ch;
     always @(*) begin
         case (rpt_idx)
-            5'd0:  ch = CH_C;
-            5'd1:  ch = CH_EQ;
-            5'd10: ch = CH_SP;
-            5'd11: ch = CH_E;
-            5'd12: ch = CH_EQ;
-            5'd14: ch = CH_SP;
-            5'd15: ch = CH_O;
-            5'd16: ch = CH_EQ;
-            5'd18: ch = CH_SP;
-            5'd19: ch = CH_P;
-            5'd20: ch = CH_EQ;
-            5'd22: ch = CH_CR;
-            5'd23: ch = CH_LF;
+            6'd0:  ch = CH_C;
+            6'd1:  ch = CH_EQ;
+            6'd10: ch = CH_SP;
+            6'd11: ch = CH_E;
+            6'd12: ch = CH_EQ;
+            6'd14: ch = CH_SP;
+            6'd15: ch = CH_O;
+            6'd16: ch = CH_EQ;
+            6'd18: ch = CH_SP;
+            6'd19: ch = CH_P;
+            6'd20: ch = CH_EQ;
+            6'd22: ch = CH_SP;
+            6'd23: ch = CH_D;
+            6'd24: ch = CH_EQ;
+            6'd26: ch = CH_SP;
+            6'd27: ch = CH_T;
+            6'd28: ch = CH_EQ;
+            6'd30: ch = CH_SP;
+            6'd31: ch = CH_R;
+            6'd32: ch = CH_EQ;
+            6'd39: ch = CH_CR;
+            6'd40: ch = CH_LF;
             default: ch = hex;
         endcase
     end

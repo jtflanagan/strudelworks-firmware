@@ -3,7 +3,7 @@
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
 // reg_map_tb - the whole register path, from a host message to a reply on the
-// wire: ft601_msg_rx -> reg_bridge -> wb_regfile -> tx_arb.
+// wire: ft601_msg_rx -> reg_bridge -> wb_regfile -> reply_stream -> msg_arb.
 //
 // The parts are individually simple and the interesting failures are all in the
 // seams, so this drives the real modules end to end rather than any of them in
@@ -133,18 +133,37 @@ module reg_map_tb;
         .hd_busy (hd_busy), .hd_execs (hd_execs), .res_drive (res_drive),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key), .kbd_drop (kbd_drop),
         .kbd_strobe (kbd_strobe), .kbd_taken (kbd_taken),
+        .ring_status (32'h0200_1234),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
     );
 
-    // ---- card -> host: capture whatever tx_arb emits -------------------------
-    reg  [31:0] src_data = 32'd0;
-    reg         src_push = 1'b0;
-    wire        src_full;
+    // ---- card -> host: capture whatever msg_arb emits -----------------------
+    // The capture's port, played by the tb: a word offered on a level and held
+    // until taken, which is the shape bus_event_capture now has.
+    reg  [31:0] src_data  = 32'd0;
+    reg         src_valid = 1'b0;
+    wire        src_take;
+    reg         src_took  = 1'b0;
+    always @(posedge clk) src_took <= src_valid && src_take;
+
+    // Offer one word and return once it has been taken - one cycle when the
+    // arbiter is ours, longer when it is someone else's.
+    task offer(input [31:0] w);
+        begin
+            src_data  = w;
+            src_valid = 1'b1;
+            @(negedge clk);
+            while (!src_took) @(negedge clk);
+            src_valid = 1'b0;
+        end
+    endtask
+
     wire [31:0] tx_data;
-    wire        tx_push;
+    wire        out_valid;
     reg         tx_full = 1'b0;
+    wire        tx_push = out_valid && !tx_full;
     // A notice, offered the way card_link offers one: held until taken.
     reg  [31:0] note_word  = 32'd0;
     reg         note_valid = 1'b0;
@@ -169,15 +188,50 @@ module reg_map_tb;
         aux_takes = aux_takes + 1;
     end
 
-    tx_arb u_arb (
+    // The masters in card_link's order: reply, notice, application, capture -
+    // each a stream through msg_master onto the bus; the tb plays the slave.
+    wire [3:0]   ma_valid, ma_take;
+    wire [127:0] ma_word;
+
+    reply_stream u_reply (
         .clk (clk), .rst (rst),
-        .src_data (src_data), .src_push (src_push), .src_full (src_full),
         .rsp_addr (rsp_addr), .rsp_data (rsp_data),
         .rsp_valid (rsp_valid), .rsp_take (rsp_take),
-        .note_word (note_word), .note_valid (note_valid), .note_take (note_take),
-        .aux_word (aux_word), .aux_valid (aux_valid), .aux_take (aux_take),
-        .tx_data (tx_data), .tx_push (tx_push), .tx_full (tx_full)
+        .word (ma_word[31:0]), .valid (ma_valid[0]), .take (ma_take[0])
     );
+    assign ma_word[63:32]  = note_word;  assign ma_valid[1] = note_valid; assign note_take = ma_take[1];
+    assign ma_word[95:64]  = aux_word;   assign ma_valid[2] = aux_valid;  assign aux_take  = ma_take[2];
+    assign ma_word[127:96] = src_data;   assign ma_valid[3] = src_valid;  assign src_take  = ma_take[3];
+
+    wire [3:0]   mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
+    wire [127:0] mb_adr, mb_dat;
+    wire [15:0]  mb_sel;
+    wire         sb_cyc, sb_stb, sb_we;
+    wire [31:0]  sb_adr, sb_dat;
+    wire [3:0]   sb_sel;
+    reg          sb_ack = 1'b0;
+
+    genvar gm;
+    generate for (gm = 0; gm < 4; gm = gm + 1) begin : g_m
+        msg_master u_m (
+            .clk (clk), .rst (rst),
+            .word (ma_word[gm*32 +: 32]), .valid (ma_valid[gm]), .take (ma_take[gm]),
+            .cyc (mb_cyc[gm]), .stb (mb_stb[gm]), .we (mb_we[gm]),
+            .adr (mb_adr[gm*32 +: 32]), .dat (mb_dat[gm*32 +: 32]), .sel (mb_sel[gm*4 +: 4]),
+            .stall (mb_stall[gm]), .ack (mb_ack[gm])
+        );
+    end endgenerate
+
+    msg_arb #(.N (4)) u_arb (
+        .clk (clk), .rst (rst),
+        .m_cyc (mb_cyc), .m_stb (mb_stb), .m_we (mb_we), .m_adr (mb_adr),
+        .m_dat (mb_dat), .m_sel (mb_sel), .m_stall (mb_stall), .m_ack (mb_ack),
+        .s_cyc (sb_cyc), .s_stb (sb_stb), .s_we (sb_we), .s_adr (sb_adr),
+        .s_dat (sb_dat), .s_sel (sb_sel), .s_stall (tx_full), .s_ack (sb_ack)
+    );
+    assign tx_data   = sb_dat;
+    assign out_valid = sb_cyc && sb_stb;
+    always @(posedge clk) sb_ack <= !rst && sb_cyc && sb_stb && !tx_full;
 
     reg [31:0] out_mem [0:255];
     integer    out_n = 0;
@@ -269,25 +323,27 @@ module reg_map_tb;
         expect_word(base + 2, BUILD_DATE,    "read-only register unchanged by write");
         $display("  ok: write to a read-only register leaves it alone and says so");
 
+        // --- case 5b / RING_STATUS reads back what tx_ring reports -----------
+        base = out_n;
+        do_read(32'h8000_0024);
+        if (out_mem[base+2] !== 32'h0200_1234) begin
+            $display("FAIL: RING_STATUS read %08x, expected 02001234", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: RING_STATUS reads back tx_ring's word");
+
         // --- case 6 / a reply must not land inside another message -----------
         // The one this file exists for.  A BUS_EVENTS message is streamed while
         // a register read is issued mid-payload; the message must come out whole.
         base = out_n;
         @(negedge clk);
-        src_data = hdr(T_BUS_EVENTS, 8'd4, 16'd0); src_push = 1'b1;
-        @(negedge clk);
-        src_data = 32'h1111_1111;
-        @(negedge clk);
+        offer(hdr(T_BUS_EVENTS, 8'd4, 16'd0));
+        offer(32'h1111_1111);
         // Request arrives with the payload half emitted.
         push_word(hdr(T_REG_READ, 8'd1, 16'd0));
         push_word(32'h8000_0004);
-        src_data = 32'h2222_2222;
-        @(negedge clk);
-        src_data = 32'h3333_3333;
-        @(negedge clk);
-        src_data = 32'h4444_4444;
-        @(negedge clk);
-        src_push = 1'b0;
+        offer(32'h2222_2222);
+        offer(32'h3333_3333);
+        offer(32'h4444_4444);
         repeat (80) @(posedge clk);
 
         // The five source words must appear consecutively and in order.
@@ -484,16 +540,11 @@ module reg_map_tb;
         base = out_n;
         note_word = {15'd0, 1'b1, 8'h17, 8'd0};
         @(negedge clk);
-        src_data = hdr(T_BUS_EVENTS, 8'd3, 16'd0); src_push = 1'b1;
-        @(negedge clk);
-        src_data = 32'hAAAA_0001;
+        offer(hdr(T_BUS_EVENTS, 8'd3, 16'd0));
         note_valid = 1'b1;                                // arrives mid-payload
-        @(negedge clk);
-        src_data = 32'hAAAA_0002;
-        @(negedge clk);
-        src_data = 32'hAAAA_0003;
-        @(negedge clk);
-        src_push = 1'b0;
+        offer(32'hAAAA_0001);
+        offer(32'hAAAA_0002);
+        offer(32'hAAAA_0003);
         repeat (40) @(posedge clk);
 
         hdr_at = -1;
@@ -558,7 +609,7 @@ module reg_map_tb;
         hd_busy = 1'b0;
 
         // --- case 13 / an application message, whole, and never inside another
-        // The hard disk's HD_DATA takes tx_arb's third slot: a header and
+        // The hard disk's HD_DATA takes msg_arb's application port: a header and
         // then its payload, streamed a word at a time.  Same obligation as a
         // reply - it waits for the boundary and comes out intact - and one of
         // its own: a source that offers the next word a cycle late must not
@@ -570,32 +621,18 @@ module reg_map_tb;
         aux_mem[3] = 32'hD000_0003;
         aux_i = 0;
         @(negedge clk);
-        src_data = hdr(T_BUS_EVENTS, 8'd3, 16'd0); src_push = 1'b1;
-        @(negedge clk);
-        src_data = 32'hBBBB_0001;
+        offer(hdr(T_BUS_EVENTS, 8'd3, 16'd0));
         aux_n = 4;                                  // arrives mid-payload
-        @(negedge clk);
-        src_data = 32'hBBBB_0002;
-        @(negedge clk);
-        src_data = 32'hBBBB_0003;
-        @(negedge clk);
-        src_push = 1'b0;
+        offer(32'hBBBB_0001);
+        offer(32'hBBBB_0002);
+        offer(32'hBBBB_0003);
         // And more capture traffic right behind, to try to interleave.  Offered
-        // the way bus_event_capture offers it: only while src_full is low,
-        // since the arbiter manufactures its gap by back-pressuring the source.
+        // the way bus_event_capture offers it: held until taken, which is not
+        // until the arbiter has let the pending HD_DATA through whole.
         repeat (2) @(negedge clk);
-        src_data = hdr(T_BUS_EVENTS, 8'd2, 16'd0);
-        while (src_full) @(negedge clk);
-        src_push = 1'b1;
-        @(negedge clk); src_push = 1'b0;
-        src_data = 32'hCCCC_0001;
-        while (src_full) @(negedge clk);
-        src_push = 1'b1;
-        @(negedge clk); src_push = 1'b0;
-        src_data = 32'hCCCC_0002;
-        while (src_full) @(negedge clk);
-        src_push = 1'b1;
-        @(negedge clk); src_push = 1'b0;
+        offer(hdr(T_BUS_EVENTS, 8'd2, 16'd0));
+        offer(32'hCCCC_0001);
+        offer(32'hCCCC_0002);
         repeat (40) @(posedge clk);
 
         hdr_at = -1;

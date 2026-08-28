@@ -88,7 +88,25 @@ module master_top #(
     output wire        ft_wakeup,
     output wire        ft_reset,
     inout  wire [31:0] ft_data,
-    inout  wire [3:0]  ft_be
+    inout  wire [3:0]  ft_be,
+
+    // DDR3 (constr/ddr3.xdc).  The card's outgoing stream crosses it; see
+    // card_link and docs/TX_RING.md.  Names match au_top's.
+    output wire [13:0] ddr3_addr,
+    output wire [2:0]  ddr3_ba,
+    output wire        ddr3_ras_n,
+    output wire        ddr3_cas_n,
+    output wire        ddr3_we_n,
+    output wire        ddr3_reset_n,
+    output wire [0:0]  ddr3_ck_p,
+    output wire [0:0]  ddr3_ck_n,
+    output wire [0:0]  ddr3_cke,
+    output wire [0:0]  ddr3_cs_n,
+    output wire [1:0]  ddr3_dm,
+    output wire [0:0]  ddr3_odt,
+    inout  wire [15:0] ddr3_dq,
+    inout  wire [1:0]  ddr3_dqs_p,
+    inout  wire [1:0]  ddr3_dqs_n
 );
 
     wire        apple_clk, apple_rst;
@@ -152,7 +170,13 @@ module master_top #(
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),
-        .ft_data (ft_data), .ft_be (ft_be)
+        .ft_data (ft_data), .ft_be (ft_be),
+        .ddr3_addr (ddr3_addr), .ddr3_ba (ddr3_ba),
+        .ddr3_ras_n (ddr3_ras_n), .ddr3_cas_n (ddr3_cas_n), .ddr3_we_n (ddr3_we_n),
+        .ddr3_reset_n (ddr3_reset_n), .ddr3_ck_p (ddr3_ck_p), .ddr3_ck_n (ddr3_ck_n),
+        .ddr3_cke (ddr3_cke), .ddr3_cs_n (ddr3_cs_n), .ddr3_dm (ddr3_dm),
+        .ddr3_odt (ddr3_odt), .ddr3_dq (ddr3_dq),
+        .ddr3_dqs_p (ddr3_dqs_p), .ddr3_dqs_n (ddr3_dqs_n)
     );
 
     // ---- watching, exactly as the snooper does ------------------------------

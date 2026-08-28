@@ -95,6 +95,7 @@ protocol.
 | `0x8000_0018` | RESET | W1 bit 0, W bits 31:16 | pulse the Apple's RES' low, for a programmatic Ctrl-Reset; `pulsing`, `pulses` — see BUS_MASTER.md |
 | `0x8000_001C` | KBD_INJECT | W bits 6:0, W1 bits 7-8 | a key on the keyboard the soft core reads: `key`, `press`, `drop`; `strobe`, `taken` — see KEYBOARD.md |
 | `0x8000_0020` | BUTTONS | RW bits 5:0 | Open-Apple, Closed-Apple and PB2 as the host holds them, two bits each (hardware / up / down); `hw` — see KEYBOARD.md |
+| `0x8000_0024` | RING_STATUS | RO | the DDR3 TX ring: `[21:0]` occupancy in lines, `[24]` full, `[25]` DDR3 calibrated, `[26]` a message was torn on the bus (sticky) — see TX_RING.md |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.
@@ -121,15 +122,18 @@ this queue would add a depth and an overflow policy to serve a case that does
 not occur. If a host ever does pipeline, the symptom is a missing reply rather
 than a wrong one, because of the address echo.
 
-**A reply never lands inside another message.** `tx_arb` tracks message
-boundaries in the outgoing stream and manufactures a gap by back-pressuring the
-event path, rather than waiting for one to occur — waiting would work on a quiet
-link and starve on a busy one. The same slot carries the card's notices and
-its application messages (HD_DATA, up to 129 words, streamed from its source
-and its length snooped from its own header), in that priority order. This matters more than it sounds: with no sync
-word and no resynchronisation, an interleaved word does not break the stream
-loudly, it makes it plausible and wrong from that point on. `sim/reg_map_tb.sv`
-asserts it directly.
+**A reply never lands inside another message.** Every source of messages —
+the reply, the card's notices, its application messages (HD_DATA, up to 129
+words), the capture — is a master on one 32-bit Wishbone bus, and a message
+is one burst: CYC held from the header to the last ack. The arbiter
+(`msg_arb`) grants per CYC by fixed priority, in that order, and never
+pre-empts a burst, which is Wishbone's own rule and is exactly message
+atomicity. This matters more than it sounds: with no sync word and no
+resynchronisation, an interleaved word does not break the stream loudly, it
+makes it plausible and wrong from that point on. A master that drops CYC
+mid-message is flagged (RING_STATUS bit 26, `T=1` on the UART).
+`sim/reg_map_tb.sv` asserts it directly; `sim/msg_arb_tb.sv` hammers the bus
+with random bursts. See `TX_RING.md`.
 
 ### The heartbeat period is the link's latency floor
 

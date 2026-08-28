@@ -38,7 +38,10 @@ module bus_snoop_tb;
     reg         tx_full    = 1'b0;
 
     wire [31:0] tx_data;
-    wire        tx_push;
+    wire        tx_valid;
+    // The arbiter's take is "there is room", a level; tx_full is the tb's
+    // way of saying there is not.
+    wire        tx_take = !tx_full;
     wire        overflow;
     wire [31:0] captured;
 
@@ -48,7 +51,7 @@ module bus_snoop_tb;
         .clk (clk), .rst (rst),
         .enable (enable), .status_req (status_req),
         .ev_data (ev_data), .ev_valid (ev_valid),
-        .tx_data (tx_data), .tx_push (tx_push), .tx_full (tx_full),
+        .tx_data (tx_data), .tx_valid (tx_valid), .tx_take (tx_take),
         .overflow (overflow), .captured (captured)
     );
 
@@ -67,7 +70,7 @@ module bus_snoop_tb;
     reg        have_expect = 1'b0;
     reg        in_status = 1'b0;
 
-    always @(posedge clk) if (!rst && tx_push && !tx_full) begin
+    always @(posedge clk) if (!rst && tx_valid && tx_take) begin
         if (blocks_left == 0) begin
             // Header.
             case (tx_data[15:8])

@@ -58,7 +58,11 @@ run bus_event_capture rtl/bus_event_capture.sv rtl/sync_fifo.sv
 run synchronizer  rtl/synchronizer.sv
 run wb_regfile    rtl/wb_regfile.sv
 run reg_bridge    rtl/reg_bridge.sv
-run tx_arb        rtl/tx_arb.sv
+run msg_arb       rtl/msg_arb.sv
+run reply_stream  rtl/reply_stream.sv
+run msg_master    rtl/msg_master.sv
+run wb_arb        rtl/wb_arb.sv
+run tx_ring       rtl/tx_ring.sv rtl/sync_fifo.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 run apple_bus_write rtl/apple_bus_write.sv
 run boot_hold     rtl/boot_hold.sv

@@ -101,6 +101,9 @@ module wb_regfile #(
     output wire            res_drive,
 
     // Wishbone B4 classic, 32-bit.
+    // RING_STATUS, straight from tx_ring: the DDR3 ring's occupancy in
+    // lines, whether it is full, and whether the DDR3 has calibrated at all.
+    input  wire [31:0]     ring_status,
     input  wire            wb_cyc,
     input  wire            wb_stb,
     input  wire            wb_we,
@@ -132,6 +135,7 @@ module wb_regfile #(
     localparam [13:0] R_RESET      = 'd6;   // 0x8000_0018, W1 bit 0 pulses RES'
     localparam [13:0] R_KBD_INJECT = 'd7;   // 0x8000_001C, W bits 6:0, W1 bits 7-8
     localparam [13:0] R_BUTTONS    = 'd8;   // 0x8000_0020, RW bits 5:0
+    localparam [13:0] R_RING_STATUS = 'd9;  // 0x8000_0024, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -434,6 +438,7 @@ module wb_regfile #(
                         R_RESET:      wb_dat_r <= reset_rd;
                         R_KBD_INJECT: wb_dat_r <= kbd_inject_rd;
                         R_BUTTONS:    wb_dat_r <= buttons_rd;
+                        R_RING_STATUS: wb_dat_r <= ring_status;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end

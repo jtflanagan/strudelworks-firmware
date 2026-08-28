@@ -120,7 +120,7 @@ module hd_card #(
     input  wire [31:0] pay_data,
     input  wire        pay_valid,
 
-    // Card -> host: HD_DATA, streamed through tx_arb's application port.
+    // Card -> host: HD_DATA, streamed through msg_arb's application port.
     output wire [31:0] tx_word,
     output wire        tx_valid,
     input  wire        tx_take,

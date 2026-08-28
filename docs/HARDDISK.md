@@ -135,7 +135,7 @@ this link does. `size` is what `$C0n9/$C0nA` read back afterwards - the ROM
 reads them after a BLK STATUS, so the host sends the unit's size with every
 completion and the card latches it.
 
-`HD_DATA` goes out through `tx_arb`'s third slot: an application message of
+`HD_DATA` goes out through `msg_arb`'s application port: an application message of
 any length, streamed a word at a time, its length snooped from its own header
 so the arbiter knows nothing about the type. Lowest priority of the three - a
 130-word block is the one that can make a register reply wait - and once

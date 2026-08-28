@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // SPDX-FileCopyrightText: 2011 Thomas Skibo
 //
+// Restore the language default for net types.  UberDDR3's sources set
+// `default_nettype none and leave it set, and once the link builds started
+// using the controller (rtl/tx_ring.sv) Vivado compiled them ahead of this
+// file, whose ports are implicit nets in the 2011 idiom - so it stopped
+// synthesising.  One directive, no change to the code below.
+`default_nettype wire
+//
 // Vendored verbatim from AppleTini v5_1_3 (which carried it unchanged from
 // Thomas Skibo's original), where it ran two Mockingboard VIAs in real
 // machines.  Third-party code under its own licence - see the notice below -

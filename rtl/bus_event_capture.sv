@@ -22,6 +22,13 @@
 // frames.  That matters because a frame left half-pushed blocks heartbeat
 // insertion (docs/PROTOCOL.md case 8), and a half-pushed frame that never
 // completes would hold the link on a 1 KB boundary indefinitely.
+//
+// THE OUTPUT IS A msg_arb PORT: valid/take, not push/full.  `tx_valid` says
+// `tx_data` is the next word and is a function of this module's state alone -
+// never of `tx_take` - because the arbiter's take is combinational from valid
+// and the two would otherwise form a loop.  A word is consumed when both are
+// high, which is the same handshake the old push-when-not-full was, seen from
+// the other side.
 //////////////////////////////////////////////////////////////////////////////////
 
 module bus_event_capture #(
@@ -43,10 +50,10 @@ module bus_event_capture #(
     input  wire [31:0] ev_data,
     input  wire        ev_valid,
 
-    // to the TX async FIFO
+    // to msg_arb, as a port of it
     output logic [31:0] tx_data,
-    output logic        tx_push,
-    input  wire         tx_full,
+    output logic        tx_valid,
+    input  wire         tx_take,
 
     // status
     output logic        overflow,
@@ -110,7 +117,7 @@ module bus_event_capture #(
     // is what carries the final count to the host, and it is emitted after the
     // disable - so clearing there reports zero every time.  Measured that way.
 
-    wire status_done = (state == S_ST_PAY) && !tx_full;
+    wire status_done = (state == S_ST_PAY) && tx_take;
 
     // ---- overflow and counters ----------------------------------------------
     always_ff @(posedge clk) begin
@@ -173,28 +180,28 @@ module bus_event_capture #(
     // ---- outputs ------------------------------------------------------------
     always_comb begin
         tx_data  = 32'd0;
-        tx_push  = 1'b0;
+        tx_valid = 1'b0;
         fq_rd_en = 1'b0;
 
         case (state)
             S_HDR: begin
-                tx_data = {16'h0000, T_BUS_EVENTS, left};
-                tx_push = !tx_full;
+                tx_data  = {16'h0000, T_BUS_EVENTS, left};
+                tx_valid = 1'b1;
             end
             S_PAY: begin
                 tx_data  = fq_dout;
-                tx_push  = !tx_full && !fq_empty;
-                fq_rd_en = !tx_full && !fq_empty;
+                tx_valid = !fq_empty;
+                fq_rd_en = tx_take && !fq_empty;
             end
             S_ST_HDR: begin
-                tx_data = {14'd0, enable, overflow, T_BUS_STATUS, 8'd1};
-                tx_push = !tx_full;
+                tx_data  = {14'd0, enable, overflow, T_BUS_STATUS, 8'd1};
+                tx_valid = 1'b1;
             end
             S_ST_PAY: begin
                 // The captured count, so the host can check its file is complete
                 // rather than merely non-empty.
-                tx_data = captured;
-                tx_push = !tx_full;
+                tx_data  = captured;
+                tx_valid = 1'b1;
             end
             default: ;
         endcase
@@ -219,15 +226,15 @@ module bus_event_capture #(
                     end
                 end
 
-                S_HDR: if (!tx_full) state <= S_PAY;
+                S_HDR: if (tx_take) state <= S_PAY;
 
-                S_PAY: if (!tx_full && !fq_empty) begin
+                S_PAY: if (tx_take && !fq_empty) begin
                     if (left == 8'd1) state <= S_IDLE;
                     else              left  <= left - 8'd1;
                 end
 
-                S_ST_HDR: if (!tx_full) state <= S_ST_PAY;
-                S_ST_PAY: if (!tx_full) state <= S_IDLE;
+                S_ST_HDR: if (tx_take) state <= S_ST_PAY;
+                S_ST_PAY: if (tx_take) state <= S_IDLE;
                 default:  state <= S_IDLE;
             endcase
         end

@@ -13,7 +13,8 @@ iverilog -g2012 -I "$root/rtl" -o "$out" -s hd_card_tb \
     "$root/rtl/cpu65c02.sv" \
     "$root/rtl/apple_bus_write.sv" \
     "$root/rtl/ft601_msg_rx.sv" \
-    "$root/rtl/tx_arb.sv" \
+    "$root/rtl/msg_arb.sv" \
+    "$root/rtl/msg_master.sv" \
     "$root/rtl/slot_switches.sv" \
     "$root/rtl/hd_card.sv"
 exec vvp -n "$out"
