@@ -119,6 +119,7 @@ protocol.
 | `0x8000_005C` | MEM_MISMATCH | RO | reads where the card's byte differed from the bus's (noise until the working set is written; watch for a plateau) |
 | `0x8000_0060` | MEM_SERVED | RO | reads answered by the card |
 | `0x8000_0064` | MEM_LAST | RO | `{addr16, card byte, bus byte}` of the last mismatch |
+| `0x8000_0068` | MEM_DIVERTED | RO | writes to a RamWorks bank the machine does not have, sent out on the bus as reads so the machine's own auxiliary memory is untouched — see MEMORY.md, "The RamWorks" |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

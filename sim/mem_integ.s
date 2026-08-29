@@ -12,6 +12,7 @@
 
 PASS    = $0300
 FAILF   = $03FF
+RWFLAG  = $03FE          ; non-zero once the card is serving: run the RamWorks test
 PTR     = $06
 
 .macro  jne target
@@ -120,9 +121,15 @@ ver:    tya
         jsr auxtest
         bcs fail
 
-        ; ---- 5. the RamWorks banks, from the ROM ------------------------------
+        ; ---- 5. the RamWorks banks, from the ROM - once the card is serving.
+        ; The machine the testbench models has no RamWorks; the card is it,
+        ; and only its image can answer.  The testbench sets RWFLAG through
+        ; the override path when it turns serving on.
+        lda RWFLAG
+        beq norw
         jsr rwtest
         bcs fail
+norw:
 
         inc PASS
         jmp loop

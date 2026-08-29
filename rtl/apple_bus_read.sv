@@ -102,6 +102,17 @@ module apple_bus_read #(
     input  wire [7:0]   data_override,
     input  wire         data_override_en,
 
+    // WRITE SUBSTITUTION, likewise.  A write the driver DIVERTED (a write to
+    // a RamWorks bank the machine does not have, sent out as a read of the
+    // same address so the machine's own memory is untouched - see
+    // apple_bus_write.sv) is a read on the wires and a write to the card's
+    // image.  While rw_override_en the event records the WRITE, with
+    // wdata_override as its byte: what the CPU did, which is what the host's
+    // mirror of the image must follow.  Takes precedence over the data
+    // substitution, which is a read's.  A watching build ties both low.
+    input  wire         rw_override_en,
+    input  wire [7:0]   wdata_override,
+
     // one event per phi0 cycle
     output logic [31:0] ev_data,
     output logic        ev_valid,
@@ -212,11 +223,13 @@ module apple_bus_read #(
 
             if (addr_snap) begin
                 addr_q <= addr_clean;
-                ctl_q  <= {m2b0, sync_override_en ? sync_override : m2sel, res, rw};
+                ctl_q  <= {m2b0, sync_override_en ? sync_override : m2sel, res,
+                           rw_override_en ? 1'b0 : rw};
             end
 
             if (data_snap && enable) begin
-                ev_data  <= {4'hf, data_override_en ? data_override : data_clean,
+                ev_data  <= {4'hf, rw_override_en   ? wdata_override :
+                                   data_override_en ? data_override  : data_clean,
                              ctl_q, addr_q};
                 ev_valid <= 1'b1;
             end

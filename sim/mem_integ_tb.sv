@@ -4,12 +4,17 @@
 //////////////////////////////////////////////////////////////////////////////////
 // mem_integ_tb - the whole memory path under the real core: the driver, the
 // reader on the pins, the MMU shadow, the ROM, the cache, the DDR3 client and
-// the arbiter, against a model of a IIe with a language card and a RamWorks
-// of four banks.
+// the arbiter, against a model of a 128K IIe with a language card - ONE
+// auxiliary bank on the pins, as the real machine has - plus a reference
+// RamWorks of four banks kept from the presented ops, which is what the card's
+// image must equal.
 //
 // The core runs sim/mem_integ.s - RAM, the stack, every language-card state,
-// RAMRD/RAMWRT/ALTZP/80STORE with PAGE2 and HIRES, the RamWorks bank
-// register and the banks behind it - first with every serve bit
+// RAMRD/RAMWRT/ALTZP/80STORE with PAGE2 and HIRES, and once the card serves,
+// the RamWorks bank register and the banks behind it, which only the card
+// has: a read of a bank the machine lacks must be the reference's byte, and
+// a write to one must NOT reach the machine's auxiliary bank (the driver
+// sends it out as a read - apple_bus_write.sv) - first with every serve bit
 // clear (the image only tracks), then with all three set under the running
 // program, the changeover the registers promise is safe.  The machine model
 // answers every read on the pins as a IIe would, and that byte is the truth:
@@ -78,6 +83,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .ev_data (), .ev_valid (), .data_tick (),
         .sync_override (drv_sync), .sync_override_en (1'b1),
         .data_override (sub_data), .data_override_en (sub_en),
+        .rw_override_en (op_divert), .wdata_override (op_wdata),
         .res_sync (res_sync), .irq_sync (), .phi0_sync (phi0_sync),
         .data_sync (data_sync), .phi0_active ()
     );
@@ -91,9 +97,10 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
     );
 
-    wire [15:0] op_addr;
-    wire        op_rw, op_present, op_commit, op_ovr;
+    wire [15:0] op_addr, nxt_addr;
+    wire        op_rw, op_present, op_commit, op_ovr, op_divert, q_divert;
     wire [7:0]  op_wdata;
+    reg  [2:0]  serve = 3'b000;
     reg         ovr_en = 1'b0, ovr_rw = 1'b1;
     reg  [15:0] ovr_addr = 16'd0;
     reg  [7:0]  ovr_wdata = 8'd0;
@@ -109,6 +116,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .din_sub_en (sub_en), .din_sub_data (sub_data),
         .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw), .ovr_wdata (ovr_wdata),
         .op_ovr (op_ovr),
+        .nxt_addr (nxt_addr), .divert (serve[0] && q_divert), .op_divert (op_divert),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)
@@ -123,9 +131,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [7:0]  rw_bank;
     wire [7:0]  rom_byte;
     wire        rom_loaded, invalidating, image_ready, refresh_ok, rot_ok, mem_idle;
-    wire [31:0] hits, misses, served, mismatches, last_mismatch;
+    wire [31:0] hits, misses, served, mismatches, last_mismatch, diverted;
     wire [7:0]  late_fills, fifo_drops;
-    reg  [2:0]  serve = 3'b000;
     reg         msg_valid = 1'b0, pay_valid = 1'b0;
     reg  [7:0]  msg_type = 8'd0, msg_len = 8'd0;
     reg  [31:0] pay_data = 32'd0;
@@ -141,7 +148,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (cl_rom_addr),
-        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .sw_state (sw_state), .rw_bank (rw_bank)
+        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .sw_state (sw_state), .rw_bank (rw_bank),
+        .q_addr (nxt_addr), .q_divert (q_divert)
     );
     apple_rom u_rom (
         .clk (clk), .rst (rst),
@@ -153,13 +161,13 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rw (cl_rw),
         .cl_wr_image (cl_wr_image), .op_addr (op_addr), .op_wdata (op_wdata),
-        .op_present (op_present), .op_commit (op_commit), .data_sync (data_sync),
+        .op_present (op_present), .op_commit (op_commit), .op_divert (op_divert), .data_sync (data_sync),
         .rom_byte (rom_byte), .rom_loaded (rom_loaded),
         .sub_en (sub_en), .sub_data (sub_data),
         .serve (serve), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
         .hits (hits), .misses (misses), .served (served), .mismatches (mismatches),
-        .last_mismatch (last_mismatch), .late_fills (late_fills), .fifo_drops (fifo_drops),
+        .last_mismatch (last_mismatch), .diverted (diverted), .late_fills (late_fills), .fifo_drops (fifo_drops),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
         .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
         .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)
@@ -245,15 +253,24 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     end
 
-    // ---- the machine: a IIe with a language card and a RamWorks of NRW banks ---------
-    reg [7:0] main_ram [0:65535];
-    reg [7:0] aux_ram  [0:NRW*65536-1];     // RamWorks bank b at b*65536
-    reg [7:0] lc_main  [0:16383];    // bank 1 D000 at 0, bank 2 D000 at 4096, E000-FFFF at 8192
-    reg [7:0] lc_aux   [0:NRW*16384-1];     // ...per RamWorks bank
-    reg [7:0] rom_img  [0:16383];    // $C000-$FFFF
+    // ---- the machine: a 128K IIe with a language card, on the pins -------------------
+    // main_ram / phys_aux / lc_main / phys_lcaux are what the real machine
+    // holds, written from the pins: ONE auxiliary bank, no bank register.
+    // aux_ram / lc_aux are the REFERENCE RamWorks - what the card's image must
+    // hold - written from the presented op at its data phase, bank by bank,
+    // which is how a diverted write (a read on the pins) still reaches them.
+    // The bank register m_bank is the reference's; the pins carry the $C073
+    // write that sets it, since $Cxxx is never diverted.
+    reg [7:0] main_ram  [0:65535];
+    reg [7:0] phys_aux  [0:65535];
+    reg [7:0] aux_ram   [0:NRW*65536-1];    // reference: RamWorks bank b at b*65536
+    reg [7:0] lc_main   [0:16383];   // bank 1 D000 at 0, bank 2 D000 at 4096, E000-FFFF at 8192
+    reg [7:0] phys_lcaux [0:16383];
+    reg [7:0] lc_aux    [0:NRW*16384-1];    // reference, per RamWorks bank
+    reg [7:0] rom_img   [0:16383];   // $C000-$FFFF
     reg m_store80, m_ramrd, m_ramwrt, m_altzp, m_page2, m_hires;
     reg m_bank2, m_lcrd, m_wren, m_pre;
-    reg [7:0] m_bank;                // the RamWorks bank register
+    reg [7:0] m_bank;                // the reference RamWorks's bank register
 
     function automatic bit m_aux(input [15:0] a, input bit rd);
         if (a < 16'h0200) m_aux = m_altzp;
@@ -300,10 +317,10 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             end else if (addr_drive[15:12] == 4'hC) begin
                 data_pin <= 8'hA5;
             end else if (addr_drive >= 16'hD000) begin
-                if (m_lcrd) data_pin <= m_altzp ? lc_aux[m_lcauxidx(addr_drive)] : lc_main[m_lcidx(addr_drive)];
+                if (m_lcrd) data_pin <= m_altzp ? phys_lcaux[m_lcidx(addr_drive)] : lc_main[m_lcidx(addr_drive)];
                 else        data_pin <= rom_img[addr_drive - 16'hC000];
             end else begin
-                data_pin <= m_aux(addr_drive, 1'b1) ? aux_ram[m_auxidx(addr_drive)] : main_ram[addr_drive];
+                data_pin <= m_aux(addr_drive, 1'b1) ? phys_aux[addr_drive] : main_ram[addr_drive];
             end
         end else if (data_oe) begin
             if (addr_drive[15:8] == 8'hC0) begin
@@ -335,11 +352,11 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                 // nothing there
             end else if (addr_drive >= 16'hD000) begin
                 if (m_wren) begin
-                    if (m_altzp) lc_aux[m_lcauxidx(addr_drive)] <= data_drive;
+                    if (m_altzp) phys_lcaux[m_lcidx(addr_drive)] <= data_drive;
                     else         lc_main[m_lcidx(addr_drive)] <= data_drive;
                 end
             end else begin
-                if (m_aux(addr_drive, 1'b0)) aux_ram[m_auxidx(addr_drive)] <= data_drive;
+                if (m_aux(addr_drive, 1'b0)) phys_aux[addr_drive] <= data_drive;
                 else                         main_ram[addr_drive] <= data_drive;
             end
             data_pin <= data_drive;
@@ -347,8 +364,25 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     end
     always @(posedge clk) if (since_fall == BUS_AT + 1 && driving) mach_byte <= data_pin;
 
+    // The reference RamWorks, from the op the card presented - diverted or
+    // not - at its data phase, with the switches as the pins set them.
+    always @(posedge clk) if (op_commit && !op_rw && op_addr[15:12] != 4'hC) begin
+        if (op_addr >= 16'hD000) begin
+            if (m_wren && m_altzp) lc_aux[m_lcauxidx(op_addr)] <= op_wdata;
+        end else if (m_aux(op_addr, 1'b0)) begin
+            aux_ram[m_auxidx(op_addr)] <= op_wdata;
+        end
+    end
+    // The byte the reference holds at an image address in a bank the machine
+    // does not have: what a served read there must return.
+    function automatic [7:0] ref_byte(input [23:0] pa);
+        if (pa[15:0] < 16'hC000) ref_byte = aux_ram[(pa[23:16] - 1) * 65536 + pa[15:0]];
+        else                     ref_byte = lc_aux[(pa[23:16] - 1) * 16384 + (pa[15:0] - 16'hC000)];
+    endfunction
+
     // ---- the running checks --------------------------------------------------------
     integer reads = 0, reads_bad = 0, ovr_cycles = 0, served_reads = 0;
+    integer banked_reads = 0, banked_writes = 0, pin_writes_banked = 0;
     reg [7:0] pass_count = 8'd0;
     reg       failed = 1'b0;
     always @(posedge clk) if (op_commit) begin
@@ -356,13 +390,28 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         if (op_rw) begin
             reads = reads + 1;
             if (sub_en) served_reads = served_reads + 1;
-            if (cpu_din !== mach_byte) begin
+            if (cl_pa[23:17] != 7'd0 && (cl_cls == 2'd1 || cl_cls == 2'd2)) begin
+                // RAM or LC in a bank the machine does not have: the
+                // reference is the truth.  (cl_pa carries bank bits for a
+                // BUS or ROM op too, whose byte comes from elsewhere.)
+                banked_reads = banked_reads + 1;
+                if (cpu_din !== ref_byte(cl_pa)) begin
+                    reads_bad = reads_bad + 1;
+                    if (reads_bad <= 5)
+                        $display("    read $%04X (pa %06x): core got %02x, the reference says %02x (sub_en %0d)",
+                                 op_addr, cl_pa, cpu_din, ref_byte(cl_pa), sub_en);
+                end
+            end else if (cpu_din !== mach_byte) begin
                 reads_bad = reads_bad + 1;
                 if (reads_bad <= 5)
                     $display("    read $%04X: core got %02x, the machine said %02x (sub_en %0d, switches %03x)",
                              op_addr, cpu_din, mach_byte, sub_en, sw_state);
             end
         end else begin
+            if (cl_pa[23:17] != 7'd0 && (cl_cls == 2'd1 || cl_cls == 2'd2)) begin
+                banked_writes = banked_writes + 1;
+                if (!op_divert) pin_writes_banked = pin_writes_banked + 1;
+            end
             if (op_addr == 16'h0300) begin
                 pass_count = op_wdata;
                 $display("    pass %0d at %0t (%0d reads so far)", op_wdata, $time, reads);
@@ -420,7 +469,20 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                 for (b = 0; b < NRW; b = b + 1)
                     if (smem[(b + 1) * 65536 + 16'hC000 + a] !== lc_aux[b * 16384 + a]) bad = bad + 1;
             end
-            if (bad != 0) fail($sformatf("%0s: %0d image bytes differ from the machine's memory", what, bad));
+            if (bad != 0) fail($sformatf("%0s: %0d image bytes differ from the reference", what, bad));
+            else ok(what);
+        end
+    endtask
+
+    // The machine's own auxiliary bank holds bank 0's writes and nobody
+    // else's: the diverted writes never reached the pins.
+    task check_phys(input string what);
+        integer a, bad;
+        begin
+            bad = 0;
+            for (a = 0; a < 16'hC000; a = a + 1) if (phys_aux[a] !== aux_ram[a]) bad = bad + 1;
+            for (a = 0; a < 16384; a = a + 1) if (phys_lcaux[a] !== lc_aux[a]) bad = bad + 1;
+            if (bad != 0) fail($sformatf("%0s: %0d bytes of the machine's auxiliary memory differ from bank 0", what, bad));
             else ok(what);
         end
     endtask
@@ -430,9 +492,9 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     integer a, c, served0, reads0, bad0, dma_idx;
     initial begin
         $readmemh(PROG, prog);
-        for (a = 0; a < 65536; a = a + 1) main_ram[a] = 8'h00;
+        for (a = 0; a < 65536; a = a + 1) begin main_ram[a] = 8'h00; phys_aux[a] = 8'h00; end
         for (a = 0; a < NRW * 65536; a = a + 1) aux_ram[a] = 8'h00;
-        for (a = 0; a < 16384; a = a + 1) lc_main[a] = 8'h00;
+        for (a = 0; a < 16384; a = a + 1) begin lc_main[a] = 8'h00; phys_lcaux[a] = 8'h00; end
         for (a = 0; a < NRW * 16384; a = a + 1) lc_aux[a] = 8'h00;
         for (a = 0; a < IMG; a = a + 1) smem[a] = 8'h00;
         for (a = 0; a < 12288; a = a + 1) rom_img[a] = $urandom;
@@ -483,9 +545,29 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok("a DMA through the override path lands in the image as it does in the machine");
 
         // ---- 3. every serve bit set, under the running program ------------------------
+        // Serving first, then the flag that lets the program use the RamWorks:
+        // the machine has none, and only the card's image can answer for it.
         served0 = served_reads; reads0 = reads; bad0 = reads_bad;
         serve <= 3'b111;
+        dma_idx = 0;
+        while (dma_idx <= 1) begin
+            @(negedge clk);
+            if (since_fall == 0) begin
+                if (dma_idx == 0) begin
+                    ovr_en <= 1'b1; ovr_rw <= 1'b0; ovr_addr <= 16'h03FE; ovr_wdata <= 8'h01;
+                end else ovr_en <= 1'b0;
+                dma_idx = dma_idx + 1;
+            end
+        end
         wait_passes(PASSES_OFF + PASSES_ON, "serve on");
+        if (banked_reads == 0 || banked_writes == 0)
+            fail("the program never touched a RamWorks bank while serving");
+        else if (pin_writes_banked != 0)
+            fail($sformatf("%0d writes to a bank the machine lacks went out on the pins as writes", pin_writes_banked));
+        else if (diverted != banked_writes)
+            fail($sformatf("diverted counts %0d, the testbench saw %0d banked writes", diverted, banked_writes));
+        else ok($sformatf("%0d reads of RamWorks banks answered from the image; every one of %0d banked writes went out as a read, and was counted",
+                          banked_reads, banked_writes));
         if (reads_bad != bad0) fail($sformatf("%0d reads disagreed with the machine while serving", reads_bad - bad0));
         else ok($sformatf("%0d reads while serving, every one the machine's byte", reads - reads0));
         if (served_reads - served0 < (reads - reads0) / 2)
@@ -498,7 +580,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         if (hits == 0 || misses == 0) fail("no hits or no misses");
         else ok($sformatf("%0d hits, %0d misses", hits, misses));
         repeat (4 * CYCLE) @(negedge clk);
-        check_image("the image still equals the machine's memory after serving");
+        check_image("the image still equals the reference after serving, RamWorks banks included");
+        check_phys("the machine's own auxiliary bank holds only bank 0's writes");
 
         // ---- 4. a reset under it: the switches go back, the memory stays -----------------
         // First leave a RamWorks bank selected, through the override path as
@@ -527,6 +610,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         pass_count = 0;
         wait_passes(2, "after a reset, still serving");
         check_image("and the image survived the reset, like RAM");
+        check_phys("and the machine's auxiliary bank is still bank 0's alone");
 
         $display("%0d checks, %0d errors", checks, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL");

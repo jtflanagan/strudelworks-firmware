@@ -61,22 +61,33 @@ firmware's auxiliary memory in bank 5. Nothing reliable depends on that, and a
 reset that always lands in bank 0 avoids a whole class of confusion; the
 convenience wins, on the card and on the host alike.
 
-**The machine's own auxiliary memory sees every bank's writes.** The bus is
-still driven for every cycle and the real IIe has no bank register, so a write
-to bank 5's `$2000` lands in the machine's one auxiliary bank too, over
-whatever bank 0 put there. The image keeps the banks apart; the machine's RAM
-does not. Three consequences:
+**A write to a bank the machine does not have goes out as a read.** The bus
+is driven for every cycle and the real IIe has no bank register, so a write to
+bank 5's `$2000`, sent out as a write, would land in the machine's one
+auxiliary bank over whatever bank 0 put there - and the video scanner reads
+that RAM. So the driver **diverts** it (`apple_bus_write.sv`): `apple_mmu` is
+asked, of the address about to be presented and in the same clock, whether a
+write there reaches auxiliary memory in a bank other than 0 (`q_addr` /
+`q_divert`), and if so - and the card is serving - the cycle goes out on the
+pins as a READ of the same address: R/W high, the data bus never enabled. A
+read of `$0000-$BFFF` or `$D000-$FFFF` has no side effect on a IIe; `$Cxxx`
+is BUS class and never diverted, so the bank register's own write and every
+soft switch still reach the machine. Everything on the card's side of the
+pins still sees the write - `op_rw`, `op_wdata`, `op_commit` are the core's
+op, so the shadow and the image apply it - and the reader records the WRITE
+in the capture with the core's byte (`apple_bus_read.sv`, `rw_override`), so
+the host's mirror follows it too. `MEM_DIVERTED` counts them.
+
+The machine's auxiliary memory is therefore bank 0's alone: a monitor plugged
+into the Apple shows the right 80-column and double-hires pages whatever a
+RAM disk is doing in bank 7. Two more consequences:
 
 - the RamWorks is real only while the card is **serving**: with serving off
-  the core reads the machine's aliased bank, exactly as a IIe without the card
-  would, and a program probing for banks finds one;
+  the core reads the machine's memory, so nothing is diverted and a program
+  probing for banks finds one aliased bank, exactly as a IIe without the card;
 - the **monitor** compares only image banks 0 and 1 with the bus - banks 2 and
   up are memory the machine does not have, and the bus's byte there is not an
-  opinion (`mem_cache.sv`, `p_machine`);
-- the **video scanner** reads the machine's RAM, so on a monitor plugged into
-  the Apple the 80-column and double-hires pages show bank 0's contents only
-  until another bank writes over them. The host's display mirror follows the
-  RamWorks's own rule - video is bank 0 - and is not disturbed.
+  opinion (`mem_cache.sv`, `p_machine`).
 
 ## Decisions, and why
 
@@ -185,7 +196,7 @@ inside the cycle's idle tail**; the ring's stream word-exact throughout.
 | `sim/run_mmu_trace.sh sim/trace_work/apple.bustrace` | the shadow against a **real IIe**: every read the shadow classifies as memory whose byte has been written must equal the traced byte; every status read (`$C011-$C01D`) must equal the shadow; every ROM read must equal the vendored file. Three captures, **67 M cycles, zero disagreements** over 31 M RAM reads, 94 K language-card reads and 4.2 M ROM reads. This is where the real unknown lived, and it ran before any DDR3 or board was involved. |
 | `sim/run_mem_cache_tb.sh` | the cache against a tree-PLRU model and a Wishbone stub that acks like the DDR3: every served byte, every hit/miss, every write's byte lane, the late-fill drop, the invalidate, the monitor - and that a RamWorks bank is served and never compared; at 512 and 64 sets |
 | `sim/run_mem_ddr3_tb.sh` | the client on the real controller: write-then-fill order, fill latency under pre-emption, refreshes only in the window |
-| `sim/run_mem_integ_tb.sh` | the real core running `sim/mem_integ.s` on the whole path against a IIe model with a language card and a four-bank RamWorks (bank 0 the regular aux memory, banks 1-3 their own, a non-existent bank ignored, ALTZP's zero page per bank, the register cleared by RES'): every read the machine's byte (56 K of them), tracking first and then serving under the running program - **31 093 of 31 129 reads answered by the card**, the rest I/O, 52 513 hits to 116 misses, zero mismatches - a DMA through the override path, a reset under it, the image byte-for-byte the machine's memory at the end |
+| `sim/run_mem_integ_tb.sh` | the real core running `sim/mem_integ.s` on the whole path against a **128K IIe model with one auxiliary bank on the pins** and a four-bank RamWorks kept as the reference: once serving, the program's bank tests (bank 0 the regular aux memory, banks 1-3 their own, a non-existent bank ignored, ALTZP's zero page per bank) run against memory only the card has - every banked read the reference's byte, every banked write sent out as a read and counted, the machine's auxiliary bank holding bank 0's writes alone at the end, the register cleared by RES': every read the machine's byte (56 K of them), tracking first and then serving under the running program - **31 093 of 31 129 reads answered by the card**, the rest I/O, 52 513 hits to 116 misses, zero mismatches - a DMA through the override path, a reset under it, the image byte-for-byte the machine's memory at the end |
 | `sim/run_reg_map_tb.sh` | the registers, end to end from a REG_WRITE |
 | the host's `tools/ramworks_test.sh` | the RamWorks on the **real machine** (2026-08-29): a monitor routine writes banks 1-3 and reads them back - `30 30 30` with serving off (one aliased bank, as a IIe without the card), `10 20 30` serving; the bank register reads 2 on the card and in the host's mirror; a Ctrl-Reset clears both |
 

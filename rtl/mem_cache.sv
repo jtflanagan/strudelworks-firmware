@@ -84,6 +84,9 @@ module mem_cache #(
     input  wire [7:0]  op_wdata,
     input  wire        op_present,
     input  wire        op_commit,
+    // The driver sent this write out as a read (apple_bus_write.sv): counted
+    // here with the rest of the image's numbers.
+    input  wire        op_divert,
     // The bus's byte, for the monitor.
     input  wire [7:0]  data_sync,
 
@@ -106,6 +109,7 @@ module mem_cache #(
     output logic [31:0] served,
     output logic [31:0] mismatches,
     output logic [31:0] last_mismatch, // {addr, cache byte, bus byte}
+    output logic [31:0] diverted,      // writes sent out as reads
     output logic [7:0]  late_fills,
     output logic [7:0]  fifo_drops,    // requests mem_client could not take
 
@@ -260,7 +264,7 @@ module mem_cache #(
             mq_valid <= 1'b0; mq_kind <= 1'b0; mq_id <= 2'd0;
             mq_line <= 20'd0; mq_byte <= 4'd0; mq_data <= 8'd0;
             hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
-            mismatches <= 32'd0; last_mismatch <= 32'd0;
+            mismatches <= 32'd0; last_mismatch <= 32'd0; diverted <= 32'd0;
             late_fills <= 8'd0; fifo_drops <= 8'd0;
             inv_idx <= '0;                 // a reset invalidates everything
             way_waddr <= '0; way_wdata <= '0;
@@ -399,6 +403,9 @@ module mem_cache #(
                 end
             end
 
+            // ---- a diverted write, once per cycle -------------------------------------
+            if (op_commit && op_divert) diverted <= diverted + 32'd1;
+
             // ---- the monitor, at the data phase ----------------------------------
             if (op_commit && cmp_valid && p_machine && cmp_byte != data_q) begin
                 mismatches    <= mismatches + 32'd1;
@@ -416,7 +423,7 @@ module mem_cache #(
 
             if (cnt_clr) begin
                 hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
-                mismatches <= 32'd0; last_mismatch <= 32'd0;
+                mismatches <= 32'd0; last_mismatch <= 32'd0; diverted <= 32'd0;
                 late_fills <= 8'd0; fifo_drops <= 8'd0;
             end
         end

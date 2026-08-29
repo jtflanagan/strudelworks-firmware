@@ -118,6 +118,7 @@ module kbd_inject_tb;
         .ev_data (ev_data), .ev_valid (ev_valid),
         .sync_override (drv_sync), .sync_override_en (1'b1),
         .data_override (sub_data), .data_override_en (sub_en),
+        .rw_override_en (1'b0), .wdata_override (8'h00),
         .res_sync (res_sync), .irq_sync (), .phi0_sync (phi0_s),
         .data_sync (data_s), .phi0_active ()
     );
@@ -159,7 +160,7 @@ module kbd_inject_tb;
         .slot_rd_claim (1'b0), .slot_rd_data (8'h00),
         .din_sub_en (sub_en), .din_sub_data (sub_data),
         .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw),
-        .ovr_wdata (ovr_wdata), .op_ovr (op_ovr),
+        .ovr_wdata (ovr_wdata), .op_ovr (op_ovr), .nxt_addr (), .divert (1'b0), .op_divert (),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)

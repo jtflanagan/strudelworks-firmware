@@ -131,7 +131,7 @@ module boot_hold_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .op_present (op_present), .op_commit (op_commit),
         .slot_rd_claim (1'b0), .slot_rd_data (8'h00),
         .din_sub_en (1'b0), .din_sub_data (8'h00),
-        .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (1'b1), .ovr_wdata (8'h00), .op_ovr (op_ovr),
+        .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (1'b1), .ovr_wdata (8'h00), .op_ovr (op_ovr), .nxt_addr (), .divert (1'b0), .op_divert (),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)

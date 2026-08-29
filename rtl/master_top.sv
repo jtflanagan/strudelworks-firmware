@@ -176,7 +176,7 @@ module master_top #(
     wire [11:0] mem_sw;
     wire [7:0]  mem_rw_bank;
     wire [7:0]  mem_late_fills, mem_fifo_drops;
-    wire [31:0] mem_hits, mem_misses, mem_mismatch, mem_served, mem_last;
+    wire [31:0] mem_hits, mem_misses, mem_mismatch, mem_served, mem_last, mem_diverted;
     wire        res_drive;
     wire        vbl_start, vbl_probe, vbl_notify, vbl_locked, vbl_pal, vbl_busy;
     wire [15:0] vbl_probe_addr;
@@ -242,7 +242,7 @@ module master_top #(
         .mem_rom_loaded (mem_rom_loaded),
         .mem_late_fills (mem_late_fills), .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
-        .mem_served (mem_served), .mem_last (mem_last),
+        .mem_served (mem_served), .mem_last (mem_last), .mem_diverted (mem_diverted),
         .res_drive (res_drive),
         .app_msg_valid (app_msg_valid), .app_msg_type (app_msg_type),
         .app_msg_free (app_msg_free), .app_msg_len (app_msg_len),
@@ -284,6 +284,8 @@ module master_top #(
         .sync_override_en  (cpu_source_active),
         .data_override     (sub_data),
         .data_override_en  (sub_en),
+        .rw_override_en    (op_divert),
+        .wdata_override    (op_wdata),
         .res_sync          (apple_res_sync),
         .irq_sync          (apple_irq_sync),
         .phi0_sync         (apple_phi0_sync),
@@ -350,6 +352,13 @@ module master_top #(
     // slots (wb_regfile refuses to latch the same one for any two), so at
     // most one claims any cycle.  The floppy has no override at all: it
     // never takes a cycle from the machine, by rule (rtl/floppy_card.sv).
+    // A write to a RamWorks bank the machine does not have goes out as a
+    // read (apple_bus_write.sv): apple_mmu is asked about the address the
+    // driver is about to present, and the answer counts only while the card
+    // is serving - with serving off the core reads the machine's memory.
+    wire        mmu_q_divert, op_divert;
+    wire [15:0] nxt_addr;
+
     wire        ovr_en    = boot_ovr_en | hd_ovr_en | vbl_ovr_en;
     wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_en ? vbl_ovr_addr  : boot_ovr_addr;
     wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_en ? vbl_ovr_rw    : 1'b1;
@@ -384,6 +393,9 @@ module master_top #(
         .ovr_rw        (ovr_rw),
         .ovr_wdata     (ovr_wdata),
         .op_ovr        (op_ovr),
+        .nxt_addr      (nxt_addr),
+        .divert        (mem_serve && mmu_q_divert),
+        .op_divert     (op_divert),
         .addr_drive    (addr_drive),
         .rw_drive      (rw_drive),
         .data_drive    (data_drive),
@@ -535,7 +547,9 @@ module master_top #(
         .cl_rw      (cl_rw),
         .cl_wr_image (cl_wr_image),
         .sw_state   (mem_sw),
-        .rw_bank    (mem_rw_bank)
+        .rw_bank    (mem_rw_bank),
+        .q_addr     (nxt_addr),
+        .q_divert   (mmu_q_divert)
     );
 
     apple_rom u_rom (
@@ -564,6 +578,7 @@ module master_top #(
         .op_wdata    (op_wdata),
         .op_present  (op_present),
         .op_commit   (op_commit),
+        .op_divert   (op_divert),
         .data_sync   (apple_data_sync),
         .rom_byte    (rom_byte),
         .rom_loaded  (mem_rom_loaded),
@@ -579,6 +594,7 @@ module master_top #(
         .served      (mem_served),
         .mismatches  (mem_mismatch),
         .last_mismatch (mem_last),
+        .diverted    (mem_diverted),
         .late_fills  (mem_late_fills),
         .fifo_drops  (mem_fifo_drops),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),

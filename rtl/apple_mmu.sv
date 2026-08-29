@@ -61,16 +61,20 @@
 // every reset land in the memory the ROM and the 80-column firmware expect;
 // the convenience wins.  The host's mirror (apple_memory.hpp) does the same.
 //
-// THE MACHINE'S OWN AUXILIARY MEMORY SEES EVERY BANK'S WRITES.  The bus is
-// still driven for every cycle and the real IIe has no bank register, so a
-// write to bank 5's $2000 lands in the machine's one auxiliary bank too, over
-// whatever bank 0 put there.  The card's image keeps them apart; the machine's
-// RAM does not.  So the RamWorks is real only while the card is serving reads
-// from the image - with serving off the core reads the machine's aliased
-// bank, exactly as a IIe without the card would - and the video scanner,
-// which reads the machine's RAM, shows bank 0's display pages only as long as
-// no other bank has written over them.  The host's display mirror follows the
-// RamWorks's own rule (video is bank 0) and is not disturbed.
+// THE MACHINE'S OWN AUXILIARY MEMORY MUST NOT SEE THE OTHER BANKS' WRITES.
+// The bus is driven for every cycle and the real IIe has no bank register, so
+// a write to bank 5's $2000, sent out as a write, would land in the machine's
+// one auxiliary bank over whatever bank 0 put there - and the video scanner
+// reads that RAM.  So the driver DIVERTS such a write: the cycle goes out on
+// the pins as a READ of the same address (harmless: nothing in $0000-$BFFF or
+// $D000-$FFFF has a read side effect), the image takes the write as it would
+// have, and the capture still records the write with the core's byte
+// (apple_bus_write.sv, apple_bus_read.sv).  The q_addr/q_divert port is the
+// driver's question, asked of the address it is about to present and answered
+// in the same clock from the switches as they stand: would a WRITE here reach
+// auxiliary memory in a bank other than 0?  The driver adds the one condition
+// this module cannot know - that the card is serving, since with serving off
+// the core reads the machine's memory and the write had better be in it.
 //
 // THE SWITCHES, as the IIe's MMU implements them (Sather, Understanding the
 // Apple IIe, ch. 5; AppleWin's Memory.cpp and LanguageCard.cpp agree):
@@ -135,7 +139,15 @@ module apple_mmu (
     //    altzp, ramwrt, ramrd, store80}
     output wire [11:0] sw_state,
     // The RamWorks bank register, for MEM_CTRL's readback.
-    output logic [7:0] rw_bank
+    output logic [7:0] rw_bank,
+
+    // The driver's question, combinational: would a write to q_addr, presented
+    // now, reach auxiliary memory in a RamWorks bank other than 0?  See the
+    // header.  q_addr is the address the driver is about to latch, so this is
+    // decided on the switches as they stood before the cycle - the same
+    // switches the classifier below will use for that op.
+    input  wire [15:0] q_addr,
+    output wire        q_divert
 );
 
     // RamWorks banks: 0..RW_BANKS-1 exist; a write of any other number is
@@ -216,6 +228,17 @@ module apple_mmu (
             end
         end
     end
+
+    // ---- the driver's query ---------------------------------------------------------
+    wire q_zp    = (q_addr[15:9]  == 7'd0);
+    wire q_text  = (q_addr[15:10] == 6'b000001);
+    wire q_hires = (q_addr[15:13] == 3'b001);
+    wire q_io    = (q_addr[15:12] == 4'hC);
+    wire q_hi    = (q_addr[15:12] >= 4'hD);
+    wire q_aux_mid = (store80 && q_text)           ? page2 :
+                     (store80 && hires && q_hires) ? page2 : ramwrt;
+    wire q_aux   = (q_hi || q_zp) ? altzp : q_aux_mid;
+    assign q_divert = (rw_bank != 8'd0) && !q_io && q_aux;
 
     // ---- the classifier ----------------------------------------------------------
     wire in_zp    = (op_addr[15:9]  == 7'd0);           // $0000-$01FF

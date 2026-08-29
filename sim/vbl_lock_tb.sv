@@ -139,6 +139,7 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .ev_data (), .ev_valid (), .data_tick (tick),
         .sync_override (drv_sync), .sync_override_en (1'b1),
         .data_override (8'h00), .data_override_en (1'b0),
+        .rw_override_en (1'b0), .wdata_override (8'h00),
         .res_sync (res_sync), .irq_sync (), .phi0_sync (phi0_sync),
         .data_sync (data_sync), .phi0_active ()
     );
@@ -181,7 +182,7 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .slot_rd_claim (1'b0), .slot_rd_data (8'h00),
         .din_sub_en (1'b0), .din_sub_data (8'h00),
         .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw),
-        .ovr_wdata (vbl_ovr_wdata), .op_ovr (op_ovr),
+        .ovr_wdata (vbl_ovr_wdata), .op_ovr (op_ovr), .nxt_addr (), .divert (1'b0), .op_divert (),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)

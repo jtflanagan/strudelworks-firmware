@@ -77,6 +77,21 @@
 // everything downstream.  DATA is windowed, and only on a write: on a read the
 // machine's own memory is driving and we must not.
 //
+// A DIVERTED WRITE goes out as a read.  The card's memory image can be a
+// RamWorks (rtl/apple_mmu.sv) - auxiliary banks the machine does not have -
+// and a write to one of those banks must reach the image but NOT the
+// machine, whose single auxiliary bank would otherwise take every bank's
+// writes on top of each other, with the video scanner reading the result.
+// When `divert` says the op about to be presented is such a write (asked of
+// nxt_addr, answered in the same clock, gated upstream by "the card is
+// serving"), the cycle is driven as a READ of the same address: R/W high,
+// the data bus never enabled.  A read there has no side effect on a IIe.
+// Everything on this side of the pins still sees the write - op_rw, op_wdata
+// and op_commit are the core's op, so the MMU shadow, the cache and the
+// peripherals apply it - and op_divert tells the reader to record the write
+// in the capture rather than the read the wires carried.  Decided at
+// T_PRESENT with the rest of the op, and held for the cycle.
+//
 // ONE EXCEPTION to "never on a read", and it is claimed, not assumed.  An
 // on-card peripheral (rtl/mockingboard.sv) can raise slot_rd_claim for a read
 // cycle whose address the motherboard maps to an EMPTY slot - a range nothing
@@ -176,6 +191,14 @@ module apple_bus_write #(
     // op_present, for boot_hold to follow what the bus actually carried.
     output wire        op_ovr,
 
+    // The address about to be latched at T_PRESENT, for apple_mmu's query,
+    // and its answer: divert this op if it is a write.  Combinational both
+    // ways; sampled at T_PRESENT only.  op_divert then says the cycle on the
+    // pins is a read standing in for the write op_* describes.
+    output wire  [15:0] nxt_addr,
+    input  wire         divert,
+    output wire         op_divert,
+
     // To the pins, via the master top.
     output wire  [15:0] addr_drive,
     output wire         rw_drive,       // 1 = read, as on the bus
@@ -225,6 +248,7 @@ module apple_bus_write #(
     logic [7:0]  drv_dout;
     logic        drv_sync_q;
     logic        drv_ovr;         // this cycle is the override's, not the core's
+    logic        drv_div;         // this write goes out as a read (see the header)
 
     // The data bus is ours only inside the emit window, and only on a write.
     logic emit_window;
@@ -236,7 +260,8 @@ module apple_bus_write #(
 
     assign drv_sync   = drv_sync_q;
     assign addr_drive = drv_addr;
-    assign rw_drive   = drv_rw;
+    // A diverted write is a read on the pins, and only there.
+    assign rw_drive   = drv_rw || drv_div;
     // On a claimed read the peripheral's byte goes out in the write data's
     // window; R/W stays a READ, because it is one - the machine's write strobe
     // must not fire, only its bus carry the byte.
@@ -244,13 +269,15 @@ module apple_bus_write #(
 
     assign addr_rw_oe = master_active;
     assign data_oe    = master_active && emit_window &&
-                        (!drv_rw || slot_rd_claim);
+                        ((!drv_rw && !drv_div) || slot_rd_claim);
     assign dma_assert = master_active;
 
     assign op_addr  = drv_addr;
     assign op_rw    = drv_rw;
     assign op_wdata = drv_dout;
     assign op_ovr   = drv_ovr;
+    assign nxt_addr  = ovr_en ? ovr_addr : cpu_addr;
+    assign op_divert = drv_div;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -262,6 +289,7 @@ module apple_bus_write #(
             drv_dout    <= 8'd0;
             drv_sync_q  <= 1'b0;
             drv_ovr     <= 1'b0;
+            drv_div     <= 1'b0;
             emit_window <= 1'b0;
             cyc_en      <= 1'b0;
             cpu_din     <= 8'd0;
@@ -290,6 +318,7 @@ module apple_bus_write #(
                 drv_rw      <= 1'b1;
                 drv_sync_q  <= 1'b0;
                 drv_ovr     <= 1'b0;
+                drv_div     <= 1'b0;
                 emit_window <= 1'b0;
                 driving     <= 1'b0;
             end else begin
@@ -304,6 +333,7 @@ module apple_bus_write #(
                     drv_dout    <= ovr_en ? ovr_wdata : cpu_dout;
                     drv_sync_q  <= ovr_en ? 1'b0      : cpu_sync;
                     drv_ovr     <= ovr_en;
+                    drv_div     <= divert && !(ovr_en ? ovr_rw : cpu_rw);
                     emit_window <= 1'b0;      // release the data bus
                     driving     <= 1'b1;
                 end

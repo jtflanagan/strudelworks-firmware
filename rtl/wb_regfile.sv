@@ -171,6 +171,7 @@ module wb_regfile #(
     input  wire [31:0]     mem_mismatch,
     input  wire [31:0]     mem_served,
     input  wire [31:0]     mem_last,
+    input  wire [31:0]     mem_diverted,
 
     // Programmatic Ctrl-Reset.  Held low while pulsing; the master top turns
     // this into an open-drain drive of the Apple's RES' line, exactly as it
@@ -230,6 +231,7 @@ module wb_regfile #(
     localparam [13:0] R_MEM_MISMATCH = 'd23; // 0x8000_005C, RO
     localparam [13:0] R_MEM_SERVED = 'd24;  // 0x8000_0060, RO
     localparam [13:0] R_MEM_LAST   = 'd25;  // 0x8000_0064, RO
+    localparam [13:0] R_MEM_DIVERTED = 'd26; // 0x8000_0068, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -822,6 +824,7 @@ module wb_regfile #(
                         R_MEM_MISMATCH: wb_dat_r <= mem_mismatch;
                         R_MEM_SERVED: wb_dat_r <= mem_served;
                         R_MEM_LAST:   wb_dat_r <= mem_last;
+                        R_MEM_DIVERTED: wb_dat_r <= mem_diverted;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end

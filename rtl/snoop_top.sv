@@ -117,7 +117,7 @@ module snoop_top #(
         .mem_sw (12'd0), .mem_rw_bank (8'd0), .mem_invalidating (1'b0), .mem_rom_loaded (1'b0),
         .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),
         .mem_hits (32'd0), .mem_misses (32'd0), .mem_mismatch (32'd0),
-        .mem_served (32'd0), .mem_last (32'd0),
+        .mem_served (32'd0), .mem_last (32'd0), .mem_diverted (32'd0),
         .res_drive (),
         .app_msg_valid (), .app_msg_type (), .app_msg_free (),
         .app_msg_len (), .app_pay_data (), .app_pay_valid (),
@@ -163,6 +163,8 @@ module snoop_top #(
         .sync_override_en  (1'b0),   // the instrument reports only what it saw
         .data_override     (8'h00),
         .data_override_en  (1'b0),
+        .rw_override_en    (1'b0),
+        .wdata_override    (8'd0),
         .res_sync          (apple_res_sync),
         .irq_sync          (),
         .phi0_sync         (),

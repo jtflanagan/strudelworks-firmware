@@ -133,7 +133,7 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .slot_rd_claim (rd_claim), .slot_rd_data (rd_data),
         .din_sub_en (1'b0), .din_sub_data (8'h00),
         .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw),
-        .ovr_wdata (ovr_wdata), .op_ovr (op_ovr),
+        .ovr_wdata (ovr_wdata), .op_ovr (op_ovr), .nxt_addr (), .divert (1'b0), .op_divert (),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)

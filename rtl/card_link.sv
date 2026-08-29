@@ -195,6 +195,7 @@ module card_link #(
     input  wire [31:0] mem_mismatch,
     input  wire [31:0] mem_served,
     input  wire [31:0]  mem_last,
+    input  wire [31:0]  mem_diverted,
     // The mismatch log's seam (rtl/mem_cache.sv <-> wb_regfile).
 
     // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
@@ -807,6 +808,7 @@ module card_link #(
         .mem_mismatch      (mem_mismatch),
         .mem_served        (mem_served),
         .mem_last          (mem_last),
+        .mem_diverted      (mem_diverted),
         .res_drive         (res_drive),
         .ring_status       (ring_status),
         .wb_cyc   (rwb_cyc),

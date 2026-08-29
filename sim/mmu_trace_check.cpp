@@ -189,7 +189,7 @@ int main(int argc, char** argv) {
     auto tick = [&]() { top.clk = 0; top.eval(); top.clk = 1; top.eval(); };
 
     top.rst = 1; top.res_sync = 1; top.op_present = 0; top.op_commit = 0;
-    top.op_addr = 0; top.op_rw = 1; top.op_wdata = 0;
+    top.op_addr = 0; top.op_rw = 1; top.op_wdata = 0; top.q_addr = 0;
     for (int i = 0; i < 4; ++i) tick();
     top.rst = 0;
     tick();

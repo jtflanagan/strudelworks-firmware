@@ -202,7 +202,7 @@ module reg_map_tb;
         .mem_invalidating (1'b0), .mem_rom_loaded (1'b1),
         .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),
         .mem_hits (32'h0000_1111), .mem_misses (32'h0000_0022),
-        .mem_mismatch (32'h0000_0003), .mem_served (32'h0000_0444),
+        .mem_mismatch (32'h0000_0003), .mem_served (32'h0000_0444), .mem_diverted (32'h0000_0777),
         .mem_last (32'h1234_5C3A),
         .ring_status (32'h0200_1234),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
@@ -1195,6 +1195,12 @@ module reg_map_tb;
                      out_mem[base+5], out_mem[base+8], out_mem[base+11], out_mem[base+14]);
             errors = errors + 1;
         end else $display("  ok: MEM_HITS, MISSES, MISMATCH, SERVED and LAST read straight through");
+        base = out_n;
+        do_read(32'h8000_0068);
+        if (out_mem[base+2] !== 32'h0000_0777) begin
+            $display("FAIL: MEM_DIVERTED reads %08x", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: MEM_DIVERTED reads straight through");
 
         if (errors == 0) $display("PASS");
         else             $display("FAIL: %0d error(s)", errors);
