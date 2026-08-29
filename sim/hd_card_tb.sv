@@ -155,7 +155,10 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         hdr = {free, t, len};
     endfunction
 
-    wire        msg_valid, pay_valid, frame_error;
+    wire        msg_valid, pay_valid, unknown_valid;
+    wire [7:0]  unknown_type, unknown_len;
+    integer     unknowns = 0;
+    always @(posedge clk) if (unknown_valid) unknowns = unknowns + 1;
     wire [7:0]  msg_type, msg_len;
     wire [15:0] msg_free;
     wire [31:0] pay_data;
@@ -165,7 +168,7 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .fifo_dout (rx_dout), .fifo_empty (rx_empty), .fifo_rd_en (rx_rd_en),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
         .msg_len (msg_len), .pay_data (pay_data), .pay_valid (pay_valid),
-        .frame_error (frame_error)
+        .unknown_valid (unknown_valid), .unknown_type (unknown_type), .unknown_len (unknown_len)
     );
 
     // ---- the disk -----------------------------------------------------------
@@ -649,7 +652,7 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         if (mem[16'h0302] !== 8'h00) fail("the commands after the reset did not complete");
         else $display("  ok: and executes, and completes, as before");
 
-        if (frame_error !== 1'b0) fail("the receiver lost framing - a type is missing from hdr_known");
+        if (unknowns != 0) fail("the receiver reported an unknown type - a disk type is missing from its list");
         else $display("  ok: HD_ROM, HD_DONE and HD_FETCH are known types");
 
         $display("");

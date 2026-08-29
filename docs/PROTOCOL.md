@@ -70,7 +70,8 @@ host reads; the receiver carries parser state across all of them.
 | `0x21` | FD_DIRTY | Card→host, **unsolicited**. Payload `[{seq, chunk, track, drive}]` then up to 252 words: a track the machine wrote to, seven chunks, sent before the FD_SEEK that leaves it. |
 | `0x22` | MEM_ROM | Host→card. One chunk of the IIe's 16 KB system ROM for the card's copy: payload `[{chunk[4:0]}]` then 128 words; 32 chunks make the ROM, in any order. See MEMORY.md. |
 | `0x23` | VIDHD_ROM | Host→card. Payload 64 words: the VidHD's 256-byte slot ROM - the signature software scans for, synthesised by the host. See VIDHD.md. |
-| `0x24`–`0xFF` | — | Application, unassigned. |
+| `0x24` | UNKNOWN_TYPE | Card→host, **unsolicited**. Header only; `free[7:0]` = the type of a host→card message the card does not consume, `free[15:8]` = its length. The card skipped that message by its length - framing is intact - and this says so, so the host can log what it sent that the gateware lacks. One pending, the latest wins. |
+| `0x25`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -256,9 +257,13 @@ card pulses the FT601's `RESET#` for 1 ms, exactly as the `'R'` command does,
 which discards unsent bus events, both async FIFOs, the chip's internal buffers,
 and the enable state. The device re-enumerates and the host must reopen it.
 
-A malformed message *received* by the card — an unknown type — takes the same
-path, because it is the same condition: the two ends no longer agree on where
-frames begin, and nothing in the format can re-establish that.
+A message *received* by the card of a type it does not consume is **not**
+loss of sync and does not take that path. The length is in the header whatever
+the type, so the card skips the payload by it and framing is kept; it then sends
+an UNKNOWN_TYPE notice naming the type and length, and the host logs it. This
+replaced a whitelist that reset the link on the first use of any type it
+lacked — twice (MEM_ROM, VIDHD_ROM) a missing line in `ft601_msg_rx.sv`
+looked exactly like a dead link. Now it looks like what it is.
 
 ### Clean disconnect
 

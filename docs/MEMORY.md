@@ -206,7 +206,10 @@ known list, or the card treats its first use as lost framing and drops the
 link. `MEM_ROM` was not, so every session with the ROM file present died at
 connect with the host reporting `write failed` - on the previous firmware too,
 which is what made it look like the board. The host now names the fault in
-its frame line, and the type is in the list.
+its frame line, and the type is in the list. (It happened once more, with
+VIDHD_ROM; since then an unknown type is skipped by its length and reported
+to the host as an UNKNOWN_TYPE notice rather than dropping the link -
+PROTOCOL.md.)
 
 The trace check is the one to rerun with a new capture: a ProDOS or Total
 Replay session exercises the language card far more than the monitor's boot

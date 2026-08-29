@@ -6,8 +6,8 @@
 //
 // Two things are being checked and they are different in kind:
 //
-//   the parser  decodes headers, skips payload, and reports an unknown type
-//               rather than trying to carry on
+//   the parser  decodes headers, skips payload - an unknown type's included,
+//               by its length, keeping framing - and reports the unknown one
 //   the watchdog fires only when armed and only when genuinely starved, and is
 //               kicked by ANY message rather than only by heartbeats
 //
@@ -51,7 +51,13 @@ module ft601_msg_rx_tb;
     endtask
 
     // ---- DUT -----------------------------------------------------------------
-    wire        msg_valid, pay_valid, frame_error;
+    wire        msg_valid, pay_valid, unknown_valid;
+    wire [7:0]  unknown_type, unknown_len;
+    integer     unknowns = 0;
+    reg [7:0]   last_unknown_type = 8'd0, last_unknown_len = 8'd0;
+    always @(posedge clk) if (unknown_valid) begin
+        unknowns = unknowns + 1; last_unknown_type = unknown_type; last_unknown_len = unknown_len;
+    end
     wire [7:0]  msg_type, msg_len;
     wire [15:0] msg_free;
     wire [31:0] pay_data;
@@ -62,7 +68,7 @@ module ft601_msg_rx_tb;
         .msg_valid (msg_valid), .msg_type (msg_type),
         .msg_free (msg_free), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
-        .frame_error (frame_error)
+        .unknown_valid (unknown_valid), .unknown_type (unknown_type), .unknown_len (unknown_len)
     );
 
     // ---- watchdog, wired the way snoop_top will wire it -----------------------
@@ -113,6 +119,7 @@ module ft601_msg_rx_tb;
     endtask
 
     integer i;
+    integer base_msgs, base_enable;
 
     initial begin
         $display("ft601_msg_rx_tb: host->card framing and watchdog");
@@ -193,17 +200,32 @@ module ft601_msg_rx_tb;
             errors = errors + 1;
         end else $display("  ok: disarmed watchdog stays quiet");
 
-        // --- an unknown type is a desync, not something to skip ----------------
-        if (frame_error) begin
-            $display("FAIL: frame_error set before any bad frame");
+        // --- an unknown type is skipped by its length and reported ---------------
+        if (unknowns != 0) begin
+            $display("FAIL: an unknown type was reported before any was sent");
             errors = errors + 1;
         end
-        push_hdr(8'd0, 8'h7e, 16'h0000);          // no such type
+        base_msgs = n_msgs; base_enable = n_enable;
+        push_hdr(8'd3, 8'h7e, 16'h0000);          // no such type, three payload words
+        push(32'hDEAD0001);
+        push(32'hDEAD0002);
+        push(32'hDEAD0003);
+        push_hdr(8'd0, 8'h11, 16'h0001);          // then a real one: BUS_ENABLE
         drain;
-        if (!frame_error) begin
-            $display("FAIL: unknown type did not raise frame_error");
+        if (unknowns != 1 || last_unknown_type != 8'h7e || last_unknown_len != 8'd3) begin
+            $display("FAIL: unknown type reported %0d times, last type %02x len %0d",
+                     unknowns, last_unknown_type, last_unknown_len);
             errors = errors + 1;
-        end else $display("  ok: unknown type raised frame_error");
+        end else $display("  ok: the unknown type is reported once, with its type and length");
+        if (n_msgs != base_msgs + 2 || n_enable != base_enable + 1) begin
+            $display("FAIL: framing lost after the unknown type: %0d headers, %0d enables",
+                     n_msgs - base_msgs, n_enable - base_enable);
+            errors = errors + 1;
+        end else $display("  ok: its payload was skipped and the next header decoded");
+        if (wd_fired) begin
+            $display("FAIL: the unknown type fired the watchdog");
+            errors = errors + 1;
+        end
 
         $display("");
         if (errors == 0) $display("PASS");

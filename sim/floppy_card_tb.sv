@@ -173,7 +173,10 @@ module floppy_card_tb;
         hdr = {free, t, len};
     endfunction
 
-    wire        msg_valid, pay_valid, frame_error;
+    wire        msg_valid, pay_valid, unknown_valid;
+    wire [7:0]  unknown_type, unknown_len;
+    integer     unknowns = 0;
+    always @(posedge clk) if (unknown_valid) unknowns = unknowns + 1;
     wire [7:0]  msg_type, msg_len;
     wire [15:0] msg_free;
     wire [31:0] pay_data;
@@ -183,7 +186,7 @@ module floppy_card_tb;
         .fifo_dout (rx_dout), .fifo_empty (rx_empty), .fifo_rd_en (rx_rd_en),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
         .msg_len (msg_len), .pay_data (pay_data), .pay_valid (pay_valid),
-        .frame_error (frame_error)
+        .unknown_valid (unknown_valid), .unknown_type (unknown_type), .unknown_len (unknown_len)
     );
 
     // ---- the floppy ---------------------------------------------------------
@@ -705,7 +708,7 @@ module floppy_card_tb;
         else $display("  ok: no read was ever driven unclaimed");
         if (overrides != 0) fail("the floppy took a cycle from the machine");
         else $display("  ok: no override, ever");
-        if (frame_error !== 1'b0) fail("the receiver lost framing - a type is missing from hdr_known");
+        if (unknowns != 0) fail("the receiver reported an unknown type - a floppy type is missing from its list");
         else $display("  ok: FD_ROM and FD_TRACK are known types");
 
         $display("");

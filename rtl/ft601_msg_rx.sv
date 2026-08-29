@@ -14,10 +14,16 @@
 // first thing on this path is the host's first header.  See the silent-until-
 // asked rule in docs/PROTOCOL.md.
 //
-// An unknown type therefore means the two ends no longer agree on where frames
-// begin.  That is unrecoverable by design, so it is reported as frame_error and
-// the top level turns it into a link reset - the same treatment as a watchdog
-// expiry, because it is the same condition.
+// An unknown type is NOT a framing error.  The length is in the header
+// whatever the type, so the payload is skipped by it and framing is kept -
+// and the card says what it skipped: unknown_valid pulses with the type and
+// length, and card_link sends the host an UNKNOWN_TYPE notice, so the host
+// learns exactly what happened and can log what needs fixing.  This replaced
+// a whitelist of known types that dropped the link on the first use of any
+// type it lacked - which it did twice (MEM_ROM, then VIDHD_ROM), each time
+// looking like a dead link rather than a missing line.  The consumers
+// downstream each match their own types and ignore the rest, so nothing
+// here needs to know which types exist.
 //////////////////////////////////////////////////////////////////////////////////
 
 module ft601_msg_rx (
@@ -39,34 +45,27 @@ module ft601_msg_rx (
     output logic [31:0] pay_data,
     output logic        pay_valid,
 
-    // An unknown type: we have lost framing.  Latched until reset.
-    output logic        frame_error
+    // A header of a type nothing on this card consumes: one pulse, with the
+    // type and the length whose payload is being skipped.
+    output logic        unknown_valid,
+    output logic [7:0]  unknown_type,
+    output logic [7:0]  unknown_len
 );
 
-    // Types this card accepts.  Anything else is a desync, not an extension
-    // point - a new type has to be added here before it can be sent.
+    // The types this card consumes, for the notice above - a header of any
+    // other type is skipped by its length and reported, never fatal.  Every
+    // consumer matches its own type; this list only decides what to report.
     localparam [7:0] T_IDLE       = 8'h00;
     localparam [7:0] T_BUS_ENABLE = 8'h11;
     localparam [7:0] T_REG_READ   = 8'h14;
     localparam [7:0] T_REG_WRITE  = 8'h15;
-    // The hard disk's three, host -> card: the slot ROM, a command's result
-    // (with any bytes to put in the Apple's memory), and a request for bytes
-    // out of it.  See rtl/hd_card.sv and docs/HARDDISK.md.
-    localparam [7:0] T_HD_ROM     = 8'h18;
+    localparam [7:0] T_HD_ROM     = 8'h18;   // rtl/hd_card.sv
     localparam [7:0] T_HD_DONE    = 8'h19;
     localparam [7:0] T_HD_FETCH   = 8'h1A;
-    // The floppy's two, host -> card: the boot ROM and a track chunk.  See
-    // rtl/floppy_card.sv and docs/FLOPPY.md.
-    localparam [7:0] T_FD_ROM     = 8'h1E;
+    localparam [7:0] T_FD_ROM     = 8'h1E;   // rtl/floppy_card.sv
     localparam [7:0] T_FD_TRACK   = 8'h1F;
-    // The memory image's one, host -> card: a chunk of the system ROM for the
-    // card's copy.  See rtl/apple_rom.sv and docs/MEMORY.md.  (Its absence
-    // from this list was a whole evening: the host sent it, the card called it
-    // lost framing, and the link dropped at every connect - docs/MEMORY.md.)
-    localparam [7:0] T_MEM_ROM    = 8'h22;
-    // The VidHD's one, host -> card: its slot ROM.  See rtl/vidhd_card.sv
-    // and docs/VIDHD.md.
-    localparam [7:0] T_VIDHD_ROM  = 8'h23;
+    localparam [7:0] T_MEM_ROM    = 8'h22;   // rtl/apple_rom.sv
+    localparam [7:0] T_VIDHD_ROM  = 8'h23;   // rtl/vidhd_card.sv
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -79,10 +78,9 @@ module ft601_msg_rx (
     wire [7:0]  hdr_len  = fifo_dout[7:0];
     wire [7:0]  hdr_type = fifo_dout[15:8];
 
-    // Every host->card type has to appear here.  An unknown one is treated as
-    // lost sync and reset the link, so forgetting to add a type is not a
-    // message that gets ignored - it is a link that drops the moment the host
-    // first uses it.
+    // Consumed here, or skipped and reported.  A type missing from this list
+    // still costs nothing but a notice - the payload is walked by its
+    // length either way.
     wire hdr_known = (hdr_type == T_IDLE)      || (hdr_type == T_BUS_ENABLE) ||
                      (hdr_type == T_REG_READ)  || (hdr_type == T_REG_WRITE)  ||
                      (hdr_type == T_HD_ROM)    || (hdr_type == T_HD_DONE)    ||
@@ -99,10 +97,13 @@ module ft601_msg_rx (
             msg_len     <= 8'd0;
             pay_valid   <= 1'b0;
             pay_data    <= 32'd0;
-            frame_error <= 1'b0;
+            unknown_valid <= 1'b0;
+            unknown_type  <= 8'd0;
+            unknown_len   <= 8'd0;
         end else begin
-            msg_valid <= 1'b0;
-            pay_valid <= 1'b0;
+            msg_valid     <= 1'b0;
+            pay_valid     <= 1'b0;
+            unknown_valid <= 1'b0;
 
             if (take) begin
                 if (blocks_left == 8'd0) begin
@@ -112,7 +113,11 @@ module ft601_msg_rx (
                     msg_len     <= hdr_len;
                     msg_free    <= fifo_dout[31:16];
                     blocks_left <= hdr_len;
-                    if (!hdr_known) frame_error <= 1'b1;
+                    if (!hdr_known) begin
+                        unknown_valid <= 1'b1;
+                        unknown_type  <= hdr_type;
+                        unknown_len   <= hdr_len;
+                    end
                 end else begin
                     // Payload.
                     pay_data    <= fifo_dout;

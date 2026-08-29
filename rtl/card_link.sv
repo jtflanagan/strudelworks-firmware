@@ -294,17 +294,20 @@ module card_link #(
     localparam integer CMD_RST_CYCLES = 100_000;   // 1 ms at 100 MHz
     localparam integer RST_TICKS      = CMD_RST_CYCLES;
 
-    // Three things pull the reset lever, and they are all the same lever on
-    // purpose: the host's 'R' command, the watchdog expiring, and a malformed
-    // message arriving.  The last two are both "we no longer agree with the host
-    // about where frames begin", which is unrecoverable by design.
+    // Two things pull the reset lever, and they are the same lever on
+    // purpose: the host's 'R' command, and the watchdog expiring - "we no
+    // longer agree with the host about where frames begin", which is
+    // unrecoverable by design.  A message of a type the card does not know
+    // USED to be a third: it is not a framing error at all (the length is in
+    // the header whatever the type), and treating it as one dropped the link
+    // on the first use of every new type - so now it is skipped and reported
+    // to the host as an UNKNOWN_TYPE notice (below, and ft601_msg_rx).
     //
     // 1 ms is measured, not chosen: a ~40 ns pulse left the chip untouched and
     // 1 ms made it re-enumerate.  See ft601_top for the full note.
     wire       cmd_reset_strobe;
     wire       watchdog_fired;
-    wire       rx_frame_error;
-    wire       link_reset_trigger = cmd_reset_strobe | watchdog_fired | rx_frame_error;
+    wire       link_reset_trigger = cmd_reset_strobe | watchdog_fired;
 
     reg [16:0] cmd_rst_cnt = 17'd0;
 
@@ -317,8 +320,9 @@ module card_link #(
     // WHY the link was last reset, and what the FT601 side looked like at that
     // instant - kept across the reset it causes, since the reset is exactly
     // what would otherwise erase the evidence.  Reported on the UART as
-    // L=c (1 the host's 'R', 2 the watchdog, 4 a malformed message; the
-    // latest wins) and S=xxxx: {TXE#, RXF#, skid count[1:0], FSM state[3:0],
+    // L=c (1 the host's 'R', 2 the watchdog; 4 was a malformed message, now
+    // retired - see above; the latest wins) and S=xxxx: {TXE#, RXF#, skid
+    // count[1:0], FSM state[3:0],
     // link resets[7:0]}.  The chip-side signals are sampled from the FT601's
     // clock domain without a synchronizer - a snapshot, not a control path.
     // Last night's wedge read TXE#=1 with words waiting and RXF#=1 with the
@@ -336,7 +340,7 @@ module card_link #(
             link_resets <= 8'd0;
             link_snap   <= 8'd0;
         end else if (link_reset_trigger && !cmd_reset) begin
-            link_cause  <= {rx_frame_error, watchdog_fired, cmd_reset_strobe};
+            link_cause  <= {1'b0, watchdog_fired, cmd_reset_strobe};
             link_resets <= link_resets + 8'd1;
             link_snap   <= {ft_txe, ft_rxf, ft_dbg_qcount, ft_dbg_state};
         end
@@ -571,6 +575,11 @@ module card_link #(
     wire [31:0] pay_data;
     wire        pay_valid;
 
+    // A header of a type nothing here consumes: skipped by its length, and
+    // reported to the host by the notice below.
+    wire       rx_unknown_valid;
+    wire [7:0] rx_unknown_type, rx_unknown_len;
+
     ft601_msg_rx u_msg_rx (
         .clk         (clk_ctrl),
         .rst         (rst),
@@ -583,7 +592,9 @@ module card_link #(
         .msg_len     (msg_len),
         .pay_data    (pay_data),
         .pay_valid   (pay_valid),
-        .frame_error (rx_frame_error)
+        .unknown_valid (rx_unknown_valid),
+        .unknown_type  (rx_unknown_type),
+        .unknown_len   (rx_unknown_len)
     );
 
     assign app_msg_valid = msg_valid;
@@ -896,6 +907,36 @@ module card_link #(
         end
     end
 
+    // ---- the UNKNOWN_TYPE notice ---------------------------------------------
+    // The host sent a message of a type this card does not consume.  The
+    // receiver skipped it by its length - framing is intact - and this says
+    // so: a header-only message, free[7:0] the type, free[15:8] its length,
+    // so the host can log exactly what it sent that the gateware lacks,
+    // rather than watch the link die and guess.  A direct answer to the
+    // host's own message, so not gated on the capture: like a REG_VALUE, it
+    // goes to whoever is asking.  One pending flag, the latest wins: two
+    // unknowns before a take are reported as the second, which is enough to
+    // say something is wrong and what.
+    localparam [7:0] T_UNKNOWN_TYPE = 8'h24;
+
+    reg        unk_pending = 1'b0;
+    reg [15:0] unk_free    = 16'd0;
+    wire       unk_take;
+
+    always @(posedge clk_ctrl) begin
+        if (rst) begin
+            unk_pending <= 1'b0;
+            unk_free    <= 16'd0;
+        end else begin
+            if (rx_unknown_valid) begin
+                unk_pending <= 1'b1;
+                unk_free    <= {rx_unknown_len, rx_unknown_type};
+            end else if (unk_take) begin
+                unk_pending <= 1'b0;
+            end
+        end
+    end
+
     // ---- the KBD_EVENT notice -----------------------------------------------
     // The other thing the card says unasked - and only once asked, through
     // KBD_CTRL's notify: a press was resolved, or the lock saw a real key.
@@ -919,16 +960,17 @@ module card_link #(
     );
 
     // ---- the message bus ---------------------------------------------------
-    // A 32-bit Wishbone with six masters, in priority order: a register
-    // reply, the CPU_HOLD notice, the KBD_EVENT notice, the top's
-    // application message (the disk's), the floppy's, the capture.  Each
+    // A 32-bit Wishbone with seven masters, in priority order: a register
+    // reply, the CPU_HOLD notice, the KBD_EVENT notice, the UNKNOWN_TYPE
+    // notice, the top's application message (the disk's), the floppy's, the
+    // capture.  Each
     // source is a stream, and msg_master makes it a master that holds CYC
     // across its message; msg_arb grants per CYC; tx_ring is the one slave.
     // Everything above the capture is rate-bounded by the host or the bus -
     // the floppy's by the machine's own head movements and writes; the
     // capture is the one continuous source and goes last.  See msg_arb for
     // why that order is load-bearing.
-    localparam integer N_SRC = 6;
+    localparam integer N_SRC = 7;
 
     wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
     wire [N_SRC*32-1:0] mb_adr, mb_dat;
@@ -961,17 +1003,21 @@ module card_link #(
     assign ms_valid[2]         = kn_valid;
     assign kn_take             = ms_take[2];
 
-    assign ms_word[3*32 +: 32] = aux_word;
-    assign ms_valid[3]         = aux_valid;
-    assign aux_take            = ms_take[3];
+    assign ms_word[3*32 +: 32] = {unk_free, T_UNKNOWN_TYPE, 8'd0};
+    assign ms_valid[3]         = unk_pending;
+    assign unk_take            = ms_take[3];
 
-    assign ms_word[4*32 +: 32] = fd_word;
-    assign ms_valid[4]         = fd_valid;
-    assign fd_take             = ms_take[4];
+    assign ms_word[4*32 +: 32] = aux_word;
+    assign ms_valid[4]         = aux_valid;
+    assign aux_take            = ms_take[4];
 
-    assign ms_word[5*32 +: 32] = cap_word;
-    assign ms_valid[5]         = cap_valid;
-    assign cap_take            = ms_take[5];
+    assign ms_word[5*32 +: 32] = fd_word;
+    assign ms_valid[5]         = fd_valid;
+    assign fd_take             = ms_take[5];
+
+    assign ms_word[6*32 +: 32] = cap_word;
+    assign ms_valid[6]         = cap_valid;
+    assign cap_take            = ms_take[6];
 
     genvar gm;
     generate

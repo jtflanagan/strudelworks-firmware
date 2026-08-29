@@ -132,7 +132,10 @@ module vidhd_card_tb;
         hdr = {free, t, len};
     endfunction
 
-    wire        msg_valid, pay_valid, frame_error;
+    wire        msg_valid, pay_valid, unknown_valid;
+    wire [7:0]  unknown_type, unknown_len;
+    integer     unknowns = 0;
+    always @(posedge clk) if (unknown_valid) unknowns = unknowns + 1;
     wire [7:0]  msg_type, msg_len;
     wire [15:0] msg_free;
     wire [31:0] pay_data;
@@ -142,7 +145,7 @@ module vidhd_card_tb;
         .fifo_dout (rx_dout), .fifo_empty (rx_empty), .fifo_rd_en (rx_rd_en),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
         .msg_len (msg_len), .pay_data (pay_data), .pay_valid (pay_valid),
-        .frame_error (frame_error)
+        .unknown_valid (unknown_valid), .unknown_type (unknown_type), .unknown_len (unknown_len)
     );
 
     // ---- the VidHD ----------------------------------------------------------
@@ -168,11 +171,6 @@ module vidhd_card_tb;
     end
     integer overrides = 0;
     always @(posedge clk) if (op_present && op_ovr) overrides = overrides + 1;
-    // Sticky: the card's reset in the last case would otherwise clear the
-    // parser's flag before it is checked.  An unknown type is a framing
-    // error, and a framing error resets the link on the real card.
-    integer frame_errors = 0;
-    always @(posedge clk) if (frame_error) frame_errors = frame_errors + 1;
 
     // ---- the host's ROM -----------------------------------------------------
     // What strudelworks-host synthesises: the signature, a JMP to an RTS,
@@ -314,7 +312,7 @@ module vidhd_card_tb;
         // ---- the rules that hold throughout ---------------------------------------
         if (read_drive_unclaimed != 0) fail("the bus was driven for a read the card did not claim");
         if (overrides != 0) fail("the card raised an override");
-        if (frame_errors != 0) fail("the parser saw a frame error - VIDHD_ROM is not in ft601_msg_rx's hdr_known");
+        if (unknowns != 0) fail("the receiver reported an unknown type - VIDHD_ROM is missing from its list");
         else $display("  ok: VIDHD_ROM is a known type");
 
         if (errors == 0) $display("PASS");
