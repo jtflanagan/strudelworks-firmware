@@ -200,6 +200,8 @@ module card_link #(
     input  wire [11:0]  mem_log_count,
     input  wire         mem_log_overflow,
     input  wire [31:0]  mem_stk_rd,
+    output wire         mem_watch_en,
+    output wire [15:0]  mem_watch_addr,
 
     // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
     // mastering top wires it to the pin; a snooper leaves it unconnected.
@@ -815,6 +817,8 @@ module card_link #(
         .mem_log_count     (mem_log_count),
         .mem_log_overflow  (mem_log_overflow),
         .mem_stk_rd        (mem_stk_rd),
+        .mem_watch_en      (mem_watch_en),
+        .mem_watch_addr    (mem_watch_addr),
         .res_drive         (res_drive),
         .ring_status       (ring_status),
         .wb_cyc   (rwb_cyc),

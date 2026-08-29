@@ -180,6 +180,8 @@ module master_top #(
     wire [63:0] mem_log_rd;
     wire        mem_log_overflow;
     wire [31:0] mem_stk_rd;
+    wire        mem_watch_en;
+    wire [15:0] mem_watch_addr;
     wire        res_drive;
     wire        vbl_start, vbl_probe, vbl_notify, vbl_locked, vbl_pal, vbl_busy;
     wire [15:0] vbl_probe_addr;
@@ -249,6 +251,7 @@ module master_top #(
         .mem_log_sel (mem_log_sel), .mem_log_rd (mem_log_rd),
         .mem_log_count (mem_log_count), .mem_log_overflow (mem_log_overflow),
         .mem_stk_rd (mem_stk_rd),
+        .mem_watch_en (mem_watch_en), .mem_watch_addr (mem_watch_addr),
         .res_drive (res_drive),
         .app_msg_valid (app_msg_valid), .app_msg_type (app_msg_type),
         .app_msg_free (app_msg_free), .app_msg_len (app_msg_len),
@@ -586,6 +589,8 @@ module master_top #(
         .late_fills  (mem_late_fills),
         .fifo_drops  (mem_fifo_drops),
         .res_sync    (apple_res_sync),
+        .watch_en    (mem_watch_en),
+        .watch_addr  (mem_watch_addr),
         .sw_state    (mem_sw),
         .log_sel     (mem_log_sel),
         .log_rd      (mem_log_rd),

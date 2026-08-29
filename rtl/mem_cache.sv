@@ -68,6 +68,12 @@ module mem_cache #(
     // written THIS run" bitmap is cleared by it, so a phantom read of a
     // never-written slot is visible as write-bit-clear.  docs/MEMORY.md.
     input  wire        res_sync,
+    // A write watch (MEM_WATCH): when enabled, every write to this address is
+    // logged as a src=3 record, so the mismatch dump carries the full timeline
+    // of a byte - what value the shadow wrote it, in which bank - beside the
+    // reads that later disagreed.  Built to root-cause the aux-$0001 divergence.
+    input  wire        watch_en,
+    input  wire [15:0] watch_addr,
 
     // The classified op, from apple_mmu, plus the op's own address and write
     // data from apple_bus_write.
@@ -255,12 +261,22 @@ module mem_cache #(
     localparam integer LOG_DEPTH = 2048;
     (* ram_style = "block" *) logic [63:0] log_mem [0:LOG_DEPTH-1];
     logic [11:0] log_wptr = 12'd0;
-    wire         log_write = op_commit && cmp_valid && (cmp_byte != data_q)
-                             && (log_wptr != LOG_DEPTH[11:0]);
     // Bit 49: was this address ever written this run (stack only meaningful).
     wire         log_wr_seen = stk_written[p_addr[7:0]];
-    wire [63:0]  log_record = {14'd0, log_wr_seen, cmp_bank, sw_state, cmp_src,
+    // Two things get logged: a read the monitor found mismatched (at op_commit),
+    // and - when the watch is on - a write to the watched address (at the P6
+    // decision, one stage earlier).  Different ops in different cycles; a
+    // mismatch wins a rare same-cycle tie and the write is dropped.
+    wire         mm_ev = op_commit && cmp_valid && (cmp_byte != data_q);
+    wire         ww_ev = watch_en && v4 && p_wr_image && (p_addr == watch_addr);
+    wire [63:0]  log_rec_mm = {14'd0, log_wr_seen, cmp_bank, sw_state, cmp_src,
                                p_cls, data_q, cmp_byte, p_addr};
+    // A write record: src=3, both byte fields carry the value written, the bank
+    // is where the shadow put it, the switches are those at the write.
+    wire [63:0]  log_rec_ww = {14'd0, 1'b1, p_pa[16], sw_state, 2'd3,
+                               p_cls, op_wdata, op_wdata, p_addr};
+    wire         log_ev     = (mm_ev || ww_ev) && (log_wptr != LOG_DEPTH[11:0]);
+    wire [63:0]  log_record = mm_ev ? log_rec_mm : log_rec_ww;
     assign log_count = log_wptr;
 
     // ---- the invalidate walk --------------------------------------------------------
@@ -460,7 +476,7 @@ module mem_cache #(
             if (cnt_clr) begin
                 log_wptr <= '0;
                 log_overflow <= 1'b0;
-            end else if (log_write) begin
+            end else if (mm_ev || ww_ev) begin
                 if (log_wptr != LOG_DEPTH[11:0]) log_wptr <= log_wptr + 12'd1;
                 else                             log_overflow <= 1'b1;
             end
@@ -488,7 +504,7 @@ module mem_cache #(
     // no crossing.  The registered read means MEM_LOG_LO/HI see the selected
     // entry a cycle later, which is nothing against a USB round trip.
     always_ff @(posedge clk) begin
-        if (log_write) log_mem[log_wptr[10:0]] <= log_record;
+        if (log_ev) log_mem[log_wptr[10:0]] <= log_record;
         if (rst) log_rd <= 64'd0;
         else     log_rd <= log_mem[log_sel[10:0]];
         // The stack bitmap slice the host selected (8 words of 32 bits).

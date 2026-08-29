@@ -89,6 +89,8 @@ module mem_cache_tb;
     logic [11:0] sw_state = 12'd0;
     logic [11:0] log_sel = 12'd0;
     logic        res_sync = 1'b1;
+    logic        watch_en = 1'b0;
+    logic [15:0] watch_addr = 16'd0;
     wire  [63:0] log_rd;
     wire  [11:0] log_count;
     wire         log_overflow;
@@ -108,6 +110,7 @@ module mem_cache_tb;
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
         .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
         .res_sync (res_sync),
+        .watch_en (watch_en), .watch_addr (watch_addr),
         .sw_state (sw_state),
         .log_sel (log_sel), .log_rd (log_rd),
         .log_count (log_count), .log_overflow (log_overflow), .stk_rd (stk_rd),
@@ -528,6 +531,21 @@ module mem_cache_tb;
         if (served != 0) fail("served with every serve bit clear");
         repeat (200) @(negedge clk);
         check_image("with serving off, writes still reach the image");
+
+        // ---- 7. the write watch -----------------------------------------------------
+        cnt_clr <= 1'b1; @(negedge clk); cnt_clr <= 1'b0; @(negedge clk);
+        watch_addr <= 16'h0042; watch_en <= 1'b1; @(negedge clk);
+        // A write of $99 to $0042 in main RAM should be logged as a src=3 record.
+        do_op(CLS_RAM, 24'h000042, 1'b0, 8'h99, 14'd0, 1'b1, 1'b0);
+        repeat (4) @(negedge clk);
+        log_sel <= 12'd0; @(negedge clk); @(negedge clk);
+        if (log_count != 12'd1)
+            fail($sformatf("watch: log_count %0d after one watched write", log_count));
+        else if (log_rd[15:0] !== 16'h0042 || log_rd[23:16] !== 8'h99 ||
+                 log_rd[35:34] !== 2'd3)
+            fail($sformatf("watch: record %016x (want addr 0042, val 99, src 3)", log_rd));
+        else ok("the write watch logs a write as a src=3 record with its value");
+        watch_en <= 1'b0;
 
         $display("%0d checks, %0d errors", checks, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL");

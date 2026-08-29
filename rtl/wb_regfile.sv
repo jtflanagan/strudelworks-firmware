@@ -177,6 +177,8 @@ module wb_regfile #(
     input  wire [11:0]     mem_log_count,
     input  wire            mem_log_overflow,
     input  wire [31:0]     mem_stk_rd,      // stack-write bitmap slice (log_sel[2:0])
+    output logic           mem_watch_en,    // MEM_WATCH: log writes to this address
+    output logic [15:0]    mem_watch_addr,
 
     // Programmatic Ctrl-Reset.  Held low while pulsing; the master top turns
     // this into an open-drain drive of the Apple's RES' line, exactly as it
@@ -241,6 +243,7 @@ module wb_regfile #(
     localparam [13:0] R_MEM_LOG_LO   = 'd28; // 0x8000_0070, RO
     localparam [13:0] R_MEM_LOG_HI   = 'd29; // 0x8000_0074, RO
     localparam [13:0] R_MEM_STK      = 'd30; // 0x8000_0078, RO (bitmap word log_sel[2:0])
+    localparam [13:0] R_MEM_WATCH    = 'd31; // 0x8000_007C, RW ([15:0] addr, [16] enable)
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -606,6 +609,18 @@ module wb_regfile #(
     end
     wire [31:0] mem_log_stat_rd = {15'd0, mem_log_overflow, 4'd0, mem_log_count};
 
+    // MEM_WATCH: an address (and enable) whose writes the mismatch log records.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            mem_watch_en   <= 1'b0;
+            mem_watch_addr <= 16'd0;
+        end else if (wr_mem_watch) begin
+            mem_watch_en   <= wb_dat_w[16];
+            mem_watch_addr <= wb_dat_w[15:0];
+        end
+    end
+    wire [31:0] mem_watch_rd = {15'd0, mem_watch_en, mem_watch_addr};
+
     // ---- MEM_STAT -----------------------------------------------------------
     //
     //   [11:0]   switches   RO   the MMU shadow: {prewrite, wren, lc_ramrd,
@@ -845,6 +860,7 @@ module wb_regfile #(
                         R_MEM_LOG_LO:   wb_dat_r <= mem_log_rd[31:0];
                         R_MEM_LOG_HI:   wb_dat_r <= mem_log_rd[63:32];
                         R_MEM_STK:      wb_dat_r <= mem_stk_rd;
+                        R_MEM_WATCH:    wb_dat_r <= mem_watch_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -882,6 +898,8 @@ module wb_regfile #(
                          (word == R_VBL_CTRL);
     wire wr_mem_log_sel = access && !wb_ack && in_region && wb_we &&
                          (word == R_MEM_LOG_SEL);
+    wire wr_mem_watch  = access && !wb_ack && in_region && wb_we &&
+                         (word == R_MEM_WATCH);
     wire wr_fd_slot    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FD_SLOT);
     wire wr_fd_drive1  = access && !wb_ack && in_region && wb_we &&
