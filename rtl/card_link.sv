@@ -193,7 +193,13 @@ module card_link #(
     input  wire [31:0] mem_misses,
     input  wire [31:0] mem_mismatch,
     input  wire [31:0] mem_served,
-    input  wire [31:0] mem_last,
+    input  wire [31:0]  mem_last,
+    // The mismatch log's seam (rtl/mem_cache.sv <-> wb_regfile).
+    output wire [11:0]  mem_log_sel,
+    input  wire [63:0]  mem_log_rd,
+    input  wire [11:0]  mem_log_count,
+    input  wire         mem_log_overflow,
+    input  wire [31:0]  mem_stk_rd,
 
     // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
     // mastering top wires it to the pin; a snooper leaves it unconnected.
@@ -271,8 +277,19 @@ module card_link #(
     ft_clk_buf u_ft_clk (.ft_clk_pin(ft_clk), .ft_clk(ft_clk_i));
 
     // ---- reset ------------------------------------------------------------
-    localparam integer RST_TICKS      = 64;
+    // The FT601's RESET# needs a MILLISECOND, and it needs it at power-on and
+    // after every bitstream load, not only on the host's 'R': the same pin is
+    // pulsed for all of them, and the one measurement this project has (a
+    // ~40 ns pulse left the chip untouched, 1 ms made it re-enumerate) says a
+    // short pulse is not a shorter reset, it is no reset at all.  The 64-tick
+    // (640 ns) power-on pulse this used to have was inherited from the
+    // reference, where a real power-on resets the chip by its own POR anyway.
+    // Here the common case is an SRAM reload with the chip still powered:
+    // during configuration its bus floats, whatever the chip made of that
+    // stays, and the 640 ns pulse afterwards changed none of it.  So the
+    // power-on reset is the same 1 ms as the command reset.
     localparam integer CMD_RST_CYCLES = 100_000;   // 1 ms at 100 MHz
+    localparam integer RST_TICKS      = CMD_RST_CYCLES;
 
     // Three things pull the reset lever, and they are all the same lever on
     // purpose: the host's 'R' command, the watchdog expiring, and a malformed
@@ -294,24 +311,79 @@ module card_link #(
         else if (cmd_rst_cnt != 17'd0)      cmd_rst_cnt <= cmd_rst_cnt - 17'd1;
     end
 
+    // WHY the link was last reset, and what the FT601 side looked like at that
+    // instant - kept across the reset it causes, since the reset is exactly
+    // what would otherwise erase the evidence.  Reported on the UART as
+    // L=c (1 the host's 'R', 2 the watchdog, 4 a malformed message; the
+    // latest wins) and S=xxxx: {TXE#, RXF#, skid count[1:0], FSM state[3:0],
+    // link resets[7:0]}.  The chip-side signals are sampled from the FT601's
+    // clock domain without a synchronizer - a snapshot, not a control path.
+    // Last night's wedge read TXE#=1 with words waiting and RXF#=1 with the
+    // host writing: a chip whose session engine had stopped.  This is what
+    // makes the next one readable without a rebuild.
+    wire [3:0] ft_dbg_state;
+    wire [1:0] ft_dbg_qcount;
+    reg  [2:0] link_cause  = 3'd0;
+    reg  [7:0] link_resets = 8'd0;
+    reg  [7:0] link_snap   = 8'd0;   // {txe, rxf, qcount, state}
+
+    always @(posedge clk_ctrl) begin
+        if (!clk_locked) begin
+            link_cause  <= 3'd0;
+            link_resets <= 8'd0;
+            link_snap   <= 8'd0;
+        end else if (link_reset_trigger && !cmd_reset) begin
+            link_cause  <= {rx_frame_error, watchdog_fired, cmd_reset_strobe};
+            link_resets <= link_resets + 8'd1;
+            link_snap   <= {ft_txe, ft_rxf, ft_dbg_qcount, ft_dbg_state};
+        end
+    end
+
     wire cmd_reset = (cmd_rst_cnt != 17'd0);
 
-    reg [7:0] tickcount = 8'd0;
+    reg [16:0] tickcount = 17'd0;
     always @(posedge clk_ctrl) begin
-        if (!clk_locked)                tickcount <= 8'd0;
-        else if (tickcount < RST_TICKS) tickcount <= tickcount + 8'd1;
+        if (!clk_locked)                tickcount <= 17'd0;
+        else if (tickcount < RST_TICKS) tickcount <= tickcount + 17'd1;
     end
 
     wire rst = ~clk_locked | (tickcount < RST_TICKS) | cmd_reset;
 
     assign ft_reset = ~rst;
 
+    // The reset as the FT601's clock domain sees it.  `rst` is a clk_ctrl
+    // signal, and everything clocked by the chip's CLKOUT - the controller,
+    // the message layer, the async FIFOs' far sides - can only act on it while
+    // that clock is running.  While RESET# is low the chip is in reset and its
+    // CLKOUT is not to be relied on, so a reset that is only ever sampled
+    // synchronously there may never be seen: the controller would come back
+    // with the state it had, skid buffer and all, in front of a chip that has
+    // just been wiped.  Asserted asynchronously, released through two flops
+    // of the chip's clock, this is seen whether or not CLKOUT ran, and it
+    // ends only once CLKOUT is running again.  The reference clears its
+    // tickcount64_com on rst for the same purpose (pcileech_com.sv).
+    // From a registered copy: an asynchronous assert wants a flop output, not
+    // an OR of comparators.
+    reg rst_r = 1'b1;
+    always @(posedge clk_ctrl) rst_r <= rst;
+
+    reg [1:0] rst_ft_sync = 2'b11;
+    always @(posedge ft_clk_i or posedge rst_r) begin
+        if (rst_r) rst_ft_sync <= 2'b11;
+        else       rst_ft_sync <= {rst_ft_sync[0], 1'b0};
+    end
+    wire rst_ft = rst_ft_sync[1];
+
+    // Then 16 running cycles more before the FIFOs are let go: XPM documents a
+    // five-cycle minimum, and the reference holds for two after its own
+    // counter restarts.
     reg [4:0] tickcount_ft = 5'd0;
     always @(posedge ft_clk_i) begin
-        if (tickcount_ft != 5'd16) tickcount_ft <= tickcount_ft + 5'd1;
+        if (rst_ft)                     tickcount_ft <= 5'd0;
+        else if (tickcount_ft != 5'd16) tickcount_ft <= tickcount_ft + 5'd1;
     end
 
-    wire fifo_rst = rst | (tickcount_ft != 5'd16);
+    wire fifo_rst = rst | rst_ft | (tickcount_ft != 5'd16);
 
     // ---- DDR3 ---------------------------------------------------------------
     // The controller's reset is the clock-lock reset, as in au_top, and NOT
@@ -387,7 +459,7 @@ module card_link #(
 
     ft601_fifo u_ft (
         .clk          (ft_clk_i),
-        .rst          (rst),
+        .rst          (rst_ft),
         .ft_be        (ft_be),
         .ft_data      (ft_data),
         .ft_rxf       (ft_rxf),
@@ -403,7 +475,9 @@ module card_link #(
         .din_req_data (ft_din_req_data),
         .fwd          (ft_fwd),
         .q_empty      (ft_q_empty),
-        .in_rx        (ft_in_rx)
+        .in_rx        (ft_in_rx),
+        .dbg_state    (ft_dbg_state),
+        .dbg_qcount   (ft_dbg_qcount)
     );
 
     // ---- FPGA -> host crossing --------------------------------------------
@@ -433,7 +507,7 @@ module card_link #(
 
     ft601_msg_tx u_msg_tx (
         .clk          (ft_clk_i),
-        .rst          (rst),
+        .rst          (rst_ft),
         .fifo_dout    (txc_dout),
         .fifo_empty   (txc_empty),
         .fifo_rd_en   (txc_rd_en),
@@ -542,7 +616,7 @@ module card_link #(
     // single transition, and the worst it can produce is one heartbeat at a
     // blended period before the value settles.
     synchronizer #(.WIDTH(4)) u_hb_shift_sync (
-        .clk (ft_clk_i), .rst (rst), .in (hb_shift_ctrl), .out (hb_shift_ft)
+        .clk (ft_clk_i), .rst (rst_ft), .in (hb_shift_ctrl), .out (hb_shift_ft)
     );
 
     // Source select, latched at enable so it cannot change mid-capture.
@@ -736,6 +810,11 @@ module card_link #(
         .mem_mismatch      (mem_mismatch),
         .mem_served        (mem_served),
         .mem_last          (mem_last),
+        .mem_log_sel       (mem_log_sel),
+        .mem_log_rd        (mem_log_rd),
+        .mem_log_count     (mem_log_count),
+        .mem_log_overflow  (mem_log_overflow),
+        .mem_stk_rd        (mem_stk_rd),
         .res_drive         (res_drive),
         .ring_status       (ring_status),
         .wb_cyc   (rwb_cyc),
@@ -989,7 +1068,7 @@ module card_link #(
     assign cmd_reset_strobe = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
 
     // ---- status over UART -------------------------------------------------
-    // "C=xxxxxxxx E=x O=x P=x D=x T=x R=xxxxxx" - events captured, capture
+    // "C=xxxxxxxx E=x O=x P=x D=x T=x R=xxxxxx L=x S=xxxx" - events captured, capture
     // enabled, overflow, whether phi0 is ticking, whether the DDR3
     // calibrated, whether a message was ever torn on the bus, and the lines
     // the DDR3 ring holds right now.  R is the one number the host cannot
@@ -1000,14 +1079,16 @@ module card_link #(
     // nothing to say there; T is a can't-happen, reported because can't-
     // happens have to be seen to be fixed.  The UART is the only way to see
     // the card's own view when the FT601 link is the thing under suspicion.
+    // L and S are the link's last reset: its cause and the chip-side snapshot
+    // taken as it fired (see link_cause above).
     localparam [7:0] CH_C = 8'h43, CH_E = 8'h45, CH_O = 8'h4F, CH_EQ = 8'h3D;
     localparam [7:0] CH_P = 8'h50, CH_D = 8'h44, CH_T = 8'h54;
     localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
-    localparam [7:0] CH_R = 8'h52;
+    localparam [7:0] CH_R = 8'h52, CH_L = 8'h4C, CH_S = 8'h53;
 
-    localparam [5:0] RPT_LAST = 6'd40;
-    localparam [5:0] RPT_IDLE = 6'd41;
+    localparam [5:0] RPT_LAST = 6'd51;
+    localparam [5:0] RPT_IDLE = 6'd52;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
@@ -1021,6 +1102,8 @@ module card_link #(
     reg        rpt_cal  = 1'b0;
     reg        rpt_torn = 1'b0;
     reg [23:0] rpt_ring = 24'd0;
+    reg [2:0]  rpt_cause = 3'd0;
+    reg [15:0] rpt_snap  = 16'd0;
 
     always @(posedge clk_ctrl) begin
         if (!clk_locked) begin
@@ -1036,6 +1119,8 @@ module card_link #(
                 rpt_cal <= calib_complete;
                 rpt_torn <= ring_status[26];
                 rpt_ring <= {2'd0, ring_status[21:0]};
+                rpt_cause <= link_cause;
+                rpt_snap  <= {link_snap, link_resets};
                 rpt_idx <= 6'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
@@ -1066,6 +1151,11 @@ module card_link #(
             6'd36: nib = rpt_ring[11:8];
             6'd37: nib = rpt_ring[7:4];
             6'd38: nib = rpt_ring[3:0];
+            6'd42: nib = {1'b0, rpt_cause};
+            6'd46: nib = rpt_snap[15:12];
+            6'd47: nib = rpt_snap[11:8];
+            6'd48: nib = rpt_snap[7:4];
+            6'd49: nib = rpt_snap[3:0];
             default: nib = 4'd0;
         endcase
     end
@@ -1096,8 +1186,14 @@ module card_link #(
             6'd30: ch = CH_SP;
             6'd31: ch = CH_R;
             6'd32: ch = CH_EQ;
-            6'd39: ch = CH_CR;
-            6'd40: ch = CH_LF;
+            6'd39: ch = CH_SP;
+            6'd40: ch = CH_L;
+            6'd41: ch = CH_EQ;
+            6'd43: ch = CH_SP;
+            6'd44: ch = CH_S;
+            6'd45: ch = CH_EQ;
+            6'd50: ch = CH_CR;
+            6'd51: ch = CH_LF;
             default: ch = hex;
         endcase
     end

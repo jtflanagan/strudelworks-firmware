@@ -204,6 +204,8 @@ module reg_map_tb;
         .mem_hits (32'h0000_1111), .mem_misses (32'h0000_0022),
         .mem_mismatch (32'h0000_0003), .mem_served (32'h0000_0444),
         .mem_last (32'h1234_5C3A),
+        .mem_log_sel (), .mem_log_rd (64'hDEAD_BEEF_1234_5678),
+        .mem_log_count (12'd7), .mem_log_overflow (1'b1), .mem_stk_rd (32'hCAFE_F00D),
         .ring_status (32'h0200_1234),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),

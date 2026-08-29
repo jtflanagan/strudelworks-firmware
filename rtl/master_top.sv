@@ -176,6 +176,10 @@ module master_top #(
     wire [11:0] mem_sw;
     wire [7:0]  mem_late_fills, mem_fifo_drops;
     wire [31:0] mem_hits, mem_misses, mem_mismatch, mem_served, mem_last;
+    wire [11:0] mem_log_sel, mem_log_count;
+    wire [63:0] mem_log_rd;
+    wire        mem_log_overflow;
+    wire [31:0] mem_stk_rd;
     wire        res_drive;
     wire        vbl_start, vbl_probe, vbl_notify, vbl_locked, vbl_pal, vbl_busy;
     wire [15:0] vbl_probe_addr;
@@ -242,6 +246,9 @@ module master_top #(
         .mem_late_fills (mem_late_fills), .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
         .mem_served (mem_served), .mem_last (mem_last),
+        .mem_log_sel (mem_log_sel), .mem_log_rd (mem_log_rd),
+        .mem_log_count (mem_log_count), .mem_log_overflow (mem_log_overflow),
+        .mem_stk_rd (mem_stk_rd),
         .res_drive (res_drive),
         .app_msg_valid (app_msg_valid), .app_msg_type (app_msg_type),
         .app_msg_free (app_msg_free), .app_msg_len (app_msg_len),
@@ -578,6 +585,13 @@ module master_top #(
         .last_mismatch (mem_last),
         .late_fills  (mem_late_fills),
         .fifo_drops  (mem_fifo_drops),
+        .res_sync    (apple_res_sync),
+        .sw_state    (mem_sw),
+        .log_sel     (mem_log_sel),
+        .log_rd      (mem_log_rd),
+        .log_count   (mem_log_count),
+        .log_overflow (mem_log_overflow),
+        .stk_rd      (mem_stk_rd),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
         .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
         .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)

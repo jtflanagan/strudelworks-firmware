@@ -55,7 +55,12 @@ module ft601_fifo (
     // chip's internal 1 KB buffer; see docs/PROTOCOL.md.
     output wire         fwd,          // a block was handed to the chip THIS cycle
     output wire         q_empty,      // the skid buffer has drained
-    output wire         in_rx         // the bus is turned around for RX
+    output wire         in_rx,        // the bus is turned around for RX
+
+    // For the link snapshot on the UART: the FSM state and the skid count as
+    // they are, sampled from another domain at the moment a reset fires.
+    output wire  [3:0]  dbg_state,
+    output wire  [1:0]  dbg_qcount
 );
 
     initial begin
@@ -174,6 +179,8 @@ module ft601_fifo (
     // heartbeat decision gets made.
     assign fwd     = FWD;
     assign q_empty = (data_queue_count == 2'd0);
+    assign dbg_state  = state;
+    assign dbg_qcount = data_queue_count;
     assign in_rx   = (state == S_RX_WAIT1)     || (state == S_RX_WAIT2)  ||
                      (state == S_RX_WAIT3)     || (state == S_RX_ACTIVE) ||
                      (state == S_RX_COOLDOWN1) || (state == S_RX_COOLDOWN2);

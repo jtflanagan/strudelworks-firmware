@@ -29,6 +29,8 @@
 // A power-on tick counter and a button - here, a tick counter and the host's 'R'
 // command.  No clock-presence gating, no lock signal, no watchdog.  The same
 // reset drives the FT601's RESET# pin, so chip and fabric leave reset together.
+// The tick counter runs for 1 ms rather than the reference's 64 ticks - see the
+// reset section below.
 //
 // The async FIFOs need their far clock alive to complete their own reset, and
 // that is handled the way the reference handles it - see fifo_rst - not by making
@@ -79,7 +81,9 @@ module ft601_top (
     ft_clk_buf u_ft_clk (.ft_clk_pin(ft_clk), .ft_clk(ft_clk_i));
 
     // ---- reset ------------------------------------------------------------
-    localparam integer RST_TICKS = 64;
+    // The power-on reset is the same 1 ms as the command reset, for the reason
+    // card_link gives: a 640 ns pulse does not reset this chip, and after an
+    // SRAM reload the chip is still powered and has just watched its bus float.
 
     // The reference's reset trigger is a BUTTON - `~user_sw2_n` - which a human
     // holds for milliseconds.  Ours is a UART byte, and uart_rx signals that with
@@ -94,6 +98,7 @@ module ft601_top (
     // Reset Generator section and the pin table describe the pin and stop - so
     // 1 ms is chosen for margin against the value we measured, not from a spec.
     localparam integer CMD_RST_CYCLES = 100_000;   // 1 ms at 100 MHz
+    localparam integer RST_TICKS      = CMD_RST_CYCLES;
 
     wire       cmd_reset_strobe;
     reg [16:0] cmd_rst_cnt = 17'd0;
@@ -106,11 +111,11 @@ module ft601_top (
 
     wire cmd_reset = (cmd_rst_cnt != 17'd0);
 
-    reg [7:0] tickcount = 8'd0;
+    reg [16:0] tickcount = 17'd0;
 
     always @(posedge clk_ctrl) begin
-        if (!clk_locked)                tickcount <= 8'd0;
-        else if (tickcount < RST_TICKS) tickcount <= tickcount + 8'd1;
+        if (!clk_locked)                tickcount <= 17'd0;
+        else if (tickcount < RST_TICKS) tickcount <= tickcount + 17'd1;
     end
 
     wire rst = ~clk_locked | (tickcount < RST_TICKS) | cmd_reset;
@@ -124,12 +129,28 @@ module ft601_top (
     // alive and released a couple of cycles later, with no clock detection
     // anywhere.  16 rather than 2 because XPM documents a 5-cycle minimum where
     // the FIFO Generator core the reference uses does not.
+    // The reset as the chip's clock domain sees it - asserted asynchronously,
+    // released through two flops of CLKOUT, so it is seen whether or not that
+    // clock ran during RESET#.  card_link has the full note.
+    // From a registered copy: an asynchronous assert wants a flop output, not
+    // an OR of comparators.
+    reg rst_r = 1'b1;
+    always @(posedge clk_ctrl) rst_r <= rst;
+
+    reg [1:0] rst_ft_sync = 2'b11;
+    always @(posedge ft_clk_i or posedge rst_r) begin
+        if (rst_r) rst_ft_sync <= 2'b11;
+        else       rst_ft_sync <= {rst_ft_sync[0], 1'b0};
+    end
+    wire rst_ft = rst_ft_sync[1];
+
     reg [4:0] tickcount_ft = 5'd0;
     always @(posedge ft_clk_i) begin
-        if (tickcount_ft != 5'd16) tickcount_ft <= tickcount_ft + 5'd1;
+        if (rst_ft)                     tickcount_ft <= 5'd0;
+        else if (tickcount_ft != 5'd16) tickcount_ft <= tickcount_ft + 5'd1;
     end
 
-    wire fifo_rst = rst | (tickcount_ft != 5'd16);
+    wire fifo_rst = rst | rst_ft | (tickcount_ft != 5'd16);
 
     // ---- FT601 controller -------------------------------------------------
     wire [31:0] ft_dout;
@@ -142,7 +163,7 @@ module ft601_top (
 
     ft601_fifo u_ft (
         .clk          (ft_clk_i),
-        .rst          (rst),
+        .rst          (rst_ft),
         .ft_be        (ft_be),
         .ft_data      (ft_data),
         .ft_rxf       (ft_rxf),
@@ -189,7 +210,7 @@ module ft601_top (
     // link idle would hang the host's read.  docs/PROTOCOL.md.
     ft601_msg_tx u_msg (
         .clk          (ft_clk_i),
-        .rst          (rst),
+        .rst          (rst_ft),
         .fifo_dout    (txc_dout),
         .fifo_empty   (txc_empty),
         .fifo_rd_en   (txc_rd_en),

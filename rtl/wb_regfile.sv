@@ -170,6 +170,13 @@ module wb_regfile #(
     input  wire [31:0]     mem_mismatch,
     input  wire [31:0]     mem_served,
     input  wire [31:0]     mem_last,
+    // The mismatch log (rtl/mem_cache.sv): the host picks an entry with
+    // MEM_LOG_SEL and reads it back as two words; MEM_LOG_STAT gives the count.
+    output logic [11:0]    mem_log_sel,
+    input  wire [63:0]     mem_log_rd,
+    input  wire [11:0]     mem_log_count,
+    input  wire            mem_log_overflow,
+    input  wire [31:0]     mem_stk_rd,      // stack-write bitmap slice (log_sel[2:0])
 
     // Programmatic Ctrl-Reset.  Held low while pulsing; the master top turns
     // this into an open-drain drive of the Apple's RES' line, exactly as it
@@ -229,6 +236,11 @@ module wb_regfile #(
     localparam [13:0] R_MEM_MISMATCH = 'd23; // 0x8000_005C, RO
     localparam [13:0] R_MEM_SERVED = 'd24;  // 0x8000_0060, RO
     localparam [13:0] R_MEM_LAST   = 'd25;  // 0x8000_0064, RO
+    localparam [13:0] R_MEM_LOG_STAT = 'd26; // 0x8000_0068, RO
+    localparam [13:0] R_MEM_LOG_SEL  = 'd27; // 0x8000_006C, RW
+    localparam [13:0] R_MEM_LOG_LO   = 'd28; // 0x8000_0070, RO
+    localparam [13:0] R_MEM_LOG_HI   = 'd29; // 0x8000_0074, RO
+    localparam [13:0] R_MEM_STK      = 'd30; // 0x8000_0078, RO (bitmap word log_sel[2:0])
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -586,6 +598,14 @@ module wb_regfile #(
 
     wire [31:0] mem_ctrl_rd = {4'd0, 4'(MEM_SETS_LOG2), 21'd0, mem_serve};
 
+    // MEM_LOG_SEL: which log entry MEM_LOG_LO/HI read back.  A plain holding
+    // register; the host writes an index, then reads the two halves.
+    always_ff @(posedge clk) begin
+        if (rst)                mem_log_sel <= 12'd0;
+        else if (wr_mem_log_sel) mem_log_sel <= wb_dat_w[11:0];
+    end
+    wire [31:0] mem_log_stat_rd = {15'd0, mem_log_overflow, 4'd0, mem_log_count};
+
     // ---- MEM_STAT -----------------------------------------------------------
     //
     //   [11:0]   switches   RO   the MMU shadow: {prewrite, wren, lc_ramrd,
@@ -820,6 +840,11 @@ module wb_regfile #(
                         R_MEM_MISMATCH: wb_dat_r <= mem_mismatch;
                         R_MEM_SERVED: wb_dat_r <= mem_served;
                         R_MEM_LAST:   wb_dat_r <= mem_last;
+                        R_MEM_LOG_STAT: wb_dat_r <= mem_log_stat_rd;
+                        R_MEM_LOG_SEL:  wb_dat_r <= {20'd0, mem_log_sel};
+                        R_MEM_LOG_LO:   wb_dat_r <= mem_log_rd[31:0];
+                        R_MEM_LOG_HI:   wb_dat_r <= mem_log_rd[63:32];
+                        R_MEM_STK:      wb_dat_r <= mem_stk_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -855,6 +880,8 @@ module wb_regfile #(
                          (word == R_MENU_HOLD);
     wire wr_vbl_ctrl   = access && !wb_ack && in_region && wb_we &&
                          (word == R_VBL_CTRL);
+    wire wr_mem_log_sel = access && !wb_ack && in_region && wb_we &&
+                         (word == R_MEM_LOG_SEL);
     wire wr_fd_slot    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FD_SLOT);
     wire wr_fd_drive1  = access && !wb_ack && in_region && wb_we &&
