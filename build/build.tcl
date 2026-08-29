@@ -125,6 +125,11 @@ if {$snoop || $master} {
         [file join $root rtl ddr3_wrapper.sv] \
         [file join $root rtl wb_arb.sv] \
         [file join $root rtl tx_ring.sv] \
+        [file join $root rtl mem_client.sv] \
+        [file join $root rtl apple_mmu.sv] \
+        [file join $root rtl apple_rom.sv] \
+        [file join $root rtl cache_way_ram.sv] \
+        [file join $root rtl mem_cache.sv] \
         [file join $root rtl uart_tx.v] \
         [file join $root rtl uart_rx.v] \
         [file join $root rtl card_link.sv] \

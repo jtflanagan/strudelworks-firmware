@@ -165,6 +165,36 @@ module card_link #(
     input  wire [31:0] vbl_stat,
     input  wire [31:0] vbl_pos,
 
+    // The memory image (rtl/mem_cache.sv in a mastering top, rtl/mem_client.sv
+    // here, docs/MEMORY.md): the cache's requests in and its fills out, the
+    // registers' levels and pulses out, the counters and state back.  A
+    // watching top ties the inputs to 0 and leaves the outputs unconnected.
+    input  wire        mem_op_present,
+    input  wire        mq_valid,
+    input  wire        mq_kind,
+    input  wire [1:0]  mq_id,
+    input  wire [19:0] mq_line,
+    input  wire [3:0]  mq_byte,
+    input  wire [7:0]  mq_data,
+    output wire        mq_ready,
+    output wire        mr_valid,
+    output wire [1:0]  mr_id,
+    output wire [127:0] mr_data,
+    output wire        mem_image_ready,
+    output wire [2:0]  mem_serve,
+    output wire        mem_cnt_clr,
+    output wire        mem_inval,
+    input  wire [11:0] mem_sw,
+    input  wire        mem_invalidating,
+    input  wire        mem_rom_loaded,
+    input  wire [7:0]  mem_late_fills,
+    input  wire [7:0]  mem_fifo_drops,
+    input  wire [31:0] mem_hits,
+    input  wire [31:0] mem_misses,
+    input  wire [31:0] mem_mismatch,
+    input  wire [31:0] mem_served,
+    input  wire [31:0] mem_last,
+
     // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
     // mastering top wires it to the pin; a snooper leaves it unconnected.
     output wire        res_drive,
@@ -325,10 +355,11 @@ module card_link #(
         .wb_rdata_aux(wb_rdata_aux),
         .calib_complete (calib_complete),
         .ddr3_debug     (),
-        // Refresh is the controller's own until an Apple-side client exists
-        // to say when a window is free; low is upstream behaviour and safe.
+        // The memory client says when a bus cycle has room for a refresh:
+        // the gate only ever pulls one EARLIER, so this is safe whatever it
+        // does (docs/DERISK.md, milestone 2).
         .user_self_refresh (1'b0),
-        .refresh_ok        (1'b0),
+        .refresh_ok        (mem_refresh_ok),
         .ddr3_addr   (ddr3_addr),
         .ddr3_ba     (ddr3_ba),
         .ddr3_ras_n  (ddr3_ras_n),
@@ -631,6 +662,8 @@ module card_link #(
 
     // KBD_CTRL's notify: the host asking for KBD_EVENT notices.
     wire kbd_notify;
+    // MEM_CTRL's clear, and the memory client's state for MEM_STAT.
+    wire mem_clear, mem_clearing, mem_refresh_ok, mem_rot_ok;
 
     wb_regfile #(
         .BUILD_DATE (BUILD_DATE),
@@ -689,6 +722,22 @@ module card_link #(
         .vbl_err           (vbl_err),
         .vbl_stat          (vbl_stat),
         .vbl_pos           (vbl_pos),
+        .mem_serve         (mem_serve),
+        .mem_cnt_clr       (mem_cnt_clr),
+        .mem_inval         (mem_inval),
+        .mem_clear         (mem_clear),
+        .mem_sw            (mem_sw),
+        .mem_image_ready   (mem_image_ready),
+        .mem_clearing      (mem_clearing),
+        .mem_invalidating  (mem_invalidating),
+        .mem_rom_loaded    (mem_rom_loaded),
+        .mem_late_fills    (mem_late_fills),
+        .mem_fifo_drops    (mem_fifo_drops),
+        .mem_hits          (mem_hits),
+        .mem_misses        (mem_misses),
+        .mem_mismatch      (mem_mismatch),
+        .mem_served        (mem_served),
+        .mem_last          (mem_last),
         .res_drive         (res_drive),
         .ring_status       (ring_status),
         .wb_cyc   (rwb_cyc),
@@ -854,20 +903,23 @@ module card_link #(
         .s_ack   (sb_ack)
     );
 
-    // ---- the ring, and the memory port behind it ----------------------------
-    // Two clients of wb_arb: the ring's reader at 0 and its writer at 1.  The
-    // Apple's memory, when it comes, goes in a strict-priority slot above
-    // both; see wb_arb.
-    wire [1:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;
-    wire [47:0]  c_addr;
-    wire [255:0] c_data;
+    // ---- the ring, the memory image, and the port behind them ---------------
+    // Three clients of wb_arb: the ring's reader at 0 and its writer at 1, in
+    // the rotation; the Apple's memory at 2, the strict-priority slot above
+    // it.  The ring's batches are 32 lines so one begun inside the memory
+    // client's window (rot_ok) is over before the next bus cycle; see
+    // rtl/mem_client.sv and wb_arb.
+    wire [2:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;
+    wire [71:0]  c_addr;
+    wire [383:0] c_data;
+    wire [47:0]  c_sel;
     wire [127:0] c_rdata;
 
-    wb_arb #(.N (2)) u_wb_arb (
-        .clk (clk_ctrl), .rst (rst),
+    wb_arb #(.N (3), .HAS_PRIO (1'b1)) u_wb_arb (
+        .clk (clk_ctrl), .rst (rst), .rot_ok (mem_rot_ok),
         .c_req (c_req), .c_gnt (c_gnt), .c_cyc (c_cyc), .c_stb (c_stb),
         .c_we (c_we), .c_addr (c_addr), .c_data (c_data),
-        .c_sel ({16'hFFFF, 16'hFFFF}),
+        .c_sel (c_sel),
         .c_stall (c_stall), .c_ack (c_ack), .c_rdata (c_rdata),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_addr (wb_addr), .wb_data (wb_data), .wb_sel (wb_sel),
@@ -875,10 +927,33 @@ module card_link #(
         .wb_rdata (wb_rdata), .wb_rdata_aux (wb_rdata_aux)
     );
 
-    assign c_we          = 2'b10;           // the reader reads, the writer writes
+    assign c_we[1:0]     = 2'b10;           // the reader reads, the writer writes
     assign c_data[127:0] = 128'd0;          // the reader carries no data
+    assign c_sel[31:0]   = {16'hFFFF, 16'hFFFF};
 
-    tx_ring u_ring (
+    mem_client u_mem (
+        .clk            (clk_ctrl),
+        .rst            (rst),
+        .calib_complete (calib_complete),
+        .master_active  (cpu_source_active),
+        .op_present     (mem_op_present),
+        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id),
+        .mq_line (mq_line), .mq_byte (mq_byte), .mq_data (mq_data),
+        .mq_ready (mq_ready),
+        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
+        .req   (c_req[2]),  .gnt (c_gnt[2]),  .cyc (c_cyc[2]),
+        .stb   (c_stb[2]),  .we (c_we[2]),
+        .addr  (c_addr[71:48]), .data (c_data[383:256]), .sel (c_sel[47:32]),
+        .stall (c_stall[2]), .ack (c_ack[2]), .rdata (c_rdata),
+        .refresh_ok  (mem_refresh_ok),
+        .rot_ok      (mem_rot_ok),
+        .mem_idle    (),
+        .image_ready (mem_image_ready),
+        .clearing    (mem_clearing),
+        .clear_req   (mem_clear)
+    );
+
+    tx_ring #(.BATCH (32)) u_ring (
         .clk            (clk_ctrl),
         .rst            (rst),
         .calib_complete (calib_complete),

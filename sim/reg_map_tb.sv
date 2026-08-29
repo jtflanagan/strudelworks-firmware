@@ -163,6 +163,15 @@ module reg_map_tb;
         if (kbd_drop)  drop_pulses = drop_pulses + 1;
     end
 
+    wire [2:0] mem_serve;
+    wire       mem_cnt_clr, mem_inval, mem_clear;
+    integer    mem_cnt_clrs = 0, mem_invals = 0, mem_clears = 0;
+    always @(posedge clk) begin
+        if (mem_cnt_clr) mem_cnt_clrs = mem_cnt_clrs + 1;
+        if (mem_inval)   mem_invals = mem_invals + 1;
+        if (mem_clear)   mem_clears = mem_clears + 1;
+    end
+
     wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME),
                  .CAN_MASTER (1'b1)) u_regs (
         .clk (clk), .rst (rst),
@@ -189,6 +198,14 @@ module reg_map_tb;
         .vbl_state (vbl_state), .vbl_locked (vbl_locked), .vbl_pal (vbl_pal),
         .vbl_busy (vbl_busy), .vbl_err (vbl_err),
         .vbl_stat (vbl_stat), .vbl_pos (vbl_pos),
+        .mem_serve (mem_serve), .mem_cnt_clr (mem_cnt_clr), .mem_inval (mem_inval),
+        .mem_clear (mem_clear),
+        .mem_sw (12'hA5C), .mem_image_ready (1'b1), .mem_clearing (1'b0),
+        .mem_invalidating (1'b0), .mem_rom_loaded (1'b1),
+        .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),
+        .mem_hits (32'h0000_1111), .mem_misses (32'h0000_0022),
+        .mem_mismatch (32'h0000_0003), .mem_served (32'h0000_0444),
+        .mem_last (32'h1234_5C3A),
         .ring_status (32'h0200_1234),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
@@ -1140,6 +1157,47 @@ module reg_map_tb;
         end
 
         $display("");
+        // ---- MEM_CTRL / MEM_STAT and the counters -----------------------------
+        base = out_n;
+        do_read(32'h8000_004C);
+        if (out_mem[base+2] !== 32'h0900_0000) begin
+            $display("FAIL: MEM_CTRL reads %08x, expected sets=9 and no serve bits", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: MEM_CTRL reads log2(sets) and every serve bit clear");
+        do_write(32'h8000_004C, 32'h0000_0705);           // serve ram+rom, all three W1s
+        base = out_n;
+        do_read(32'h8000_004C);
+        if (out_mem[base+2] !== 32'h0900_0005 || mem_serve !== 3'b101) begin
+            $display("FAIL: MEM_CTRL after write reads %08x, serve %b", out_mem[base+2], mem_serve);
+            errors = errors + 1;
+        end else if (mem_cnt_clrs != 1 || mem_invals != 1 || mem_clears != 1) begin
+            $display("FAIL: W1 pulses %0d/%0d/%0d, expected one each", mem_cnt_clrs, mem_invals, mem_clears);
+            errors = errors + 1;
+        end else $display("  ok: MEM_CTRL's serve bits are levels and its W1 bits pulse once");
+        do_write(32'h8000_004C, 32'h0000_0000);
+        if (mem_cnt_clrs != 1 || mem_serve !== 3'b000) begin
+            $display("FAIL: a write with the W1 bits clear pulsed, or serve stuck"); errors = errors + 1;
+        end
+        base = out_n;
+        do_read(32'h8000_0050);
+        if (out_mem[base+2] !== 32'h0000_9A5C) begin
+            $display("FAIL: MEM_STAT reads %08x, expected rom_loaded image_ready and the switches", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: MEM_STAT reads the shadow's switches and the image's state");
+        base = out_n;
+        do_read(32'h8000_0054);
+        do_read(32'h8000_0058);
+        do_read(32'h8000_005C);
+        do_read(32'h8000_0060);
+        do_read(32'h8000_0064);
+        if (out_mem[base+2] !== 32'h0000_1111 || out_mem[base+5] !== 32'h0000_0022 ||
+            out_mem[base+8] !== 32'h0000_0003 || out_mem[base+11] !== 32'h0000_0444 ||
+            out_mem[base+14] !== 32'h1234_5C3A) begin
+            $display("FAIL: MEM counters read %08x %08x %08x %08x %08x", out_mem[base+2],
+                     out_mem[base+5], out_mem[base+8], out_mem[base+11], out_mem[base+14]);
+            errors = errors + 1;
+        end else $display("  ok: MEM_HITS, MISSES, MISMATCH, SERVED and LAST read straight through");
+
         if (errors == 0) $display("PASS");
         else             $display("FAIL: %0d error(s)", errors);
         $finish;

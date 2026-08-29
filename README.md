@@ -36,7 +36,9 @@ docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRA
             (the hard disk's slot on the card, the images on the host),
             KEYBOARD.md (a key from the host, on the keyboard the soft core
             reads), VBL.md (the video scanner found on the floating bus during the
-            boot hold and followed to the cycle from then on), and on this branch
+            boot hold and followed to the cycle from then on), MEMORY.md (the
+            machine's memory on the card: the IIe map shadowed, a cache in
+            front of the DDR3, the ROM in BRAM), and on this branch
             UCODE816.md - a first stab at a microcoded 65816, what it costs and
             what can verify it.  Exploratory, not on the milestone plan.
 ```
@@ -86,6 +88,10 @@ sim/run_boot_hold_tb.sh    # the soft core held at its reset vector, ~1 s
 sim/run_hd_card_tb.sh      # the hard disk: busy, polled, a block in, a block out, ~1 s
 sim/run_floppy_card_tb.sh  # the Disk II: nibbles on the cycle, the head, seeks filled, a sector written, ~10 s
 sim/run_kbd_inject_tb.sh   # a key from the host, read by the core and the capture alike, ~3 s
+sim/run_mmu_trace.sh TRACE # the IIe memory map shadow replayed against a real machine's capture, ~10 s
+sim/run_mem_cache_tb.sh    # the memory cache, its DDR3 client and the ROM against a Wishbone stub, ~35 s
+sim/run_mem_ddr3_tb.sh     # the memory client on the real UberDDR3 with the ring streaming, ~2 min
+sim/run_mem_integ_tb.sh    # the whole memory path under the real core, against a 128K IIe model, ~1 min
 python3 sim/gen_microcode.py --check   # microcode ROM matches its generator
 sim/run_cpu_cycles_tb.sh   # every opcode's cycle count vs the 65C02 table, ~5 s
 sim/run_cpu_tb.sh          # Klaus Dormann's two functional suites, ~16 s

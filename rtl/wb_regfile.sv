@@ -29,6 +29,8 @@
 // wait would be measuring nothing but itself.
 //////////////////////////////////////////////////////////////////////////////////
 module wb_regfile #(
+    // log2 of the cache's sets, for MEM_CTRL's readback.
+    parameter integer MEM_SETS_LOG2 = 9,
     // Stamped by build/build.sh through build.tcl's -generic.  Zero means the
     // bitstream was built without a stamp - an interactive GUI build - and the
     // host is expected to say "unstamped" rather than render it as a date.
@@ -149,6 +151,28 @@ module wb_regfile #(
     input  wire [31:0]     vbl_stat,
     input  wire [31:0]     vbl_pos,
 
+    // The memory image and its cache (rtl/mem_cache.sv, rtl/mem_client.sv,
+    // docs/MEMORY.md): MEM_CTRL's serve bits out as levels and its W1 bits as
+    // pulses; the shadow's switches, the counters and the state back for the
+    // readback.  A watching top ties the inputs to 0 and leaves the outputs
+    // unconnected.
+    output logic [2:0]     mem_serve,       // {rom, lc, ram}
+    output logic           mem_cnt_clr,     // pulses
+    output logic           mem_inval,
+    output logic           mem_clear,
+    input  wire [11:0]     mem_sw,
+    input  wire            mem_image_ready,
+    input  wire            mem_clearing,
+    input  wire            mem_invalidating,
+    input  wire            mem_rom_loaded,
+    input  wire [7:0]      mem_late_fills,
+    input  wire [7:0]      mem_fifo_drops,
+    input  wire [31:0]     mem_hits,
+    input  wire [31:0]     mem_misses,
+    input  wire [31:0]     mem_mismatch,
+    input  wire [31:0]     mem_served,
+    input  wire [31:0]     mem_last,
+
     // Programmatic Ctrl-Reset.  Held low while pulsing; the master top turns
     // this into an open-drain drive of the Apple's RES' line, exactly as it
     // drives DMA'.  A snoop build ties CAN_MASTER low, so this never asserts
@@ -200,6 +224,13 @@ module wb_regfile #(
     localparam [13:0] R_FD_DRIVE1  = 'd16;  // 0x8000_0040, RW bits 21:0, W1 bit 22
     localparam [13:0] R_FD_DRIVE2  = 'd17;  // 0x8000_0044, the same
     localparam [13:0] R_FD_STAT    = 'd18;  // 0x8000_0048, W1 bits 1:0
+    localparam [13:0] R_MEM_CTRL   = 'd19;  // 0x8000_004C, RW bits 2:0, W1 bits 10:8
+    localparam [13:0] R_MEM_STAT   = 'd20;  // 0x8000_0050, RO
+    localparam [13:0] R_MEM_HITS   = 'd21;  // 0x8000_0054, RO
+    localparam [13:0] R_MEM_MISSES = 'd22;  // 0x8000_0058, RO
+    localparam [13:0] R_MEM_MISMATCH = 'd23; // 0x8000_005C, RO
+    localparam [13:0] R_MEM_SERVED = 'd24;  // 0x8000_0060, RO
+    localparam [13:0] R_MEM_LAST   = 'd25;  // 0x8000_0064, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -528,6 +559,53 @@ module wb_regfile #(
 
     wire [31:0] fd_stat_rd = {fd_fill_max, fd_late, 4'd0, fd_ctl};
 
+    // ---- MEM_CTRL -----------------------------------------------------------
+    //
+    //   [0]      serve_ram  RW   answer reads of RAM from the image's cache
+    //   [1]      serve_lc   RW   ...and of the language card's RAM
+    //   [2]      serve_rom  RW   ...and of the ROM, from the card's copy
+    //   [8]      cnt_clr    W1   clear the counters
+    //   [9]      inval      W1   invalidate every cache line
+    //   [10]     clear      W1   zero the image (with the machine held only)
+    //   [27:24]  sets       RO   log2 of the cache's sets
+    //
+    // Levels, card-reset only and never latched on RES': a serve bit can be
+    // flipped under a running machine, because with it clear the core takes
+    // the bus's byte exactly as it did before the cache existed, and with it
+    // set the cache is already tracking every write.  That is the bring-up
+    // ladder docs/MEMORY.md describes: track first, serve a class at a time.
+    // The clear is not so forgiving - a write during the walk is lost from
+    // the image - so it is for a held machine, and the doc says so.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            mem_serve   <= 3'd0;
+            mem_cnt_clr <= 1'b0;
+            mem_inval   <= 1'b0;
+            mem_clear   <= 1'b0;
+        end else begin
+            if (wr_mem_ctrl) mem_serve <= wb_dat_w[2:0];
+            mem_cnt_clr <= wr_mem_ctrl && wb_dat_w[8];
+            mem_inval   <= wr_mem_ctrl && wb_dat_w[9];
+            mem_clear   <= wr_mem_ctrl && wb_dat_w[10];
+        end
+    end
+
+    wire [31:0] mem_ctrl_rd = {4'd0, 4'(MEM_SETS_LOG2), 21'd0, mem_serve};
+
+    // ---- MEM_STAT -----------------------------------------------------------
+    //
+    //   [11:0]   switches   RO   the MMU shadow: {prewrite, wren, lc_ramrd,
+    //                           bank2, slotc3rom, intcxrom, hires, page2,
+    //                           altzp, ramwrt, ramrd, store80}
+    //   [12]     image_ready RO  the clear walk has run since the DDR3 came up
+    //   [13]     clearing   RO
+    //   [14]     invalidating RO
+    //   [15]     rom_loaded RO   every MEM_ROM chunk has landed
+    //   [23:16]  late_fills RO   fills that landed after their cycle: must be 0
+    //   [31:24]  fifo_drops RO   requests the DDR3 client could not take: must be 0
+    wire [31:0] mem_stat_rd = {mem_fifo_drops, mem_late_fills, mem_rom_loaded,
+                               mem_invalidating, mem_clearing, mem_image_ready, mem_sw};
+
     // ---- RESET --------------------------------------------------------------
     //
     //   [0]      pulse     W1   assert the Apple's RES' low for a while
@@ -741,6 +819,13 @@ module wb_regfile #(
                         R_FD_DRIVE1:  wb_dat_r <= fd_drive1_rd;
                         R_FD_DRIVE2:  wb_dat_r <= fd_drive2_rd;
                         R_FD_STAT:    wb_dat_r <= fd_stat_rd;
+                        R_MEM_CTRL:   wb_dat_r <= mem_ctrl_rd;
+                        R_MEM_STAT:   wb_dat_r <= mem_stat_rd;
+                        R_MEM_HITS:   wb_dat_r <= mem_hits;
+                        R_MEM_MISSES: wb_dat_r <= mem_misses;
+                        R_MEM_MISMATCH: wb_dat_r <= mem_mismatch;
+                        R_MEM_SERVED: wb_dat_r <= mem_served;
+                        R_MEM_LAST:   wb_dat_r <= mem_last;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -784,6 +869,8 @@ module wb_regfile #(
                          (word == R_FD_DRIVE2);
     wire wr_fd_stat    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FD_STAT);
+    wire wr_mem_ctrl   = access && !wb_ack && in_region && wb_we &&
+                         (word == R_MEM_CTRL);
 
     // A boot-hold RELEASE re-latches MB_SLOT, HD_SLOT and FD_SLOT above, so the menu's
     // choices reach the boot it releases into.  Same qualification as the

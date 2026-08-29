@@ -1,0 +1,501 @@
+`timescale 1ns / 1ps
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-FileCopyrightText: 2026 jtflanagan
+//////////////////////////////////////////////////////////////////////////////////
+// mem_integ_tb - the whole memory path under the real core: the driver, the
+// reader on the pins, the MMU shadow, the ROM, the cache, the DDR3 client and
+// the arbiter, against a model of a 128K IIe with a language card.
+//
+// The core runs sim/mem_integ.s - RAM, the stack, every language-card state,
+// RAMRD/RAMWRT/ALTZP/80STORE with PAGE2 and HIRES - first with every serve bit
+// clear (the image only tracks), then with all three set under the running
+// program, the changeover the registers promise is safe.  The machine model
+// answers every read on the pins as a IIe would, and that byte is the truth:
+// at every read's commit the byte the core consumed must equal it, whether
+// it came from the bus or from the card.  The program's own verdict - a pass
+// counter, a failure flag - is the second opinion.
+//
+// A DMA of the hard disk's shape is injected through the override path, so
+// the image is seen to follow writes the core never made.  At the end the
+// image in the DDR3 stub is compared byte for byte with the machine's memory.
+//////////////////////////////////////////////////////////////////////////////////
+module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
+                      parameter PROG = "mem_integ.hex");
+
+    localparam integer T_PRESENT = 2, T_EMIT = 2, T_DIN = 44, T_CYCEN = 45;
+    localparam integer PHI0_LOW = 49, PHI0_HIGH = 49, CYCLE = PHI0_LOW + PHI0_HIGH;
+    localparam integer BUS_AT = 70;
+    localparam integer PASSES_OFF = 2, PASSES_ON = 3;
+
+    reg clk = 0, rst = 1;
+    always #5 clk = ~clk;
+
+    integer errors = 0, checks = 0;
+    task fail(input string why);
+        begin $display("FAIL: %0s", why); errors = errors + 1; end
+    endtask
+    task ok(input string what);
+        begin $display("ok: %0s", what); checks = checks + 1; end
+    endtask
+
+    // ---- phi0 -------------------------------------------------------------------
+    reg phi0 = 0;
+    integer phase_ctr = 0;
+    always @(posedge clk) begin
+        phase_ctr <= phase_ctr + 1;
+        if (!phi0 && phase_ctr == PHI0_LOW - 1)  begin phi0 <= 1; phase_ctr <= 0; end
+        if ( phi0 && phase_ctr == PHI0_HIGH - 1) begin phi0 <= 0; phase_ctr <= 0; end
+    end
+    reg prev_phi0 = 0;
+    wire fall = !phi0 && prev_phi0;
+    integer since_fall = 0;
+    always @(posedge clk) begin
+        prev_phi0 <= phi0;
+        if (fall) since_fall <= 0; else since_fall <= since_fall + 1;
+    end
+
+    // ---- the reader, the core, the driver -------------------------------------------
+    reg  res_n = 1'b1;
+    wire cpu_rst = rst || !res_n;
+    reg  master_active = 1'b1;
+    reg  [7:0]  data_pin = 8'h00;
+    wire [15:0] addr_drive;
+    wire        rw_drive, addr_rw_oe, data_oe, dma_assert, driving, drv_sync;
+    wire [7:0]  data_drive;
+    wire        phi0_sync, res_sync;
+    wire [7:0]  data_sync;
+    wire        sub_en;
+    wire [7:0]  sub_data;
+
+    apple_bus_read u_read (
+        .clk (clk), .rst (rst), .enable (1'b1),
+        .apple_data_pin (data_pin), .apple_addr_pin (addr_drive), .apple_rw_pin (rw_drive),
+        .apple_phi0_pin (phi0), .apple_m2sel_pin (1'b0), .apple_m2b0_pin (1'b0),
+        .apple_inh_pin (1'b1), .apple_res_pin (res_n), .apple_irq_pin (1'b1),
+        .apple_rdy_pin (1'b1), .apple_dma_pin (!dma_assert),
+        .ev_data (), .ev_valid (), .data_tick (),
+        .sync_override (drv_sync), .sync_override_en (1'b1),
+        .data_override (sub_data), .data_override_en (sub_en),
+        .res_sync (res_sync), .irq_sync (), .phi0_sync (phi0_sync),
+        .data_sync (data_sync), .phi0_active ()
+    );
+
+    wire [15:0] cpu_addr;
+    wire        cpu_rw, cpu_sync, cpu_cyc_en;
+    wire [7:0]  cpu_dout, cpu_din;
+    cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
+        .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
+        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
+        .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
+    );
+
+    wire [15:0] op_addr;
+    wire        op_rw, op_present, op_commit, op_ovr;
+    wire [7:0]  op_wdata;
+    reg         ovr_en = 1'b0, ovr_rw = 1'b1;
+    reg  [15:0] ovr_addr = 16'd0;
+    reg  [7:0]  ovr_wdata = 8'd0;
+
+    apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
+        .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
+        .master_active (master_active),
+        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
+        .drv_sync (drv_sync), .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
+        .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
+        .op_present (op_present), .op_commit (op_commit),
+        .slot_rd_claim (1'b0), .slot_rd_data (8'h00),
+        .din_sub_en (sub_en), .din_sub_data (sub_data),
+        .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw), .ovr_wdata (ovr_wdata),
+        .op_ovr (op_ovr),
+        .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
+        .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
+        .driving (driving)
+    );
+
+    // ---- the memory path --------------------------------------------------------------
+    wire        cl_valid, cl_rw, cl_wr_image;
+    wire [1:0]  cl_cls;
+    wire [23:0] cl_pa;
+    wire [13:0] cl_rom_addr;
+    wire [11:0] sw_state;
+    wire [7:0]  rom_byte;
+    wire        rom_loaded, invalidating, image_ready, clearing, refresh_ok, rot_ok, mem_idle;
+    wire [31:0] hits, misses, served, mismatches, last_mismatch;
+    wire [7:0]  late_fills, fifo_drops;
+    reg  [2:0]  serve = 3'b000;
+    reg         msg_valid = 1'b0, pay_valid = 1'b0;
+    reg  [7:0]  msg_type = 8'd0, msg_len = 8'd0;
+    reg  [31:0] pay_data = 32'd0;
+    wire        mq_valid, mq_kind, mq_ready, mr_valid;
+    wire [1:0]  mq_id, mr_id;
+    wire [19:0] mq_line;
+    wire [3:0]  mq_byte;
+    wire [7:0]  mq_data;
+    wire [127:0] mr_data;
+
+    apple_mmu u_mmu (
+        .clk (clk), .rst (rst), .res_sync (res_sync),
+        .op_addr (op_addr), .op_rw (op_rw), .op_present (op_present), .op_commit (op_commit),
+        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (cl_rom_addr),
+        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .sw_state (sw_state)
+    );
+    apple_rom u_rom (
+        .clk (clk), .rst (rst),
+        .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
+        .pay_data (pay_data), .pay_valid (pay_valid),
+        .rd_en (cl_valid), .rd_addr (cl_rom_addr), .rd_data (rom_byte), .rom_loaded (rom_loaded)
+    );
+    mem_cache u_cache (
+        .clk (clk), .rst (rst),
+        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rw (cl_rw),
+        .cl_wr_image (cl_wr_image), .op_addr (op_addr), .op_wdata (op_wdata),
+        .op_present (op_present), .op_commit (op_commit), .data_sync (data_sync),
+        .rom_byte (rom_byte), .rom_loaded (rom_loaded),
+        .sub_en (sub_en), .sub_data (sub_data),
+        .serve (serve), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),
+        .invalidating (invalidating),
+        .hits (hits), .misses (misses), .served (served), .mismatches (mismatches),
+        .last_mismatch (last_mismatch), .late_fills (late_fills), .fifo_drops (fifo_drops),
+        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
+        .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
+        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)
+    );
+
+    wire [1:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;
+    wire [47:0]  c_addr;
+    wire [255:0] c_data;
+    wire [31:0]  c_sel;
+    wire [127:0] c_rdata;
+    wire         wb_cyc, wb_stb, wb_we, wb_stall, wb_ack;
+    wire [23:0]  wb_addr;
+    wire [127:0] wb_data, wb_rdata;
+    wire [15:0]  wb_sel;
+    wire [3:0]   wb_aux, wb_rdata_aux;
+    assign c_req[0] = 1'b0; assign c_cyc[0] = 1'b0; assign c_stb[0] = 1'b0; assign c_we[0] = 1'b0;
+    assign c_addr[23:0] = 24'd0; assign c_data[127:0] = 128'd0; assign c_sel[15:0] = 16'd0;
+
+    wb_arb #(.N (2), .HAS_PRIO (1'b1)) u_arb (
+        .clk (clk), .rst (rst), .rot_ok (rot_ok),
+        .c_req (c_req), .c_gnt (c_gnt), .c_cyc (c_cyc), .c_stb (c_stb),
+        .c_we (c_we), .c_addr (c_addr), .c_data (c_data), .c_sel (c_sel),
+        .c_stall (c_stall), .c_ack (c_ack), .c_rdata (c_rdata),
+        .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we), .wb_addr (wb_addr),
+        .wb_data (wb_data), .wb_sel (wb_sel), .wb_aux (wb_aux),
+        .wb_stall (wb_stall), .wb_ack (wb_ack), .wb_rdata (wb_rdata), .wb_rdata_aux (wb_rdata_aux)
+    );
+    mem_client u_client (
+        .clk (clk), .rst (rst), .calib_complete (1'b1),
+        .master_active (master_active), .op_present (op_present),
+        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
+        .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
+        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
+        .req (c_req[1]), .gnt (c_gnt[1]), .cyc (c_cyc[1]), .stb (c_stb[1]),
+        .we (c_we[1]), .addr (c_addr[47:24]), .data (c_data[255:128]), .sel (c_sel[31:16]),
+        .stall (c_stall[1]), .ack (c_ack[1]), .rdata (c_rdata),
+        .refresh_ok (refresh_ok), .rot_ok (rot_ok), .mem_idle (mem_idle),
+        .image_ready (image_ready), .clearing (clearing), .clear_req (1'b0)
+    );
+
+    // ---- the DDR3 stub: the image, in order, twelve clocks late ---------------------
+    reg [7:0] smem [0:131071];
+    localparam integer DL = 64;
+    reg [127:0] dl_d [0:DL-1];
+    reg [3:0]   dl_aux [0:DL-1];
+    integer     dl_time [0:DL-1];
+    integer     dl_wp = 0, dl_rp = 0, now = 0, s_cnt = 0;
+    reg         wb_ack_r = 0, s_stall = 0;
+    reg [127:0] wb_rdata_r = 0;
+    reg [3:0]   wb_aux_r = 0;
+    assign wb_ack = wb_ack_r; assign wb_rdata = wb_rdata_r; assign wb_rdata_aux = wb_aux_r;
+    assign wb_stall = s_stall;
+    function automatic [16:0] wb_to_byte(input [23:0] a);
+        wb_to_byte = {a[22:10], a[6:0]} << 4;
+    endfunction
+    integer i;
+    always @(posedge clk) begin
+        now <= now + 1;
+        s_cnt <= s_cnt + 1;
+        s_stall <= ((s_cnt % 41) < 2);
+        wb_ack_r <= 1'b0;
+        if (wb_cyc && wb_stb && !wb_stall) begin
+            if (wb_addr[9:7] != 3'd0 || wb_addr[23] || wb_addr[22:10] >= 13'd512)
+                fail($sformatf("DDR3 address outside the image: %06x", wb_addr));
+            if (wb_we) begin
+                for (i = 0; i < 16; i = i + 1)
+                    if (wb_sel[i]) smem[wb_to_byte(wb_addr) + i] <= wb_data[8*i +: 8];
+                dl_d[dl_wp % DL] <= 128'd0;
+            end else begin
+                for (i = 0; i < 16; i = i + 1)
+                    dl_d[dl_wp % DL][8*i +: 8] <= smem[wb_to_byte(wb_addr) + i];
+            end
+            dl_aux[dl_wp % DL] <= wb_aux;
+            dl_time[dl_wp % DL] <= now + 12;
+            dl_wp <= dl_wp + 1;
+        end
+        if (dl_rp != dl_wp && now >= dl_time[dl_rp % DL] && !wb_ack_r) begin
+            wb_ack_r <= 1'b1; wb_rdata_r <= dl_d[dl_rp % DL]; wb_aux_r <= dl_aux[dl_rp % DL];
+            dl_rp <= dl_rp + 1;
+        end
+    end
+
+    // ---- the machine: a 128K IIe with a language card --------------------------------
+    reg [7:0] main_ram [0:65535];
+    reg [7:0] aux_ram  [0:65535];
+    reg [7:0] lc_main  [0:16383];    // bank 1 D000 at 0, bank 2 D000 at 4096, E000-FFFF at 8192
+    reg [7:0] lc_aux   [0:16383];
+    reg [7:0] rom_img  [0:16383];    // $C000-$FFFF
+    reg m_store80, m_ramrd, m_ramwrt, m_altzp, m_page2, m_hires;
+    reg m_bank2, m_lcrd, m_wren, m_pre;
+
+    function automatic bit m_aux(input [15:0] a, input bit rd);
+        if (a < 16'h0200) m_aux = m_altzp;
+        else if (m_store80 && a[15:10] == 6'b000001) m_aux = m_page2;
+        else if (m_store80 && m_hires && a[15:13] == 3'b001) m_aux = m_page2;
+        else m_aux = rd ? m_ramrd : m_ramwrt;
+    endfunction
+    function automatic integer m_lcidx(input [15:0] a);
+        if (a[15:12] == 4'hD) m_lcidx = (m_bank2 ? 4096 : 0) + a[11:0];
+        else m_lcidx = 8192 + (a - 16'hE000);
+    endfunction
+
+    task m_reset;
+        begin
+            m_store80 = 0; m_ramrd = 0; m_ramwrt = 0; m_altzp = 0; m_page2 = 0; m_hires = 0;
+            m_bank2 = 1; m_lcrd = 0; m_wren = 1; m_pre = 0;
+        end
+    endtask
+
+    // The byte the machine returned for the op in flight: the truth.
+    reg [7:0] mach_byte = 8'h00;
+    always @(posedge clk) if (since_fall == BUS_AT && driving) begin
+        if (rw_drive) begin
+            if (addr_drive[15:8] == 8'hC0) begin
+                data_pin <= 8'hA5;
+                if (addr_drive[7:4] == 4'h5) begin
+                    if (addr_drive[3:1] == 3'd2) m_page2 <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd3) m_hires <= addr_drive[0];
+                end
+                if (addr_drive[7:4] == 4'h8) begin
+                    m_bank2 <= !addr_drive[3];
+                    m_lcrd  <= (addr_drive[1] == addr_drive[0]);
+                    if (!addr_drive[0]) begin m_wren <= 0; m_pre <= 0; end
+                    else begin if (m_pre) m_wren <= 1; m_pre <= 1; end
+                end
+            end else if (addr_drive[15:12] == 4'hC) begin
+                data_pin <= 8'hA5;
+            end else if (addr_drive >= 16'hD000) begin
+                if (m_lcrd) data_pin <= m_altzp ? lc_aux[m_lcidx(addr_drive)] : lc_main[m_lcidx(addr_drive)];
+                else        data_pin <= rom_img[addr_drive - 16'hC000];
+            end else begin
+                data_pin <= m_aux(addr_drive, 1'b1) ? aux_ram[addr_drive] : main_ram[addr_drive];
+            end
+        end else if (data_oe) begin
+            if (addr_drive[15:8] == 8'hC0) begin
+                if (addr_drive[7:4] == 4'h0) begin
+                    case (addr_drive[3:1])
+                        3'd0: m_store80 <= addr_drive[0];
+                        3'd1: m_ramrd   <= addr_drive[0];
+                        3'd2: m_ramwrt  <= addr_drive[0];
+                        3'd4: m_altzp   <= addr_drive[0];
+                        default: ;
+                    endcase
+                end
+                if (addr_drive[7:4] == 4'h5) begin
+                    if (addr_drive[3:1] == 3'd2) m_page2 <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd3) m_hires <= addr_drive[0];
+                end
+                if (addr_drive[7:4] == 4'h8) begin
+                    m_bank2 <= !addr_drive[3];
+                    m_lcrd  <= (addr_drive[1] == addr_drive[0]);
+                    if (!addr_drive[0]) begin m_wren <= 0; m_pre <= 0; end
+                    else m_pre <= 0;
+                end
+            end else if (addr_drive[15:12] == 4'hC) begin
+                // nothing there
+            end else if (addr_drive >= 16'hD000) begin
+                if (m_wren) begin
+                    if (m_altzp) lc_aux[m_lcidx(addr_drive)] <= data_drive;
+                    else         lc_main[m_lcidx(addr_drive)] <= data_drive;
+                end
+            end else begin
+                if (m_aux(addr_drive, 1'b0)) aux_ram[addr_drive] <= data_drive;
+                else                         main_ram[addr_drive] <= data_drive;
+            end
+            data_pin <= data_drive;
+        end
+    end
+    always @(posedge clk) if (since_fall == BUS_AT + 1 && driving) mach_byte <= data_pin;
+
+    // ---- the running checks --------------------------------------------------------
+    integer reads = 0, reads_bad = 0, ovr_cycles = 0, served_reads = 0;
+    reg [7:0] pass_count = 8'd0;
+    reg       failed = 1'b0;
+    always @(posedge clk) if (op_commit) begin
+        if (op_ovr) ovr_cycles = ovr_cycles + 1;
+        if (op_rw) begin
+            reads = reads + 1;
+            if (sub_en) served_reads = served_reads + 1;
+            if (cpu_din !== mach_byte) begin
+                reads_bad = reads_bad + 1;
+                if (reads_bad <= 5)
+                    $display("    read $%04X: core got %02x, the machine said %02x (sub_en %0d, switches %03x)",
+                             op_addr, cpu_din, mach_byte, sub_en, sw_state);
+            end
+        end else begin
+            if (op_addr == 16'h0300) begin
+                pass_count = op_wdata;
+                $display("    pass %0d at %0t (%0d reads so far)", op_wdata, $time, reads);
+            end
+            if (op_addr == 16'h03FF && op_wdata == 8'hFF) failed = 1'b1;
+        end
+    end
+
+    // A heartbeat, so a stalled run is distinguishable from a slow one.
+    always @(posedge clk) if (now % 1_000_000 == 999_999)
+        $display("    ...%0d clocks, %0d reads, image_ready %0d, hits %0d misses %0d served %0d",
+                 now + 1, reads, image_ready, hits, misses, served);
+
+    // ---- the ROM's load -----------------------------------------------------------
+    task send_chunk(input integer c);
+        integer k;
+        begin
+            @(negedge clk);
+            msg_valid <= 1'b1; msg_type <= 8'h22; msg_len <= 8'd129;
+            @(negedge clk);
+            msg_valid <= 1'b0; pay_valid <= 1'b1; pay_data <= c;
+            @(negedge clk);
+            for (k = 0; k < 128; k = k + 1) begin
+                pay_data <= {rom_img[c*512 + 4*k + 3], rom_img[c*512 + 4*k + 2],
+                             rom_img[c*512 + 4*k + 1], rom_img[c*512 + 4*k]};
+                @(negedge clk);
+            end
+            pay_valid <= 1'b0;
+            @(negedge clk);
+        end
+    endtask
+
+    task wait_passes(input integer n, input string what);
+        integer c;
+        begin
+            c = 0;
+            while (pass_count < n && !failed && c < 6_000_000) begin @(posedge clk); c = c + 1; end
+            if (failed) fail($sformatf("%0s: the program raised its failure flag at pass %0d", what, pass_count));
+            else if (pass_count < n) fail($sformatf("%0s: only %0d passes before the timeout", what, pass_count));
+            else ok($sformatf("%0s: %0d passes of the program", what, n));
+        end
+    endtask
+
+    task check_image(input string what);
+        integer a, bad;
+        begin
+            bad = 0;
+            for (a = 0; a < 16'hC000; a = a + 1) begin
+                if (smem[a] !== main_ram[a]) bad = bad + 1;
+                if (smem[17'h10000 + a] !== aux_ram[a]) bad = bad + 1;
+            end
+            for (a = 0; a < 16384; a = a + 1) begin
+                if (smem[17'h0C000 + a] !== lc_main[a]) bad = bad + 1;
+                if (smem[17'h1C000 + a] !== lc_aux[a]) bad = bad + 1;
+            end
+            if (bad != 0) fail($sformatf("%0s: %0d image bytes differ from the machine's memory", what, bad));
+            else ok(what);
+        end
+    endtask
+
+    // ---- the run -------------------------------------------------------------------------
+    reg [7:0] prog [0:4095];
+    integer a, c, served0, reads0, bad0, dma_idx;
+    initial begin
+        $readmemh(PROG, prog);
+        for (a = 0; a < 65536; a = a + 1) begin main_ram[a] = 8'h00; aux_ram[a] = 8'h00; end
+        for (a = 0; a < 16384; a = a + 1) begin lc_main[a] = 8'h00; lc_aux[a] = 8'h00; end
+        for (a = 0; a < 131072; a = a + 1) smem[a] = 8'h00;
+        for (a = 0; a < 12288; a = a + 1) rom_img[a] = $urandom;
+        for (a = 0; a < 4096; a = a + 1) rom_img[12288 + a] = prog[a];
+        rom_img[16'h1000] = 8'hC7;                 // what the program expects at ROM $D000
+        m_reset();
+
+        repeat (5) @(negedge clk);
+        rst <= 1'b0;
+        c = 0;
+        while (!image_ready && c < 60000) begin @(negedge clk); c = c + 1; end
+        if (!image_ready) fail("no image_ready");
+        else ok($sformatf("the clear walk zeroed the image in %0d clocks", c));
+        for (c = 0; c < 32; c = c + 1) send_chunk(c);
+        if (!rom_loaded) fail("the ROM did not load");
+
+        // The machine comes out of reset; the core with it.
+        res_n <= 1'b0;
+        repeat (5 * CYCLE) @(negedge clk);
+        m_reset();
+        res_n <= 1'b1;
+
+        // ---- 1. tracking only -------------------------------------------------------
+        wait_passes(PASSES_OFF, "serve off");
+        if (served_reads != 0) fail("a byte was served with every serve bit clear");
+        else ok("nothing served while the serve bits are clear");
+        if (reads_bad != 0) fail($sformatf("%0d reads disagreed with the machine", reads_bad));
+        else ok($sformatf("%0d reads, every one the machine's byte", reads));
+        repeat (4 * CYCLE) @(negedge clk);
+        check_image("the image tracked every write the program made");
+
+        // ---- 2. the DMA, of the disk's shape: 16 writes the core never made --------
+        // One override per bus cycle, changed at the falling edge so each is
+        // presented exactly once - the disk does the same.
+        dma_idx = 0;
+        while (dma_idx <= 16) begin
+            @(negedge clk);
+            if (since_fall == 0) begin
+                if (dma_idx < 16) begin
+                    ovr_en <= 1'b1; ovr_rw <= 1'b0;
+                    ovr_addr <= 16'h2100 + dma_idx; ovr_wdata <= 8'h80 + dma_idx;
+                end else ovr_en <= 1'b0;
+                dma_idx = dma_idx + 1;
+            end
+        end
+        repeat (4 * CYCLE) @(negedge clk);
+        if (ovr_cycles != 16) fail($sformatf("%0d override cycles, expected 16", ovr_cycles));
+        else if (smem[17'h2100] !== 8'h80 || smem[17'h210F] !== 8'h8F || main_ram[16'h2100] !== 8'h80)
+            fail("the DMA's writes did not reach the image and the machine alike");
+        else ok("a DMA through the override path lands in the image as it does in the machine");
+
+        // ---- 3. every serve bit set, under the running program ------------------------
+        served0 = served_reads; reads0 = reads; bad0 = reads_bad;
+        serve <= 3'b111;
+        wait_passes(PASSES_OFF + PASSES_ON, "serve on");
+        if (reads_bad != bad0) fail($sformatf("%0d reads disagreed with the machine while serving", reads_bad - bad0));
+        else ok($sformatf("%0d reads while serving, every one the machine's byte", reads - reads0));
+        if (served_reads - served0 < (reads - reads0) / 2)
+            fail($sformatf("only %0d of %0d reads were served", served_reads - served0, reads - reads0));
+        else ok($sformatf("%0d of %0d reads were answered by the card", served_reads - served0, reads - reads0));
+        if (mismatches != 0) fail($sformatf("the monitor counted %0d mismatches (last %08x)", mismatches, last_mismatch));
+        else ok("the monitor saw the machine agree on every served byte");
+        if (late_fills != 0 || fifo_drops != 0) fail($sformatf("late fills %0d, drops %0d", late_fills, fifo_drops));
+        else ok("no fill was late and no request was dropped");
+        if (hits == 0 || misses == 0) fail("no hits or no misses");
+        else ok($sformatf("%0d hits, %0d misses", hits, misses));
+        repeat (4 * CYCLE) @(negedge clk);
+        check_image("the image still equals the machine's memory after serving");
+
+        // ---- 4. a reset under it: the switches go back, the memory stays -----------------
+        res_n <= 1'b0;
+        repeat (5 * CYCLE) @(negedge clk);
+        m_reset();
+        if (sw_state !== 12'h500) fail($sformatf("switches after reset: %03x", sw_state));
+        else ok("RES' puts the shadow's switches back to the IIe's reset state");
+        res_n <= 1'b1;
+        pass_count = 0;
+        wait_passes(2, "after a reset, still serving");
+        check_image("and the image survived the reset, like RAM");
+
+        $display("%0d checks, %0d errors", checks, errors);
+        if (errors == 0) $display("PASS"); else $display("FAIL");
+        $finish;
+    end
+
+    initial begin
+        #400_000_000;
+        $display("FAIL: timeout");
+        $finish;
+    end
+endmodule

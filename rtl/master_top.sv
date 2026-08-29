@@ -153,10 +153,29 @@ module master_top #(
     wire [7:0]  kbd_sub_data, pb_sub_data;
     wire [5:0]  pb_override;
     wire [2:0]  pb_hw;
-    // The two substitutions answer for disjoint addresses ($C00x, $C061-3),
-    // so at most one asserts on any cycle; the mux only has to be defined.
-    wire        sub_en   = kbd_sub_en | pb_sub_en;
-    wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data : pb_sub_data;
+    // The three substitutions answer for disjoint addresses - the keyboard
+    // $C00x, the buttons $C061-3, the memory image nothing in $C000-$CFFF at
+    // all - so at most one asserts on any cycle; the mux only has to be
+    // defined.  The memory comes last so the two that were here are untouched.
+    wire        mem_sub_en;
+    wire [7:0]  mem_sub_data;
+    wire        sub_en   = kbd_sub_en | pb_sub_en | mem_sub_en;
+    wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data :
+                           pb_sub_en  ? pb_sub_data  : mem_sub_data;
+    // The memory image's seam through card_link (rtl/mem_client.sv is there,
+    // beside the DDR3; the MMU shadow, the ROM and the cache are here, beside
+    // the core).  See docs/MEMORY.md.
+    wire        mq_valid, mq_kind, mq_ready, mr_valid;
+    wire [1:0]  mq_id, mr_id;
+    wire [19:0] mq_line;
+    wire [3:0]  mq_byte;
+    wire [7:0]  mq_data;
+    wire [127:0] mr_data;
+    wire        mem_image_ready, mem_cnt_clr, mem_inval, mem_invalidating, mem_rom_loaded;
+    wire [2:0]  mem_serve;
+    wire [11:0] mem_sw;
+    wire [7:0]  mem_late_fills, mem_fifo_drops;
+    wire [31:0] mem_hits, mem_misses, mem_mismatch, mem_served, mem_last;
     wire        res_drive;
     wire        vbl_start, vbl_probe, vbl_notify, vbl_locked, vbl_pal, vbl_busy;
     wire [15:0] vbl_probe_addr;
@@ -212,6 +231,17 @@ module master_top #(
         .vbl_state (vbl_state), .vbl_locked (vbl_locked), .vbl_pal (vbl_pal),
         .vbl_busy (vbl_busy), .vbl_err (vbl_err),
         .vbl_stat (vbl_stat), .vbl_pos (vbl_pos),
+        .mem_op_present (op_present),
+        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
+        .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
+        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
+        .mem_image_ready (mem_image_ready),
+        .mem_serve (mem_serve), .mem_cnt_clr (mem_cnt_clr), .mem_inval (mem_inval),
+        .mem_sw (mem_sw), .mem_invalidating (mem_invalidating),
+        .mem_rom_loaded (mem_rom_loaded),
+        .mem_late_fills (mem_late_fills), .mem_fifo_drops (mem_fifo_drops),
+        .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
+        .mem_served (mem_served), .mem_last (mem_last),
         .res_drive (res_drive),
         .app_msg_valid (app_msg_valid), .app_msg_type (app_msg_type),
         .app_msg_free (app_msg_free), .app_msg_len (app_msg_len),
@@ -473,6 +503,84 @@ module master_top #(
         .sub_en        (pb_sub_en),
         .sub_data      (pb_sub_data),
         .hw_level      (pb_hw)
+    );
+
+    // ---- the memory image ---------------------------------------------------
+    // The IIe's memory map shadowed, the ROM on the card, and the cache in
+    // front of the image in the DDR3: every op the driver presents is
+    // classified, and a read of RAM or ROM can be answered from here instead
+    // of from the bus - through the same din substitution the keyboard uses,
+    // so the capture records what the core read.  Nothing on the bus changes.
+    // See docs/MEMORY.md.
+    wire        cl_valid, cl_rw, cl_wr_image;
+    wire [1:0]  cl_cls;
+    wire [23:0] cl_pa;
+    wire [13:0] cl_rom_addr;
+    wire [7:0]  rom_byte;
+
+    apple_mmu u_mmu (
+        .clk        (apple_clk),
+        .rst        (apple_rst),
+        .res_sync   (apple_res_sync),
+        .op_addr    (op_addr),
+        .op_rw      (op_rw),
+        .op_present (op_present),
+        .op_commit  (op_commit),
+        .cl_valid   (cl_valid),
+        .cl_cls     (cl_cls),
+        .cl_pa      (cl_pa),
+        .cl_rom_addr (cl_rom_addr),
+        .cl_rw      (cl_rw),
+        .cl_wr_image (cl_wr_image),
+        .sw_state   (mem_sw)
+    );
+
+    apple_rom u_rom (
+        .clk        (apple_clk),
+        .rst        (apple_rst),
+        .msg_valid  (app_msg_valid),
+        .msg_type   (app_msg_type),
+        .msg_len    (app_msg_len),
+        .pay_data   (app_pay_data),
+        .pay_valid  (app_pay_valid),
+        .rd_en      (cl_valid),
+        .rd_addr    (cl_rom_addr),
+        .rd_data    (rom_byte),
+        .rom_loaded (mem_rom_loaded)
+    );
+
+    mem_cache u_cache (
+        .clk         (apple_clk),
+        .rst         (apple_rst),
+        .cl_valid    (cl_valid),
+        .cl_cls      (cl_cls),
+        .cl_pa       (cl_pa),
+        .cl_rw       (cl_rw),
+        .cl_wr_image (cl_wr_image),
+        .op_addr     (op_addr),
+        .op_wdata    (op_wdata),
+        .op_present  (op_present),
+        .op_commit   (op_commit),
+        .data_sync   (apple_data_sync),
+        .rom_byte    (rom_byte),
+        .rom_loaded  (mem_rom_loaded),
+        .sub_en      (mem_sub_en),
+        .sub_data    (mem_sub_data),
+        .serve       (mem_serve),
+        .inval       (mem_inval),
+        .cnt_clr     (mem_cnt_clr),
+        .image_ready (mem_image_ready),
+        .invalidating (mem_invalidating),
+        .hits        (mem_hits),
+        .misses      (mem_misses),
+        .served      (mem_served),
+        .mismatches  (mem_mismatch),
+        .last_mismatch (mem_last),
+        .late_fills  (mem_late_fills),
+        .fifo_drops  (mem_fifo_drops),
+        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
+        .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
+        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)
     );
 
     // ---- the hard disk ------------------------------------------------------

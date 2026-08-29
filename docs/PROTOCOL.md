@@ -68,6 +68,7 @@ host reads; the receiver carries parser state across all of them.
 | `0x1F` | FD_TRACK | Host→card. One chunk of a track answering FD_SEEK: payload `[{seq, chunk, track, drive}]` then up to 252 words of nibbles; seven chunks make a track, the seventh clears the buffer's STALE. A chunk whose `seq` is not the drive's current one is dropped. |
 | `0x20` | FD_SEEK | Card→host, **unsolicited**. Payload `[{seq, 0, track, drive}]`: the head is on a track the card does not hold; answer with seven FD_TRACK chunks carrying `seq`. |
 | `0x21` | FD_DIRTY | Card→host, **unsolicited**. Payload `[{seq, chunk, track, drive}]` then up to 252 words: a track the machine wrote to, seven chunks, sent before the FD_SEEK that leaves it. |
+| `0x22` | MEM_ROM | Host→card. One chunk of the IIe's 16 KB system ROM for the card's copy: payload `[{chunk[4:0]}]` then 128 words; 32 chunks make the ROM, in any order. See MEMORY.md. |
 | `0x22`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
@@ -111,6 +112,13 @@ protocol.
 | `0x8000_0040` | FD_DRIVE1 | RW bits 21:0, W1 bit 22 | what is in drive 1, live: `inserted`, `wp`, `nibbles`, `tracks`, `flush`; `stale`, `dirty`, `phase` — see FLOPPY.md |
 | `0x8000_0044` | FD_DRIVE2 | RW bits 21:0, W1 bit 22 | the same for drive 2 |
 | `0x8000_0048` | FD_STAT | W1 bits 1:0 | the controller's switches and its own lateness: `motor`, `drive`, `q6`, `q7`, `late`, `fill_max` — see FLOPPY.md |
+| `0x8000_004C` | MEM_CTRL | RW bits 2:0, W1 bits 10:8 | the memory image: `serve_ram`, `serve_lc`, `serve_rom` levels; W1 clear-counters, invalidate, clear-image; [27:24] log2 of the cache's sets — see MEMORY.md |
+| `0x8000_0050` | MEM_STAT | RO | the MMU shadow's switches [11:0], `image_ready`, `clearing`, `invalidating`, `rom_loaded`, `late_fills` [23:16], `fifo_drops` [31:24] |
+| `0x8000_0054` | MEM_HITS | RO | cache hits on reads of RAM |
+| `0x8000_0058` | MEM_MISSES | RO | ...and misses |
+| `0x8000_005C` | MEM_MISMATCH | RO | reads where the card's byte differed from the bus's (noise until the working set is written; watch for a plateau) |
+| `0x8000_0060` | MEM_SERVED | RO | reads answered by the card |
+| `0x8000_0064` | MEM_LAST | RO | `{addr16, card byte, bus byte}` of the last mismatch |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

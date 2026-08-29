@@ -669,6 +669,12 @@ the FT601.
 
 ## 6. Recommended structure
 
+> **Built (2026-08-28), see `MEMORY.md`:** the Apple's memory image is DDR3
+> bank 0 behind `rtl/mem_cache.sv`; `rtl/mem_client.sv` is the strict-priority
+> client of `rtl/wb_arb.sv`, pre-emptive rather than window-gated, and drives
+> `i_refresh_ok` from the bus cycle's position; the ring's batches are 32 lines
+> so one begun in the client's window is over before the next cycle.
+
 There is **no second data port** — `SECOND_WISHBONE` is a 32-bit, 7-bit-address
 memory-mapped *debug/calibration* interface, not a data path. Arbitration is
 yours to build.

@@ -1,0 +1,238 @@
+; SPDX-License-Identifier: GPL-2.0-or-later
+; SPDX-FileCopyrightText: 2026 jtflanagan
+;
+; mem_integ.s - a program for sim/mem_integ_tb.sv: exercises every kind of
+; memory the card's image claims to serve, and says whether each read came
+; back right.  Runs from RAM at $6000 (copied out of the ROM by the reset
+; code), with the auxiliary-memory tests in ROM because RAMRD would take the
+; code away from under them.
+;
+; PASS ($0300) counts completed passes; FAILF ($03FF) is $FF if anything
+; disagreed, and the program then halts.
+
+PASS    = $0300
+FAILF   = $03FF
+PTR     = $06
+
+.macro  jne target
+        beq :+
+        jmp target
+:
+.endmacro
+
+.segment "CODE"
+
+main:
+        lda #$00
+        sta PASS
+        sta FAILF
+loop:
+        ; ---- 1. a page of RAM, written and read back ----------------------------
+        lda #$00
+        sta PTR
+        lda #$10
+        sta PTR+1
+        ldy #0
+fill:   tya
+        clc
+        adc PASS
+        sta (PTR),y
+        iny
+        bne fill
+        inc PTR+1
+        lda PTR+1
+        cmp #$11
+        bne fill
+        lda #$10
+        sta PTR+1
+        ldy #0
+ver:    tya
+        clc
+        adc PASS
+        cmp (PTR),y
+        jne fail
+        iny
+        bne ver
+        inc PTR+1
+        lda PTR+1
+        cmp #$11
+        bne ver
+
+        ; ---- 2. the stack and a subroutine -----------------------------------
+        lda #$5A
+        pha
+        jsr sub
+        pla
+        cmp #$5A
+        jne fail
+
+        ; ---- 3. the language card --------------------------------------------
+        lda $C083               ; bank 2, read RAM, two reads: write enabled
+        lda $C083
+        lda #$D2
+        sta $D000
+        lda #$E1
+        sta $E000
+        lda $C08B               ; bank 1, read RAM, write enabled
+        lda $C08B
+        lda #$D1
+        sta $D000
+        lda $D000
+        cmp #$D1
+        jne fail
+        lda $E000               ; shared above $E000
+        cmp #$E1
+        jne fail
+        lda $C080               ; bank 2, read RAM, write protected
+        lda $D000
+        cmp #$D2
+        jne fail
+        lda #$77
+        sta $D000               ; must land nowhere
+        lda $D000
+        cmp #$D2
+        jne fail
+        lda $C082               ; bank 2, read ROM, write protected
+        lda $D000
+        cmp #$C7                ; the ROM's byte there
+        jne fail
+        lda $C081               ; read ROM, write RAM bank 2
+        lda $C081
+        lda #$D3
+        sta $D000               ; lands under the ROM
+        lda $D000
+        cmp #$C7
+        jne fail
+        lda $C080
+        lda $D000
+        cmp #$D3
+        jne fail
+        lda $C089               ; one read of an odd address: no write enable yet
+        lda #$44
+        sta $D000               ; bank 1: still write protected
+        lda $C08B
+        lda $D000
+        cmp #$D1
+        jne fail
+        lda $C082               ; back to ROM, protected, before touching aux
+
+        ; ---- 4. auxiliary memory, from the ROM -------------------------------
+        jsr auxtest
+        bcs fail
+
+        inc PASS
+        jmp loop
+
+sub:    lda #$C3
+        rts
+
+fail:   lda #$FF
+        sta FAILF
+halt:   jmp halt
+
+.import __CODE_LOAD__, __CODE_RUN__, __CODE_SIZE__
+
+.segment "BOOT"
+
+reset:  sei
+        cld
+        ldx #$FF
+        txs
+        lda #<__CODE_LOAD__
+        sta $00
+        lda #>__CODE_LOAD__
+        sta $01
+        lda #<__CODE_RUN__
+        sta $02
+        lda #>__CODE_RUN__
+        sta $03
+        ldx #>(__CODE_SIZE__ + 255)
+        ldy #0
+copy:   lda ($00),y
+        sta ($02),y
+        iny
+        bne copy
+        inc $01
+        inc $03
+        dex
+        bne copy
+        jmp __CODE_RUN__
+
+; Carry set on failure.  Every switch is restored before any branch into RAM.
+auxtest:
+        sta $C005               ; RAMWRT aux
+        lda #$AA
+        sta $0800
+        sta $C004               ; RAMWRT main
+        lda #$55
+        sta $0800
+        lda $0800
+        cmp #$55
+        jne axfail
+        sta $C003               ; RAMRD aux: this code is in ROM, unaffected
+        lda $0800
+        cmp #$AA
+        jne axfail_rd
+        sta $C002
+        lda #$11                ; ALTZP: the zero page moves, the stack with it
+        sta $20
+        sta $C009
+        lda #$22
+        sta $20
+        lda $20
+        cmp #$22
+        jne axfail_zp
+        sta $C008
+        lda $20
+        cmp #$11
+        jne axfail
+        sta $C001               ; 80STORE: PAGE2 steers the text page
+        sta $C055
+        lda #$BB
+        sta $0400
+        sta $C054
+        lda #$CC
+        sta $0400
+        lda $0400
+        cmp #$CC
+        jne axfail_80
+        sta $C055
+        lda $0400
+        cmp #$BB
+        jne axfail_80
+        sta $C054
+        sta $C057               ; ...and with HIRES, the hires page too
+        sta $C055
+        lda #$DD
+        sta $2000
+        sta $C054
+        lda #$EE
+        sta $2000
+        sta $C055
+        lda $2000
+        cmp #$DD
+        jne axfail_80
+        sta $C054
+        sta $C056
+        sta $C000
+        lda $2000
+        cmp #$EE
+        jne axfail
+        clc
+        rts
+axfail_80: sta $C054
+        sta $C056
+        sta $C000
+        sec
+        rts
+axfail_rd: sta $C002
+        sec
+        rts
+axfail_zp: sta $C008
+        sec
+        rts
+axfail: sec
+        rts
+
+.segment "VECTORS"
+        .word reset, reset, reset

@@ -113,10 +113,12 @@ module mem_client #(
     logic [3:0]  outstanding;
     wire  accept = stb && !stall;
 
-    // The clear walk.
+    // The clear walk.  Armed by a reset, taken as soon as the DDR3 is
+    // calibrated - a LEVEL, not an edge: the DDR3 is not reset with the card,
+    // so after a card reset calibration is long since complete and an edge
+    // would never come.
     logic [13:0] clr_idx;
-    logic        clr_armed;             // waiting for calibration after reset
-    logic        calib_q;
+    logic        clr_armed;             // a reset has happened; walk when calibrated
 
     wire clr_step = clearing && !issuing && q_empty;
 
@@ -143,7 +145,6 @@ module mem_client #(
 
     always_ff @(posedge clk) begin
         mr_valid <= 1'b0;
-        calib_q  <= calib_complete;
 
         if (rst) begin
             q_wp <= 3'd0; q_rp <= 3'd0;
@@ -167,7 +168,7 @@ module mem_client #(
             end
 
             // ---- the walk's start --------------------------------------------------
-            if ((clr_armed && calib_complete && !calib_q) || (clear_req && !clearing)) begin
+            if ((clr_armed && calib_complete) || (clear_req && !clearing)) begin
                 clearing    <= 1'b1;
                 clr_armed   <= 1'b0;
                 clr_idx     <= 14'd0;
