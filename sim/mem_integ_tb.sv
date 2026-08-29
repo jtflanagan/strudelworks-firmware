@@ -83,7 +83,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .ev_data (), .ev_valid (), .data_tick (),
         .sync_override (drv_sync), .sync_override_en (1'b1),
         .data_override (sub_data), .data_override_en (sub_en),
-        .rw_override_en (op_divert), .wdata_override (op_wdata),
+        .rw_override_en (op_divert), .wdata_override (op_wdata), .vbl_level (1'b0),
         .res_sync (res_sync), .irq_sync (), .phi0_sync (phi0_sync),
         .data_sync (data_sync), .phi0_active ()
     );

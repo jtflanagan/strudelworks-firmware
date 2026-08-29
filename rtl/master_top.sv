@@ -184,6 +184,7 @@ module master_top #(
     wire [31:0] vbl_stat, vbl_pos;
     wire        vbl_mark;
     wire [15:0] vbl_mark_free;
+    wire        vbl_level;      // the lock's counter in blanking: bit 19 of every event
     wire        app_msg_valid, app_pay_valid;
     wire [7:0]  app_msg_type, app_msg_len;
     wire [15:0] app_msg_free;
@@ -286,6 +287,7 @@ module master_top #(
         .data_override_en  (sub_en),
         .rw_override_en    (op_divert),
         .wdata_override    (op_wdata),
+        .vbl_level         (vbl_level),
         .res_sync          (apple_res_sync),
         .irq_sync          (apple_irq_sync),
         .phi0_sync         (apple_phi0_sync),
@@ -454,6 +456,7 @@ module master_top #(
         .ovr_wdata     (vbl_ovr_wdata),
         .mark          (vbl_mark),
         .mark_free     (vbl_mark_free),
+        .vbl_level     (vbl_level),
         .state         (vbl_state),
         .locked        (vbl_locked),
         .pal           (vbl_pal),

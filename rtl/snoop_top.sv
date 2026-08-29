@@ -165,6 +165,7 @@ module snoop_top #(
         .data_override_en  (1'b0),
         .rw_override_en    (1'b0),
         .wdata_override    (8'd0),
+        .vbl_level         (1'b0),   // no lock on a watching build: bit 19 stays 0
         .res_sync          (apple_res_sync),
         .irq_sync          (),
         .phi0_sync         (),

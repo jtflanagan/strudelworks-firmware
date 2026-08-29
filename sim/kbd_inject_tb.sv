@@ -118,7 +118,7 @@ module kbd_inject_tb;
         .ev_data (ev_data), .ev_valid (ev_valid),
         .sync_override (drv_sync), .sync_override_en (1'b1),
         .data_override (sub_data), .data_override_en (sub_en),
-        .rw_override_en (1'b0), .wdata_override (8'h00),
+        .rw_override_en (1'b0), .wdata_override (8'h00), .vbl_level (1'b0),
         .res_sync (res_sync), .irq_sync (), .phi0_sync (phi0_s),
         .data_sync (data_s), .phi0_active ()
     );

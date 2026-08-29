@@ -119,6 +119,18 @@ module vbl_lock #(
     output wire        mark,
     output wire [15:0] mark_free,
 
+    // THE VBL LEVEL: 1 while the counter is in vertical blanking - line 192
+    // and up - and 0 before the lock.  rtl/apple_bus_read.sv puts it in bit
+    // 19 of every event word, so every cycle the host sees says which side
+    // of blanking it was on and the two edges say where the frame is, to
+    // the cycle, with no notice at all.  Defined as AppleWin defines VBL':
+    // the same count that generates the scanner address, blanking from line
+    // 192 (NTSC_GetVblBar is `vert < 192`).  The IIe's own VBL' pin is one
+    // cycle ahead of this (docs/VBL.md, "What the machine said"); the model
+    // follows AppleWin, not the pin.  Not gated by `notify`: it is a level
+    // in a word the host already asked for, not a message.
+    output wire        vbl_level,
+
     // For the registers.
     output wire [3:0]  state,
     output logic       locked,
@@ -213,6 +225,10 @@ module vbl_lock #(
     assign pos       = fc;
     assign mark      = tick && locked && notify && (v == 9'd0) && (h == 7'd0);
     assign mark_free = {frames, 7'd0, pal};
+    // Combinational from the counter, which steps at `tick`: on the clock
+    // the reader registers a cycle's event (one before its tick) v still
+    // holds that cycle's line, so the bit and the event agree.
+    assign vbl_level = locked && (v >= 9'd192);
 
     // ---- the op in flight ----------------------------------------------------
     logic [2:0]  seq;       // which switch

@@ -129,17 +129,20 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire [7:0]  data_drive;
     wire        phi0_sync, res_sync, tick;
     wire [7:0]  data_sync;
+    wire        vbl_level;          // the DUT's level, into bit 19 of the event
+    wire [31:0] ev_data;
+    wire        ev_valid;
 
     apple_bus_read u_read (
         .clk (clk), .rst (rst), .enable (1'b1),
         .apple_data_pin (data_pin), .apple_addr_pin (addr_drive), .apple_rw_pin (rw_drive),
-        .apple_phi0_pin (phi0), .apple_m2sel_pin (1'b0), .apple_m2b0_pin (1'b0),
+        .apple_phi0_pin (phi0), .apple_m2sel_pin (1'b0), .apple_m2b0_pin (1'b1),
         .apple_inh_pin (1'b1), .apple_res_pin (res_n), .apple_irq_pin (1'b1),
         .apple_rdy_pin (1'b1), .apple_dma_pin (!dma_assert),
-        .ev_data (), .ev_valid (), .data_tick (tick),
+        .ev_data (ev_data), .ev_valid (ev_valid), .data_tick (tick),
         .sync_override (drv_sync), .sync_override_en (1'b1),
         .data_override (8'h00), .data_override_en (1'b0),
-        .rw_override_en (1'b0), .wdata_override (8'h00),
+        .rw_override_en (1'b0), .wdata_override (8'h00), .vbl_level (vbl_level),
         .res_sync (res_sync), .irq_sync (), .phi0_sync (phi0_sync),
         .data_sync (data_sync), .phi0_active ()
     );
@@ -226,7 +229,7 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .start (start), .probe (probe), .probe_addr (probe_addr), .notify (notify),
         .ovr_en (vbl_ovr_en), .ovr_addr (vbl_ovr_addr), .ovr_rw (vbl_ovr_rw),
         .ovr_wdata (vbl_ovr_wdata),
-        .mark (mark), .mark_free (mark_free),
+        .mark (mark), .mark_free (mark_free), .vbl_level (vbl_level),
         .state (state), .locked (locked), .pal (dpal), .busy (busy), .err (err),
         .mismatches (mismatches), .slip (slip), .pos (pos),
         .frames (frames), .locks (locks)
@@ -344,6 +347,25 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     end
     integer marks_total_cycles = 0;
     always @(posedge clk) if (op_commit) marks_total_cycles = marks_total_cycles + 1;
+
+    // The VBL level against the scanner: high exactly on lines 192 and up
+    // (AppleWin's VBL', on the floating-bus count), never before the lock,
+    // and bit 19 of every event the reader emits is that level - with the
+    // m2b0 pin tied HIGH above, so a reader still recording the pin would
+    // be caught here.
+    integer vbl_n_chk = 0, vbl_bad = 0, vbl_early = 0, ev_n = 0, ev_vbl_bad = 0;
+    always @(posedge clk) if (op_commit && track_en) begin
+        vbl_n_chk = vbl_n_chk + 1;
+        if (vbl_level !== (cur_line >= 192)) begin
+            vbl_bad = vbl_bad + 1;
+            if (vbl_bad <= 3) $display("    vbl: level %0d on scanner line %0d cycle %0d", vbl_level, cur_line, cur_hc);
+        end
+    end
+    always @(posedge clk) if (!locked && vbl_level) vbl_early = vbl_early + 1;
+    always @(posedge clk) if (ev_valid) begin
+        ev_n = ev_n + 1;
+        if (ev_data[19] !== vbl_level) ev_vbl_bad = ev_vbl_bad + 1;
+    end
 
     // The probe: every $C019 read's bit 7 against the DUT's own line.
     integer probe_reads = 0, probe_bad = 0, probe_low = 0;
@@ -559,6 +581,11 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         if (mark_gap != 17030) begin $display("FAIL: case 3: marks %0d cycles apart, not 17030", mark_gap); errors = errors + 1; end
         else $display("  ok: marks are 17030 cycles apart");
         if (mark_free[0] !== 1'b0) fail("case 3: mark_free says PAL");
+        if (vbl_bad != 0 || vbl_n_chk == 0) begin $display("FAIL: case 3: the VBL level disagreed with the scanner on %0d of %0d cycles", vbl_bad, vbl_n_chk); errors = errors + 1; end
+        else $display("  ok: the VBL level is high on lines 192-261 and low on 0-191, all %0d cycles", vbl_n_chk);
+        if (vbl_early != 0) fail("case 3: the VBL level was high before the lock");
+        if (ev_vbl_bad != 0 || ev_n == 0) begin $display("FAIL: case 3: bit 19 of %0d of %0d events was not the VBL level", ev_vbl_bad, ev_n); errors = errors + 1; end
+        else $display("  ok: bit 19 of all %0d events is the VBL level (the m2b0 pin is high and not recorded)", ev_n);
         // Notify off: no marks.
         notify = 1'b0;
         marks = 0;
@@ -642,7 +669,7 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         else if (dpal !== 1'b1) fail("case 8: PAL read as NTSC");
         else if (mismatches !== 16'd0) begin $display("FAIL: case 8: %0d mismatches on PAL", mismatches); errors = errors + 1; end
         else $display("  ok: PAL - locked, pal=1, 0 mismatches over the 312-line verify frame");
-        track_n = 0; track_bad = 0; marks = 0; marks_bad = 0; origins = 0; origins_unmarked = 0; last_mark_fc = -1;
+        track_n = 0; track_bad = 0; marks = 0; marks_bad = 0; origins = 0; origins_unmarked = 0; last_mark_fc = -1; vbl_bad = 0;
         track_en = 1'b1;
         cycles(20280 * 2 + 200);
         if (track_bad != 0) begin $display("FAIL: case 8: %0d disagreements on PAL", track_bad); errors = errors + 1; end
@@ -652,6 +679,8 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
             errors = errors + 1;
         end else $display("  ok: marks 20280 cycles apart, each at the origin; mark_free says PAL=%0d", mark_free[0]);
         if (mark_free[0] !== 1'b1) fail("case 8: mark_free does not say PAL");
+        if (vbl_bad != 0) begin $display("FAIL: case 8: the VBL level disagreed with the PAL scanner on %0d cycles", vbl_bad); errors = errors + 1; end
+        else $display("  ok: the VBL level is high on lines 192-311 on PAL");
         track_en = 1'b0;
 
         // --- case 9 / the runtime door: refused --------------------------------

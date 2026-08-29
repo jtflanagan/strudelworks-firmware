@@ -174,7 +174,38 @@ which event was line 0, cycle 0. A register cannot say that - the host has
 no way to relate "now" on the card to a position in a stream it reads
 milliseconds later - and a notice through the message bus lands at the next
 message boundary, which can be 255 events after the fact (BOOT_MENU.md's
-CPU_HOLD lives with that; this cannot).
+CPU_HOLD lives with that; this cannot). Two things say it.
+
+### The bit
+
+**Bit 19 of every event word is the counter's vertical blanking level**: 1
+on lines 192 and up, 0 on the 192 displayed lines, 0 until the lock is set.
+`rtl/apple_bus_read.sv` samples `vbl_lock`'s `vbl_level` with the data on
+the clock it registers the event - the counter steps one clock later, on
+`data_tick`, so on that clock it still describes the cycle being recorded.
+The first event with the bit set is line 192, cycle 0; the first with it
+clear again is line 0, cycle 0; and the 4,550 (NTSC) or 7,800 (PAL) events
+between the two say which frame it is. A host attaching mid-stream is
+placed at the next edge with no notice at all, a trace file carries the
+beam's position in every word, and the host draws the picture cycle by
+cycle from the bus alone (strudelworks-host `beam_render.hpp`).
+
+The bit is where the v5 wire format kept the IIgs's M2B0 pin, which is
+never high on any machine this card serves (DERISK.md: 33.5 M cycles, not
+one) and which nothing ever read; the pin is still synchronised and no
+longer recorded. **It is not gated by `notify`**: it is a level in a word
+the host already asked for, not a message, and the silent-until-asked rule
+is about messages. A watching build (`snoop_top`) has no lock and ties it
+low, so its bit 19 reads 0 exactly as m2b0 always did.
+
+**Defined as AppleWin defines VBL′.** `NTSC_GetVblBar` is `vert < 192` on
+the same count that generates the scanner address, and this counter is that
+count (the origin is the floating bus's), so the bit is `v >= 192` with no
+correction. The IIe's own VBL′ pin is one cycle ahead of both - "What the
+machine said", below - and a feature that wants the pin's timing subtracts
+one; the bit follows the model.
+
+### The mark
 
 So the capture is cut. `rtl/bus_event_capture.sv` takes a **mark** alongside
 each event; the marked event's index is remembered, and when the framer
@@ -191,13 +222,16 @@ can see a missed one. The mark is raised only while the host has asked
 (`notify` in VBL_CTRL): the silent-until-asked rule (PROTOCOL.md). A host
 that has not asked sees a stream identical to today's.
 
-**What the host does with it.** Its decoder rasterises a frame when its
-cycle count reaches the *start of vertical blanking* - origin plus 192 × 65
-- and sets that from every marker. Not the origin itself: a program that
-draws during VBL and spills into the displayed lines is caught mid-draw by
-a snapshot at line 0, and caught finished by one at line 192; a program
-that finishes inside VBL looks the same from either. The period comes from
-the marker too, so a PAL machine frames at 20,280 without being told.
+**What the host does with both.** Its decoder walks the scanner with the
+events - each cycle's byte fetched through the switches as they stood on
+that cycle and drawn where the beam was - and the bit's edges and the marks
+*place* the walk; a placement that finds it elsewhere is a slip, counted.
+The frame is handed on when the beam enters vertical blanking, not at the
+origin: a program that draws during VBL and spills into the displayed lines
+is caught mid-draw by a snapshot at line 0, and caught finished by one at
+line 192; a program that finishes inside VBL looks the same from either.
+The period comes from the bit (the length of the blanking) and from the
+marker's `free[0]`, so a PAL machine frames at 20,280 without being told.
 
 ## The card's interface
 
@@ -281,9 +315,12 @@ the cycle subtracts one.
   memory in 40-column modes. Whether a //e's floating bus shows the aux byte
   in any configuration this sets up is answered by the mismatch count, not
   assumed.
-- **The host does not yet use the beam for anything but framing.** Mid-frame
-  mode switches (a split-screen demo) are decoded as if they happened at the
-  frame boundary; the position to do better is now in the stream.
+- **Nothing here has run on hardware with the bit yet.** The level and the
+  bit are checked in `sim/vbl_lock_tb.sv` against the testbench's scanner
+  on every cycle of NTSC and PAL frames, with the m2b0 pin tied high to
+  prove it is no longer recorded; the host's decoder frames on the bit in
+  its tests.  The marks were proven on the machine on 2026-08-28; the bit
+  comes from the same counter.
 
 ## Verification
 
@@ -294,10 +331,13 @@ the cycle subtracts one.
   addresses and no hole touched; locked on an NTSC machine with the
   origin, the period and zero mismatches, marks on exactly the origin
   cycles, the counter agreeing with the tb's scanner on every cycle of
-  several frames; the same on PAL; a second detection with slip 0; a
-  reset mid-detection aborting it and leaving the earlier lock alone; the
-  probe of `$C019` reading exactly one frame and showing VBL′ low on
-  lines 192 up. The holes hold `A`, `H` and `Q`.
+  several frames, the VBL level high on exactly the scanner's lines 192
+  and up and never before the lock, and bit 19 of every event the real
+  reader emits equal to it with the m2b0 pin held high; the same on PAL;
+  a second detection with slip 0; a reset mid-detection aborting it and
+  leaving the earlier lock alone; the probe of `$C019` reading exactly
+  one frame and showing VBL′ low on lines 192 up. The holes hold `A`, `H`
+  and `Q`.
 - `sim/run_bus_snoop_tb.sh` - a marked event cuts the frame before it, the
   notice is one word between the two, conservation holds, and a mark under
   back pressure waits its turn.

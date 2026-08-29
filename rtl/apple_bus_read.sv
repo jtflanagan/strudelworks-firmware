@@ -41,8 +41,18 @@
 // One event is produced per phi0 cycle, at the data sample, in the v5 wire
 // format so existing analysis tooling reads these dumps:
 //
-//   [15:0]  addr        [19:16] {m2b0, m2sel, res, rw}
+//   [15:0]  addr        [19:16] {vbl, m2sel, res, rw}
 //   [27:20] data        [31:28] 0xF tag
+//
+// BIT 19 IS THE VBL LEVEL, NOT m2b0.  The v5 format put the IIgs's M2B0 pin
+// there; on the machines this card serves the pin is never high (measured
+// over 33.5 M cycles, docs/DERISK.md), and the IIgs is out of scope.  The
+// bit now carries the video scanner's vertical blanking as rtl/vbl_lock.sv
+// counts it - 1 on lines 192 and up, 0 on the displayed lines, 0 until the
+// lock is set - so every event says which side of blanking its cycle was
+// on, and the host draws the picture cycle by cycle from the bus alone
+// (docs/VBL.md, "The bit").  The pin is still synchronised, and no longer
+// recorded.
 //////////////////////////////////////////////////////////////////////////////////
 
 module apple_bus_read #(
@@ -113,6 +123,14 @@ module apple_bus_read #(
     input  wire         rw_override_en,
     input  wire [7:0]   wdata_override,
 
+    // THE VBL LEVEL, for bit 19 of the event: rtl/vbl_lock.sv's counter in
+    // vertical blanking.  Sampled with the data, on the clock the event is
+    // registered - the lock's counter steps one clock later, on data_tick,
+    // so on this clock it still describes the cycle being recorded.  A
+    // watching build, which has no lock, ties it low and bit 19 reads 0
+    // exactly as m2b0 always did.
+    input  wire         vbl_level,
+
     // one event per phi0 cycle
     output logic [31:0] ev_data,
     output logic        ev_valid,
@@ -171,7 +189,6 @@ module apple_bus_read #(
     wire phi0  = misc_clean[7];
     wire rw    = misc_clean[8];
     wire m2sel = misc_clean[6];
-    wire m2b0  = misc_clean[5];
     wire res   = misc_clean[3];
     assign res_sync  = res;
     assign irq_sync  = misc_clean[2];
@@ -192,7 +209,7 @@ module apple_bus_read #(
 
     // ---- sampled fields ------------------------------------------------------
     logic [15:0] addr_q = 16'd0;
-    logic [3:0]  ctl_q  = 4'd0;                 // {m2b0, m2sel, res, rw}
+    logic [2:0]  ctl_q  = 3'd0;                 // {m2sel, res, rw}; m2b0 is not kept
 
     // ---- liveness ------------------------------------------------------------
     // A machine that is off, or a card on the bench, gives no phi0 edges.  Time
@@ -207,7 +224,7 @@ module apple_bus_read #(
             addr_pipe   <= '0;
             data_pipe   <= '0;
             addr_q      <= 16'd0;
-            ctl_q       <= 4'd0;
+            ctl_q       <= 3'd0;
             ev_data     <= 32'd0;
             ev_valid    <= 1'b0;
             data_tick   <= 1'b0;
@@ -223,14 +240,14 @@ module apple_bus_read #(
 
             if (addr_snap) begin
                 addr_q <= addr_clean;
-                ctl_q  <= {m2b0, sync_override_en ? sync_override : m2sel, res,
+                ctl_q  <= {sync_override_en ? sync_override : m2sel, res,
                            rw_override_en ? 1'b0 : rw};
             end
 
             if (data_snap && enable) begin
                 ev_data  <= {4'hf, rw_override_en   ? wdata_override :
                                    data_override_en ? data_override  : data_clean,
-                             ctl_q, addr_q};
+                             vbl_level, ctl_q, addr_q};
                 ev_valid <= 1'b1;
             end
 

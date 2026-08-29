@@ -52,7 +52,7 @@ host reads; the receiver carries parser state across all of them.
 | `0x01`–`0x0F` | — | Reserved for link-layer types: ones the FT601 layer may generate or consume on its own, parseable without application state. |
 | `0x10` | SEQ | Card→host. The verified counter stream from `ft601_top`, the link regression vehicle. |
 | `0x11` | BUS_ENABLE | Host→card. `free[0]` capture enable, `free[1]` source select (0 synthetic, 1 real bus), `free[7:4]` heartbeat period select. `enable = 0` is the clean stop. |
-| `0x12` | BUS_EVENTS | Card→host. Payload is N Apple bus event words. |
+| `0x12` | BUS_EVENTS | Card→host. Payload is N Apple bus event words (`rtl/apple_bus_read.sv`: `{0xF, data[7:0], vbl, sync, res, rw, addr[15:0]}`; bit 19 is the video scanner's vertical blanking level once locked - see VBL.md, "The bit"). |
 | `0x13` | BUS_STATUS | Card→host. Overflow flag, enable state, captured and dropped counts. |
 | `0x14` | REG_READ | Host→card. Payload `[addr]`. Answered with REG_VALUE. |
 | `0x15` | REG_WRITE | Host→card. Payload `[addr][data]`. Also answered with REG_VALUE. |
