@@ -51,9 +51,9 @@ host reads; the receiver carries parser state across all of them.
 | `0x00` | IDLE | Link filler, **both directions**. Payload, if any, is discarded by the receiver. `len = 0` is the **heartbeat**: the single word `0x00000000`. |
 | `0x01`–`0x0F` | — | Reserved for link-layer types: ones the FT601 layer may generate or consume on its own, parseable without application state. |
 | `0x10` | SEQ | Card→host. The verified counter stream from `ft601_top`, the link regression vehicle. |
-| `0x11` | BUS_ENABLE | Host→card. `free[0]` capture enable, `free[1]` source select (0 synthetic, 1 real bus), `free[7:4]` heartbeat period select. `enable = 0` is the clean stop. |
-| `0x12` | BUS_EVENTS | Card→host. Payload is N Apple bus event words (`rtl/apple_bus_read.sv`: `{0xF, data[7:0], vbl, sync, res, rw, addr[15:0]}`; bit 19 is the video scanner's vertical blanking level once locked - see VBL.md, "The bit"). |
-| `0x13` | BUS_STATUS | Card→host. Overflow flag, enable state, captured and dropped counts. |
+| `0x11` | BUS_ENABLE | Host→card. `free[0]` capture enable, `free[1]` source select (0 synthetic, 1 real bus), `free[2]` sparse (send only `$Cxxx` accesses, writes, the blanking and RES′ edges, with SKIP words counting the rest - see SPARSE.md; real bus only), `free[7:4]` heartbeat period select. All latched at enable. `enable = 0` is the clean stop. |
+| `0x12` | BUS_EVENTS | Card→host. Payload is N words: Apple bus events (`rtl/apple_bus_read.sv`: `{0xF, data[7:0], vbl, sync, res, rw, addr[15:0]}`; bit 19 is the video scanner's vertical blanking level once locked - see VBL.md, "The bit") and, in sparse mode, SKIP words `{0xD, count[27:0]}`: that many cycles passed unsent before the next word (SPARSE.md). |
+| `0x13` | BUS_STATUS | Card→host. Overflow flag, enable state, captured count - of WORDS into the capture FIFO (events and SKIPs alike). |
 | `0x14` | REG_READ | Host→card. Payload `[addr]`. Answered with REG_VALUE. |
 | `0x15` | REG_WRITE | Host→card. Payload `[addr][data]`. Also answered with REG_VALUE. |
 | `0x16` | REG_VALUE | Card→host. Payload `[addr][data]`, answering either of the above. |

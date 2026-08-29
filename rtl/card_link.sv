@@ -624,6 +624,16 @@ module card_link #(
         else if (want_enable) source_real <= msg_free[1];
     end
 
+    // Sparse capture, free[2], latched the same way: send the host only
+    // the cycles it needs and count the rest (rtl/bus_event_filter.sv,
+    // docs/SPARSE.md).  Zero - every event, as always - is what a host that
+    // never sets it sends.
+    reg sparse_ctrl = 1'b0;
+    always @(posedge clk_ctrl) begin
+        if (rst)              sparse_ctrl <= 1'b0;
+        else if (want_enable) sparse_ctrl <= msg_free[2];
+    end
+
     // Acknowledge every enable change with a status frame, so the host can see
     // the card acted rather than inferring it from the data stopping.
     reg status_req = 1'b0;
@@ -683,6 +693,29 @@ module card_link #(
     // The synthetic source has no scanner, so no frame to mark.
     wire        ev_mark  = source_real && real_mark;
 
+    // The filter, always in the path: a wire in full mode, the keep rule
+    // and the SKIP words in sparse.  Sparse applies to the real bus only -
+    // the synthetic stream is the link's self-test, and the host checks
+    // its every word.
+    wire [31:0] fev_data;
+    wire        fev_valid, fev_mark;
+    wire [15:0] fev_mark_free;
+
+    bus_event_filter u_filter (
+        .clk           (clk_ctrl),
+        .rst           (rst),
+        .enable        (capture_enable),
+        .sparse        (sparse_ctrl && source_real),
+        .in_data       (ev_data),
+        .in_valid      (ev_valid),
+        .in_mark       (ev_mark),
+        .in_mark_free  (real_mark_free),
+        .out_data      (fev_data),
+        .out_valid     (fev_valid),
+        .out_mark      (fev_mark),
+        .out_mark_free (fev_mark_free)
+    );
+
     wire        overflow;
     wire [31:0] captured;
 
@@ -691,10 +724,10 @@ module card_link #(
         .rst        (rst),
         .enable     (capture_enable),
         .status_req (status_req),
-        .ev_data    (ev_data),
-        .ev_valid   (ev_valid),
-        .ev_mark    (ev_mark),
-        .ev_mark_free (real_mark_free),
+        .ev_data    (fev_data),
+        .ev_valid   (fev_valid),
+        .ev_mark    (fev_mark),
+        .ev_mark_free (fev_mark_free),
         .tx_data    (cap_word),
         .tx_valid   (cap_valid),
         .tx_take    (cap_take),

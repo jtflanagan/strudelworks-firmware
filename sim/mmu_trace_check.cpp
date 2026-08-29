@@ -52,9 +52,12 @@ struct Header {
 static_assert(sizeof(Header) == 32, "must match the host's on-disk header");
 constexpr uint32_t kEventTag = 0xFu;
 constexpr uint32_t kGapTag = 0xEu;
+constexpr uint32_t kSkipTag = 0xDu;   // sparse capture: N cycles passed unsent (docs/SPARSE.md)
 struct Event { uint16_t addr; uint8_t data; bool rw; bool res; bool sync; };
 inline bool is_event(uint32_t w) { return (w >> 28) == kEventTag; }
 inline bool is_gap(uint32_t w)   { return (w >> 28) == kGapTag; }
+inline bool is_skip(uint32_t w)  { return (w >> 28) == kSkipTag; }
+inline uint32_t skip_count(uint32_t w) { return w & 0x0FFFFFFFu; }
 inline Event decode(uint32_t w) {
     Event e;
     e.addr = static_cast<uint16_t>(w & 0xFFFF);
@@ -194,7 +197,7 @@ int main(int argc, char** argv) {
     top.rst = 0;
     tick();
 
-    uint64_t cycles = 0, gaps = 0, resets = 0;
+    uint64_t cycles = 0, gaps = 0, resets = 0, skips = 0;
     uint64_t cls_count[4] = {0, 0, 0, 0};
     uint64_t compared[4] = {0, 0, 0, 0};
     uint64_t mismatch[4] = {0, 0, 0, 0};
@@ -213,6 +216,10 @@ int main(int argc, char** argv) {
             std::fill(written.begin(), written.end(), 0);
             continue;
         }
+        // A sparse capture's unsent cycles: reads of RAM and ROM, none of
+        // which change the shadow, so the check goes on - with fewer reads
+        // to compare.
+        if (trace::is_skip(w)) { ++skips; cycles += trace::skip_count(w); continue; }
         if (!trace::is_event(w)) continue;
         trace::Event e = trace::decode(w);
         if (opt.max_cycles && cycles >= opt.max_cycles) break;
@@ -303,9 +310,9 @@ int main(int argc, char** argv) {
     for (int b = 0; b < 12; ++b) total_status_wrong += status_wrong[b];
 
     std::printf("-- mmu_trace_check: %s --\n", opt.path.c_str());
-    std::printf("cycles %llu  resets %llu  gaps %llu  armed %s\n",
+    std::printf("cycles %llu  resets %llu  gaps %llu  skips %llu  armed %s\n",
                 static_cast<unsigned long long>(cycles), static_cast<unsigned long long>(resets),
-                static_cast<unsigned long long>(gaps), armed ? "yes" : "NO - no reset in the trace");
+                static_cast<unsigned long long>(gaps), static_cast<unsigned long long>(skips), armed ? "yes" : "NO - no reset in the trace");
     std::printf("classes: BUS %llu  RAM %llu  LC %llu  ROM %llu   (bad bank %llu)\n",
                 static_cast<unsigned long long>(cls_count[BUS]), static_cast<unsigned long long>(cls_count[RAM]),
                 static_cast<unsigned long long>(cls_count[LC]), static_cast<unsigned long long>(cls_count[ROM]),

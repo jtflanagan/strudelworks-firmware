@@ -169,7 +169,9 @@ the reader's taps count from phi0 edges, so nothing here notices.
 ## Telling the host, to the cycle
 
 The host counts events as cycles (one event per phi0 cycle, never a gap,
-that is the whole contract of the capture), so what it needs is one thing:
+that is the whole contract of the capture - and in sparse mode, SPARSE.md,
+the cycles not sent are counted in SKIP words, so the contract holds by
+arithmetic), so what it needs is one thing:
 which event was line 0, cycle 0. A register cannot say that - the host has
 no way to relate "now" on the card to a position in a stream it reads
 milliseconds later - and a notice through the message bus lands at the next

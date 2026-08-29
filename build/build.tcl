@@ -117,6 +117,7 @@ if {$snoop || $master} {
         [file join $root rtl synchronizer.sv] \
         [file join $root rtl apple_bus_read.sv] \
         [file join $root rtl bus_event_capture.sv] \
+        [file join $root rtl bus_event_filter.sv] \
         [file join $root rtl wb_regfile.sv] \
         [file join $root rtl reg_bridge.sv] \
         [file join $root rtl msg_arb.sv] \

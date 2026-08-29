@@ -138,6 +138,13 @@ struct Event {
 inline bool is_event(uint32_t w) { return (w >> 28) == kEventTag; }
 inline bool is_gap(uint32_t w)   { return (w >> 28) == kGapTag; }
 inline uint32_t gap_count(uint32_t w) { return w & 0x0FFFFFFFu; }
+// A sparse capture's SKIP (docs/SPARSE.md): N cycles the card did not send.
+// To a lockstep replay that is a gap by another name - the next word is not
+// the next cycle - and it is treated as one everywhere below.
+constexpr uint32_t kSkipTag = 0xDu;
+inline bool is_skip(uint32_t w)  { return (w >> 28) == kSkipTag; }
+inline uint32_t skip_count(uint32_t w) { return w & 0x0FFFFFFFu; }
+inline bool is_break(uint32_t w) { return is_gap(w) || is_skip(w); }
 
 inline Event decode(uint32_t w) {
     Event e;
@@ -225,7 +232,7 @@ bool load(const std::string& path, std::string* err) {
 // core against a machine several instructions further along.
 std::size_t first_gap() {
     for (std::size_t i = 0; i < g_words.size(); ++i) {
-        if (trace::is_gap(g_words[i])) return i;
+        if (trace::is_break(g_words[i])) return i;
     }
     return g_words.size();
 }
@@ -294,7 +301,7 @@ std::vector<TraceReset> find_all_resets(std::size_t limit) {
         // the trace's length, is how much of this reset is usable.
         std::size_t k = r.align_at;
         while (k < limit) {
-            if (trace::is_gap(g_words[k])) break;
+            if (trace::is_break(g_words[k])) break;
             if (trace::is_event(g_words[k]) && trace::in_reset(trace::decode(g_words[k]))) break;
             ++k;
         }
@@ -630,7 +637,7 @@ static Result replay(const Options& opt, std::size_t align_at, int skew, uint8_t
 
     // ---- lockstep --------------------------------------------------------
     while (t < limit) {
-        if (trace::is_gap(g_words[t])) { r.hit_gap = true; break; }
+        if (trace::is_break(g_words[t])) { r.hit_gap = true; break; }
         if (!trace::is_event(g_words[t])) { ++t; continue; }
         const trace::Event e = trace::decode(g_words[t]);
         // A cycle with RES' asserted is the machine being reset again; the run
@@ -716,6 +723,10 @@ static void print_context(const Options& opt, std::size_t at, uint16_t got_addr,
             std::printf("  %10zu   -- gap of %u events --\n", i, trace::gap_count(g_words[i]));
             continue;
         }
+        if (trace::is_skip(g_words[i])) {
+            std::printf("  %10zu   -- %u cycles not sent (sparse capture) --\n", i, trace::skip_count(g_words[i]));
+            continue;
+        }
         const trace::Event e = trace::decode(g_words[i]);
         std::printf("  %10zu   $%04X  %s   $%02X%s\n", i, e.addr, rwc(e.rw), e.data,
                     i == at ? "   <-- the real part did this" : "");
@@ -786,7 +797,7 @@ static int replay_and_report(const Options& opt, std::size_t align_at, uint8_t s
 
     if (!best.diverged) {
         if (best.hit_gap) {
-            std::printf("stopped : the trace's first gap.\n");
+            std::printf("stopped : the trace's first gap (or a sparse capture's first SKIP).\n");
         } else if (best.hit_reset) {
             std::printf("stopped : RES' asserted again - the next bounce, or another "
                         "press.\n");
@@ -1007,7 +1018,7 @@ int main(int argc, char** argv) {
                     opt.from_nth, want, found);
         std::size_t clean = 0;
         for (std::size_t k = found; k < limit; ++k) {
-            if (trace::is_gap(g_words[k])) break;
+            if (trace::is_break(g_words[k])) break;
             if (trace::is_event(g_words[k]) && trace::in_reset(trace::decode(g_words[k]))) break;
             ++clean;
         }

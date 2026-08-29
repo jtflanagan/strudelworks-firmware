@@ -80,6 +80,7 @@ sim/run_ft601_fifo_tb.sh   # FT601 controller moves data from a cold start, ~1 s
 sim/run_ft601_msg_tb.sh    # FT601 heartbeat insertion, per stop-condition, ~2 s
 sim/run_ft601_msg_rx_tb.sh # host->card framing + the 1 s link watchdog, ~1 s
 sim/run_bus_snoop_tb.sh    # bus event capture, framing, overflow, ~1 s
+sim/run_bus_event_filter_tb.sh # sparse capture: the keep rule and SKIP words, ~1 s
 sim/run_bus_write_tb.sh    # driving the Apple bus as its CPU, ~1 s
 sim/run_reg_map_tb.sh      # control registers end to end, ~1 s
 sim/run_mockingboard_tb.sh # the Mockingboard's VIAs behind the driver, ~2 s
