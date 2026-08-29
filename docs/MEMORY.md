@@ -148,6 +148,14 @@ inside the cycle's idle tail**; the ring's stream word-exact throughout.
 | `sim/run_mem_integ_tb.sh` | the real core running `sim/mem_integ.s` on the whole path against a 128K IIe model with a language card: every read the machine's byte (56 K of them), tracking first and then serving under the running program - **31 093 of 31 129 reads answered by the card**, the rest I/O, 52 513 hits to 116 misses, zero mismatches - a DMA through the override path, a reset under it, the image byte-for-byte the machine's memory at the end |
 | `sim/run_reg_map_tb.sh` | the registers, end to end from a REG_WRITE |
 
+The first hardware attempt was lost to a rule this repository already
+states: a new host→card message type has to be in `rtl/ft601_msg_rx.sv`'s
+known list, or the card treats its first use as lost framing and drops the
+link. `MEM_ROM` was not, so every session with the ROM file present died at
+connect with the host reporting `write failed` - on the previous firmware too,
+which is what made it look like the board. The host now names the fault in
+its frame line, and the type is in the list.
+
 The trace check is the one to rerun with a new capture: a ProDOS or Total
 Replay session exercises the language card far more than the monitor's boot
 does, and the check needs no hardware but the capture.
