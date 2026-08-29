@@ -88,6 +88,7 @@ sim/run_cpu_irq_tb.sh      # a live hardware IRQ, taken between instructions, ~1
 sim/run_boot_hold_tb.sh    # the soft core held at its reset vector, ~1 s
 sim/run_hd_card_tb.sh      # the hard disk: busy, polled, a block in, a block out, ~1 s
 sim/run_floppy_card_tb.sh  # the Disk II: nibbles on the cycle, the head, seeks filled, a sector written, ~10 s
+sim/run_vidhd_card_tb.sh   # the VidHD: a slot ROM, the signature, slot 3's switches, ~1 s
 sim/run_kbd_inject_tb.sh   # a key from the host, read by the core and the capture alike, ~3 s
 sim/run_mmu_trace.sh TRACE # the IIe memory map shadow replayed against a real machine's capture, ~10 s
 sim/run_mem_cache_tb.sh    # the memory cache, its DDR3 client and the ROM against a Wishbone stub, ~35 s

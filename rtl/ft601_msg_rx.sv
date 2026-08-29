@@ -64,6 +64,9 @@ module ft601_msg_rx (
     // from this list was a whole evening: the host sent it, the card called it
     // lost framing, and the link dropped at every connect - docs/MEMORY.md.)
     localparam [7:0] T_MEM_ROM    = 8'h22;
+    // The VidHD's one, host -> card: its slot ROM.  See rtl/vidhd_card.sv
+    // and docs/VIDHD.md.
+    localparam [7:0] T_VIDHD_ROM  = 8'h23;
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -84,7 +87,8 @@ module ft601_msg_rx (
                      (hdr_type == T_REG_READ)  || (hdr_type == T_REG_WRITE)  ||
                      (hdr_type == T_HD_ROM)    || (hdr_type == T_HD_DONE)    ||
                      (hdr_type == T_HD_FETCH)  || (hdr_type == T_FD_ROM)     ||
-                     (hdr_type == T_FD_TRACK)  || (hdr_type == T_MEM_ROM);
+                     (hdr_type == T_FD_TRACK)  || (hdr_type == T_MEM_ROM)    ||
+                     (hdr_type == T_VIDHD_ROM);
 
     always_ff @(posedge clk) begin
         if (rst) begin

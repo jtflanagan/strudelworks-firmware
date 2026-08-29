@@ -115,6 +115,12 @@ module wb_regfile #(
     output logic           fd_late_clr,     // pulses
     output logic           fd_fill_clr,
 
+    // The VidHD (rtl/vidhd_card.sv, docs/VIDHD.md): its slot latched like
+    // the floppy's, and whether its ROM has landed, for the readback.  A
+    // watching top ties the input to 0 and leaves the output unconnected.
+    output wire [2:0]      vidhd_slot_active,
+    input  wire            vidhd_rom_loaded,
+
     // Keyboard injection (rtl/kbd_inject.sv).  press and drop are one-cycle
     // pulses per write of their bits, press_key the key that write carried;
     // lock and notify are levels the host holds.  The flags and the counts
@@ -232,6 +238,7 @@ module wb_regfile #(
     localparam [13:0] R_MEM_SERVED = 'd24;  // 0x8000_0060, RO
     localparam [13:0] R_MEM_LAST   = 'd25;  // 0x8000_0064, RO
     localparam [13:0] R_MEM_DIVERTED = 'd26; // 0x8000_0068, RO
+    localparam [13:0] R_VIDHD_SLOT = 'd27;  // 0x8000_006C, RW in bits 2:0
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -488,6 +495,40 @@ module wb_regfile #(
 
     wire [31:0] fd_slot_rd = {fd_seeks, 7'd0, fd_rom_loaded,
                               5'd0, fd_slot_active_q, 5'd0, fd_slot_desired};
+
+    // ---- VIDHD_SLOT ---------------------------------------------------------
+    //
+    //   [2:0]    desired   RW   which slot the VidHD answers as; 0 = off
+    //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [16]     rom       RO   the 256-byte slot ROM has been loaded
+    //                           (VIDHD_ROM)
+    //
+    // FD_SLOT's contract, and the clash rule is four-way now: the VidHD is
+    // the newest and yields to all three of the others, latching 0 when any
+    // has the same slot asked for.  See docs/VIDHD.md.
+    logic [2:0] vidhd_slot_desired;
+    logic [2:0] vidhd_slot_active_q;
+
+    assign vidhd_slot_active = vidhd_slot_active_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            vidhd_slot_desired  <= 3'd0;   // no VidHD until asked for
+            vidhd_slot_active_q <= 3'd0;
+        end else begin
+            if (res_assert || boot_relatch) begin
+                vidhd_slot_active_q <= (CAN_MASTER &&
+                                        vidhd_slot_desired != mb_slot_desired &&
+                                        vidhd_slot_desired != hd_slot_desired &&
+                                        vidhd_slot_desired != fd_slot_desired)
+                                       ? vidhd_slot_desired : 3'd0;
+            end
+            if (wr_vidhd_slot) vidhd_slot_desired <= wb_dat_w[2:0];
+        end
+    end
+
+    wire [31:0] vidhd_slot_rd = {8'd0, 7'd0, vidhd_rom_loaded,
+                                 5'd0, vidhd_slot_active_q, 5'd0, vidhd_slot_desired};
 
     // ---- FD_DRIVE1 / FD_DRIVE2 ----------------------------------------------
     //
@@ -825,6 +866,7 @@ module wb_regfile #(
                         R_MEM_SERVED: wb_dat_r <= mem_served;
                         R_MEM_LAST:   wb_dat_r <= mem_last;
                         R_MEM_DIVERTED: wb_dat_r <= mem_diverted;
+                        R_VIDHD_SLOT: wb_dat_r <= vidhd_slot_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -870,8 +912,10 @@ module wb_regfile #(
                          (word == R_FD_STAT);
     wire wr_mem_ctrl   = access && !wb_ack && in_region && wb_we &&
                          (word == R_MEM_CTRL);
+    wire wr_vidhd_slot = access && !wb_ack && in_region && wb_we &&
+                         (word == R_VIDHD_SLOT);
 
-    // A boot-hold RELEASE re-latches MB_SLOT, HD_SLOT and FD_SLOT above, so the menu's
+    // A boot-hold RELEASE re-latches MB_SLOT, HD_SLOT, FD_SLOT and VIDHD_SLOT above, so the menu's
     // choices reach the boot it releases into.  Same qualification as the
     // release pulse itself; CPU_SOURCE deliberately does NOT re-latch here -
     // switching the driving CPU mid-hold is the one changeover BOOT_MENU.md

@@ -102,6 +102,7 @@ module snoop_top #(
         .fd_inserted (), .fd_wp (), .fd_nibbles (), .fd_tracks (), .fd_flush (),
         .fd_stale (2'd0), .fd_dirty (2'd0), .fd_phase (14'd0), .fd_ctl (4'd0),
         .fd_late (8'd0), .fd_fill_max (16'd0), .fd_late_clr (), .fd_fill_clr (),
+        .vidhd_slot_active (), .vidhd_rom_loaded (1'b0),   // nor for a VidHD
         .kbd_press (), .kbd_press_key (), .kbd_drop (),   // nor type at it
         .kbd_lock (), .kbd_flags (3'd0), .kbd_counts (32'd0),
         .kbd_resolved_key (7'd0), .kbd_changed (1'b0),

@@ -69,7 +69,8 @@ host reads; the receiver carries parser state across all of them.
 | `0x20` | FD_SEEK | Card→host, **unsolicited**. Payload `[{seq, 0, track, drive}]`: the head is on a track the card does not hold; answer with seven FD_TRACK chunks carrying `seq`. |
 | `0x21` | FD_DIRTY | Card→host, **unsolicited**. Payload `[{seq, chunk, track, drive}]` then up to 252 words: a track the machine wrote to, seven chunks, sent before the FD_SEEK that leaves it. |
 | `0x22` | MEM_ROM | Host→card. One chunk of the IIe's 16 KB system ROM for the card's copy: payload `[{chunk[4:0]}]` then 128 words; 32 chunks make the ROM, in any order. See MEMORY.md. |
-| `0x22`–`0xFF` | — | Application, unassigned. |
+| `0x23` | VIDHD_ROM | Host→card. Payload 64 words: the VidHD's 256-byte slot ROM - the signature software scans for, synthesised by the host. See VIDHD.md. |
+| `0x24`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -120,6 +121,7 @@ protocol.
 | `0x8000_0060` | MEM_SERVED | RO | reads answered by the card |
 | `0x8000_0064` | MEM_LAST | RO | `{addr16, card byte, bus byte}` of the last mismatch |
 | `0x8000_0068` | MEM_DIVERTED | RO | writes to a RamWorks bank the machine does not have, sent out on the bus as reads so the machine's own auxiliary memory is untouched — see MEMORY.md, "The RamWorks" |
+| `0x8000_006C` | VIDHD_SLOT | RW bits 2:0 | the VidHD's slot, 0 = off; latched at RES', never MB_SLOT's, HD_SLOT's or FD_SLOT's; `rom` — see VIDHD.md |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

@@ -130,6 +130,9 @@ module reg_map_tb;
     reg  [3:0]  fd_ctl = 4'd0;
     reg  [15:0] fd_fill_max = 16'd0;
     integer     fd_flush_pulses = 0, fd_late_clrs = 0, fd_fill_clrs = 0;
+    // The VidHD's side of VIDHD_SLOT: the tb plays the card.
+    wire [2:0]  vidhd_slot_active;
+    reg         vidhd_rom_loaded = 1'b0;
     always @(posedge clk) begin
         if (fd_flush[0]) fd_flush_pulses = fd_flush_pulses + 1;
         if (fd_flush[1]) fd_flush_pulses = fd_flush_pulses + 1;
@@ -189,6 +192,7 @@ module reg_map_tb;
         .fd_stale (fd_stale), .fd_dirty (fd_dirty), .fd_phase (fd_phase),
         .fd_ctl (fd_ctl), .fd_late (fd_late), .fd_fill_max (fd_fill_max),
         .fd_late_clr (fd_late_clr), .fd_fill_clr (fd_fill_clr),
+        .vidhd_slot_active (vidhd_slot_active), .vidhd_rom_loaded (vidhd_rom_loaded),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key), .kbd_drop (kbd_drop),
         .kbd_lock (kbd_lock), .kbd_notify (kbd_notify),
         .kbd_flags (kbd_flags), .kbd_counts (kbd_counts),
@@ -321,7 +325,7 @@ module reg_map_tb;
     assign out_valid = sb_cyc && sb_stb;
     always @(posedge clk) sb_ack <= !rst && sb_cyc && sb_stb && !tx_full;
 
-    reg [31:0] out_mem [0:255];
+    reg [31:0] out_mem [0:4095];
     integer    out_n = 0;
     always @(posedge clk) if (tx_push && !tx_full) begin
         out_mem[out_n] = tx_data;
@@ -1153,6 +1157,52 @@ module reg_map_tb;
         end else begin
             $display("  ok: no frame error; REG_READ and REG_WRITE are known types");
         end
+
+        $display("");
+        // ---- VIDHD_SLOT --------------------------------------------------------
+        // The VidHD's slot latches like the floppy's and yields to ALL THREE
+        // of the others.
+        do_write(32'h8000_000C, 32'h0000_0004);       // the Mockingboard in 4
+        do_write(32'h8000_0014, 32'h0000_0007);       // the hard disk in 7
+        do_write(32'h8000_003C, 32'h0000_0006);       // the floppy in 6
+        pulse_reset_line;
+        if (vidhd_slot_active !== 3'd0) begin
+            $display("FAIL: the VidHD is enabled before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: VIDHD_SLOT starts disabled");
+        do_write(32'h8000_006C, 32'h0000_0006);       // the floppy's slot
+        pulse_reset_line;
+        if (vidhd_slot_active !== 3'd0) begin
+            $display("FAIL: the VidHD took the floppy's slot");
+            errors = errors + 1;
+        end else $display("  ok: the VidHD yields the floppy's slot");
+        do_write(32'h8000_006C, 32'h0000_0007);       // the disk's
+        pulse_reset_line;
+        if (vidhd_slot_active !== 3'd0) begin
+            $display("FAIL: the VidHD took the hard disk's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the hard disk's");
+        do_write(32'h8000_006C, 32'h0000_0004);       // the Mockingboard's
+        pulse_reset_line;
+        if (vidhd_slot_active !== 3'd0) begin
+            $display("FAIL: the VidHD took the Mockingboard's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the Mockingboard's");
+        do_write(32'h8000_006C, 32'h0000_0003);
+        if (vidhd_slot_active !== 3'd0) begin
+            $display("FAIL: the WRITE enabled the VidHD - it must take a reset");
+            errors = errors + 1;
+        end
+        pulse_reset_line;
+        vidhd_rom_loaded = 1'b1;
+        base = out_n;
+        do_read(32'h8000_006C);
+        if (vidhd_slot_active !== 3'd3 || out_mem[base+2] !== 32'h0001_0303) begin
+            $display("FAIL: VIDHD_SLOT readback %08x, expected desired=3 active=3 rom=1",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: VIDHD_SLOT=3 latches at the reset; rom reads back");
+        vidhd_rom_loaded = 1'b0;
 
         $display("");
         // ---- MEM_CTRL / MEM_STAT and the counters -----------------------------

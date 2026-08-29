@@ -144,6 +144,8 @@ module master_top #(
     wire        fd_motor, fd_drive_sel, fd_q6, fd_q7;
     wire [31:0] fd_word;
     wire        fd_valid, fd_take;
+    wire [2:0]  vidhd_slot_active;
+    wire        vidhd_rom_loaded;
     wire        kbd_press, kbd_drop, kbd_lock;
     wire [6:0]  kbd_press_key;
     wire        kbd_strobe, kbd_seen, kbd_touched, kbd_changed;
@@ -222,6 +224,8 @@ module master_top #(
         .fd_ctl ({fd_q7, fd_q6, fd_drive_sel, fd_motor}),
         .fd_late (fd_late), .fd_fill_max (fd_fill_max),
         .fd_late_clr (fd_late_clr), .fd_fill_clr (fd_fill_clr),
+        .vidhd_slot_active (vidhd_slot_active),
+        .vidhd_rom_loaded (vidhd_rom_loaded),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key),
         .kbd_drop (kbd_drop), .kbd_lock (kbd_lock),
         .kbd_flags ({kbd_touched, kbd_seen, kbd_strobe}),
@@ -335,8 +339,8 @@ module master_top #(
     wire        op_rw;
     wire [7:0]  op_wdata;
     wire        op_present, op_commit, op_ovr;
-    wire        mb_rd_claim, hd_rd_claim, fd_rd_claim;
-    wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data;
+    wire        mb_rd_claim, hd_rd_claim, fd_rd_claim, vidhd_rd_claim;
+    wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data, vidhd_rd_data;
     wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw, vbl_ovr_en, vbl_ovr_rw;
     wire [15:0] boot_ovr_addr, hd_ovr_addr, vbl_ovr_addr;
     wire [7:0]  hd_ovr_wdata, vbl_ovr_wdata;
@@ -350,10 +354,11 @@ module master_top #(
     // keyboard reads; the disk is reset with the core at the vector, so the
     // two never meet.  Each acts only on cycles it recognises as its own,
     // so a cycle another takes costs it nothing - the core moves for none
-    // of them.  Three peripherals into one claim: they answer for different
+    // of them.  Four peripherals into one claim: they answer for different
     // slots (wb_regfile refuses to latch the same one for any two), so at
-    // most one claims any cycle.  The floppy has no override at all: it
-    // never takes a cycle from the machine, by rule (rtl/floppy_card.sv).
+    // most one claims any cycle.  The floppy and the VidHD have no override
+    // at all: neither ever takes a cycle from the machine, by rule
+    // (rtl/floppy_card.sv, rtl/vidhd_card.sv).
     // A write to a RamWorks bank the machine does not have goes out as a
     // read (apple_bus_write.sv): apple_mmu is asked about the address the
     // driver is about to present, and the answer counts only while the card
@@ -365,9 +370,10 @@ module master_top #(
     wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_en ? vbl_ovr_addr  : boot_ovr_addr;
     wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_en ? vbl_ovr_rw    : 1'b1;
     wire [7:0]  ovr_wdata = hd_ovr_en ? hd_ovr_wdata : vbl_ovr_wdata;
-    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim;
-    wire [7:0]  slot_rd_data  = hd_rd_claim ? hd_rd_data :
-                                fd_rd_claim ? fd_rd_data : mb_rd_data;
+    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim | vidhd_rd_claim;
+    wire [7:0]  slot_rd_data  = hd_rd_claim    ? hd_rd_data    :
+                                fd_rd_claim    ? fd_rd_data    :
+                                vidhd_rd_claim ? vidhd_rd_data : mb_rd_data;
 
     apple_bus_write u_write (
         .clk           (apple_clk),
@@ -686,6 +692,33 @@ module master_top #(
         .seeks         (fd_seeks),
         .late          (fd_late),
         .fill_max      (fd_fill_max)
+    );
+
+    // ---- the VidHD ----------------------------------------------------------
+    // A slot ROM carrying the signature software scans for; the IIgs video
+    // registers it then writes go out on the bus unanswered, and the host
+    // draws the picture from its mirror of auxiliary memory.  See
+    // rtl/vidhd_card.sv and docs/VIDHD.md.
+    vidhd_card u_vidhd (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .res_sync      (apple_res_sync),
+        .master_active (cpu_source_active),
+        .slot_assign   (vidhd_slot_active),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_present    (op_present),
+        .op_commit     (op_commit),
+        .op_ovr        (op_ovr),
+        .rd_claim      (vidhd_rd_claim),
+        .rd_data       (vidhd_rd_data),
+        .msg_valid     (app_msg_valid),
+        .msg_type      (app_msg_type),
+        .msg_free      (app_msg_free),
+        .msg_len       (app_msg_len),
+        .pay_data      (app_pay_data),
+        .pay_valid     (app_pay_valid),
+        .rom_loaded    (vidhd_rom_loaded)
     );
 
     // ---- the Mockingboard ---------------------------------------------------

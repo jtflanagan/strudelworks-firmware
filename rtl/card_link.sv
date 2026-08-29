@@ -130,6 +130,12 @@ module card_link #(
     output wire        fd_late_clr,
     output wire        fd_fill_clr,
 
+    // The VidHD (rtl/vidhd_card.sv): its slot latched like the floppy's,
+    // and its ROM's arrival back for the readback.  A watching top ties the
+    // input to 0.
+    output wire [2:0]  vidhd_slot_active,
+    input  wire        vidhd_rom_loaded,
+
     // Keyboard injection (rtl/kbd_inject.sv, in a mastering top): the
     // KBD_INJECT register's press and drop pulses and the key out, the
     // KBD_CTRL lock out; the flags {touched, seen, strobe}, the counts
@@ -806,6 +812,8 @@ module card_link #(
         .fd_fill_max       (fd_fill_max),
         .fd_late_clr       (fd_late_clr),
         .fd_fill_clr       (fd_fill_clr),
+        .vidhd_slot_active (vidhd_slot_active),
+        .vidhd_rom_loaded  (vidhd_rom_loaded),
         .kbd_press         (kbd_press),
         .kbd_press_key     (kbd_press_key),
         .kbd_drop          (kbd_drop),

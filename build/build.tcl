@@ -149,6 +149,7 @@ if {$snoop || $master} {
             [file join $root rtl hd_card.sv] \
             [file join $root rtl fd_bank.sv] \
             [file join $root rtl floppy_card.sv] \
+            [file join $root rtl vidhd_card.sv] \
             [file join $root rtl vbl_lock.sv] \
             [file join $root rtl master_top.sv] \
         ]
