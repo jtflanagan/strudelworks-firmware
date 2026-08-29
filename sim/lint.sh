@@ -62,6 +62,11 @@ run msg_arb       rtl/msg_arb.sv
 run reply_stream  rtl/reply_stream.sv
 run msg_master    rtl/msg_master.sv
 run wb_arb        rtl/wb_arb.sv
+run apple_mmu     rtl/apple_mmu.sv
+run apple_rom     rtl/apple_rom.sv
+run cache_way_ram rtl/cache_way_ram.sv
+run mem_cache     rtl/mem_cache.sv rtl/cache_way_ram.sv
+run mem_client    rtl/mem_client.sv
 run tx_ring       rtl/tx_ring.sv rtl/sync_fifo.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 run apple_bus_write rtl/apple_bus_write.sv

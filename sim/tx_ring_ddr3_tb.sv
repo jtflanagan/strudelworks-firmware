@@ -161,7 +161,7 @@ module tx_ring_ddr3_tb;
     wire [31:0]  status;
 
     wb_arb #(.N (2), .ADDR_BITS (WB_ADDR_BITS)) u_arb (
-        .clk (clk), .rst (rst),
+        .clk (clk), .rst (rst), .rot_ok (1'b1),
         .c_req (c_req), .c_gnt (c_gnt), .c_cyc (c_cyc), .c_stb (c_stb),
         .c_we (c_we), .c_addr (c_addr), .c_data (c_data),
         .c_sel ({16'hFFFF, 16'hFFFF}),

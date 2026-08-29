@@ -18,12 +18,28 @@
 // turnaround, which applies to every bank, and the row change between two
 // clients in the same bank - once per batch rather than once per burst.
 //
-// ROUND-ROBIN, for now.  With two streaming clients of equal standing the
-// fair thing is to alternate when both are waiting, and that is all this does:
-// after a grant ends the search for the next starts one past the holder.  A
-// latency-critical client (the Apple, 180 ns) goes in a strict-priority slot
-// ABOVE the rotation when it arrives, gated by the free-window predicate §6
-// describes; it does not go into the rotation.
+// ROUND-ROBIN among the streaming clients.  With two of equal standing the
+// fair thing is to alternate when both are waiting, and that is all the
+// rotation does: after a grant ends the search for the next starts one past
+// the holder.
+//
+// ONE STRICT-PRIORITY SLOT ABOVE THE ROTATION, when HAS_PRIO is set: client
+// N-1 - the Apple's memory (rtl/mem_client.sv), whose fill has a bus cycle's
+// deadline.  It is never in the rotation and it does not wait for a batch to
+// end: the clock after it asks, the port is its, and the rotation's holder is
+// stalled where it stands.  Nothing is cancelled - a stalled stb is the
+// pipelined-Wishbone way of saying "not yet", every client here already holds
+// its request through a stall, and cyc stays the OR of everyone's so no ack
+// is aborted.  When the priority client lets go the holder carries on with
+// its batch.  The one thing the priority client can still wait for is a burst
+// the controller has ALREADY accepted, plus a read<->write turnaround; that is
+// the ~8 clocks docs/DDR3_USAGE.md budgets, not a batch.
+//
+// rot_ok is the free-window predicate §6 describes: a rotation grant may only
+// START while it is high.  mem_client raises it early in a bus cycle, so a
+// batch begun then is over before the next cycle can need the memory.  The
+// pre-emption is what makes this a performance knob rather than a correctness
+// requirement.
 //
 // ACKS ARE ROUTED BY TAG, not by grant.  Each request carries its client's
 // index in `wb_aux`, which the controller returns with the ack, so the grant
@@ -41,10 +57,15 @@ module wb_arb #(
     parameter integer ADDR_BITS = 24,
     parameter integer DATA_BITS = 128,
     parameter integer SEL_BITS  = 16,
-    parameter integer AUX_WIDTH = 4
+    parameter integer AUX_WIDTH = 4,
+    // 1: client N-1 is the strict-priority slot, outside the rotation.
+    parameter bit     HAS_PRIO  = 1'b0
 ) (
     input  wire                    clk,
     input  wire                    rst,
+    // A rotation grant may only START while this is high.  Tie high when
+    // there is no priority client to keep clear of.
+    input  wire                    rot_ok,
 
     // ---- clients.  Port i is bit i / slice i.  ----------------------------
     input  wire [N-1:0]            c_req,      // wants the port; hold for the batch
@@ -74,10 +95,13 @@ module wb_arb #(
 );
 
     localparam integer IW = (N > 1) ? $clog2(N) : 1;
+    localparam integer NR = HAS_PRIO ? N - 1 : N;      // clients in the rotation
+    localparam [IW-1:0] PRIO = IW'(N - 1);
 
-    logic          held = 1'b0;       // someone has the port
+    logic          held = 1'b0;       // someone in the rotation has the port
     logic [IW-1:0] holder = '0;
     logic [IW-1:0] last   = '0;       // where the next search starts from
+    logic          pre    = 1'b0;     // the priority client has the port
 
     // Rotating pick: the first requester at or after last + 1.
     logic [IW-1:0] pick;
@@ -87,8 +111,8 @@ module wb_arb #(
     always_comb begin
         pick = '0;
         any  = 1'b0;
-        for (k = N; k >= 1; k = k - 1) begin
-            cand = IW'((32'(last) + k) % N);
+        for (k = NR; k >= 1; k = k - 1) begin
+            cand = IW'((32'(last) + k) % NR);
             if (c_req[cand]) begin
                 pick = cand;
                 any  = 1'b1;
@@ -97,27 +121,37 @@ module wb_arb #(
     end
 
     // The holder keeps the port while it asks for it.  The cycle it lets go,
-    // the port is idle; a new grant lands the cycle after.
+    // the port is idle; a new grant lands the cycle after, and only in a
+    // window the priority client has declared free.
     always_ff @(posedge clk) begin
         if (rst) begin
             held   <= 1'b0;
             holder <= '0;
             last   <= '0;
-        end else if (held) begin
-            if (!c_req[holder]) begin
-                held <= 1'b0;
-                last <= holder;
+            pre    <= 1'b0;
+        end else begin
+            pre <= HAS_PRIO && c_req[PRIO];
+            if (held) begin
+                if (!c_req[holder]) begin
+                    held <= 1'b0;
+                    last <= holder;
+                end
+            end else if (any && rot_ok) begin
+                held   <= 1'b1;
+                holder <= pick;
             end
-        end else if (any) begin
-            held   <= 1'b1;
-            holder <= pick;
         end
     end
+
+    // Who the port answers to this clock.  pre is a flop so the wide muxes
+    // below select on a register, not on a request line.
+    wire [IW-1:0] eff = pre ? PRIO : holder;
+    wire          eff_held = pre || held;
 
     genvar g;
     generate
         for (g = 0; g < N; g = g + 1) begin : g_port
-            assign c_gnt[g]   = held && (holder == IW'(g));
+            assign c_gnt[g]   = eff_held && (eff == IW'(g));
             assign c_stall[g] = !c_gnt[g] || wb_stall;
             assign c_ack[g]   = wb_ack && (wb_rdata_aux == AUX_WIDTH'(g));
         end
@@ -126,11 +160,11 @@ module wb_arb #(
     assign c_rdata = wb_rdata;
 
     assign wb_cyc  = |c_cyc;
-    assign wb_stb  = held && c_stb[holder];
-    assign wb_we   = c_we[holder];
-    assign wb_addr = c_addr[holder*ADDR_BITS +: ADDR_BITS];
-    assign wb_data = c_data[holder*DATA_BITS +: DATA_BITS];
-    assign wb_sel  = c_sel[holder*SEL_BITS +: SEL_BITS];
-    assign wb_aux  = AUX_WIDTH'(holder);
+    assign wb_stb  = eff_held && c_stb[eff];
+    assign wb_we   = c_we[eff];
+    assign wb_addr = c_addr[eff*ADDR_BITS +: ADDR_BITS];
+    assign wb_data = c_data[eff*DATA_BITS +: DATA_BITS];
+    assign wb_sel  = c_sel[eff*SEL_BITS +: SEL_BITS];
+    assign wb_aux  = AUX_WIDTH'(eff);
 
 endmodule

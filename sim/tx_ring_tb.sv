@@ -118,7 +118,7 @@ module tx_ring_tb;
     reg  [3:0]           wb_rdata_aux = '0;
 
     wb_arb #(.N (2), .ADDR_BITS (ADDR_BITS)) u_arb (
-        .clk (clk), .rst (rst),
+        .clk (clk), .rst (rst), .rot_ok (1'b1),
         .c_req (c_req), .c_gnt (c_gnt), .c_cyc (c_cyc), .c_stb (c_stb),
         .c_we (c_we), .c_addr (c_addr), .c_data (c_data),
         .c_sel ({16'hFFFF, 16'hFFFF}),
