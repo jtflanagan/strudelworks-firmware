@@ -53,7 +53,7 @@ module mem_cache_tb;
     logic        op_present = 1'b0, op_commit = 1'b0;
     logic [7:0]  data_sync = 8'd0;
     logic [13:0] rom_addr = 14'd0;
-    logic [2:0]  serve = 3'b111;
+    logic        serve = 1'b1;
     logic        inval = 1'b0, cnt_clr = 1'b0;
     logic        master_active = 1'b1;
     logic        calib_complete = 1'b0;
@@ -86,16 +86,6 @@ module mem_cache_tb;
         .rom_loaded (rom_loaded)
     );
 
-    logic [11:0] sw_state = 12'd0;
-    logic [11:0] log_sel = 12'd0;
-    logic        res_sync = 1'b1;
-    logic        watch_en = 1'b0;
-    logic [15:0] watch_addr = 16'd0;
-    wire  [63:0] log_rd;
-    wire  [11:0] log_count;
-    wire         log_overflow;
-    wire  [31:0] stk_rd;
-
     mem_cache #(.SETS (SETS)) u_cache (
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rw (cl_rw),
@@ -109,11 +99,6 @@ module mem_cache_tb;
         .last_mismatch (last_mismatch), .late_fills (late_fills), .fifo_drops (fifo_drops),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
         .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
-        .res_sync (res_sync),
-        .watch_en (watch_en), .watch_addr (watch_addr),
-        .sw_state (sw_state),
-        .log_sel (log_sel), .log_rd (log_rd),
-        .log_count (log_count), .log_overflow (log_overflow), .stk_rd (stk_rd),
         .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)
     );
 
@@ -326,11 +311,11 @@ module mem_cache_tb;
             if (rw && (cls == CLS_RAM || cls == CLS_LC)) begin
                 hit = model_access(pa, 1'b1, may);
                 if (hit) e_hits = e_hits + 1; else e_misses = e_misses + 1;
-                if (may && ((cls == CLS_RAM) ? serve[0] : serve[1])) begin
+                if (may && serve) begin
                     exp_sub = 1'b1; exp_data = ref_mem[pa[16:0]];
                 end
             end else if (rw && cls == CLS_ROM) begin
-                if (rom_loaded && serve[2]) begin exp_sub = 1'b1; exp_data = rom_img[ra]; end
+                if (rom_loaded && serve) begin exp_sub = 1'b1; exp_data = rom_img[ra]; end
             end else if (!rw && wr_image) begin
                 hit = model_access(pa, 1'b0, may);
                 ref_mem[pa[16:0]] = wdata;
@@ -506,22 +491,12 @@ module mem_cache_tb;
         else if (last_mismatch !== {pa[15:0], 8'h5C, 8'hA3})
             fail($sformatf("last_mismatch %08x", last_mismatch));
         else ok("the monitor counts a byte the machine disagrees on and names it");
-        // The mismatch log recorded that same event, readable by index.
-        log_sel <= 12'd0; @(negedge clk); @(negedge clk);
-        if (log_count != 12'd1)
-            fail($sformatf("log_count %0d after one mismatch", log_count));
-        else if (log_rd[15:0] !== pa[15:0] || log_rd[23:16] !== 8'h5C ||
-                 log_rd[31:24] !== 8'hA3 || log_rd[48] !== pa[16])
-            fail($sformatf("log record %016x", log_rd));
-        else ok("the log records the mismatch's address, both bytes and the bank");
         cnt_clr <= 1'b1; @(negedge clk); cnt_clr <= 1'b0; @(negedge clk);
         if (hits != 0 || mismatches != 0 || late_fills != 0) fail("cnt_clr left a counter set");
         else ok("cnt_clr clears the counters");
-        if (log_count != 12'd0) fail("cnt_clr left the log non-empty");
-        else ok("cnt_clr empties the mismatch log");
 
         // ---- 6. serve off entirely: nothing substituted, everything still tracked ----
-        serve <= 3'b000; e_served = 0;
+        serve <= 1'b0; e_served = 0;
         for (n = 0; n < 100; n = n + 1) begin
             pa = hot[$urandom % NHOT] + {20'd0, 4'($urandom)};
             if (pa[15:12] == 4'hC) pa[15:12] = 4'h3;
@@ -531,21 +506,6 @@ module mem_cache_tb;
         if (served != 0) fail("served with every serve bit clear");
         repeat (200) @(negedge clk);
         check_image("with serving off, writes still reach the image");
-
-        // ---- 7. the write watch -----------------------------------------------------
-        cnt_clr <= 1'b1; @(negedge clk); cnt_clr <= 1'b0; @(negedge clk);
-        watch_addr <= 16'h0042; watch_en <= 1'b1; @(negedge clk);
-        // A write of $99 to $0042 in main RAM should be logged as a src=3 record.
-        do_op(CLS_RAM, 24'h000042, 1'b0, 8'h99, 14'd0, 1'b1, 1'b0);
-        repeat (4) @(negedge clk);
-        log_sel <= 12'd0; @(negedge clk); @(negedge clk);
-        if (log_count != 12'd1)
-            fail($sformatf("watch: log_count %0d after one watched write", log_count));
-        else if (log_rd[15:0] !== 16'h0042 || log_rd[23:16] !== 8'h99 ||
-                 log_rd[35:34] !== 2'd3)
-            fail($sformatf("watch: record %016x (want addr 0042, val 99, src 3)", log_rd));
-        else ok("the write watch logs a write as a src=3 record with its value");
-        watch_en <= 1'b0;
 
         $display("%0d checks, %0d errors", checks, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL");

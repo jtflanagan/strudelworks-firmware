@@ -63,17 +63,6 @@ module mem_cache #(
     // The card's reset.  RES' never comes here: like real RAM, the image and
     // the cache survive the machine being reset.
     input  wire        rst,
-    // Synchronised RES' (ACTIVE LOW), for the stack-write tracker only - the
-    // image itself deliberately survives a reset, but the "was this stack byte
-    // written THIS run" bitmap is cleared by it, so a phantom read of a
-    // never-written slot is visible as write-bit-clear.  docs/MEMORY.md.
-    input  wire        res_sync,
-    // A write watch (MEM_WATCH): when enabled, every write to this address is
-    // logged as a src=3 record, so the mismatch dump carries the full timeline
-    // of a byte - what value the shadow wrote it, in which bank - beside the
-    // reads that later disagreed.  Built to root-cause the aux-$0001 divergence.
-    input  wire        watch_en,
-    input  wire [15:0] watch_addr,
 
     // The classified op, from apple_mmu, plus the op's own address and write
     // data from apple_bus_write.
@@ -98,7 +87,7 @@ module mem_cache #(
     output logic [7:0] sub_data,
 
     // Control and status, from MEM_CTRL / to MEM_STAT.
-    input  wire [2:0]  serve,          // [0] RAM, [1] LC, [2] ROM
+    input  wire        serve,          // all-or-nothing: serve every cacheable class, or none
     input  wire        inval,          // pulse: invalidate every line
     input  wire        cnt_clr,        // pulse: clear the counters
     input  wire        image_ready,
@@ -122,26 +111,7 @@ module mem_cache #(
     // From mem_client: a fill's line, tagged with the id it was asked with.
     input  wire         mr_valid,
     input  wire [1:0]   mr_id,
-    input  wire [127:0] mr_data,
-
-    // The soft-switch context, for the mismatch log (docs/MEMORY.md): the same
-    // twelve bits MEM_STAT reports, captured with every logged mismatch so a
-    // banking divergence is readable in the record itself.
-    input  wire [11:0]  sw_state,
-
-    // The mismatch log.  A BRAM ring the monitor fills with one record per
-    // mismatch and the host drains by index (MEM_LOG_*).  cnt_clr empties it,
-    // so a `clear, run a workload, read it back` gives the addresses that
-    // diverged - class, source and the main/aux bank included, which is what
-    // tells a ROM read compared against the image from a genuine RAM/LC miss
-    // from a write the shadow never saw.
-    input  wire [11:0]  log_sel,        // entry the host wants (and, low 3 bits, the stk word)
-    output logic [63:0] log_rd,         // that entry, registered
-    output logic [11:0] log_count,      // entries captured since cnt_clr (0..DEPTH)
-    output logic        log_overflow,   // more mismatches than the log can hold
-    // The main-bank stack write bitmap: bit N set means $01N received a write
-    // since the last RES'.  Read back a 32-bit slice at a time (log_sel[2:0]).
-    output logic [31:0] stk_rd
+    input  wire [127:0] mr_data
 );
 
     localparam integer IW = $clog2(SETS);      // set index
@@ -245,47 +215,16 @@ module mem_cache #(
     // What the monitor compares this op's byte against, and whether to.
     logic        cmp_valid;
     logic [7:0]  cmp_byte;
-    logic [1:0]  cmp_src;              // 0 cache hit, 1 line fill, 2 ROM
-    logic        cmp_bank;             // p_pa[16], the main/aux 17th bit
     logic [7:0]  data_q;               // data_sync a clock ago: the T_DIN sample
-
-    // ---- the main-bank stack write bitmap -----------------------------------
-    // One bit per $0100-$01FF address, set on a write that lands in the image
-    // in the MAIN bank, cleared by RES'.  A stack read that mismatches with its
-    // bit clear was never written this run - a phantom read during a 6502 dummy
-    // cycle, not a mirroring failure.
-    logic [255:0] stk_written = 256'd0;
-    wire          op_is_stk_wr = (p_addr[15:8] == 8'h01) && !p_pa[16];
-
-    // ---- the mismatch log's BRAM and pointers -------------------------------
-    localparam integer LOG_DEPTH = 2048;
-    (* ram_style = "block" *) logic [63:0] log_mem [0:LOG_DEPTH-1];
-    logic [11:0] log_wptr = 12'd0;
-    // Bit 49: was this address ever written this run (stack only meaningful).
-    wire         log_wr_seen = stk_written[p_addr[7:0]];
-    // Two things get logged: a read the monitor found mismatched (at op_commit),
-    // and - when the watch is on - a write to the watched address (at the P6
-    // decision, one stage earlier).  Different ops in different cycles; a
-    // mismatch wins a rare same-cycle tie and the write is dropped.
-    wire         mm_ev = op_commit && cmp_valid && (cmp_byte != data_q);
-    wire         ww_ev = watch_en && v4 && p_wr_image && (p_addr == watch_addr);
-    wire [63:0]  log_rec_mm = {14'd0, log_wr_seen, cmp_bank, sw_state, cmp_src,
-                               p_cls, data_q, cmp_byte, p_addr};
-    // A write record: src=3, both byte fields carry the value written, the bank
-    // is where the shadow put it, the switches are those at the write.
-    wire [63:0]  log_rec_ww = {14'd0, 1'b1, p_pa[16], sw_state, 2'd3,
-                               p_cls, op_wdata, op_wdata, p_addr};
-    wire         log_ev     = (mm_ev || ww_ev) && (log_wptr != LOG_DEPTH[11:0]);
-    wire [63:0]  log_record = mm_ev ? log_rec_mm : log_rec_ww;
-    assign log_count = log_wptr;
 
     // ---- the invalidate walk --------------------------------------------------------
     logic [IW:0] inv_idx;              // one extra bit: == SETS means done
     assign invalidating = !inv_idx[IW];
 
-    wire serve_cls = (p_cls == CLS_RAM) ? serve[0] :
-                     (p_cls == CLS_LC)  ? serve[1] :
-                     (p_cls == CLS_ROM) ? (serve[2] && rom_loaded) : 1'b0;
+    // All-or-nothing: when serving, every RAM and LC read is answered from the
+    // image and every ROM read from the card's ROM; a $Cxxx (BUS) read never is.
+    wire serve_cls = serve && ((p_cls == CLS_RAM) || (p_cls == CLS_LC) ||
+                               (p_cls == CLS_ROM && rom_loaded));
     wire cacheable = (p_cls == CLS_RAM) || (p_cls == CLS_LC);
     wire may_touch = image_ready && !invalidating;
 
@@ -307,9 +246,7 @@ module mem_cache #(
             sub_en <= 1'b0; sub_data <= 8'd0;
             fill_pending <= 1'b0; fill_id <= 2'd0; fill_serve <= 1'b0;
             fill_cmp <= 1'b0; fill_byte <= 8'd0;
-            cmp_valid <= 1'b0; cmp_byte <= 8'd0; cmp_src <= 2'd0; cmp_bank <= 1'b0;
-            log_wptr <= 12'd0; log_overflow <= 1'b0;
-            stk_written <= 256'd0;
+            cmp_valid <= 1'b0; cmp_byte <= 8'd0;
             mq_valid <= 1'b0; mq_kind <= 1'b0; mq_id <= 2'd0;
             mq_line <= 20'd0; mq_byte <= 4'd0; mq_data <= 8'd0;
             hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
@@ -320,9 +257,6 @@ module mem_cache #(
             tag_waddr <= '0; tag_wdata <= '0;
             for (w = 0; w < 4; w = w + 1) wbyte[w] <= 8'd0;
         end else begin
-            // RES' clears the per-run stack-write bitmap (only).
-            if (!res_sync) stk_written <= 256'd0;
-
             // ---- the request handshake --------------------------------------
             if (mq_valid && mq_ready) mq_valid <= 1'b0;
 
@@ -382,8 +316,6 @@ module mem_cache #(
                             end
                             cmp_valid <= 1'b1;
                             cmp_byte  <= rbyte;
-                            cmp_src   <= 2'd0;
-                            cmp_bank  <= p_pa[16];
                             // Touch the LRU bits.
                             tag_we    <= 1'b1;
                             tag_waddr <= p_set;
@@ -403,18 +335,15 @@ module mem_cache #(
                             end
                         end
                     end else if (p_cls == CLS_ROM && rom_loaded) begin
-                        if (serve[2]) begin
+                        if (serve) begin
                             sub_en   <= 1'b1;
                             sub_data <= rom_q;
                             served   <= served + 32'd1;
                         end
                         cmp_valid <= 1'b1;
                         cmp_byte  <= rom_q;
-                        cmp_src   <= 2'd2;
-                        cmp_bank  <= p_pa[16];
                     end
                 end else if (p_wr_image) begin
-                    if (op_is_stk_wr) stk_written[p_addr[7:0]] <= 1'b1;
                     // Through to the image, and into the line if it is here.
                     if (mq_valid) fifo_drops <= fifo_drops + 8'd1;
                     mq_valid <= 1'b1;
@@ -454,8 +383,6 @@ module mem_cache #(
                     end
                     cmp_valid <= 1'b1;
                     cmp_byte  <= mr_data[8 * p_byte +: 8];
-                    cmp_src   <= 2'd1;
-                    cmp_bank  <= p_pa[16];
                 end else begin
                     late_fills <= late_fills + 8'd1;
                 end
@@ -465,20 +392,6 @@ module mem_cache #(
             if (op_commit && cmp_valid && cmp_byte != data_q) begin
                 mismatches    <= mismatches + 32'd1;
                 last_mismatch <= {p_addr, cmp_byte, data_q};
-            end
-
-            // ---- the mismatch log ------------------------------------------------
-            // One 64-bit record per mismatch into a BRAM ring the host drains by
-            // index.  cnt_clr empties it along with the counters, so the log is
-            // always "since the last clear".  It stops at DEPTH rather than
-            // overwriting: the FIRST records after a clear are the ones a
-            // `clear, run, read` wants, and log_overflow says if more happened.
-            if (cnt_clr) begin
-                log_wptr <= '0;
-                log_overflow <= 1'b0;
-            end else if (mm_ev || ww_ev) begin
-                if (log_wptr != LOG_DEPTH[11:0]) log_wptr <= log_wptr + 12'd1;
-                else                             log_overflow <= 1'b1;
             end
 
             // ---- the invalidate walk ---------------------------------------------
@@ -496,19 +409,6 @@ module mem_cache #(
                 late_fills <= 8'd0; fifo_drops <= 8'd0;
             end
         end
-    end
-
-
-    // The log BRAM: one write port (the monitor) and one read port (the host,
-    // by index).  Same clock as everything here - apple_clk is clk_ctrl - so
-    // no crossing.  The registered read means MEM_LOG_LO/HI see the selected
-    // entry a cycle later, which is nothing against a USB round trip.
-    always_ff @(posedge clk) begin
-        if (log_ev) log_mem[log_wptr[10:0]] <= log_record;
-        if (rst) log_rd <= 64'd0;
-        else     log_rd <= log_mem[log_sel[10:0]];
-        // The stack bitmap slice the host selected (8 words of 32 bits).
-        stk_rd <= stk_written[log_sel[2:0]*32 +: 32];
     end
 
 endmodule
