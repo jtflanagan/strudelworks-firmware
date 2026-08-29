@@ -4,10 +4,12 @@
 //////////////////////////////////////////////////////////////////////////////////
 // mem_integ_tb - the whole memory path under the real core: the driver, the
 // reader on the pins, the MMU shadow, the ROM, the cache, the DDR3 client and
-// the arbiter, against a model of a 128K IIe with a language card.
+// the arbiter, against a model of a IIe with a language card and a RamWorks
+// of four banks.
 //
 // The core runs sim/mem_integ.s - RAM, the stack, every language-card state,
-// RAMRD/RAMWRT/ALTZP/80STORE with PAGE2 and HIRES - first with every serve bit
+// RAMRD/RAMWRT/ALTZP/80STORE with PAGE2 and HIRES, the RamWorks bank
+// register and the banks behind it - first with every serve bit
 // clear (the image only tracks), then with all three set under the running
 // program, the changeover the registers promise is safe.  The machine model
 // answers every read on the pins as a IIe would, and that byte is the truth:
@@ -118,6 +120,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [23:0] cl_pa;
     wire [13:0] cl_rom_addr;
     wire [11:0] sw_state;
+    wire [7:0]  rw_bank;
     wire [7:0]  rom_byte;
     wire        rom_loaded, invalidating, image_ready, refresh_ok, rot_ok, mem_idle;
     wire [31:0] hits, misses, served, mismatches, last_mismatch;
@@ -135,9 +138,10 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     apple_mmu u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
-        .op_addr (op_addr), .op_rw (op_rw), .op_present (op_present), .op_commit (op_commit),
+        .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
+        .op_present (op_present), .op_commit (op_commit),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (cl_rom_addr),
-        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .sw_state (sw_state)
+        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .sw_state (sw_state), .rw_bank (rw_bank)
     );
     apple_rom u_rom (
         .clk (clk), .rst (rst),
@@ -197,7 +201,10 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     );
 
     // ---- the DDR3 stub: the image, in order, twelve clocks late ---------------------
-    reg [7:0] smem [0:131071];
+    // Image banks 0-4: main, and the RamWorks's banks 0-3.
+    localparam integer NRW = 4;                 // RamWorks banks the machine has
+    localparam integer IMG = (NRW + 1) * 65536;
+    reg [7:0] smem [0:IMG-1];
     localparam integer DL = 64;
     reg [127:0] dl_d [0:DL-1];
     reg [3:0]   dl_aux [0:DL-1];
@@ -208,7 +215,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     reg [3:0]   wb_aux_r = 0;
     assign wb_ack = wb_ack_r; assign wb_rdata = wb_rdata_r; assign wb_rdata_aux = wb_aux_r;
     assign wb_stall = s_stall;
-    function automatic [16:0] wb_to_byte(input [23:0] a);
+    function automatic [19:0] wb_to_byte(input [23:0] a);
         wb_to_byte = {a[22:10], a[6:0]} << 4;
     endfunction
     integer i;
@@ -218,7 +225,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         s_stall <= ((s_cnt % 41) < 2);
         wb_ack_r <= 1'b0;
         if (wb_cyc && wb_stb && !wb_stall) begin
-            if (wb_addr[9:7] != 3'd0 || wb_addr[23] || wb_addr[22:10] >= 13'd512)
+            if (wb_addr[9:7] != 3'd0 || wb_addr[23] || wb_addr[22:10] >= 13'(IMG / 2048))
                 fail($sformatf("DDR3 address outside the image: %06x", wb_addr));
             if (wb_we) begin
                 for (i = 0; i < 16; i = i + 1)
@@ -238,14 +245,15 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     end
 
-    // ---- the machine: a 128K IIe with a language card --------------------------------
+    // ---- the machine: a IIe with a language card and a RamWorks of NRW banks ---------
     reg [7:0] main_ram [0:65535];
-    reg [7:0] aux_ram  [0:65535];
+    reg [7:0] aux_ram  [0:NRW*65536-1];     // RamWorks bank b at b*65536
     reg [7:0] lc_main  [0:16383];    // bank 1 D000 at 0, bank 2 D000 at 4096, E000-FFFF at 8192
-    reg [7:0] lc_aux   [0:16383];
+    reg [7:0] lc_aux   [0:NRW*16384-1];     // ...per RamWorks bank
     reg [7:0] rom_img  [0:16383];    // $C000-$FFFF
     reg m_store80, m_ramrd, m_ramwrt, m_altzp, m_page2, m_hires;
     reg m_bank2, m_lcrd, m_wren, m_pre;
+    reg [7:0] m_bank;                // the RamWorks bank register
 
     function automatic bit m_aux(input [15:0] a, input bit rd);
         if (a < 16'h0200) m_aux = m_altzp;
@@ -262,8 +270,16 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         begin
             m_store80 = 0; m_ramrd = 0; m_ramwrt = 0; m_altzp = 0; m_page2 = 0; m_hires = 0;
             m_bank2 = 1; m_lcrd = 0; m_wren = 1; m_pre = 0;
+            m_bank = 0;              // by decision: the card's and the host's rule too
         end
     endtask
+    // The bank a RamWorks access reaches, as an index into aux_ram / lc_aux.
+    function automatic integer m_auxidx(input [15:0] a);
+        m_auxidx = m_bank * 65536 + a;
+    endfunction
+    function automatic integer m_lcauxidx(input [15:0] a);
+        m_lcauxidx = m_bank * 16384 + m_lcidx(a);
+    endfunction
 
     // The byte the machine returned for the op in flight: the truth.
     reg [7:0] mach_byte = 8'h00;
@@ -284,10 +300,10 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             end else if (addr_drive[15:12] == 4'hC) begin
                 data_pin <= 8'hA5;
             end else if (addr_drive >= 16'hD000) begin
-                if (m_lcrd) data_pin <= m_altzp ? lc_aux[m_lcidx(addr_drive)] : lc_main[m_lcidx(addr_drive)];
+                if (m_lcrd) data_pin <= m_altzp ? lc_aux[m_lcauxidx(addr_drive)] : lc_main[m_lcidx(addr_drive)];
                 else        data_pin <= rom_img[addr_drive - 16'hC000];
             end else begin
-                data_pin <= m_aux(addr_drive, 1'b1) ? aux_ram[addr_drive] : main_ram[addr_drive];
+                data_pin <= m_aux(addr_drive, 1'b1) ? aux_ram[m_auxidx(addr_drive)] : main_ram[addr_drive];
             end
         end else if (data_oe) begin
             if (addr_drive[15:8] == 8'hC0) begin
@@ -304,6 +320,11 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                     if (addr_drive[3:1] == 3'd2) m_page2 <= addr_drive[0];
                     if (addr_drive[3:1] == 3'd3) m_hires <= addr_drive[0];
                 end
+                // $C071/$C073: the RamWorks bank register; a bank the card
+                // does not have leaves it alone.
+                if (addr_drive[7:0] == 8'h71 || addr_drive[7:0] == 8'h73) begin
+                    if (data_drive < NRW) m_bank <= data_drive;
+                end
                 if (addr_drive[7:4] == 4'h8) begin
                     m_bank2 <= !addr_drive[3];
                     m_lcrd  <= (addr_drive[1] == addr_drive[0]);
@@ -314,11 +335,11 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                 // nothing there
             end else if (addr_drive >= 16'hD000) begin
                 if (m_wren) begin
-                    if (m_altzp) lc_aux[m_lcidx(addr_drive)] <= data_drive;
+                    if (m_altzp) lc_aux[m_lcauxidx(addr_drive)] <= data_drive;
                     else         lc_main[m_lcidx(addr_drive)] <= data_drive;
                 end
             end else begin
-                if (m_aux(addr_drive, 1'b0)) aux_ram[addr_drive] <= data_drive;
+                if (m_aux(addr_drive, 1'b0)) aux_ram[m_auxidx(addr_drive)] <= data_drive;
                 else                         main_ram[addr_drive] <= data_drive;
             end
             data_pin <= data_drive;
@@ -386,16 +407,18 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     endtask
 
     task check_image(input string what);
-        integer a, bad;
+        integer a, b, bad;
         begin
             bad = 0;
             for (a = 0; a < 16'hC000; a = a + 1) begin
                 if (smem[a] !== main_ram[a]) bad = bad + 1;
-                if (smem[17'h10000 + a] !== aux_ram[a]) bad = bad + 1;
+                for (b = 0; b < NRW; b = b + 1)
+                    if (smem[(b + 1) * 65536 + a] !== aux_ram[b * 65536 + a]) bad = bad + 1;
             end
             for (a = 0; a < 16384; a = a + 1) begin
                 if (smem[17'h0C000 + a] !== lc_main[a]) bad = bad + 1;
-                if (smem[17'h1C000 + a] !== lc_aux[a]) bad = bad + 1;
+                for (b = 0; b < NRW; b = b + 1)
+                    if (smem[(b + 1) * 65536 + 16'hC000 + a] !== lc_aux[b * 16384 + a]) bad = bad + 1;
             end
             if (bad != 0) fail($sformatf("%0s: %0d image bytes differ from the machine's memory", what, bad));
             else ok(what);
@@ -407,9 +430,11 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     integer a, c, served0, reads0, bad0, dma_idx;
     initial begin
         $readmemh(PROG, prog);
-        for (a = 0; a < 65536; a = a + 1) begin main_ram[a] = 8'h00; aux_ram[a] = 8'h00; end
-        for (a = 0; a < 16384; a = a + 1) begin lc_main[a] = 8'h00; lc_aux[a] = 8'h00; end
-        for (a = 0; a < 131072; a = a + 1) smem[a] = 8'h00;
+        for (a = 0; a < 65536; a = a + 1) main_ram[a] = 8'h00;
+        for (a = 0; a < NRW * 65536; a = a + 1) aux_ram[a] = 8'h00;
+        for (a = 0; a < 16384; a = a + 1) lc_main[a] = 8'h00;
+        for (a = 0; a < NRW * 16384; a = a + 1) lc_aux[a] = 8'h00;
+        for (a = 0; a < IMG; a = a + 1) smem[a] = 8'h00;
         for (a = 0; a < 12288; a = a + 1) rom_img[a] = $urandom;
         for (a = 0; a < 4096; a = a + 1) rom_img[12288 + a] = prog[a];
         rom_img[16'h1000] = 8'hC7;                 // what the program expects at ROM $D000
@@ -476,11 +501,28 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         check_image("the image still equals the machine's memory after serving");
 
         // ---- 4. a reset under it: the switches go back, the memory stays -----------------
+        // First leave a RamWorks bank selected, through the override path as
+        // the program itself never does: the reset must clear it.
+        dma_idx = 0;
+        while (dma_idx <= 1) begin
+            @(negedge clk);
+            if (since_fall == 0) begin
+                if (dma_idx == 0) begin
+                    ovr_en <= 1'b1; ovr_rw <= 1'b0; ovr_addr <= 16'hC073; ovr_wdata <= 8'd3;
+                end else ovr_en <= 1'b0;
+                dma_idx = dma_idx + 1;
+            end
+        end
+        repeat (2 * CYCLE) @(negedge clk);
+        if (rw_bank !== 8'd3 || m_bank !== 8'd3) fail($sformatf("bank register %0d (machine %0d) after a write of 3", rw_bank, m_bank));
+        else ok("a write to $C073 selects RamWorks bank 3, on the card and in the machine");
         res_n <= 1'b0;
         repeat (5 * CYCLE) @(negedge clk);
         m_reset();
         if (sw_state !== 12'h500) fail($sformatf("switches after reset: %03x", sw_state));
         else ok("RES' puts the shadow's switches back to the IIe's reset state");
+        if (rw_bank !== 8'd0) fail($sformatf("bank register %0d after RES'", rw_bank));
+        else ok("...and the RamWorks bank register to 0, by decision");
         res_n <= 1'b1;
         pass_count = 0;
         wait_passes(2, "after a reset, still serving");

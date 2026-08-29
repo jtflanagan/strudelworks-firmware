@@ -160,6 +160,7 @@ module wb_regfile #(
     output logic           mem_cnt_clr,     // pulses
     output logic           mem_inval,
     input  wire [11:0]     mem_sw,
+    input  wire [7:0]      mem_rw_bank,     // the RamWorks bank register
     input  wire            mem_image_ready,
     input  wire            mem_invalidating,
     input  wire            mem_rom_loaded,
@@ -563,6 +564,8 @@ module wb_regfile #(
     //                               read from the image, or none of them
     //   [8]      cnt_clr    W1   clear the counters
     //   [9]      inval      W1   invalidate every cache line
+    //   [23:16]  bank       RO   the RamWorks bank register, as the shadow
+    //                           holds it (rtl/apple_mmu.sv); 0 after RES'
     //   [27:24]  sets       RO   log2 of the cache's sets
     //
     // A level, card-reset only and never latched on RES': serving can be
@@ -583,7 +586,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] mem_ctrl_rd = {4'd0, 4'(MEM_SETS_LOG2), 23'd0, mem_serve};
+    wire [31:0] mem_ctrl_rd = {4'd0, 4'(MEM_SETS_LOG2), mem_rw_bank, 15'd0, mem_serve};
 
     // ---- MEM_STAT -----------------------------------------------------------
     //

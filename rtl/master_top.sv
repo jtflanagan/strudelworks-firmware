@@ -174,6 +174,7 @@ module master_top #(
     wire        mem_image_ready, mem_cnt_clr, mem_inval, mem_invalidating, mem_rom_loaded;
     wire        mem_serve;
     wire [11:0] mem_sw;
+    wire [7:0]  mem_rw_bank;
     wire [7:0]  mem_late_fills, mem_fifo_drops;
     wire [31:0] mem_hits, mem_misses, mem_mismatch, mem_served, mem_last;
     wire        res_drive;
@@ -237,7 +238,7 @@ module master_top #(
         .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
         .mem_image_ready (mem_image_ready),
         .mem_serve (mem_serve), .mem_cnt_clr (mem_cnt_clr), .mem_inval (mem_inval),
-        .mem_sw (mem_sw), .mem_invalidating (mem_invalidating),
+        .mem_sw (mem_sw), .mem_rw_bank (mem_rw_bank), .mem_invalidating (mem_invalidating),
         .mem_rom_loaded (mem_rom_loaded),
         .mem_late_fills (mem_late_fills), .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
@@ -524,6 +525,7 @@ module master_top #(
         .res_sync   (apple_res_sync),
         .op_addr    (op_addr),
         .op_rw      (op_rw),
+        .op_wdata   (op_wdata),
         .op_present (op_present),
         .op_commit  (op_commit),
         .cl_valid   (cl_valid),
@@ -532,7 +534,8 @@ module master_top #(
         .cl_rom_addr (cl_rom_addr),
         .cl_rw      (cl_rw),
         .cl_wr_image (cl_wr_image),
-        .sw_state   (mem_sw)
+        .sw_state   (mem_sw),
+        .rw_bank    (mem_rw_bank)
     );
 
     apple_rom u_rom (

@@ -30,6 +30,15 @@
 // would answer the wrong cycle.  That counter must read zero on hardware; at
 // Apple speed a fill has ~90 clocks and needs ~15.
 //
+// THE MONITOR STOPS AT THE MACHINE'S MEMORY.  Image banks 0 and 1 - main
+// and the regular auxiliary memory - exist in the machine, so the bus's byte
+// is an opinion worth comparing with.  Banks 2 and up are the RamWorks's
+// extension (rtl/apple_mmu.sv), memory the machine does not have: the bus
+// carries whatever its one auxiliary bank holds there, which every bank's
+// writes have been landing in, and a comparison would count nothing but
+// the difference between a RamWorks and a 128K IIe.  Those reads are served
+// and cached like any other, and not compared.
+//
 // UNWRITTEN MEMORY IS GARBAGE, by decision (docs/MEMORY.md): nothing here
 // tracks which bytes have been written, because a powered-up Apple's memory
 // is garbage too and programs are written for that.  The consequence is that
@@ -129,6 +138,7 @@ module mem_cache #(
     logic [15:0] p_addr;
     logic [1:0]  p_cls;
     logic        p_rw, p_wr_image;
+    logic        p_machine;            // the op reaches memory the machine has
 
     wire [IW-1:0] set_in  = cl_pa[IW+3:4];
     wire [IW-1:0] p_set   = p_pa[IW+3:4];
@@ -239,7 +249,7 @@ module mem_cache #(
         if (rst) begin
             v1 <= 1'b0; v2 <= 1'b0; v3 <= 1'b0; v4 <= 1'b0;
             p_pa <= 24'd0; p_addr <= 16'd0; p_cls <= CLS_BUS; p_rw <= 1'b1;
-            p_wr_image <= 1'b0;
+            p_wr_image <= 1'b0; p_machine <= 1'b0;
             hitv <= 4'd0; tagword <= '0; rom_q <= 8'd0;
             hit <= 1'b0; rbyte <= 8'd0; hway <= 2'd0; victim <= 2'd0;
             plru_after_hit <= 3'd0; plru_after_fill <= 3'd0;
@@ -275,6 +285,7 @@ module mem_cache #(
                 p_cls      <= cl_cls;
                 p_rw       <= cl_rw;
                 p_wr_image <= cl_wr_image;
+                p_machine  <= (cl_pa[23:17] == 7'd0);
             end
             v2 <= v1;
 
@@ -389,7 +400,7 @@ module mem_cache #(
             end
 
             // ---- the monitor, at the data phase ----------------------------------
-            if (op_commit && cmp_valid && cmp_byte != data_q) begin
+            if (op_commit && cmp_valid && p_machine && cmp_byte != data_q) begin
                 mismatches    <= mismatches + 32'd1;
                 last_mismatch <= {p_addr, cmp_byte, data_q};
             end

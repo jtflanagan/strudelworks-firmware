@@ -179,15 +179,17 @@ int main(int argc, char** argv) {
         have_rom = true;
     }
 
-    // The image: banks 0 and 1 (main, aux), 64 KB each, emulator layout.
-    std::vector<uint8_t> image(1u << 17, 0);
-    std::vector<uint8_t> written(1u << 17, 0);
+    // The image: 256 banks of 64 KB, emulator layout - main, then the
+    // auxiliary memory one RamWorks bank at a time.  A real IIe's capture
+    // never leaves banks 0 and 1 unless something wrote the bank register.
+    std::vector<uint8_t> image(1u << 24, 0);
+    std::vector<uint8_t> written(1u << 24, 0);
 
     Vapple_mmu top;
     auto tick = [&]() { top.clk = 0; top.eval(); top.clk = 1; top.eval(); };
 
     top.rst = 1; top.res_sync = 1; top.op_present = 0; top.op_commit = 0;
-    top.op_addr = 0; top.op_rw = 1;
+    top.op_addr = 0; top.op_rw = 1; top.op_wdata = 0;
     for (int i = 0; i < 4; ++i) tick();
     top.rst = 0;
     tick();
@@ -223,6 +225,7 @@ int main(int argc, char** argv) {
         top.res_sync = e.res ? 1 : 0;
         top.op_addr = e.addr;
         top.op_rw = e.rw ? 1 : 0;
+        top.op_wdata = e.data;
         top.op_present = 1; tick();          // cl_* latched on this edge
         top.op_present = 0;
         unsigned sw = top.sw_state;

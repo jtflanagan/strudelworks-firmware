@@ -4,8 +4,8 @@
 ; mem_integ.s - a program for sim/mem_integ_tb.sv: exercises every kind of
 ; memory the card's image claims to serve, and says whether each read came
 ; back right.  Runs from RAM at $6000 (copied out of the ROM by the reset
-; code), with the auxiliary-memory tests in ROM because RAMRD would take the
-; code away from under them.
+; code), with the auxiliary-memory and RamWorks tests in ROM because RAMRD
+; would take the code away from under them.
 ;
 ; PASS ($0300) counts completed passes; FAILF ($03FF) is $FF if anything
 ; disagreed, and the program then halts.
@@ -120,6 +120,10 @@ ver:    tya
         jsr auxtest
         bcs fail
 
+        ; ---- 5. the RamWorks banks, from the ROM ------------------------------
+        jsr rwtest
+        bcs fail
+
         inc PASS
         jmp loop
 
@@ -232,6 +236,88 @@ axfail_zp: sta $C008
         sec
         rts
 axfail: sec
+        rts
+
+; The RamWorks: bank 0 is the regular auxiliary memory auxtest just used,
+; banks 1-3 are their own; a bank that does not exist is ignored; ALTZP's
+; zero page follows the bank.  Carry set on failure; every switch and the
+; bank register restored before any branch into RAM - and the stack is not
+; touched while ALTZP is on, since the return address is on the main one.
+rwtest:
+        sta $C005               ; RAMWRT aux
+        ldx #1
+        stx $C073
+        lda #$B1
+        sta $0900               ; bank 1
+        ldx #2
+        stx $C073
+        lda #$B2
+        sta $0900               ; bank 2
+        ldx #3
+        stx $C071               ; the register's other address
+        lda #$B3
+        sta $0900               ; bank 3
+        ldx #0
+        stx $C073
+        lda #$B0
+        sta $0900               ; bank 0
+        sta $C004               ; RAMWRT main
+        sta $C003               ; RAMRD aux, still bank 0
+        lda $0900
+        cmp #$B0
+        jne rwfail
+        lda $0800               ; auxtest's $AA: bank 0 kept it through the others
+        cmp #$AA
+        jne rwfail
+        ldx #2
+        stx $C073
+        lda $0900
+        cmp #$B2
+        jne rwfail
+        ldx #$FF
+        stx $C073               ; no such bank: ignored, still bank 2
+        lda $0900
+        cmp #$B2
+        jne rwfail
+        ldx #3
+        stx $C073
+        lda $0900
+        cmp #$B3
+        jne rwfail
+        ldx #1
+        stx $C071
+        lda $0900
+        cmp #$B1
+        jne rwfail
+        sta $C002               ; RAMRD main
+        sta $C009               ; ALTZP: the zero page is bank 1's now
+        lda #$C1
+        sta $30
+        ldx #3
+        stx $C073
+        lda #$C3
+        sta $30                 ; bank 3's zero page
+        ldx #1
+        stx $C073
+        lda $30
+        cmp #$C1
+        jne rwfail_zp
+        ldx #3
+        stx $C073
+        lda $30
+        cmp #$C3
+        jne rwfail_zp
+        sta $C008               ; ALTZP off
+        ldx #0
+        stx $C073
+        clc
+        rts
+rwfail_zp:
+        sta $C008
+rwfail: sta $C002
+        ldx #0
+        stx $C073
+        sec
         rts
 
 .segment "VECTORS"

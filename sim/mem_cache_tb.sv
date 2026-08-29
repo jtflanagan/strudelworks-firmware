@@ -177,8 +177,10 @@ module mem_cache_tb;
     always @(posedge clk) rot_ok_q <= rot_ok;
 
     // ---- the Wishbone memory stub -----------------------------------------------------
-    // 8192 lines of bank 0 (banks 0-1 of the image), plus bank 7 ignored.
-    logic [7:0] smem [0:131071];
+    // Image banks 0-7 (512 KB): the machine's two, and room for a RamWorks
+    // bank above them.  Bank 7 of the DDR3 (the ring) is ignored.
+    localparam integer IMG = 8 * 65536;
+    logic [7:0] smem [0:IMG-1];
     integer     s_lat = 12;              // clocks from accept to ack
     integer     s_stall_every = 0;       // 0 = never
     integer     s_pause = 0;             // clocks of stall left: a refresh's worth
@@ -205,15 +207,15 @@ module mem_cache_tb;
     assign wb_ack = wb_ack_r;
     assign wb_rdata = wb_rdata_r;
     assign wb_rdata_aux = wb_aux_r;
-    function automatic [16:0] wb_to_byte(input [23:0] a);
-        wb_to_byte = {a[22:10], a[6:0]} << 4;      // line * 16, banks 0-1 only
+    function automatic [18:0] wb_to_byte(input [23:0] a);
+        wb_to_byte = {a[22:10], a[6:0]} << 4;      // line * 16, banks 0-7 only
     endfunction
     integer i;
     always @(posedge clk) begin
         now <= now + 1;
         wb_ack_r <= 1'b0;
         if (wb_cyc && wb_stb && !wb_stall) begin
-            if (wb_addr[9:7] == 3'd0 && wb_addr[23] == 1'b0 && wb_addr[22:10] < 13'd512) begin
+            if (wb_addr[9:7] == 3'd0 && wb_addr[23] == 1'b0 && wb_addr[22:10] < 13'd256) begin
                 if (wb_we) begin
                     for (i = 0; i < 16; i = i + 1)
                         if (wb_sel[i]) smem[wb_to_byte(wb_addr) + i] <= wb_data[8*i +: 8];
@@ -240,7 +242,7 @@ module mem_cache_tb;
     end
 
     // ---- the reference model -------------------------------------------------------
-    logic [7:0] ref_mem [0:131071];      // the image as it should be
+    logic [7:0] ref_mem [0:IMG-1];       // the image as it should be
     logic [7:0] rom_img [0:16383];
     logic       m_valid [0:SETS-1][0:3];
     logic [TW-1:0] m_tag [0:SETS-1][0:3];
@@ -312,19 +314,19 @@ module mem_cache_tb;
                 hit = model_access(pa, 1'b1, may);
                 if (hit) e_hits = e_hits + 1; else e_misses = e_misses + 1;
                 if (may && serve) begin
-                    exp_sub = 1'b1; exp_data = ref_mem[pa[16:0]];
+                    exp_sub = 1'b1; exp_data = ref_mem[pa[18:0]];
                 end
             end else if (rw && cls == CLS_ROM) begin
                 if (rom_loaded && serve) begin exp_sub = 1'b1; exp_data = rom_img[ra]; end
             end else if (!rw && wr_image) begin
                 hit = model_access(pa, 1'b0, may);
-                ref_mem[pa[16:0]] = wdata;
+                ref_mem[pa[18:0]] = wdata;
             end
             if (exp_sub) e_served = e_served + 1;
 
             // The machine's own RAM answers the bus; for ROM the ROM does.
             bus_byte = rw ? ((cls == CLS_ROM) ? rom_img[ra] :
-                             (cls == CLS_BUS) ? 8'h5A : ref_mem[pa[16:0]]) : wdata;
+                             (cls == CLS_BUS) ? 8'h5A : ref_mem[pa[18:0]]) : wdata;
 
             for (t = 3; t < T_CHECK; t = t + 1) @(negedge clk);
             if (check) begin
@@ -347,7 +349,7 @@ module mem_cache_tb;
         integer a, bad;
         begin
             bad = 0;
-            for (a = 0; a < 131072; a = a + 1) if (smem[a] !== ref_mem[a]) bad = bad + 1;
+            for (a = 0; a < IMG; a = a + 1) if (smem[a] !== ref_mem[a]) bad = bad + 1;
             if (bad != 0) fail($sformatf("%0s: %0d image bytes differ from the reference", what, bad));
             else ok(what);
         end
@@ -383,7 +385,7 @@ module mem_cache_tb;
     integer      lf0, saved_served;
 
     initial begin
-        for (a = 0; a < 131072; a = a + 1) begin smem[a] = 8'h00; ref_mem[a] = 8'h00; end
+        for (a = 0; a < IMG; a = a + 1) begin smem[a] = 8'h00; ref_mem[a] = 8'h00; end
         for (a = 0; a < 16384; a = a + 1) rom_img[a] = $urandom;
         for (n = 0; n < NHOT; n = n + 1) hot[n] = {7'd0, 1'($urandom), 16'($urandom)};
         model_invalidate();
@@ -484,9 +486,9 @@ module mem_cache_tb;
         // ---- 5. the monitor ---------------------------------------------------------
         pa = hot[0]; if (pa[15:12] == 4'hC) pa[15:12] = 4'h3;
         do_op(pa[16] ? CLS_LC : CLS_RAM, pa, 1'b0, 8'h5C, 14'd0, 1'b1, 1'b1);
-        ref_mem[pa[16:0]] = 8'hA3;                              // the machine disagrees
+        ref_mem[pa[18:0]] = 8'hA3;                              // the machine disagrees
         do_op(pa[16] ? CLS_LC : CLS_RAM, pa, 1'b1, 8'h00, 14'd0, 1'b0, 1'b0);
-        ref_mem[pa[16:0]] = 8'h5C;
+        ref_mem[pa[18:0]] = 8'h5C;
         if (mismatches != 1) fail($sformatf("mismatches %0d after one disagreement", mismatches));
         else if (last_mismatch !== {pa[15:0], 8'h5C, 8'hA3})
             fail($sformatf("last_mismatch %08x", last_mismatch));
@@ -494,6 +496,21 @@ module mem_cache_tb;
         cnt_clr <= 1'b1; @(negedge clk); cnt_clr <= 1'b0; @(negedge clk);
         if (hits != 0 || mismatches != 0 || late_fills != 0) fail("cnt_clr left a counter set");
         else ok("cnt_clr clears the counters");
+
+        // ---- 5b. a RamWorks bank: served from the image, never compared ---------
+        // Image bank 5 is memory the machine does not have; its bus byte is
+        // whatever its one auxiliary bank holds, and means nothing here.
+        pa = 24'h051234;
+        do_op(CLS_RAM, pa, 1'b0, 8'h77, 14'd0, 1'b1, 1'b1);
+        ref_mem[pa[18:0]] = 8'h00;                              // the machine's bus says otherwise
+        do_op(CLS_RAM, pa, 1'b1, 8'h00, 14'd0, 1'b0, 1'b0);     // a miss: the fill answers
+        if (!sub_en || sub_data !== 8'h77) fail($sformatf("bank 5: served %0d/%02x, expected the image's 77", sub_en, sub_data));
+        else if (mismatches != 0) fail("the monitor compared a RamWorks bank with the machine's bus");
+        else ok("a RamWorks bank is served from the image and never compared with the bus");
+        ref_mem[pa[18:0]] = 8'h77;
+        do_op(CLS_RAM, pa, 1'b1, 8'h00, 14'd0, 1'b0, 1'b1);     // and hits
+        if (mismatches != 0) fail("a hit in a RamWorks bank was compared");
+        cnt_clr <= 1'b1; @(negedge clk); cnt_clr <= 1'b0; @(negedge clk);   // section 6 starts from zero
 
         // ---- 6. serve off entirely: nothing substituted, everything still tracked ----
         serve <= 1'b0; e_served = 0;

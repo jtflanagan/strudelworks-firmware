@@ -198,7 +198,7 @@ module reg_map_tb;
         .vbl_busy (vbl_busy), .vbl_err (vbl_err),
         .vbl_stat (vbl_stat), .vbl_pos (vbl_pos),
         .mem_serve (mem_serve), .mem_cnt_clr (mem_cnt_clr), .mem_inval (mem_inval),
-        .mem_sw (12'hA5C), .mem_image_ready (1'b1),
+        .mem_sw (12'hA5C), .mem_rw_bank (8'h07), .mem_image_ready (1'b1),
         .mem_invalidating (1'b0), .mem_rom_loaded (1'b1),
         .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),
         .mem_hits (32'h0000_1111), .mem_misses (32'h0000_0022),
@@ -1158,14 +1158,14 @@ module reg_map_tb;
         // ---- MEM_CTRL / MEM_STAT and the counters -----------------------------
         base = out_n;
         do_read(32'h8000_004C);
-        if (out_mem[base+2] !== 32'h0900_0000) begin
-            $display("FAIL: MEM_CTRL reads %08x, expected sets=9 and no serve bits", out_mem[base+2]);
+        if (out_mem[base+2] !== 32'h0907_0000) begin
+            $display("FAIL: MEM_CTRL reads %08x, expected sets=9, bank 7 and no serve bits", out_mem[base+2]);
             errors = errors + 1;
-        end else $display("  ok: MEM_CTRL reads log2(sets) and every serve bit clear");
+        end else $display("  ok: MEM_CTRL reads log2(sets), the RamWorks bank and every serve bit clear");
         do_write(32'h8000_004C, 32'h0000_0301);           // serve on, both W1s
         base = out_n;
         do_read(32'h8000_004C);
-        if (out_mem[base+2] !== 32'h0900_0001 || mem_serve !== 1'b1) begin
+        if (out_mem[base+2] !== 32'h0907_0001 || mem_serve !== 1'b1) begin
             $display("FAIL: MEM_CTRL after write reads %08x, serve %b", out_mem[base+2], mem_serve);
             errors = errors + 1;
         end else if (mem_cnt_clrs != 1 || mem_invals != 1) begin

@@ -114,7 +114,7 @@ module snoop_top #(
         .mq_byte (4'd0), .mq_data (8'd0), .mq_ready (),
         .mr_valid (), .mr_id (), .mr_data (), .mem_image_ready (),
         .mem_serve (), .mem_cnt_clr (), .mem_inval (),
-        .mem_sw (12'd0), .mem_invalidating (1'b0), .mem_rom_loaded (1'b0),
+        .mem_sw (12'd0), .mem_rw_bank (8'd0), .mem_invalidating (1'b0), .mem_rom_loaded (1'b0),
         .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),
         .mem_hits (32'd0), .mem_misses (32'd0), .mem_mismatch (32'd0),
         .mem_served (32'd0), .mem_last (32'd0),

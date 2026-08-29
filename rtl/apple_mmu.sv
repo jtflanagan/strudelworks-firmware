@@ -30,10 +30,47 @@
 //
 // THE IMAGE'S LAYOUT is the one emulators use: 64 KB per bank, with the
 // language card's 16 KB folded into the $C000-$FFFF hole - bank 1 of $D000 at
-// $C000-$CFFF, bank 2 of $D000 and the shared $E000-$FFFF where they sit.  Bank 0
-// is main memory, bank 1 is auxiliary; the eight bank bits leave room for a
-// RamWorks-style card's banks when the image grows.  cl_pa is that 24-bit
-// physical address.
+// $C000-$CFFF, bank 2 of $D000 and the shared $E000-$FFFF where they sit.
+// Image bank 0 is MAIN MEMORY, always: nothing banks it.  Image banks 1-255
+// are the AUXILIARY memory, one per RamWorks bank.  cl_pa is that 24-bit
+// physical address: 16 MB, the whole image.
+//
+// THE RAMWORKS.  An Applied Engineering RamWorks III in the auxiliary slot
+// replaces the 64 KB auxiliary memory with up to 256 banks of it, each a
+// complete auxiliary memory - $0000-$BFFF, the zero page and stack ALTZP
+// moves, the language card ALTZP moves - and a bank register at $C073
+// (AppleWin's Memory.cpp also honours $C071, the earlier extended-memory
+// cards' address; so does this) selecting which of them every auxiliary
+// access reaches.  Bank 0 IS the regular auxiliary memory of a 128K IIe -
+// what the 80-column firmware, DHGR and ProDOS's /RAM use - and banks 1 and
+// up are the extension.  Writes only; the register cannot be read back on the
+// real card, and software finds the banks by writing a signature into each
+// and looking for it.
+//
+// Here the card IS the RamWorks, with RW_BANKS = 255 banks: RamWorks bank k
+// is image bank k+1, so the regular auxiliary memory (bank 0) is image bank 1
+// exactly as it was before the RamWorks existed, and the 255 banks plus main
+// memory fill the 16 MB.  A write of a bank number that does not exist (255)
+// is ignored and the register keeps its value, which is what AppleWin does
+// for a bank beyond the configured size.
+//
+// THE BANK REGISTER RESETS ON RES', by decision.  The real card's does not
+// (AppleWin resets it only on a power cycle, GH#1414), so a program that
+// leaves bank 5 selected and then Ctrl-Resets finds the monitor's auxiliary
+// memory in bank 5.  Nothing reliable depends on that, and clearing it makes
+// every reset land in the memory the ROM and the 80-column firmware expect;
+// the convenience wins.  The host's mirror (apple_memory.hpp) does the same.
+//
+// THE MACHINE'S OWN AUXILIARY MEMORY SEES EVERY BANK'S WRITES.  The bus is
+// still driven for every cycle and the real IIe has no bank register, so a
+// write to bank 5's $2000 lands in the machine's one auxiliary bank too, over
+// whatever bank 0 put there.  The card's image keeps them apart; the machine's
+// RAM does not.  So the RamWorks is real only while the card is serving reads
+// from the image - with serving off the core reads the machine's aliased
+// bank, exactly as a IIe without the card would - and the video scanner,
+// which reads the machine's RAM, shows bank 0's display pages only as long as
+// no other bank has written over them.  The host's display mirror follows the
+// RamWorks's own rule (video is bank 0) and is not disturbed.
 //
 // THE SWITCHES, as the IIe's MMU implements them (Sather, Understanding the
 // Apple IIe, ch. 5; AppleWin's Memory.cpp and LanguageCard.cpp agree):
@@ -81,6 +118,7 @@ module apple_mmu (
     // The presented op, from apple_bus_write.
     input  wire [15:0] op_addr,
     input  wire        op_rw,          // 1 = read
+    input  wire [7:0]  op_wdata,       // a write's byte: the bank register's value
     input  wire        op_present,     // pulse: op_* have just been latched
     input  wire        op_commit,      // pulse: the data phase
 
@@ -95,8 +133,14 @@ module apple_mmu (
     // The switches, for a status register:
     //   {prewrite, wren, lc_ramrd, bank2, slotc3rom, intcxrom, hires, page2,
     //    altzp, ramwrt, ramrd, store80}
-    output wire [11:0] sw_state
+    output wire [11:0] sw_state,
+    // The RamWorks bank register, for MEM_CTRL's readback.
+    output logic [7:0] rw_bank
 );
+
+    // RamWorks banks: 0..RW_BANKS-1 exist; a write of any other number is
+    // ignored.  255 banks plus main memory are the image's 256.
+    localparam [7:0] RW_BANKS = 8'd255;
 
     localparam [1:0] CLS_BUS = 2'd0;
     localparam [1:0] CLS_RAM = 2'd1;
@@ -115,6 +159,9 @@ module apple_mmu (
     wire io_page = (op_addr[15:8] == 8'hC0);
     wire sw_c00x = io_page && (op_addr[7:4] == 4'h0);      // $C000-$C00F
     wire sw_c05x = io_page && (op_addr[7:4] == 4'h5);      // $C050-$C05F
+    // $C071 and $C073: the RamWorks bank register, a write of the bank number.
+    wire sw_rwbk = io_page && (op_addr[7:4] == 4'h7) &&
+                   (op_addr[3:0] == 4'h1 || op_addr[3:0] == 4'h3);
     wire sw_c08x = io_page && (op_addr[7:4] == 4'h8);      // $C080-$C08F
 
     always_ff @(posedge clk) begin
@@ -131,6 +178,7 @@ module apple_mmu (
             lc_ramrd    <= 1'b0;
             lc_wren     <= 1'b1;
             lc_prewrite <= 1'b0;
+            rw_bank     <= 8'd0;       // by decision: see the header
         end else if (op_commit) begin
             // $C000-$C00F: write strobes, the address selects the switch, A0
             // the value.
@@ -145,6 +193,8 @@ module apple_mmu (
                     default: ;
                 endcase
             end
+            // $C071/$C073: the RamWorks bank, if it exists.
+            if (sw_rwbk && !op_rw && op_wdata < RW_BANKS) rw_bank <= op_wdata;
             // $C054-$C057: read or write alike.
             if (sw_c05x) begin
                 if (op_addr[3:1] == 3'd2) page2 <= op_addr[0];
@@ -183,6 +233,10 @@ module apple_mmu (
                    (op_rw ? ramrd : ramwrt);
     wire aux_sel = in_zp ? altzp : aux_mid;
 
+    // Which image bank: main is 0, and an auxiliary access reaches RamWorks
+    // bank rw_bank, which is image bank rw_bank + 1.
+    wire [7:0] aux_bank = rw_bank + 8'd1;
+
     // The language card's RAM: bank 1 of $D000 lives in the image's $C000 hole.
     wire [15:0] lc_off = (in_d && !lc_bank2) ? {4'hC, op_addr[11:0]} : op_addr;
 
@@ -192,12 +246,12 @@ module apple_mmu (
 
     always_comb begin
         n_cls      = CLS_BUS;
-        n_pa       = {7'd0, aux_sel, op_addr};
+        n_pa       = {aux_sel ? aux_bank : 8'd0, op_addr};
         n_wr_image = 1'b0;
         if (in_io) begin
             n_cls = CLS_BUS;
         end else if (in_hi) begin
-            n_pa = {7'd0, altzp, lc_off};
+            n_pa = {altzp ? aux_bank : 8'd0, lc_off};
             if (op_rw) begin
                 n_cls = lc_ramrd ? CLS_LC : CLS_ROM;
             end else begin

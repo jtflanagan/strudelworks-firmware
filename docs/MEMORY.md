@@ -34,9 +34,49 @@ the card be memory the machine does not have.
 **The image** is DDR3 bank 0 - `{L[19:7], 3'b000, L[6:0]}` for line `L`, 2 KB
 of every 16 KB, a 16 MB image - laid out as emulators lay it out: 64 KB per
 bank, `$0000-$BFFF` RAM, the language card's bank 1 of `$D000` folded into
-`$C000-$CFFF`, bank 2 and `$E000-$FFFF` where they sit. Bank 0 is main memory,
-bank 1 auxiliary; the eight bank bits leave room for a RamWorks-style card
-when the image grows. The ROM is not in the image.
+`$C000-$CFFF`, bank 2 and `$E000-$FFFF` where they sit. Image bank 0 is main
+memory, always; image banks 1-255 are the auxiliary memory, one per RamWorks
+bank (below). The ROM is not in the image.
+
+## The RamWorks
+
+The card is an Applied Engineering RamWorks III of 255 banks: the auxiliary
+memory is not one 64 KB bank but 255 of them, and a write to `$C073` - or
+`$C071`, which AppleWin also honours for the earlier extended-memory cards -
+names the one every auxiliary access reaches (RAMRD, RAMWRT, ALTZP's zero
+page, stack and language card, 80STORE's pages). **Bank 0 is the regular
+auxiliary memory** of a 128K IIe - the 80-column firmware's, DHGR's, ProDOS's
+`/RAM` - and lives in image bank 1 exactly as it did before; bank *k* is image
+bank *k+1*; the 255 banks plus main memory fill the 16 MB. A write of 255, a
+bank that does not exist, is ignored and the register keeps its value, as
+AppleWin's does for a bank beyond the configured size. The register cannot be
+read on the real card; `MEM_CTRL [23:16]` reads the shadow's copy. 16 MB is
+the whole of it (`rtl/apple_mmu.sv`, `RW_BANKS`); the host mirrors the same
+256 banks (`apple_memory.hpp`).
+
+**The bank register resets on RES', by decision.** The real card's does not
+(AppleWin resets it only on a power cycle, GH#1414), so a program that leaves
+bank 5 selected and then Ctrl-Resets has the monitor's and the 80-column
+firmware's auxiliary memory in bank 5. Nothing reliable depends on that, and a
+reset that always lands in bank 0 avoids a whole class of confusion; the
+convenience wins, on the card and on the host alike.
+
+**The machine's own auxiliary memory sees every bank's writes.** The bus is
+still driven for every cycle and the real IIe has no bank register, so a write
+to bank 5's `$2000` lands in the machine's one auxiliary bank too, over
+whatever bank 0 put there. The image keeps the banks apart; the machine's RAM
+does not. Three consequences:
+
+- the RamWorks is real only while the card is **serving**: with serving off
+  the core reads the machine's aliased bank, exactly as a IIe without the card
+  would, and a program probing for banks finds one;
+- the **monitor** compares only image banks 0 and 1 with the bus - banks 2 and
+  up are memory the machine does not have, and the bus's byte there is not an
+  opinion (`mem_cache.sv`, `p_machine`);
+- the **video scanner** reads the machine's RAM, so on a monitor plugged into
+  the Apple the 80-column and double-hires pages show bank 0's contents only
+  until another bank writes over them. The host's display mirror follows the
+  RamWorks's own rule - video is bank 0 - and is not disturbed.
 
 ## Decisions, and why
 
@@ -143,10 +183,11 @@ inside the cycle's idle tail**; the ring's stream word-exact throughout.
 | | what it settles |
 |---|---|
 | `sim/run_mmu_trace.sh sim/trace_work/apple.bustrace` | the shadow against a **real IIe**: every read the shadow classifies as memory whose byte has been written must equal the traced byte; every status read (`$C011-$C01D`) must equal the shadow; every ROM read must equal the vendored file. Three captures, **67 M cycles, zero disagreements** over 31 M RAM reads, 94 K language-card reads and 4.2 M ROM reads. This is where the real unknown lived, and it ran before any DDR3 or board was involved. |
-| `sim/run_mem_cache_tb.sh` | the cache against a tree-PLRU model and a Wishbone stub that acks like the DDR3: every served byte, every hit/miss, every write's byte lane, the late-fill drop, the invalidate, the monitor; at 512 and 64 sets |
+| `sim/run_mem_cache_tb.sh` | the cache against a tree-PLRU model and a Wishbone stub that acks like the DDR3: every served byte, every hit/miss, every write's byte lane, the late-fill drop, the invalidate, the monitor - and that a RamWorks bank is served and never compared; at 512 and 64 sets |
 | `sim/run_mem_ddr3_tb.sh` | the client on the real controller: write-then-fill order, fill latency under pre-emption, refreshes only in the window |
-| `sim/run_mem_integ_tb.sh` | the real core running `sim/mem_integ.s` on the whole path against a 128K IIe model with a language card: every read the machine's byte (56 K of them), tracking first and then serving under the running program - **31 093 of 31 129 reads answered by the card**, the rest I/O, 52 513 hits to 116 misses, zero mismatches - a DMA through the override path, a reset under it, the image byte-for-byte the machine's memory at the end |
+| `sim/run_mem_integ_tb.sh` | the real core running `sim/mem_integ.s` on the whole path against a IIe model with a language card and a four-bank RamWorks (bank 0 the regular aux memory, banks 1-3 their own, a non-existent bank ignored, ALTZP's zero page per bank, the register cleared by RES'): every read the machine's byte (56 K of them), tracking first and then serving under the running program - **31 093 of 31 129 reads answered by the card**, the rest I/O, 52 513 hits to 116 misses, zero mismatches - a DMA through the override path, a reset under it, the image byte-for-byte the machine's memory at the end |
 | `sim/run_reg_map_tb.sh` | the registers, end to end from a REG_WRITE |
+| the host's `tools/ramworks_test.sh` | the RamWorks on the **real machine** (2026-08-29): a monitor routine writes banks 1-3 and reads them back - `30 30 30` with serving off (one aliased bank, as a IIe without the card), `10 20 30` serving; the bank register reads 2 on the card and in the host's mirror; a Ctrl-Reset clears both |
 
 The first hardware attempt was lost to a rule this repository already
 states: a new host→card message type has to be in `rtl/ft601_msg_rx.sv`'s
@@ -179,7 +220,5 @@ does, and the check needs no hardware but the capture.
   tag word, a write buffer, and a rendezvous with the bus for BUS-class reads.
   The cache's hit path is registered at every stage so that work starts from
   here rather than from a rewrite.
-- **Expanded memory** beyond 128 KB: the image has the room and the classifier
-  has the bank bits; a RamWorks bank register is a shadow-and-classifier change.
 - **INH'.** A card asserting INH' or DMA' is out of scope (DERISK.md, "Two
   memory modes"); serving trusts the image.
