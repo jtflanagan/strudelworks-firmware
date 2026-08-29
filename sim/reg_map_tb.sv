@@ -164,12 +164,11 @@ module reg_map_tb;
     end
 
     wire [2:0] mem_serve;
-    wire       mem_cnt_clr, mem_inval, mem_clear;
-    integer    mem_cnt_clrs = 0, mem_invals = 0, mem_clears = 0;
+    wire       mem_cnt_clr, mem_inval;
+    integer    mem_cnt_clrs = 0, mem_invals = 0;
     always @(posedge clk) begin
         if (mem_cnt_clr) mem_cnt_clrs = mem_cnt_clrs + 1;
         if (mem_inval)   mem_invals = mem_invals + 1;
-        if (mem_clear)   mem_clears = mem_clears + 1;
     end
 
     wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME),
@@ -199,8 +198,7 @@ module reg_map_tb;
         .vbl_busy (vbl_busy), .vbl_err (vbl_err),
         .vbl_stat (vbl_stat), .vbl_pos (vbl_pos),
         .mem_serve (mem_serve), .mem_cnt_clr (mem_cnt_clr), .mem_inval (mem_inval),
-        .mem_clear (mem_clear),
-        .mem_sw (12'hA5C), .mem_image_ready (1'b1), .mem_clearing (1'b0),
+        .mem_sw (12'hA5C), .mem_image_ready (1'b1),
         .mem_invalidating (1'b0), .mem_rom_loaded (1'b1),
         .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),
         .mem_hits (32'h0000_1111), .mem_misses (32'h0000_0022),
@@ -1164,14 +1162,14 @@ module reg_map_tb;
             $display("FAIL: MEM_CTRL reads %08x, expected sets=9 and no serve bits", out_mem[base+2]);
             errors = errors + 1;
         end else $display("  ok: MEM_CTRL reads log2(sets) and every serve bit clear");
-        do_write(32'h8000_004C, 32'h0000_0705);           // serve ram+rom, all three W1s
+        do_write(32'h8000_004C, 32'h0000_0305);           // serve ram+rom, both W1s
         base = out_n;
         do_read(32'h8000_004C);
         if (out_mem[base+2] !== 32'h0900_0005 || mem_serve !== 3'b101) begin
             $display("FAIL: MEM_CTRL after write reads %08x, serve %b", out_mem[base+2], mem_serve);
             errors = errors + 1;
-        end else if (mem_cnt_clrs != 1 || mem_invals != 1 || mem_clears != 1) begin
-            $display("FAIL: W1 pulses %0d/%0d/%0d, expected one each", mem_cnt_clrs, mem_invals, mem_clears);
+        end else if (mem_cnt_clrs != 1 || mem_invals != 1) begin
+            $display("FAIL: W1 pulses %0d/%0d, expected one each", mem_cnt_clrs, mem_invals);
             errors = errors + 1;
         end else $display("  ok: MEM_CTRL's serve bits are levels and its W1 bits pulse once");
         do_write(32'h8000_004C, 32'h0000_0000);

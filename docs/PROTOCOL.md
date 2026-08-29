@@ -112,8 +112,8 @@ protocol.
 | `0x8000_0040` | FD_DRIVE1 | RW bits 21:0, W1 bit 22 | what is in drive 1, live: `inserted`, `wp`, `nibbles`, `tracks`, `flush`; `stale`, `dirty`, `phase` — see FLOPPY.md |
 | `0x8000_0044` | FD_DRIVE2 | RW bits 21:0, W1 bit 22 | the same for drive 2 |
 | `0x8000_0048` | FD_STAT | W1 bits 1:0 | the controller's switches and its own lateness: `motor`, `drive`, `q6`, `q7`, `late`, `fill_max` — see FLOPPY.md |
-| `0x8000_004C` | MEM_CTRL | RW bits 2:0, W1 bits 10:8 | the memory image: `serve_ram`, `serve_lc`, `serve_rom` levels; W1 clear-counters, invalidate, clear-image; [27:24] log2 of the cache's sets — see MEMORY.md |
-| `0x8000_0050` | MEM_STAT | RO | the MMU shadow's switches [11:0], `image_ready`, `clearing`, `invalidating`, `rom_loaded`, `late_fills` [23:16], `fifo_drops` [31:24] |
+| `0x8000_004C` | MEM_CTRL | RW bits 2:0, W1 bits 9:8 | the memory image: `serve_ram`, `serve_lc`, `serve_rom` levels; W1 clear-counters, invalidate; [27:24] log2 of the cache's sets — see MEMORY.md |
+| `0x8000_0050` | MEM_STAT | RO | the MMU shadow's switches [11:0], `image_ready` (the DDR3 is calibrated), `invalidating`, `rom_loaded`, `late_fills` [23:16], `fifo_drops` [31:24] |
 | `0x8000_0054` | MEM_HITS | RO | cache hits on reads of RAM |
 | `0x8000_0058` | MEM_MISSES | RO | ...and misses |
 | `0x8000_005C` | MEM_MISMATCH | RO | reads where the card's byte differed from the bus's (noise until the working set is written; watch for a plateau) |

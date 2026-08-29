@@ -81,7 +81,7 @@ module mem_ddr3_tb;
     wire [BYTE_LANES-1:0] ddr3_dm;
     wire [(8*BYTE_LANES)-1:0] dq;
     wire [BYTE_LANES-1:0] dqs, dqs_n;
-    wire refresh_ok, rot_ok, mem_idle, image_ready, clearing;
+    wire refresh_ok, rot_ok, mem_idle, image_ready;
 
     ddr3_top #(
         .CONTROLLER_CLK_PERIOD (CONTROLLER_CLK_PERIOD),
@@ -283,7 +283,7 @@ module mem_ddr3_tb;
     wire [1:0]  mr_id;
     wire [127:0] mr_data;
 
-    mem_client #(.CLR_LINES (256), .PH_REF_LO (PH_REF_LO), .PH_REF_HI (PH_REF_HI)) u_mem (
+    mem_client #(.PH_REF_LO (PH_REF_LO), .PH_REF_HI (PH_REF_HI)) u_mem (
         .clk (clk), .rst (rst), .calib_complete (o_calib_complete),
         .master_active (master_active), .op_present (op_present),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
@@ -294,10 +294,10 @@ module mem_ddr3_tb;
         .data (c_data[383:256]), .sel (c_sel[47:32]),
         .stall (c_stall[2]), .ack (c_ack[2]), .rdata (c_rdata),
         .refresh_ok (refresh_ok), .rot_ok (rot_ok), .mem_idle (mem_idle),
-        .image_ready (image_ready), .clearing (clearing), .clear_req (1'b0)
+        .image_ready (image_ready)
     );
 
-    // The software image: the first 256 lines, which the walk zeroed.
+    // The software image: the first 256 lines, written before they are read.
     localparam integer NL = 256;
     reg [7:0]  img [0:NL*16-1];
     integer    fills = 0, fill_bad = 0, fill_max = 0, fill_late = 0, fill_sum = 0;
@@ -368,13 +368,18 @@ module mem_ddr3_tb;
         $display("  waiting for calibration...");
         wait (o_calib_complete === 1'b1);
         $display("  calibrated at %0t", $time);
-        c = 0;
-        while (!image_ready && c < 20000) begin @(negedge clk); c = c + 1; end
-        if (!image_ready) begin $display("FAIL: the clear walk never finished"); errors = errors + 1; end
-        else $display("  ok: the clear walk finished, %0d clocks after calibration", c);
+        if (!image_ready) begin $display("FAIL: image_ready did not follow calibration"); errors = errors + 1; end
+        // Nothing clears the DDR3, so write every line the run will read before
+        // reading any: a fill of an unwritten line is X in the model.
+        master_active = 1'b1;
+        for (n = 0; n < NL; n = n + 1) begin
+            @(negedge clk); op_present <= 1'b1; @(negedge clk); op_present <= 1'b0;
+            for (b = 0; b < 16; b = b + 1) push(1'b0, n[19:0], b[3:0], 8'h00);
+            repeat (40) @(negedge clk);
+        end
+        repeat (200) @(negedge clk);
 
         // ---- 1. a write, then its line: the order holds ------------------------
-        master_active = 1'b1;
         gate = 1'b1; out_take = 1'b1;
         @(negedge clk); op_present <= 1'b1; @(negedge clk); op_present <= 1'b0;
         push(1'b0, 20'd17, 4'd5, 8'hA7);

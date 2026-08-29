@@ -41,16 +41,12 @@
 // before the next cycle, so a fill never queues behind more than the burst in
 // flight.
 //
-// THE CLEAR WALK zeroes banks 0 and 1 - 8192 bursts, ~82 us - after the DDR3
-// calibrates following a card reset, and on request.  Not because unwritten
-// memory needs a value (it is garbage by decision) but because a card reset
-// hands the bus back to the real 6502 for a while, and what it wrote is not
-// in the image; better a known nothing than a stale something.  The walk owns
-// the port while it runs and image_ready is low, so the cache neither serves
-// nor writes through; the host's own clear is for a machine that is held.
+// THE IMAGE IS NEVER CLEARED.  Not at power-up, not on a card reset, not on
+// RES': it holds whatever it held, exactly as the machine's RAM does, and
+// unwritten memory is garbage by decision (docs/MEMORY.md).  image_ready is
+// simply "the DDR3 is calibrated".
 //////////////////////////////////////////////////////////////////////////////////
 module mem_client #(
-    parameter integer CLR_LINES = 8192,     // banks 0 and 1 of the image
     parameter integer PH_REF_LO = 30,
     parameter integer PH_REF_HI = 60,
     parameter integer PH_ROT_LO = 30,
@@ -92,9 +88,7 @@ module mem_client #(
     output wire         refresh_ok,
     output wire         rot_ok,
     output wire         mem_idle,
-    output logic        image_ready,
-    output logic        clearing,
-    input  wire         clear_req
+    output wire         image_ready
 );
 
     // ---- the request FIFO ------------------------------------------------------
@@ -110,25 +104,19 @@ module mem_client #(
     logic        issuing;               // stb is up, waiting to be accepted
     logic        cur_kind;
     logic [1:0]  cur_id;
-    logic [3:0]  outstanding;
+    // Accepted and not yet acknowledged.  Wide enough that it cannot wrap
+    // whatever the controller's ack latency turns out to be: a wrapped count
+    // never returns to zero, and cyc would never drop.
+    logic [7:0]  outstanding;
     wire  accept = stb && !stall;
 
-    // The clear walk.  Armed by a reset, taken as soon as the DDR3 is
-    // calibrated - a LEVEL, not an edge: the DDR3 is not reset with the card,
-    // so after a card reset calibration is long since complete and an edge
-    // would never come.
-    logic [13:0] clr_idx;
-    logic        clr_armed;             // a reset has happened; walk when calibrated
-
-    wire clr_step = clearing && !issuing && q_empty;
-
-    assign req = issuing || !q_empty || clearing;
-    assign cyc = req || (outstanding != 4'd0);
+    assign req = issuing || !q_empty;
+    assign cyc = req || (outstanding != 8'd0);
 
     // ---- acks, in order ------------------------------------------------------------
     // Kinds of the accepted-but-unacked requests, oldest first.
-    logic [2:0] ak [0:7];                // {kind, id}
-    logic [2:0] ak_wp, ak_rp;
+    logic [2:0] ak [0:15];               // {kind, id}
+    logic [3:0] ak_wp, ak_rp;
 
     function automatic [23:0] line_to_wb(input [19:0] l);
         line_to_wb = {1'b0, l[19:7], 3'b000, l[6:0]};
@@ -139,9 +127,10 @@ module mem_client #(
     wire in_ref_win = (phase >= PH_REF_LO[7:0]) && (phase <= PH_REF_HI[7:0]);
     wire in_rot_win = (phase >= PH_ROT_LO[7:0]) && (phase <= PH_ROT_HI[7:0]);
 
-    assign mem_idle   = q_empty && !issuing && (outstanding == 4'd0) && !clearing;
-    assign refresh_ok = calib_complete && mem_idle && (!master_active || in_ref_win);
-    assign rot_ok     = q_empty && !issuing && !clearing && (!master_active || in_rot_win);
+    assign mem_idle    = q_empty && !issuing && (outstanding == 8'd0);
+    assign refresh_ok  = calib_complete && mem_idle && (!master_active || in_ref_win);
+    assign rot_ok      = q_empty && !issuing && (!master_active || in_rot_win);
+    assign image_ready = calib_complete;
 
     always_ff @(posedge clk) begin
         mr_valid <= 1'b0;
@@ -150,11 +139,9 @@ module mem_client #(
             q_wp <= 3'd0; q_rp <= 3'd0;
             issuing <= 1'b0; cur_kind <= 1'b0; cur_id <= 2'd0;
             stb <= 1'b0; we <= 1'b0; addr <= 24'd0; data <= 128'd0; sel <= 16'd0;
-            outstanding <= 4'd0;
-            ak_wp <= 3'd0; ak_rp <= 3'd0;
+            outstanding <= 8'd0;
+            ak_wp <= 4'd0; ak_rp <= 4'd0;
             mr_id <= 2'd0; mr_data <= 128'd0;
-            clr_idx <= 14'd0; clearing <= 1'b0; clr_armed <= 1'b1;
-            image_ready <= 1'b0;
             phase <= 8'd0;
         end else begin
             // ---- position in the bus cycle ------------------------------------
@@ -167,21 +154,13 @@ module mem_client #(
                 q_wp <= q_wp + 3'd1;
             end
 
-            // ---- the walk's start --------------------------------------------------
-            if ((clr_armed && calib_complete) || (clear_req && !clearing)) begin
-                clearing    <= 1'b1;
-                clr_armed   <= 1'b0;
-                clr_idx     <= 14'd0;
-                image_ready <= 1'b0;
-            end
-
             // ---- issue -------------------------------------------------------------
             if (issuing) begin
                 if (accept) begin
                     issuing <= 1'b0;
                     stb     <= 1'b0;
                     ak[ak_wp] <= {cur_kind, cur_id};
-                    ak_wp   <= ak_wp + 3'd1;
+                    ak_wp   <= ak_wp + 4'd1;
                 end
             end else if (!q_empty) begin
                 // Pop the oldest request onto the port.
@@ -194,31 +173,13 @@ module mem_client #(
                 data     <= {16{q[q_rp[1:0]][7:0]}};
                 sel      <= q[q_rp[1:0]][QW-1] ? 16'hFFFF : (16'd1 << q[q_rp[1:0]][11:8]);
                 q_rp     <= q_rp + 3'd1;
-            end else if (clr_step) begin
-                if (clr_idx == 14'(CLR_LINES)) begin
-                    // Done once the last write has been acknowledged.
-                    if (outstanding == 4'd0) begin
-                        clearing    <= 1'b0;
-                        image_ready <= 1'b1;
-                    end
-                end else begin
-                    issuing  <= 1'b1;
-                    stb      <= 1'b1;
-                    cur_kind <= 1'b0;
-                    cur_id   <= 2'd0;
-                    we       <= 1'b1;
-                    addr     <= line_to_wb({6'd0, clr_idx});
-                    data     <= 128'd0;
-                    sel      <= 16'hFFFF;
-                    clr_idx  <= clr_idx + 14'd1;
-                end
             end
 
             // ---- acks ----------------------------------------------------------------
-            if (accept && !ack)      outstanding <= outstanding + 4'd1;
-            else if (ack && !accept) outstanding <= outstanding - 4'd1;
+            if (accept && !ack)      outstanding <= outstanding + 8'd1;
+            else if (ack && !accept) outstanding <= outstanding - 8'd1;
             if (ack) begin
-                ak_rp <= ak_rp + 3'd1;
+                ak_rp <= ak_rp + 4'd1;
                 if (ak[ak_rp][2]) begin
                     mr_valid <= 1'b1;
                     mr_id    <= ak[ak_rp][1:0];

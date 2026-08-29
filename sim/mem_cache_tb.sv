@@ -54,7 +54,7 @@ module mem_cache_tb;
     logic [7:0]  data_sync = 8'd0;
     logic [13:0] rom_addr = 14'd0;
     logic [2:0]  serve = 3'b111;
-    logic        inval = 1'b0, cnt_clr = 1'b0, clear_req = 1'b0;
+    logic        inval = 1'b0, cnt_clr = 1'b0;
     logic        master_active = 1'b1;
     logic        calib_complete = 1'b0;
 
@@ -113,7 +113,7 @@ module mem_cache_tb;
     wire [127:0] wb_data, wb_rdata;
     wire [15:0]  wb_sel;
     wire [3:0]   wb_aux, wb_rdata_aux;
-    wire         refresh_ok, rot_ok, mem_idle, image_ready, clearing;
+    wire         refresh_ok, rot_ok, mem_idle, image_ready;
 
     wb_arb #(.N (2), .HAS_PRIO (1'b1)) u_arb (
         .clk (clk), .rst (rst), .rot_ok (rot_ok),
@@ -126,7 +126,7 @@ module mem_cache_tb;
         .wb_rdata_aux (wb_rdata_aux)
     );
 
-    mem_client #(.CLR_LINES (64)) u_client (
+    mem_client u_client (
         .clk (clk), .rst (rst), .calib_complete (calib_complete),
         .master_active (master_active), .op_present (op_present),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
@@ -136,7 +136,7 @@ module mem_cache_tb;
         .we (c_we[1]), .addr (c_addr[47:24]), .data (c_data[255:128]),
         .sel (c_sel[31:16]), .stall (c_stall[1]), .ack (c_ack[1]), .rdata (c_rdata),
         .refresh_ok (refresh_ok), .rot_ok (rot_ok), .mem_idle (mem_idle),
-        .image_ready (image_ready), .clearing (clearing), .clear_req (clear_req)
+        .image_ready (image_ready)
     );
 
     // ---- the streaming dummy: batches of 32 writes to bank 7, whenever it may -----
@@ -392,12 +392,13 @@ module mem_cache_tb;
         rst <= 1'b0;
         repeat (5) @(negedge clk);
 
-        // ---- 1. the clear walk ------------------------------------------------
+        // ---- 1. the image is ready when the DDR3 is ---------------------------
+        if (image_ready) fail("image_ready before calibration");
         calib_complete <= 1'b1;
-        if (image_ready) fail("image_ready before the clear walk");
-        while (!image_ready) @(negedge clk);
-        if (s_writes != 64) fail($sformatf("clear walk wrote %0d bursts, expected 64", s_writes));
-        else ok("the clear walk zeroes the image's lines and raises image_ready");
+        @(negedge clk);
+        if (!image_ready) fail("image_ready did not follow calib_complete");
+        else if (s_writes != 0) fail("something wrote the image before any op");
+        else ok("the image is ready as soon as the DDR3 is calibrated, and nothing clears it");
         while (invalidating) @(negedge clk);
 
         // ---- 2. the ROM ------------------------------------------------------------

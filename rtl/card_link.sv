@@ -662,8 +662,8 @@ module card_link #(
 
     // KBD_CTRL's notify: the host asking for KBD_EVENT notices.
     wire kbd_notify;
-    // MEM_CTRL's clear, and the memory client's state for MEM_STAT.
-    wire mem_clear, mem_clearing, mem_refresh_ok, mem_rot_ok;
+    // The memory client's scheduling outputs.
+    wire mem_refresh_ok, mem_rot_ok;
 
     wb_regfile #(
         .BUILD_DATE (BUILD_DATE),
@@ -725,10 +725,8 @@ module card_link #(
         .mem_serve         (mem_serve),
         .mem_cnt_clr       (mem_cnt_clr),
         .mem_inval         (mem_inval),
-        .mem_clear         (mem_clear),
         .mem_sw            (mem_sw),
         .mem_image_ready   (mem_image_ready),
-        .mem_clearing      (mem_clearing),
         .mem_invalidating  (mem_invalidating),
         .mem_rom_loaded    (mem_rom_loaded),
         .mem_late_fills    (mem_late_fills),
@@ -948,9 +946,7 @@ module card_link #(
         .refresh_ok  (mem_refresh_ok),
         .rot_ok      (mem_rot_ok),
         .mem_idle    (),
-        .image_ready (mem_image_ready),
-        .clearing    (mem_clearing),
-        .clear_req   (mem_clear)
+        .image_ready (mem_image_ready)
     );
 
     tx_ring #(.BATCH (32)) u_ring (

@@ -27,7 +27,7 @@ the card be memory the machine does not have.
 | the IIe's memory map | `rtl/apple_mmu.sv` | the soft switches, shadowed; every op classified BUS / RAM / LC / ROM with a physical address |
 | the ROM | `rtl/apple_rom.sv` | $C000-$FFFF, 16 KB, host-loaded (`MEM_ROM`), 4 RAMB36, always a hit |
 | the cache | `rtl/mem_cache.sv`, `rtl/cache_way_ram.sv` | 4 ways × 512 sets × 16 bytes, tree PLRU, write-through, 9 RAMB36 |
-| the DDR3 side | `rtl/mem_client.sv` | one in-order queue, the refresh window, the clear walk, bank 0 |
+| the DDR3 side | `rtl/mem_client.sv` | one in-order queue, the refresh window, bank 0 |
 | the port | `rtl/wb_arb.sv` | the strict-priority slot above the ring's rotation, pre-emptive |
 | the registers | `rtl/wb_regfile.sv` | `MEM_CTRL`, `MEM_STAT`, the counters (PROTOCOL.md) |
 
@@ -87,10 +87,12 @@ The ring's batches are 32 lines so one begun inside the client's window
 clear the core takes the bus's byte exactly as it did before this existed;
 with it set the cache was already tracking every write. So bring-up goes one
 class at a time under a running program, and the registers never wait for a
-reset. The one thing that is not safe under a running machine is the clear
-walk - a write during it is lost from the image - so `MEM_CTRL`'s clear is for
-a machine that is held, and it also runs on its own after the DDR3 calibrates
-following a card reset (the real 6502 had the bus meanwhile).
+reset.
+
+**Nothing clears the image.** Not power-up, not a card reset, not RES': the
+DDR3 holds what it held, as the machine's RAM does, and unwritten memory is
+garbage by decision. (A clear walk was built and torn out: it held the
+arbiter's priority slot for its length and bought nothing.)
 
 **RES' resets the switches and nothing else.** The shadow goes back to the
 IIe's reset state (bank 2, ROM read, RAM write-enabled, every auxiliary switch
@@ -114,8 +116,7 @@ Every cacheable read is compared, at the data phase, with the byte the bus
 carried: the served byte or the byte that would have been served. `MEM_MISMATCH`
 counts the disagreements and `MEM_LAST` names the last one. It runs in every
 mode, serving or not. Because unwritten memory is garbage by decision, the
-count climbs while a program reads memory nobody has written since the image
-was cleared - and stops once the working set has been written. A count that
+count climbs while a program reads memory nobody has written - and stops once the working set has been written. A count that
 keeps climbing under a steady program is the signal; a count that plateaus is
 the expected shape.
 
@@ -146,12 +147,6 @@ inside the cycle's idle tail**; the ring's stream word-exact throughout.
 | `sim/run_mem_ddr3_tb.sh` | the client on the real controller: write-then-fill order, fill latency under pre-emption, refreshes only in the window |
 | `sim/run_mem_integ_tb.sh` | the real core running `sim/mem_integ.s` on the whole path against a 128K IIe model with a language card: every read the machine's byte (56 K of them), tracking first and then serving under the running program - **31 093 of 31 129 reads answered by the card**, the rest I/O, 52 513 hits to 116 misses, zero mismatches - a DMA through the override path, a reset under it, the image byte-for-byte the machine's memory at the end |
 | `sim/run_reg_map_tb.sh` | the registers, end to end from a REG_WRITE |
-
-The integration test earned its place before it ever passed: its first run
-found that the clear walk waited for `calib_complete` to *rise* after a reset,
-and on this card the DDR3 is not reset with the card - calibration is long
-since complete, the edge never comes, and the image would never have been
-ready on hardware. It is a level now, armed by the reset.
 
 The trace check is the one to rerun with a new capture: a ProDOS or Total
 Replay session exercises the language card far more than the monitor's boot

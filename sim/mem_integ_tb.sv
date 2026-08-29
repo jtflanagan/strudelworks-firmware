@@ -119,7 +119,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [13:0] cl_rom_addr;
     wire [11:0] sw_state;
     wire [7:0]  rom_byte;
-    wire        rom_loaded, invalidating, image_ready, clearing, refresh_ok, rot_ok, mem_idle;
+    wire        rom_loaded, invalidating, image_ready, refresh_ok, rot_ok, mem_idle;
     wire [31:0] hits, misses, served, mismatches, last_mismatch;
     wire [7:0]  late_fills, fifo_drops;
     reg  [2:0]  serve = 3'b000;
@@ -193,7 +193,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .we (c_we[1]), .addr (c_addr[47:24]), .data (c_data[255:128]), .sel (c_sel[31:16]),
         .stall (c_stall[1]), .ack (c_ack[1]), .rdata (c_rdata),
         .refresh_ok (refresh_ok), .rot_ok (rot_ok), .mem_idle (mem_idle),
-        .image_ready (image_ready), .clearing (clearing), .clear_req (1'b0)
+        .image_ready (image_ready)
     );
 
     // ---- the DDR3 stub: the image, in order, twelve clocks late ---------------------
@@ -417,10 +417,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
         repeat (5) @(negedge clk);
         rst <= 1'b0;
-        c = 0;
-        while (!image_ready && c < 60000) begin @(negedge clk); c = c + 1; end
-        if (!image_ready) fail("no image_ready");
-        else ok($sformatf("the clear walk zeroed the image in %0d clocks", c));
+        @(negedge clk);
+        if (!image_ready) fail("no image_ready with the DDR3 calibrated");
         for (c = 0; c < 32; c = c + 1) send_chunk(c);
         if (!rom_loaded) fail("the ROM did not load");
 
