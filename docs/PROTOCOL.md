@@ -63,7 +63,12 @@ host reads; the receiver carries parser state across all of them.
 | `0x1A` | HD_FETCH | Host→card. Payload `[{count, addr}]`: read bytes out of the Apple's memory. |
 | `0x1B` | HD_DATA | Card→host. `free` = count; payload the bytes, answering HD_FETCH. Through the same boundary-respecting slot as a reply, whatever its length. |
 | `0x1C` | KBD_EVENT | Card→host, **unsolicited once asked** (KBD_CTRL `notify`). A press on the injected keyboard was resolved, or the lock saw a real key. `free[0]` strobe, `[1]` seen, `[2]` touched, `[3]` lock, `[15:8]` the key resolved last; payload one word `{replaced, flushed, taken, pressed}`. A level, like CPU_HOLD: the words carry the state as it is when they go out. See KEYBOARD.md. |
-| `0x1D`–`0xFF` | — | Application, unassigned. |
+| `0x1D` | VBL_MARK | Card→host, **unsolicited once asked** (VBL_CTRL `notify`). Header only; `free[0]` = PAL, `free[15:8]` = frame count. Emitted by the capture itself, **between two BUS_EVENTS messages**: the event after it is line 0, cycle 0 of the video scanner. See VBL.md. |
+| `0x1E` | FD_ROM | Host→card. Payload 64 words: the Disk II's 256-byte boot ROM. See FLOPPY.md. |
+| `0x1F` | FD_TRACK | Host→card. One chunk of a track answering FD_SEEK: payload `[{seq, chunk, track, drive}]` then up to 252 words of nibbles; seven chunks make a track, the seventh clears the buffer's STALE. A chunk whose `seq` is not the drive's current one is dropped. |
+| `0x20` | FD_SEEK | Card→host, **unsolicited**. Payload `[{seq, 0, track, drive}]`: the head is on a track the card does not hold; answer with seven FD_TRACK chunks carrying `seq`. |
+| `0x21` | FD_DIRTY | Card→host, **unsolicited**. Payload `[{seq, chunk, track, drive}]` then up to 252 words: a track the machine wrote to, seven chunks, sent before the FD_SEEK that leaves it. |
+| `0x22`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -99,6 +104,13 @@ protocol.
 | `0x8000_0024` | RING_STATUS | RO | the DDR3 TX ring: `[21:0]` occupancy in lines, `[24]` full, `[25]` DDR3 calibrated, `[26]` a message was torn on the bus (sticky) — see TX_RING.md |
 | `0x8000_0028` | KBD_CTRL | RW bits 1:0 | `lock` the machine's own keyboard out, `notify` ask for KBD_EVENT; `touched`, `taken`, `flushed`, `replaced` — see KEYBOARD.md |
 | `0x8000_002C` | MENU_HOLD | RW bits 7:0, W1 bit 8 | the runtime menu's door into the same hold: `enable`, `hotkey`, `trigger`, `menus` — see RUNTIME_MENU.md |
+| `0x8000_0030` | VBL_CTRL | W1 bits 1:0, RW bit 2, RW bits 31:16 | the video scanner lock: `start`, `probe`, `notify`, `probe_addr`; `state`, `locked`, `pal`, `busy`, `err` — see VBL.md |
+| `0x8000_0034` | VBL_STAT | RO | `[15:0]` mismatches in the last verify pass, `[31:16]` the slip of a re-lock — see VBL.md |
+| `0x8000_0038` | VBL_POS | RO | `[14:0]` the cycle within the frame now, `[23:16]` frames, `[31:24]` locks — see VBL.md |
+| `0x8000_003C` | FD_SLOT | RW bits 2:0 | the floppy controller's slot, 0 = off; latched at RES', never MB_SLOT's or HD_SLOT's; `rom`, `seeks` — see FLOPPY.md |
+| `0x8000_0040` | FD_DRIVE1 | RW bits 21:0, W1 bit 22 | what is in drive 1, live: `inserted`, `wp`, `nibbles`, `tracks`, `flush`; `stale`, `dirty`, `phase` — see FLOPPY.md |
+| `0x8000_0044` | FD_DRIVE2 | RW bits 21:0, W1 bit 22 | the same for drive 2 |
+| `0x8000_0048` | FD_STAT | W1 bits 1:0 | the controller's switches and its own lateness: `motor`, `drive`, `q6`, `q7`, `late`, `fill_max` — see FLOPPY.md |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.
@@ -127,7 +139,7 @@ than a wrong one, because of the address echo.
 
 **A reply never lands inside another message.** Every source of messages —
 the reply, the card's notices, its application messages (HD_DATA, up to 129
-words), the capture — is a master on one 32-bit Wishbone bus, and a message
+words; FD_DIRTY, up to 254), the capture — is a master on one 32-bit Wishbone bus, and a message
 is one burst: CYC held from the header to the last ack. The arbiter
 (`msg_arb`) grants per CYC by fixed priority, in that order, and never
 pre-empts a burst, which is Wishbone's own rule and is exactly message

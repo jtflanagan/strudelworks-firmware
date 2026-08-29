@@ -116,6 +116,26 @@ module reg_map_tb;
     wire       res_drive;
     reg        hd_rom_loaded = 1'b0, hd_busy = 1'b0;
     reg  [7:0] hd_execs = 8'd0;
+    // The floppy's side of FD_SLOT, FD_DRIVE1/2 and FD_STAT: the tb plays
+    // the controller.
+    wire [2:0]  fd_slot_active;
+    wire [1:0]  fd_inserted, fd_wp, fd_flush;
+    wire [25:0] fd_nibbles;
+    wire [11:0] fd_tracks;
+    wire        fd_late_clr, fd_fill_clr;
+    reg         fd_rom_loaded = 1'b0;
+    reg  [7:0]  fd_seeks = 8'd0, fd_late = 8'd0;
+    reg  [1:0]  fd_stale = 2'd0, fd_dirty = 2'd0;
+    reg  [13:0] fd_phase = 14'd0;
+    reg  [3:0]  fd_ctl = 4'd0;
+    reg  [15:0] fd_fill_max = 16'd0;
+    integer     fd_flush_pulses = 0, fd_late_clrs = 0, fd_fill_clrs = 0;
+    always @(posedge clk) begin
+        if (fd_flush[0]) fd_flush_pulses = fd_flush_pulses + 1;
+        if (fd_flush[1]) fd_flush_pulses = fd_flush_pulses + 1;
+        if (fd_late_clr) fd_late_clrs = fd_late_clrs + 1;
+        if (fd_fill_clr) fd_fill_clrs = fd_fill_clrs + 1;
+    end
     // Keyboard injection's side of KBD_INJECT and KBD_CTRL: the tb plays
     // kbd_inject.  The flags are {touched, seen, strobe}, the counts
     // {replaced, flushed, taken, pressed}.
@@ -125,6 +145,17 @@ module reg_map_tb;
     reg  [31:0] kbd_counts = 32'd0;
     reg  [6:0]  kbd_resolved_key = 7'd0;
     reg         kbd_changed = 1'b0;
+    // The VBL lock's side of VBL_CTRL/STAT/POS: the tb plays vbl_lock.
+    wire        vbl_start, vbl_probe, vbl_notify;
+    wire [15:0] vbl_probe_addr;
+    reg  [3:0]  vbl_state = 4'd0, vbl_err = 4'd0;
+    reg         vbl_locked = 1'b0, vbl_pal = 1'b0, vbl_busy = 1'b0;
+    reg  [31:0] vbl_stat = 32'd0, vbl_pos = 32'd0;
+    integer     start_pulses = 0, probe_pulses = 0;
+    always @(posedge clk) begin
+        if (vbl_start) start_pulses = start_pulses + 1;
+        if (vbl_probe) probe_pulses = probe_pulses + 1;
+    end
     integer    press_pulses = 0, drop_pulses = 0;
     reg  [6:0] last_pressed = 7'd0;
     always @(posedge clk) begin
@@ -144,9 +175,20 @@ module reg_map_tb;
         .pb_override (pb_override), .pb_hw (pb_hw),
         .hd_slot_active (hd_slot_active), .hd_rom_loaded (hd_rom_loaded),
         .hd_busy (hd_busy), .hd_execs (hd_execs), .res_drive (res_drive),
+        .fd_slot_active (fd_slot_active), .fd_rom_loaded (fd_rom_loaded),
+        .fd_seeks (fd_seeks), .fd_inserted (fd_inserted), .fd_wp (fd_wp),
+        .fd_nibbles (fd_nibbles), .fd_tracks (fd_tracks), .fd_flush (fd_flush),
+        .fd_stale (fd_stale), .fd_dirty (fd_dirty), .fd_phase (fd_phase),
+        .fd_ctl (fd_ctl), .fd_late (fd_late), .fd_fill_max (fd_fill_max),
+        .fd_late_clr (fd_late_clr), .fd_fill_clr (fd_fill_clr),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key), .kbd_drop (kbd_drop),
         .kbd_lock (kbd_lock), .kbd_notify (kbd_notify),
         .kbd_flags (kbd_flags), .kbd_counts (kbd_counts),
+        .vbl_start (vbl_start), .vbl_probe (vbl_probe), .vbl_notify (vbl_notify),
+        .vbl_probe_addr (vbl_probe_addr),
+        .vbl_state (vbl_state), .vbl_locked (vbl_locked), .vbl_pal (vbl_pal),
+        .vbl_busy (vbl_busy), .vbl_err (vbl_err),
+        .vbl_stat (vbl_stat), .vbl_pos (vbl_pos),
         .ring_status (32'h0200_1234),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
@@ -639,6 +681,81 @@ module reg_map_tb;
         end else $display("  ok: readback desired=7 active=7 rom=1 busy=1 execs=9");
         hd_busy = 1'b0;
 
+        // --- case 12b / FD_SLOT, FD_DRIVE1/2, FD_STAT --------------------------
+        // The floppy's slot latches like the disk's and yields to BOTH the
+        // others; what is in a drive is live, not latched.
+        if (fd_slot_active !== 3'd0) begin
+            $display("FAIL: the floppy is enabled before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: FD_SLOT starts disabled");
+        do_write(32'h8000_003C, 32'h0000_0007);       // the disk's slot
+        pulse_reset_line;
+        if (fd_slot_active !== 3'd0) begin
+            $display("FAIL: the floppy took the hard disk's slot");
+            errors = errors + 1;
+        end else $display("  ok: the floppy yields the hard disk's slot");
+        do_write(32'h8000_003C, 32'h0000_0004);       // the Mockingboard's
+        pulse_reset_line;
+        if (fd_slot_active !== 3'd0) begin
+            $display("FAIL: the floppy took the Mockingboard's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the Mockingboard's");
+        do_write(32'h8000_003C, 32'h0000_0006);
+        if (fd_slot_active !== 3'd0) begin
+            $display("FAIL: the WRITE enabled the floppy - it must take a reset");
+            errors = errors + 1;
+        end
+        pulse_reset_line;
+        fd_rom_loaded = 1'b1; fd_seeks = 8'd21;
+        base = out_n;
+        do_read(32'h8000_003C);
+        if (fd_slot_active !== 3'd6 ||
+            out_mem[base+2][2:0] !== 3'd6 || out_mem[base+2][10:8] !== 3'd6 ||
+            out_mem[base+2][16] !== 1'b1 || out_mem[base+2][31:24] !== 8'd21) begin
+            $display("FAIL: FD_SLOT readback %08x, expected desired=6 active=6 rom=1 seeks=21",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: FD_SLOT=6 latches at the reset; rom and seeks read back");
+
+        // A disk in drive 1, live: no reset needed.
+        do_write(32'h8000_0040, {7'd0, 1'b0, 1'b0, 1'b1, 6'd35, 13'd6384, 1'b0, 1'b1, 1'b1});
+        if (fd_inserted !== 2'b01 || fd_wp !== 2'b01 || fd_nibbles[12:0] !== 13'd6384 ||
+            fd_tracks[5:0] !== 6'd35 || fd_flush_pulses !== 1) begin
+            $display("FAIL: FD_DRIVE1 did not land live: ins=%b wp=%b nib=%0d trk=%0d flush=%0d",
+                     fd_inserted, fd_wp, fd_nibbles[12:0], fd_tracks[5:0], fd_flush_pulses);
+            errors = errors + 1;
+        end else $display("  ok: FD_DRIVE1 lands without a reset, flush is one pulse");
+        fd_stale = 2'b01; fd_dirty = 2'b00; fd_phase[6:0] = 7'd33;
+        base = out_n;
+        do_read(32'h8000_0040);
+        if (out_mem[base+2] !== {7'd33, 1'b0, 1'b1, 1'b0, 6'd35, 13'd6384, 1'b0, 1'b1, 1'b1}) begin
+            $display("FAIL: FD_DRIVE1 readback %08x", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: FD_DRIVE1 reads back with stale and the head's phase; flush reads 0");
+        if (fd_inserted[1] !== 1'b0 || fd_nibbles[25:13] !== 13'd0) begin
+            $display("FAIL: writing drive 1 touched drive 2");
+            errors = errors + 1;
+        end else $display("  ok: drive 2 untouched");
+        do_write(32'h8000_0044, {10'd0, 6'd40, 13'd6656, 1'b0, 1'b0, 1'b1});
+        if (fd_inserted !== 2'b11 || fd_nibbles[25:13] !== 13'd6656 || fd_tracks[11:6] !== 6'd40) begin
+            $display("FAIL: FD_DRIVE2 did not land");
+            errors = errors + 1;
+        end else $display("  ok: FD_DRIVE2 is its own drive");
+
+        // FD_STAT: the switches and the two measurements, cleared by W1.
+        fd_ctl = 4'b1011; fd_late = 8'd3; fd_fill_max = 16'd1234;
+        base = out_n;
+        do_read(32'h8000_0048);
+        if (out_mem[base+2] !== {16'd1234, 8'd3, 4'd0, 4'b1011}) begin
+            $display("FAIL: FD_STAT readback %08x", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: FD_STAT reads fill_max, late and the switches");
+        do_write(32'h8000_0048, 32'h0000_0003);
+        if (fd_late_clrs !== 1 || fd_fill_clrs !== 1) begin
+            $display("FAIL: FD_STAT W1 bits pulsed %0d/%0d times", fd_late_clrs, fd_fill_clrs);
+            errors = errors + 1;
+        end else $display("  ok: FD_STAT's two W1 bits are one pulse each");
+
         // --- case 13 / an application message, whole, and never inside another
         // The hard disk's HD_DATA takes msg_arb's application port: a header and
         // then its payload, streamed a word at a time.  Same obligation as a
@@ -963,6 +1080,56 @@ module reg_map_tb;
         end else $display("  ok: and the next boot release does");
         boot_held = 1'b0;
         do_write(32'h8000_002C, 32'h0000_0000);           // shut again
+
+        // --- case 21 / VBL_CTRL, VBL_STAT, VBL_POS -----------------------------
+        // The scanner lock's registers (docs/VBL.md): start and probe are
+        // pulses, notify and probe_addr levels, the rest the detector's.
+        base = out_n;
+        do_read(32'h8000_0030);
+        if (out_mem[base+2] !== 32'hC019_0000) begin
+            $display("FAIL: VBL_CTRL reads %08x at reset, expected probe_addr=$C019 and nothing else",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: VBL_CTRL starts with probe_addr $C019, notify off");
+        do_write(32'h8000_0030, 32'hC054_0005);          // start + notify, probe_addr $C054
+        if (start_pulses !== 1 || probe_pulses !== 0) begin
+            $display("FAIL: start pulsed %0d time(s), probe %0d; expected 1 and 0", start_pulses, probe_pulses);
+            errors = errors + 1;
+        end else if (vbl_notify !== 1'b1 || vbl_probe_addr !== 16'hC054) begin
+            $display("FAIL: VBL_CTRL write did not land: notify=%0d probe_addr=%04x", vbl_notify, vbl_probe_addr);
+            errors = errors + 1;
+        end else $display("  ok: start is one pulse; notify and probe_addr are levels");
+        vbl_state = 4'd5; vbl_locked = 1'b1; vbl_pal = 1'b1; vbl_busy = 1'b1; vbl_err = 4'd0;
+        vbl_stat = 32'h0003_0007; vbl_pos = 32'h0201_4231;
+        repeat (2) @(posedge clk);
+        base = out_n;
+        do_read(32'h8000_0030);
+        if (out_mem[base+2] !== 32'hC054_0754) begin
+            $display("FAIL: VBL_CTRL reads %08x, expected probe_addr=$C054 busy pal locked state=5 notify",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: VBL_CTRL reads the detector's state; start reads back as 0");
+        base = out_n;
+        do_read(32'h8000_0034);
+        if (out_mem[base+2] !== 32'h0003_0007) begin
+            $display("FAIL: VBL_STAT reads %08x", out_mem[base+2]); errors = errors + 1;
+        end
+        base = out_n;
+        do_read(32'h8000_0038);
+        if (out_mem[base+2] !== 32'h0201_4231) begin
+            $display("FAIL: VBL_POS reads %08x", out_mem[base+2]); errors = errors + 1;
+        end else $display("  ok: VBL_STAT and VBL_POS read what the detector says");
+        do_write(32'h8000_0030, 32'hC019_0006);          // probe + notify
+        if (probe_pulses !== 1 || start_pulses !== 1) begin
+            $display("FAIL: probe pulsed %0d time(s), start %0d; expected 1 and 1", probe_pulses, start_pulses);
+            errors = errors + 1;
+        end else $display("  ok: probe is one pulse too");
+        do_write(32'h8000_0030, 32'hC019_0000);          // notify off
+        if (vbl_notify !== 1'b0) begin
+            $display("FAIL: notify did not clear"); errors = errors + 1;
+        end
+        vbl_state = 4'd0; vbl_locked = 1'b0; vbl_pal = 1'b0; vbl_busy = 1'b0;
+        vbl_stat = 32'd0; vbl_pos = 32'd0;
 
         // --- case 7 / the parser never lost sync -----------------------------
         if (frame_error !== 1'b0) begin

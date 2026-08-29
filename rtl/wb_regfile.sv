@@ -91,6 +91,28 @@ module wb_regfile #(
     input  wire            hd_busy,
     input  wire [7:0]      hd_execs,
 
+    // The floppy (rtl/floppy_card.sv, docs/FLOPPY.md).  The slot latches
+    // like the disk's; what is IN each drive is live, because the runtime
+    // menu changes a disk under a running program; the rest is the
+    // controller's state coming back for the readback.  A watching top ties
+    // the inputs to 0 and leaves the outputs unconnected.
+    output wire [2:0]      fd_slot_active,
+    input  wire            fd_rom_loaded,
+    input  wire [7:0]      fd_seeks,
+    output logic [1:0]     fd_inserted,
+    output logic [1:0]     fd_wp,
+    output logic [25:0]    fd_nibbles,      // [12:0] drive 1, [25:13] drive 2
+    output logic [11:0]    fd_tracks,       // [5:0] drive 1, [11:6] drive 2
+    output logic [1:0]     fd_flush,        // pulses
+    input  wire [1:0]      fd_stale,
+    input  wire [1:0]      fd_dirty,
+    input  wire [13:0]     fd_phase,        // [6:0] drive 1, [13:7] drive 2
+    input  wire [3:0]      fd_ctl,          // {q7, q6, drive_sel, motor}
+    input  wire [7:0]      fd_late,
+    input  wire [15:0]     fd_fill_max,
+    output logic           fd_late_clr,     // pulses
+    output logic           fd_fill_clr,
+
     // Keyboard injection (rtl/kbd_inject.sv).  press and drop are one-cycle
     // pulses per write of their bits, press_key the key that write carried;
     // lock and notify are levels the host holds.  The flags and the counts
@@ -110,6 +132,22 @@ module wb_regfile #(
     // the hardware's level back for the readback.
     output logic [5:0]     pb_override,
     input  wire [2:0]      pb_hw,
+
+    // The VBL lock (rtl/vbl_lock.sv, docs/VBL.md): start and probe are
+    // one-cycle pulses per write of their bits, notify and probe_addr
+    // levels; the rest is the detector's state coming back for the
+    // readback.  A watching top ties the inputs to 0.
+    output logic           vbl_start,
+    output logic           vbl_probe,
+    output logic           vbl_notify,
+    output logic [15:0]    vbl_probe_addr,
+    input  wire [3:0]      vbl_state,
+    input  wire            vbl_locked,
+    input  wire            vbl_pal,
+    input  wire            vbl_busy,
+    input  wire [3:0]      vbl_err,
+    input  wire [31:0]     vbl_stat,
+    input  wire [31:0]     vbl_pos,
 
     // Programmatic Ctrl-Reset.  Held low while pulsing; the master top turns
     // this into an open-drain drive of the Apple's RES' line, exactly as it
@@ -155,6 +193,13 @@ module wb_regfile #(
     localparam [13:0] R_RING_STATUS = 'd9;  // 0x8000_0024, RO
     localparam [13:0] R_KBD_CTRL   = 'd10;  // 0x8000_0028, RW bits 1:0
     localparam [13:0] R_MENU_HOLD  = 'd11;  // 0x8000_002C, RW bits 7:0, W1 bit 8
+    localparam [13:0] R_VBL_CTRL   = 'd12;  // 0x8000_0030, W1 bits 1:0, RW bit 2, RW bits 31:16
+    localparam [13:0] R_VBL_STAT   = 'd13;  // 0x8000_0034, RO
+    localparam [13:0] R_VBL_POS    = 'd14;  // 0x8000_0038, RO
+    localparam [13:0] R_FD_SLOT    = 'd15;  // 0x8000_003C, RW in bits 2:0
+    localparam [13:0] R_FD_DRIVE1  = 'd16;  // 0x8000_0040, RW bits 21:0, W1 bit 22
+    localparam [13:0] R_FD_DRIVE2  = 'd17;  // 0x8000_0044, the same
+    localparam [13:0] R_FD_STAT    = 'd18;  // 0x8000_0048, W1 bits 1:0
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -378,6 +423,111 @@ module wb_regfile #(
     wire [31:0] hd_slot_rd = {hd_execs, 6'd0, hd_busy, hd_rom_loaded,
                               5'd0, hd_slot_active_q, 5'd0, hd_slot_desired};
 
+    // ---- FD_SLOT ------------------------------------------------------------
+    //
+    //   [2:0]    desired   RW   which slot the floppy controller answers as;
+    //                           0 = off
+    //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [16]     rom       RO   the 256-byte boot ROM has been loaded (FD_ROM)
+    //   [31:24]  seeks     RO   head movements the host was asked to fill,
+    //                           wrapping
+    //
+    // HD_SLOT's contract, and the clash rule is now three-way: the floppy is
+    // the newest of the three and yields to both the others, latching 0 when
+    // either has the same slot asked for.  See docs/FLOPPY.md.
+    logic [2:0] fd_slot_desired;
+    logic [2:0] fd_slot_active_q;
+
+    assign fd_slot_active = fd_slot_active_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            fd_slot_desired  <= 3'd0;     // no floppy until asked for
+            fd_slot_active_q <= 3'd0;
+        end else begin
+            if (res_assert || boot_relatch) begin
+                fd_slot_active_q <= (CAN_MASTER && fd_slot_desired != mb_slot_desired &&
+                                     fd_slot_desired != hd_slot_desired)
+                                    ? fd_slot_desired : 3'd0;
+            end
+            if (wr_fd_slot) fd_slot_desired <= wb_dat_w[2:0];
+        end
+    end
+
+    wire [31:0] fd_slot_rd = {fd_seeks, 7'd0, fd_rom_loaded,
+                              5'd0, fd_slot_active_q, 5'd0, fd_slot_desired};
+
+    // ---- FD_DRIVE1 / FD_DRIVE2 ----------------------------------------------
+    //
+    //   [0]      inserted  RW   a disk is in the drive
+    //   [1]      wp        RW   ...and it is write-protected
+    //   [15:3]   nibbles   RW   nibbles per track: 6384 for a sector image,
+    //                           6656 for a .nib
+    //   [21:16]  tracks    RW   tracks in the image, 35 or 40
+    //   [22]     flush     W1   send the buffer to the host now if it was
+    //                           written; reads as 0
+    //   [23]     stale     RO   the buffer is not the track under the head yet
+    //   [24]     dirty     RO   the buffer has been written to
+    //   [31:25]  phase     RO   where the head is, in half tracks
+    //
+    // NOT reset-latched, on purpose: a disk goes in and out of a running
+    // machine, and the runtime menu is where that happens.  An insertion is
+    // the 0 -> 1 edge of `inserted`; to change the disk, eject first.  The
+    // card's reset clears the drives, as it does the keyboard; a RES' does
+    // not, as it does not on a real drive.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            fd_inserted <= 2'd0;
+            fd_wp       <= 2'd0;
+            fd_nibbles  <= 26'd0;
+            fd_tracks   <= 12'd0;
+            fd_flush    <= 2'd0;
+        end else begin
+            fd_flush <= {wr_fd_drive2 && wb_dat_w[22], wr_fd_drive1 && wb_dat_w[22]};
+            if (wr_fd_drive1) begin
+                fd_inserted[0]    <= wb_dat_w[0];
+                fd_wp[0]          <= wb_dat_w[1];
+                fd_nibbles[12:0]  <= wb_dat_w[15:3];
+                fd_tracks[5:0]    <= wb_dat_w[21:16];
+            end
+            if (wr_fd_drive2) begin
+                fd_inserted[1]    <= wb_dat_w[0];
+                fd_wp[1]          <= wb_dat_w[1];
+                fd_nibbles[25:13] <= wb_dat_w[15:3];
+                fd_tracks[11:6]   <= wb_dat_w[21:16];
+            end
+        end
+    end
+
+    wire [31:0] fd_drive1_rd = {fd_phase[6:0], fd_dirty[0], fd_stale[0], 1'b0,
+                                fd_tracks[5:0], fd_nibbles[12:0], 1'b0, fd_wp[0], fd_inserted[0]};
+    wire [31:0] fd_drive2_rd = {fd_phase[13:7], fd_dirty[1], fd_stale[1], 1'b0,
+                                fd_tracks[11:6], fd_nibbles[25:13], 1'b0, fd_wp[1], fd_inserted[1]};
+
+    // ---- FD_STAT ------------------------------------------------------------
+    //
+    //   [0]      motor     RO   the motor switch is on
+    //   [1]      drive     RO   which drive is selected, 0 or 1
+    //   [2]      q6        RO   the sequencer's load/shift switch
+    //   [3]      q7        RO   ...and its read/write switch
+    //   [15:8]   late      RO   fills that landed after the machine had read;
+    //                           W1 bit 0 clears it
+    //   [31:16]  fill_max  RO   the longest fill, head movement to seventh
+    //                           chunk, in bus cycles; W1 bit 1 clears it
+    //
+    // The two numbers docs/FLOPPY.md's latency budget is checked against.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            fd_late_clr <= 1'b0;
+            fd_fill_clr <= 1'b0;
+        end else begin
+            fd_late_clr <= wr_fd_stat && wb_dat_w[0];
+            fd_fill_clr <= wr_fd_stat && wb_dat_w[1];
+        end
+    end
+
+    wire [31:0] fd_stat_rd = {fd_fill_max, fd_late, 4'd0, fd_ctl};
+
     // ---- RESET --------------------------------------------------------------
     //
     //   [0]      pulse     W1   assert the Apple's RES' low for a while
@@ -515,6 +665,46 @@ module wb_regfile #(
 
     wire [31:0] buttons_rd = {13'd0, pb_hw, 10'd0, pb_override};
 
+    // ---- VBL_CTRL / VBL_STAT / VBL_POS ------------------------------------
+    //
+    //   VBL_CTRL
+    //   [0]      start      W1   run the detection: needs the boot hold; reads 0
+    //   [1]      probe      W1   read probe_addr every cycle for one frame;
+    //                            needs the lock and the boot hold; reads 0
+    //   [2]      notify     RW   mark the frame origin in the capture stream
+    //   [7:4]    state      RO   the detector's state (rtl/vbl_lock.sv)
+    //   [8]      locked     RO   the counter is set
+    //   [9]      pal        RO   312 lines, not 262
+    //   [10]     busy       RO   a detection or a probe is running
+    //   [15:12]  err        RO   the last run's result; 0 is success
+    //   [31:16]  probe_addr RW   what a probe reads; $C019 (the //e's VBL')
+    //                            at the card's reset
+    //   VBL_STAT [15:0] mismatches in the last verify pass, [31:16] the slip
+    //   VBL_POS  [14:0] the cycle within the frame, [23:16] frames, [31:24] locks
+    //
+    // The counter is the card's, not the machine's: RES' does not reset the
+    // scanner and so does not reset this.  `notify` is the host asking to be
+    // told - the silent-until-asked rule - and clears with the card, the
+    // watchdog's included, like KBD_CTRL's.  See docs/VBL.md.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            vbl_start      <= 1'b0;
+            vbl_probe      <= 1'b0;
+            vbl_notify     <= 1'b0;
+            vbl_probe_addr <= 16'hC019;
+        end else begin
+            vbl_start <= wr_vbl_ctrl && wb_dat_w[0];
+            vbl_probe <= wr_vbl_ctrl && wb_dat_w[1];
+            if (wr_vbl_ctrl) begin
+                vbl_notify     <= wb_dat_w[2];
+                vbl_probe_addr <= wb_dat_w[31:16];
+            end
+        end
+    end
+
+    wire [31:0] vbl_ctrl_rd = {vbl_probe_addr, vbl_err, 1'b0, vbl_busy, vbl_pal, vbl_locked,
+                               vbl_state, 1'b0, vbl_notify, 2'b00};
+
     assign wb_stall = 1'b0;
 
     wire access = wb_cyc && wb_stb;
@@ -544,6 +734,13 @@ module wb_regfile #(
                         R_RING_STATUS: wb_dat_r <= ring_status;
                         R_KBD_CTRL:   wb_dat_r <= kbd_ctrl_rd;
                         R_MENU_HOLD:  wb_dat_r <= menu_hold_rd;
+                        R_VBL_CTRL:   wb_dat_r <= vbl_ctrl_rd;
+                        R_VBL_STAT:   wb_dat_r <= vbl_stat;
+                        R_VBL_POS:    wb_dat_r <= vbl_pos;
+                        R_FD_SLOT:    wb_dat_r <= fd_slot_rd;
+                        R_FD_DRIVE1:  wb_dat_r <= fd_drive1_rd;
+                        R_FD_DRIVE2:  wb_dat_r <= fd_drive2_rd;
+                        R_FD_STAT:    wb_dat_r <= fd_stat_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -577,8 +774,18 @@ module wb_regfile #(
                          (word == R_KBD_CTRL);
     wire wr_menu_hold  = access && !wb_ack && in_region && wb_we &&
                          (word == R_MENU_HOLD);
+    wire wr_vbl_ctrl   = access && !wb_ack && in_region && wb_we &&
+                         (word == R_VBL_CTRL);
+    wire wr_fd_slot    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_FD_SLOT);
+    wire wr_fd_drive1  = access && !wb_ack && in_region && wb_we &&
+                         (word == R_FD_DRIVE1);
+    wire wr_fd_drive2  = access && !wb_ack && in_region && wb_we &&
+                         (word == R_FD_DRIVE2);
+    wire wr_fd_stat    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_FD_STAT);
 
-    // A boot-hold RELEASE re-latches MB_SLOT and HD_SLOT above, so the menu's
+    // A boot-hold RELEASE re-latches MB_SLOT, HD_SLOT and FD_SLOT above, so the menu's
     // choices reach the boot it releases into.  Same qualification as the
     // release pulse itself; CPU_SOURCE deliberately does NOT re-latch here -
     // switching the driving CPU mid-hold is the one changeover BOOT_MENU.md

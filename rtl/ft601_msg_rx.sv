@@ -55,6 +55,10 @@ module ft601_msg_rx (
     localparam [7:0] T_HD_ROM     = 8'h18;
     localparam [7:0] T_HD_DONE    = 8'h19;
     localparam [7:0] T_HD_FETCH   = 8'h1A;
+    // The floppy's two, host -> card: the boot ROM and a track chunk.  See
+    // rtl/floppy_card.sv and docs/FLOPPY.md.
+    localparam [7:0] T_FD_ROM     = 8'h1E;
+    localparam [7:0] T_FD_TRACK   = 8'h1F;
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -74,7 +78,8 @@ module ft601_msg_rx (
     wire hdr_known = (hdr_type == T_IDLE)      || (hdr_type == T_BUS_ENABLE) ||
                      (hdr_type == T_REG_READ)  || (hdr_type == T_REG_WRITE)  ||
                      (hdr_type == T_HD_ROM)    || (hdr_type == T_HD_DONE)    ||
-                     (hdr_type == T_HD_FETCH);
+                     (hdr_type == T_HD_FETCH)  || (hdr_type == T_FD_ROM)     ||
+                     (hdr_type == T_FD_TRACK);
 
     always_ff @(posedge clk) begin
         if (rst) begin

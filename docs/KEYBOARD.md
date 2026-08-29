@@ -9,9 +9,9 @@ prompt prints 42, a 42-key program typed and run prints its output, every key
 `taken` at 0.8 ms a key; a key pressed 50 ms into a machine-language delay
 loop that never reads it is `flushed` by the loop's `BIT $C010`; a key
 pressed into a BASIC `FOR` loop (Applesoft's Ctrl-C check reads it, nothing
-strobes it) is dropped by the typist after a second, and one pressed into
-the same loop before a RES′ is dropped by the reset, the menu engaging after
-it; BASIC typed under the lock arrives, keys pressed at the Apple under it
+strobes it) waits on the keyboard and is taken when the loop ends, and one
+pressed into the same loop before a RES′ is dropped by the reset, the menu
+engaging after it; BASIC typed under the lock arrives, keys pressed at the Apple under it
 do not - `touched` went to 1 with one notice, the screen stayed as it was,
 and the last of them (a Return) showed through the moment the lock lifted,
 exactly as the lock section below says. `replaced` stayed at zero
@@ -254,13 +254,21 @@ millisecond while typing, two thousand round trips a second for nothing.
 The register path is one request outstanding at a time, so the typist
 defers entirely while the menu's apply or a reset pulse is in flight.
 
-A key the machine has not taken after a second is **dropped, then the next
-is pressed** - never pressed over, which would be a second press in flight.
-The drop resolves it (the notice says so, with `seen` clear: nobody read
-it), the count of keys not taken in time goes up, and the typist moves on.
-A card that answers no notice at all - `notify` refused, or gateware older
-than this - is given a short grace after the drop and then abandoned for
-that key, so the queue never wedges.
+**A key waits for the machine, however long.** A press nobody has taken is
+a key on the keyboard - the latch holds it as it holds a person's - and the
+program that is not looking now (DOS reading a track, a BASIC loop) will
+look later; the typist waits for the notice that says so, and no timer
+decides otherwise. Only the machine resolves a key: taken, flushed by its
+own `BIT $C010`, or dropped by a RES′. So `LOAD X` and `RUN` typed back to
+back both arrive, whatever the load took (the first cut dropped a key after
+a second, and lost the R of `RUN` behind a two-second load - 2026-08-28);
+what bounds a script is its own `wait MS`. The two timers left are not about
+the machine: a register ack that never comes is a link fault and that key is
+abandoned; and gateware that sends no notice at all - `notify` refused in
+the KBD_CTRL readback, or older than this - gives the host no way to see a
+resolution, so for such a card only a key nobody takes is **dropped, then
+the next pressed** - never pressed over, which would be two in flight - and
+a drop it never acknowledges is abandoned after a short grace.
 
 At start the host sets `notify`; at exit it drops any key in flight and
 clears KBD_CTRL, so the next host - or the machine's own user - inherits

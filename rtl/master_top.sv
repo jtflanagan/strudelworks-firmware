@@ -40,12 +40,23 @@
 // and the mux below gives the hold the cycle anyway, so that if they ever
 // could, the answer is defined.
 //
+// THE FLOPPY sits beside the disk, and takes no cycle at all: its data
+// register is served from a track buffer on the card, and the host fills
+// the buffer beside the read stream, never in it; see rtl/floppy_card.sv
+// and docs/FLOPPY.md.
+//
 // KEYBOARD AND BUTTON INJECTION sit beside the core's din.  A key the host
 // pressed is what the core latches on its next $C00x read, a button the host
 // holds is bit 7 of its next $C061-$C063 read, and the capture records the
 // same byte for that cycle - a substitution, never a drive, because the
 // motherboard owns those pins; see rtl/kbd_inject.sv, rtl/pb_inject.sv and
 // docs/KEYBOARD.md.  Nothing pressed, both are wires.
+//
+// THE VBL LOCK listens to every cycle and, during the boot hold, takes them:
+// it writes a known picture into the text page, reads the floating bus on
+// every cycle until it finds the scanner's frame, and counts from then on.
+// Its mark on the frame-origin event goes to the capture with the event, so
+// the host is told to the cycle; see rtl/vbl_lock.sv and docs/VBL.md.
 //
 // WHAT IS NOT HERE YET: INH, RDY and NMI.  INH would let the card override the
 // machine's own memory, which is a memory-mode decision that has not been made;
@@ -112,7 +123,7 @@ module master_top #(
     wire        apple_clk, apple_rst;
     wire        capture_on, capture_real;
     wire [31:0] real_data;
-    wire        real_valid, phi0_live;
+    wire        real_valid, phi0_live, bus_tick;
     wire        apple_res_sync, apple_irq_sync, apple_phi0_sync;
     wire [7:0]  apple_data_sync;
     wire        cpu_source_active;
@@ -122,6 +133,17 @@ module master_top #(
     wire [6:0]  menu_hotkey;
     wire        hd_rom_loaded, hd_busy;
     wire [7:0]  hd_execs;
+    wire [2:0]  fd_slot_active;
+    wire        fd_rom_loaded, fd_late_clr, fd_fill_clr;
+    wire [7:0]  fd_seeks, fd_late;
+    wire [15:0] fd_fill_max;
+    wire [1:0]  fd_inserted, fd_wp, fd_flush, fd_stale, fd_dirty;
+    wire [25:0] fd_nibbles;
+    wire [11:0] fd_tracks;
+    wire [13:0] fd_phase;
+    wire        fd_motor, fd_drive_sel, fd_q6, fd_q7;
+    wire [31:0] fd_word;
+    wire        fd_valid, fd_take;
     wire        kbd_press, kbd_drop, kbd_lock;
     wire [6:0]  kbd_press_key;
     wire        kbd_strobe, kbd_seen, kbd_touched, kbd_changed;
@@ -136,6 +158,12 @@ module master_top #(
     wire        sub_en   = kbd_sub_en | pb_sub_en;
     wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data : pb_sub_data;
     wire        res_drive;
+    wire        vbl_start, vbl_probe, vbl_notify, vbl_locked, vbl_pal, vbl_busy;
+    wire [15:0] vbl_probe_addr;
+    wire [3:0]  vbl_state, vbl_err;
+    wire [31:0] vbl_stat, vbl_pos;
+    wire        vbl_mark;
+    wire [15:0] vbl_mark_free;
     wire        app_msg_valid, app_pay_valid;
     wire [7:0]  app_msg_type, app_msg_len;
     wire [15:0] app_msg_free;
@@ -153,6 +181,7 @@ module master_top #(
         .apple_clk (apple_clk), .apple_rst (apple_rst),
         .capture_on (capture_on), .capture_real (capture_real),
         .real_data (real_data), .real_valid (real_valid),
+        .real_mark (vbl_mark), .real_mark_free (vbl_mark_free),
         .phi0_live (phi0_live),
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (cpu_source_active),
@@ -164,17 +193,31 @@ module master_top #(
         .hd_slot_active (hd_slot_active),
         .hd_rom_loaded (hd_rom_loaded), .hd_busy (hd_busy),
         .hd_execs (hd_execs),
+        .fd_slot_active (fd_slot_active),
+        .fd_rom_loaded (fd_rom_loaded), .fd_seeks (fd_seeks),
+        .fd_inserted (fd_inserted), .fd_wp (fd_wp),
+        .fd_nibbles (fd_nibbles), .fd_tracks (fd_tracks), .fd_flush (fd_flush),
+        .fd_stale (fd_stale), .fd_dirty (fd_dirty), .fd_phase (fd_phase),
+        .fd_ctl ({fd_q7, fd_q6, fd_drive_sel, fd_motor}),
+        .fd_late (fd_late), .fd_fill_max (fd_fill_max),
+        .fd_late_clr (fd_late_clr), .fd_fill_clr (fd_fill_clr),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key),
         .kbd_drop (kbd_drop), .kbd_lock (kbd_lock),
         .kbd_flags ({kbd_touched, kbd_seen, kbd_strobe}),
         .kbd_counts ({kbd_replaced, kbd_flushed, kbd_taken, kbd_pressed}),
         .kbd_resolved_key (kbd_resolved_key), .kbd_changed (kbd_changed),
         .pb_override (pb_override), .pb_hw (pb_hw),
+        .vbl_start (vbl_start), .vbl_probe (vbl_probe), .vbl_notify (vbl_notify),
+        .vbl_probe_addr (vbl_probe_addr),
+        .vbl_state (vbl_state), .vbl_locked (vbl_locked), .vbl_pal (vbl_pal),
+        .vbl_busy (vbl_busy), .vbl_err (vbl_err),
+        .vbl_stat (vbl_stat), .vbl_pos (vbl_pos),
         .res_drive (res_drive),
         .app_msg_valid (app_msg_valid), .app_msg_type (app_msg_type),
         .app_msg_free (app_msg_free), .app_msg_len (app_msg_len),
         .app_pay_data (app_pay_data), .app_pay_valid (app_pay_valid),
         .aux_word (aux_word), .aux_valid (aux_valid), .aux_take (aux_take),
+        .fd_word (fd_word), .fd_valid (fd_valid), .fd_take (fd_take),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),
@@ -205,6 +248,7 @@ module master_top #(
         .apple_dma_pin     (apple_dma_pin),
         .ev_data           (real_data),
         .ev_valid          (real_valid),
+        .data_tick         (bus_tick),
         .sync_override     (drv_sync),
         .sync_override_en  (cpu_source_active),
         .data_override     (sub_data),
@@ -256,27 +300,32 @@ module master_top #(
     wire        op_rw;
     wire [7:0]  op_wdata;
     wire        op_present, op_commit, op_ovr;
-    wire        mb_rd_claim, hd_rd_claim;
-    wire [7:0]  mb_rd_data, hd_rd_data;
-    wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw;
-    wire [15:0] boot_ovr_addr, hd_ovr_addr;
-    wire [7:0]  hd_ovr_wdata;
+    wire        mb_rd_claim, hd_rd_claim, fd_rd_claim;
+    wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data;
+    wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw, vbl_ovr_en, vbl_ovr_rw;
+    wire [15:0] boot_ovr_addr, hd_ovr_addr, vbl_ovr_addr;
+    wire [7:0]  hd_ovr_wdata, vbl_ovr_wdata;
 
-    // Two overrides into one driver: the hold's is always a read of its
-    // keyboard address, the disk's may be a write.  THE DISK'S COMES FIRST:
-    // a runtime hold can have a transfer outstanding, and a transfer that
-    // waited behind a menu would time out on the card and the host alike.
-    // The hold acts only on cycles it recognises as its own, so a cycle the
-    // disk takes costs it nothing - the core moves for neither.  Two
-    // peripherals into one claim: they answer for different slots
-    // (wb_regfile refuses to latch the same one for both), so at most one
-    // claims any cycle.
-    wire        ovr_en    = boot_ovr_en | hd_ovr_en;
-    wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : boot_ovr_addr;
-    wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : 1'b1;
-    wire [7:0]  ovr_wdata = hd_ovr_wdata;
-    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim;
-    wire [7:0]  slot_rd_data  = hd_rd_claim ? hd_rd_data : mb_rd_data;
+    // Three overrides into one driver: the hold's is always a read of its
+    // keyboard address, the disk's and the VBL lock's may be writes.  THE
+    // DISK'S COMES FIRST: a runtime hold can have a transfer outstanding,
+    // and a transfer that waited behind a menu would time out on the card
+    // and the host alike.  THE VBL LOCK'S NEXT: it runs during the boot
+    // hold and must take the cycles the hold would otherwise spend on
+    // keyboard reads; the disk is reset with the core at the vector, so the
+    // two never meet.  Each acts only on cycles it recognises as its own,
+    // so a cycle another takes costs it nothing - the core moves for none
+    // of them.  Three peripherals into one claim: they answer for different
+    // slots (wb_regfile refuses to latch the same one for any two), so at
+    // most one claims any cycle.  The floppy has no override at all: it
+    // never takes a cycle from the machine, by rule (rtl/floppy_card.sv).
+    wire        ovr_en    = boot_ovr_en | hd_ovr_en | vbl_ovr_en;
+    wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_en ? vbl_ovr_addr  : boot_ovr_addr;
+    wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_en ? vbl_ovr_rw    : 1'b1;
+    wire [7:0]  ovr_wdata = hd_ovr_en ? hd_ovr_wdata : vbl_ovr_wdata;
+    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim;
+    wire [7:0]  slot_rd_data  = hd_rd_claim ? hd_rd_data :
+                                fd_rd_claim ? fd_rd_data : mb_rd_data;
 
     apple_bus_write u_write (
         .clk           (apple_clk),
@@ -336,6 +385,44 @@ module master_top #(
         .held          (boot_held),
         .runtime       (hold_runtime)
     );
+
+    // ---- the VBL lock -------------------------------------------------------
+    // The scanner's frame found on the floating bus during the boot hold,
+    // and counted from then on.  See rtl/vbl_lock.sv.
+    vbl_lock u_vbl (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .master_active (cpu_source_active),
+        .held          (boot_held),
+        .runtime       (hold_runtime),
+        .tick          (bus_tick),
+        .op_present    (op_present),
+        .op_ovr        (op_ovr),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .din           (cpu_din),
+        .start         (vbl_start),
+        .probe         (vbl_probe),
+        .probe_addr    (vbl_probe_addr),
+        .notify        (vbl_notify),
+        .ovr_en        (vbl_ovr_en),
+        .ovr_addr      (vbl_ovr_addr),
+        .ovr_rw        (vbl_ovr_rw),
+        .ovr_wdata     (vbl_ovr_wdata),
+        .mark          (vbl_mark),
+        .mark_free     (vbl_mark_free),
+        .state         (vbl_state),
+        .locked        (vbl_locked),
+        .pal           (vbl_pal),
+        .busy          (vbl_busy),
+        .err           (vbl_err),
+        .mismatches    (vbl_stat[15:0]),
+        .slip          (vbl_stat[31:16]),
+        .pos           (vbl_pos[14:0]),
+        .frames        (vbl_pos[23:16]),
+        .locks         (vbl_pos[31:24])
+    );
+    assign vbl_pos[15] = 1'b0;
 
     // ---- keyboard injection -------------------------------------------------
     // The keyboard the core reads: the machine's latch and strobe, with the
@@ -422,6 +509,53 @@ module master_top #(
         .rom_loaded    (hd_rom_loaded),
         .busy          (hd_busy),
         .execs         (hd_execs)
+    );
+
+    // ---- the floppy ---------------------------------------------------------
+    // A Disk II controller and two drives, with the images on the host and
+    // one track of each in the card.  See rtl/floppy_card.sv.
+    floppy_card u_fd (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .cpu_rst       (cpu_rst),
+        .res_sync      (apple_res_sync),
+        .master_active (cpu_source_active),
+        .slot_assign   (fd_slot_active),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_wdata      (op_wdata),
+        .op_present    (op_present),
+        .op_commit     (op_commit),
+        .op_ovr        (op_ovr),
+        .rd_claim      (fd_rd_claim),
+        .rd_data       (fd_rd_data),
+        .msg_valid     (app_msg_valid),
+        .msg_type      (app_msg_type),
+        .msg_free      (app_msg_free),
+        .msg_len       (app_msg_len),
+        .pay_data      (app_pay_data),
+        .pay_valid     (app_pay_valid),
+        .tx_word       (fd_word),
+        .tx_valid      (fd_valid),
+        .tx_take       (fd_take),
+        .drv_inserted  (fd_inserted),
+        .drv_wp        (fd_wp),
+        .drv_nibbles   (fd_nibbles),
+        .drv_tracks    (fd_tracks),
+        .drv_flush     (fd_flush),
+        .late_clr      (fd_late_clr),
+        .fill_clr      (fd_fill_clr),
+        .rom_loaded    (fd_rom_loaded),
+        .stale_o       (fd_stale),
+        .dirty_o       (fd_dirty),
+        .phase_o       (fd_phase),
+        .motor_o       (fd_motor),
+        .drive_sel_o   (fd_drive_sel),
+        .q6_o          (fd_q6),
+        .q7_o          (fd_q7),
+        .seeks         (fd_seeks),
+        .late          (fd_late),
+        .fill_max      (fd_fill_max)
     );
 
     // ---- the Mockingboard ---------------------------------------------------

@@ -23,6 +23,19 @@
 // insertion (docs/PROTOCOL.md case 8), and a half-pushed frame that never
 // completes would hold the link on a 1 KB boundary indefinitely.
 //
+// A MARKED EVENT CUTS THE FRAME.  rtl/vbl_lock.sv raises `ev_mark` with the
+// event of the cycle that is line 0, cycle 0 of the video scanner, and the
+// host has to be told which event that was TO THE EVENT - a notice through
+// its own port lands at the next message boundary, which can be 255 events
+// late.  So the mark is remembered by the event's index, and when the framer
+// reaches that event the BUS_EVENTS message in progress ends BEFORE it, a
+// one-word VBL_MARK goes out through this same port, and the next message
+// begins with the marked event.  The notice is therefore exactly between the
+// last event of one frame and the first of the next, and the host's ring
+// marker takes effect there.  One pending mark is the whole queue: the FIFO
+// is shorter than a frame, so a second marked event cannot be inside it
+// while the first still is; if one ever were it is dropped, not misplaced.
+//
 // THE OUTPUT IS A msg_arb PORT: valid/take, not push/full.  `tx_valid` says
 // `tx_data` is the next word and is a function of this module's state alone -
 // never of `tx_take` - because the arbiter's take is combinational from valid
@@ -46,9 +59,12 @@ module bus_event_capture #(
     input  wire        enable,          // capture on/off (BUS_ENABLE)
     input  wire        status_req,      // send a BUS_STATUS frame
 
-    // event source
+    // event source.  ev_mark with ev_valid: this event is a frame origin;
+    // ev_mark_free rides in the notice's header.
     input  wire [31:0] ev_data,
     input  wire        ev_valid,
+    input  wire        ev_mark,
+    input  wire [15:0] ev_mark_free,
 
     // to msg_arb, as a port of it
     output logic [31:0] tx_data,
@@ -62,6 +78,7 @@ module bus_event_capture #(
 
     localparam [7:0] T_BUS_EVENTS = 8'h12;
     localparam [7:0] T_BUS_STATUS = 8'h13;
+    localparam [7:0] T_VBL_MARK   = 8'h1D;
 
     localparam integer CW = $clog2(DEPTH + 1);
 
@@ -106,7 +123,8 @@ module bus_event_capture #(
                      S_HDR     = 3'd1,
                      S_PAY     = 3'd2,
                      S_ST_HDR  = 3'd3,
-                     S_ST_PAY  = 3'd4;
+                     S_ST_PAY  = 3'd4,
+                     S_MARK    = 3'd5;
 
     logic [2:0] state = S_IDLE;
     logic [7:0] left  = 8'd0;
@@ -118,6 +136,34 @@ module bus_event_capture #(
     // disable - so clearing there reports zero every time.  Measured that way.
 
     wire status_done = (state == S_ST_PAY) && tx_take;
+    wire mark_done   = (state == S_MARK)   && tx_take;
+
+    // ---- the mark ------------------------------------------------------------
+    // The index of the marked event, in the same count `captured` keeps, and
+    // the head of the FIFO in that count; their difference is how many
+    // events the next message may carry before it has to stop.
+    logic          mark_valid;
+    logic [CW-1:0] mark_idx;
+    logic [15:0]   mark_free;
+    wire  [CW-1:0] head_idx  = captured[CW-1:0] - fq_count;
+    wire  [CW-1:0] mark_dist = mark_idx - head_idx;
+    wire           at_mark   = mark_valid && (mark_dist == '0);
+
+    wire accept = enable && ev_valid && !overflow && !fq_full;
+
+    always_ff @(posedge clk) begin
+        if (fifo_rst) begin
+            mark_valid <= 1'b0;
+            mark_idx   <= '0;
+            mark_free  <= 16'd0;
+        end else if (accept && ev_mark && !mark_valid) begin
+            mark_valid <= 1'b1;
+            mark_idx   <= captured[CW-1:0];
+            mark_free  <= ev_mark_free;
+        end else if (mark_done) begin
+            mark_valid <= 1'b0;
+        end
+    end
 
     // ---- overflow and counters ----------------------------------------------
     always_ff @(posedge clk) begin
@@ -166,6 +212,8 @@ module bus_event_capture #(
     wire have_full_frame = (fq_count >= FRAME_EVENTS[CW-1:0]);
     // While draining there is nothing more coming, so do not wait out the timer.
     wire have_partial    = (fq_count != 0) && (flush_due || draining);
+    // A mark in the FIFO: everything before it may go now, so the notice can.
+    wire have_to_mark    = mark_valid && !at_mark;
 
     // Zero-extend before slicing.  fq_count is $clog2(DEPTH+1) bits, which is 12
     // at the default DEPTH but only 7 at the small DEPTH the testbench uses - so
@@ -176,6 +224,15 @@ module bus_event_capture #(
     // Safe to truncate to 8 bits: have_partial only wins when the count is below
     // FRAME_EVENTS, which is 255.
     wire [31:0] fq_count_x = {{(32 - CW){1'b0}}, fq_count};
+    wire [31:0] mark_dist_x = {{(32 - CW){1'b0}}, mark_dist};
+
+    // The next message's length: a full frame, or what is queued, but never
+    // past a marked event - that one starts the message after the notice.
+    logic [7:0] next_len;
+    always_comb begin
+        next_len = have_full_frame ? FRAME_EVENTS[7:0] : fq_count_x[7:0];
+        if (mark_valid && (mark_dist_x < {24'd0, next_len})) next_len = mark_dist_x[7:0];
+    end
 
     // ---- outputs ------------------------------------------------------------
     always_comb begin
@@ -203,6 +260,12 @@ module bus_event_capture #(
                 tx_data  = captured;
                 tx_valid = 1'b1;
             end
+            S_MARK: begin
+                // Header only: the frame count and the standard, from the
+                // module that raised the mark.
+                tx_data  = {mark_free, T_VBL_MARK, 8'd0};
+                tx_valid = 1'b1;
+            end
             default: ;
         endcase
     end
@@ -214,12 +277,14 @@ module bus_event_capture #(
         end else begin
             case (state)
                 S_IDLE: begin
-                    // Status first: an overflow has to reach the host, and it
-                    // must not be queued behind events it invalidates.
-                    // Events before status: the status frame marks the end of
-                    // the capture, so anything still queued has to precede it.
-                    if (fifo_active && (have_full_frame || have_partial)) begin
-                        left  <= have_full_frame ? FRAME_EVENTS[7:0] : fq_count_x[7:0];
+                    // The mark first, when the marked event is at the head:
+                    // the notice belongs before it.  Then events, then
+                    // status: the status frame marks the end of the capture,
+                    // so anything still queued has to precede it.
+                    if (fifo_active && at_mark) begin
+                        state <= S_MARK;
+                    end else if (fifo_active && (have_full_frame || have_partial || have_to_mark)) begin
+                        left  <= next_len;
                         state <= S_HDR;
                     end else if (status_pending && !draining) begin
                         state <= S_ST_HDR;
@@ -235,6 +300,7 @@ module bus_event_capture #(
 
                 S_ST_HDR: if (tx_take) state <= S_ST_PAY;
                 S_ST_PAY: if (tx_take) state <= S_IDLE;
+                S_MARK:   if (tx_take) state <= S_IDLE;
                 default:  state <= S_IDLE;
             endcase
         end

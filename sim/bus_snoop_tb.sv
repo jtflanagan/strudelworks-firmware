@@ -14,6 +14,8 @@
 //   a clean stop FLUSHES what is queued, then stops - a reset is what discards
 //   nothing leaks from one capture into the next
 //   overflow stops capture, reports itself, and ends on a frame boundary
+//   a MARKED event cuts the frame before it: the VBL_MARK notice is one word
+//   between the two frames, and the next frame begins with the marked event
 //
 // The tb decodes the outgoing block stream the same way the host will, which is
 // what makes "well formed" a real assertion rather than a spot check.
@@ -27,6 +29,7 @@ module bus_snoop_tb;
 
     localparam [7:0] T_BUS_EVENTS = 8'h12;
     localparam [7:0] T_BUS_STATUS = 8'h13;
+    localparam [7:0] T_VBL_MARK   = 8'h1D;
 
     reg clk = 0, rst = 1;
     always #5 clk = ~clk;
@@ -35,6 +38,8 @@ module bus_snoop_tb;
     reg         status_req = 1'b0;
     reg  [31:0] ev_data    = 32'd0;
     reg         ev_valid   = 1'b0;
+    reg         ev_mark    = 1'b0;
+    reg  [15:0] ev_mark_free = 16'd0;
     reg         tx_full    = 1'b0;
 
     wire [31:0] tx_data;
@@ -51,6 +56,7 @@ module bus_snoop_tb;
         .clk (clk), .rst (rst),
         .enable (enable), .status_req (status_req),
         .ev_data (ev_data), .ev_valid (ev_valid),
+        .ev_mark (ev_mark), .ev_mark_free (ev_mark_free),
         .tx_data (tx_data), .tx_valid (tx_valid), .tx_take (tx_take),
         .overflow (overflow), .captured (captured)
     );
@@ -69,6 +75,15 @@ module bus_snoop_tb;
     reg [31:0] expect_ev = 32'd0;
     reg        have_expect = 1'b0;
     reg        in_status = 1'b0;
+    // The marks: how many notices, what the last carried, and the event
+    // that followed each one - which must be the marked one, at the start
+    // of a frame.
+    integer    n_marks = 0;
+    reg [15:0] last_mark_free = 16'd0;
+    reg        after_mark = 1'b0;      // the next payload word must start a frame
+    reg        frame_first = 1'b0;     // the next payload word is a frame's first
+    reg [31:0] after_mark_ev = 32'd0;
+    integer    mark_misplaced = 0;
 
     always @(posedge clk) if (!rst && tx_valid && tx_take) begin
         if (blocks_left == 0) begin
@@ -79,6 +94,7 @@ module bus_snoop_tb;
                     last_frame_len = tx_data[7:0];
                     blocks_left    = tx_data[7:0];
                     in_status      = 1'b0;
+                    frame_first    = 1'b1;
                     if (tx_data[7:0] == 0) begin
                         $display("FAIL: BUS_EVENTS frame with len 0");
                         errors = errors + 1;
@@ -89,6 +105,19 @@ module bus_snoop_tb;
                     last_status_overflow = tx_data[16];
                     blocks_left          = tx_data[7:0];
                     in_status            = 1'b1;
+                end
+                T_VBL_MARK: begin
+                    n_marks        = n_marks + 1;
+                    last_mark_free = tx_data[31:16];
+                    after_mark     = 1'b1;
+                    if (tx_data[7:0] != 0) begin
+                        $display("FAIL: VBL_MARK with a payload");
+                        errors = errors + 1;
+                    end
+                    // A mark must fall on a frame boundary of its own: the
+                    // header before it was a complete frame (blocks_left is
+                    // 0 here by construction) - and the frame after must
+                    // begin with the marked event.
                 end
                 default: begin
                     $display("FAIL: unknown outgoing type %02x (block %08x)",
@@ -103,6 +132,14 @@ module bus_snoop_tb;
             end else begin
                 // Payload event: must follow its predecessor exactly.
                 n_events = n_events + 1;
+                if (after_mark) begin
+                    // The first event after a notice: recorded, and it has
+                    // to be a frame's first word.
+                    after_mark_ev = tx_data;
+                    if (!frame_first) mark_misplaced = mark_misplaced + 1;
+                    after_mark = 1'b0;
+                end
+                frame_first = 1'b0;
                 if (have_expect && tx_data !== expect_ev) begin
                     if (errors < 6) begin
                         $display("FAIL: event out of order - expected %08x got %08x",
@@ -135,6 +172,20 @@ module bus_snoop_tb;
 
     task settle;
         begin repeat (FLUSH_TICKS * 3) @(posedge clk); end
+    endtask
+
+    // One marked event, then n - 1 plain ones after it.
+    task send_marked(input integer n, input [15:0] free);
+        integer k;
+        begin
+            @(negedge clk);
+            ev_data  = src; src = src + 1;
+            ev_valid = 1'b1; ev_mark = 1'b1; ev_mark_free = free;
+            @(negedge clk);
+            ev_valid = 1'b0; ev_mark = 1'b0;
+            repeat (2) @(posedge clk);
+            send_events(n - 1);
+        end
     endtask
 
     task check(input integer got, input integer want, input string what);
@@ -252,6 +303,74 @@ module bus_snoop_tb;
             errors = errors + 1;
         end else $display("  ok: BUS_STATUS carried a captured count (%0d)",
                           last_status_count);
+
+        // --- a marked event cuts the frame before it -------------------------
+        // Re-enable: the overflow above stopped the capture.
+        @(negedge clk); enable = 1'b0; settle;
+        @(negedge clk); enable = 1'b1; settle;
+        have_expect = 1'b0;
+        mark_ev = n_events; mark_fr = n_frames; n_marks = 0; mark_misplaced = 0;
+        // Three events queued, then the marked one and two more: the three
+        // go out at once as a short frame (no waiting for the timer), the
+        // notice follows, and the marked event starts the next frame.
+        send_events(3);
+        send_marked(3, 16'h2A01);
+        settle;
+        check(n_marks, 1, "one VBL_MARK notice");
+        check(n_frames - mark_fr, 2, "frames around the mark");
+        check(n_events - mark_ev, 6, "events around the mark");
+        if (last_mark_free !== 16'h2A01) begin
+            $display("FAIL: the notice carried free=%04x, expected 2a01", last_mark_free);
+            errors = errors + 1;
+        end else $display("  ok: the notice carries the mark's free bits");
+        if (mark_misplaced != 0 || after_mark_ev !== src - 3) begin
+            $display("FAIL: the event after the notice is not the marked one at a frame's start");
+            errors = errors + 1;
+        end else $display("  ok: the marked event is the first word of the frame after the notice");
+
+        // A mark inside what would have been one full frame: the frame is
+        // cut short before it, and the rest follows.
+        mark_ev = n_events; mark_fr = n_frames; n_marks = 0;
+        send_events(FRAME_EVENTS - 2);
+        send_marked(FRAME_EVENTS + 2, 16'h0100);
+        settle;
+        check(n_marks, 1, "one notice inside a full frame's worth");
+        check(n_events - mark_ev, 2 * FRAME_EVENTS, "events conserved across the cut");
+        if (mark_misplaced != 0) begin
+            $display("FAIL: the cut did not put the marked event at a frame's start");
+            errors = errors + 1;
+        end else $display("  ok: a full frame is cut short before the marked event");
+
+        // A mark at the very head, nothing queued before it: the notice goes
+        // out at once, the event waits for the timer like any other.
+        mark_ev = n_events; n_marks = 0;
+        send_marked(1, 16'h0002);
+        repeat (20) @(posedge clk);
+        check(n_marks, 1, "a notice with nothing queued before the mark goes at once");
+        check(n_events - mark_ev, 0, "the marked event itself waits for the timer");
+        settle;
+        check(n_events - mark_ev, 1, "...and is flushed by it");
+        if (mark_misplaced != 0) begin
+            $display("FAIL: the lone marked event did not start its frame");
+            errors = errors + 1;
+        end
+
+        // A mark under back pressure waits its turn and lands in the same
+        // place.
+        mark_ev = n_events; n_marks = 0;
+        @(negedge clk); tx_full = 1'b1;
+        send_events(4);
+        send_marked(4, 16'h0003);
+        repeat (FLUSH_TICKS) @(posedge clk);
+        check(n_marks, 0, "no notice while tx_full");
+        @(negedge clk); tx_full = 1'b0;
+        settle;
+        check(n_marks, 1, "the notice after the back pressure");
+        check(n_events - mark_ev, 8, "events conserved through it");
+        if (mark_misplaced != 0) begin
+            $display("FAIL: back pressure moved the mark");
+            errors = errors + 1;
+        end else $display("  ok: back pressure delays the notice and does not move it");
 
         // --- a frame is never left half-emitted ------------------------------
         if (blocks_left != 0) begin

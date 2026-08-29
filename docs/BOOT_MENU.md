@@ -245,6 +245,21 @@ which owns the transport, drives the rest over a few polls: it asks the
 controller at the new slot, writes `MB_SLOT` and `HD_SLOT`, and writes the
 release. A few polls of latency cost nothing against a machine that is parked.
 
+## The scanner is found while the machine is parked
+
+The hold is also when the card finds the video scanner (VBL.md): the host
+writes `VBL_CTRL.start` on every `CPU_HOLD` from the boot door, and for the
+next sixty milliseconds the cycles the hold would spend on keyboard reads
+are the detector's instead - seven soft-switch accesses, 960 writes that
+fill the text page with a picture the ROM is about to clear anyway, then
+reads of the floating bus until the frame is found. `vbl_lock`'s override
+sits above the hold's in `master_top`'s mux, and the hold acts only on
+cycles it recognises as its own, so the two interleave the way the disk's
+DMA and the hold already do. A key pressed meanwhile waits in the IOU's
+latch. The host does not release the hold while the detection is running
+(`Pipeline::drive_apply` waits at its register phase). The runtime door
+never runs it: a program's memory is not the card's to write.
+
 ## What it still does not do, and how it would
 
 - **Draw on the Apple's own screen.** The same hold, plus a host→card queue of

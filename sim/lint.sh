@@ -71,6 +71,12 @@ run kbd_notice    rtl/kbd_notice.sv
 run pb_inject     rtl/pb_inject.sv
 run slot_switches rtl/slot_switches.sv
 run hd_card       rtl/hd_card.sv rtl/slot_switches.sv
+# fd_bank is the two-process true-dual-port RAM template Vivado infers block
+# RAM from (UG901); Verilator reads its two writers as a multi-driven array,
+# which is the shape, not a bug.
+run floppy_card   rtl/floppy_card.sv rtl/fd_bank.sv rtl/slot_switches.sv \
+                  -Wno-MULTIDRIVEN
+run vbl_lock      rtl/vbl_lock.sv
 # via6522 is third-party (see its header) and linted only as a dependency of
 # the mockingboard, with the style warnings its 2011 idiom trips suppressed
 # rather than fixed - it ran real machines as-is, and diverging from the

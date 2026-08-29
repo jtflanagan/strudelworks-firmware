@@ -67,9 +67,14 @@ module card_link #(
     output wire        capture_on,
     output wire        capture_real,
 
-    // The top's event stream, already in the wire format.
+    // The top's event stream, already in the wire format - and, with an
+    // event, the mark that says it is a frame origin (rtl/vbl_lock.sv):
+    // the capture cuts its message there and sends the VBL_MARK notice
+    // between.  A watching top ties the mark to 0.
     input  wire [31:0] real_data,
     input  wire        real_valid,
+    input  wire        real_mark,
+    input  wire [15:0] real_mark_free,
     input  wire        phi0_live,
 
     // Synchronised RES', for the CPU_SOURCE latch, and what it latched.
@@ -105,6 +110,26 @@ module card_link #(
     input  wire        hd_busy,
     input  wire [7:0]  hd_execs,
 
+    // The floppy (rtl/floppy_card.sv): its slot latched like the disk's,
+    // the drives' contents live from FD_DRIVE1/2, and the controller's
+    // state back for the readback.  A watching top ties the inputs to 0.
+    output wire [2:0]  fd_slot_active,
+    input  wire        fd_rom_loaded,
+    input  wire [7:0]  fd_seeks,
+    output wire [1:0]  fd_inserted,
+    output wire [1:0]  fd_wp,
+    output wire [25:0] fd_nibbles,
+    output wire [11:0] fd_tracks,
+    output wire [1:0]  fd_flush,
+    input  wire [1:0]  fd_stale,
+    input  wire [1:0]  fd_dirty,
+    input  wire [13:0] fd_phase,
+    input  wire [3:0]  fd_ctl,
+    input  wire [7:0]  fd_late,
+    input  wire [15:0] fd_fill_max,
+    output wire        fd_late_clr,
+    output wire        fd_fill_clr,
+
     // Keyboard injection (rtl/kbd_inject.sv, in a mastering top): the
     // KBD_INJECT register's press and drop pulses and the key out, the
     // KBD_CTRL lock out; the flags {touched, seen, strobe}, the counts
@@ -124,6 +149,21 @@ module card_link #(
     // the hardware's levels back.  A watching top ties the input to 0.
     output wire [5:0]  pb_override,
     input  wire [2:0]  pb_hw,
+
+    // The VBL lock (rtl/vbl_lock.sv): VBL_CTRL's pulses and levels out, the
+    // detector's state back for the readback.  A watching top ties the
+    // inputs to 0 and leaves the outputs unconnected.
+    output wire        vbl_start,
+    output wire        vbl_probe,
+    output wire        vbl_notify,
+    output wire [15:0] vbl_probe_addr,
+    input  wire [3:0]  vbl_state,
+    input  wire        vbl_locked,
+    input  wire        vbl_pal,
+    input  wire        vbl_busy,
+    input  wire [3:0]  vbl_err,
+    input  wire [31:0] vbl_stat,
+    input  wire [31:0] vbl_pos,
 
     // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
     // mastering top wires it to the pin; a snooper leaves it unconnected.
@@ -146,6 +186,12 @@ module card_link #(
     input  wire [31:0] aux_word,
     input  wire        aux_valid,
     output wire        aux_take,
+
+    // ...and a second, the floppy's (FD_SEEK, FD_DIRTY), below the disk's
+    // and above the capture.  A watching top ties fd_valid low.
+    input  wire [31:0] fd_word,
+    input  wire        fd_valid,
+    output wire        fd_take,
 
     // FT601 (constr/ft601.xdc)
     input  wire        ft_clk,
@@ -532,6 +578,8 @@ module card_link #(
 
     wire [31:0] ev_data  = source_real ? real_data  : synth_data;
     wire        ev_valid = source_real ? real_valid : synth_valid;
+    // The synthetic source has no scanner, so no frame to mark.
+    wire        ev_mark  = source_real && real_mark;
 
     wire        overflow;
     wire [31:0] captured;
@@ -543,6 +591,8 @@ module card_link #(
         .status_req (status_req),
         .ev_data    (ev_data),
         .ev_valid   (ev_valid),
+        .ev_mark    (ev_mark),
+        .ev_mark_free (real_mark_free),
         .tx_data    (cap_word),
         .tx_valid   (cap_valid),
         .tx_take    (cap_take),
@@ -603,6 +653,22 @@ module card_link #(
         .hd_rom_loaded     (hd_rom_loaded),
         .hd_busy        (hd_busy),
         .hd_execs          (hd_execs),
+        .fd_slot_active    (fd_slot_active),
+        .fd_rom_loaded     (fd_rom_loaded),
+        .fd_seeks          (fd_seeks),
+        .fd_inserted       (fd_inserted),
+        .fd_wp             (fd_wp),
+        .fd_nibbles        (fd_nibbles),
+        .fd_tracks         (fd_tracks),
+        .fd_flush          (fd_flush),
+        .fd_stale          (fd_stale),
+        .fd_dirty          (fd_dirty),
+        .fd_phase          (fd_phase),
+        .fd_ctl            (fd_ctl),
+        .fd_late           (fd_late),
+        .fd_fill_max       (fd_fill_max),
+        .fd_late_clr       (fd_late_clr),
+        .fd_fill_clr       (fd_fill_clr),
         .kbd_press         (kbd_press),
         .kbd_press_key     (kbd_press_key),
         .kbd_drop          (kbd_drop),
@@ -612,6 +678,17 @@ module card_link #(
         .kbd_counts        (kbd_counts),
         .pb_override       (pb_override),
         .pb_hw             (pb_hw),
+        .vbl_start         (vbl_start),
+        .vbl_probe         (vbl_probe),
+        .vbl_notify        (vbl_notify),
+        .vbl_probe_addr    (vbl_probe_addr),
+        .vbl_state         (vbl_state),
+        .vbl_locked        (vbl_locked),
+        .vbl_pal           (vbl_pal),
+        .vbl_busy          (vbl_busy),
+        .vbl_err           (vbl_err),
+        .vbl_stat          (vbl_stat),
+        .vbl_pos           (vbl_pos),
         .res_drive         (res_drive),
         .ring_status       (ring_status),
         .wb_cyc   (rwb_cyc),
@@ -681,15 +758,16 @@ module card_link #(
     );
 
     // ---- the message bus ---------------------------------------------------
-    // A 32-bit Wishbone with five masters, in priority order: a register
+    // A 32-bit Wishbone with six masters, in priority order: a register
     // reply, the CPU_HOLD notice, the KBD_EVENT notice, the top's
-    // application message, the capture.  Each source is a stream, and
-    // msg_master makes it a master that holds CYC across its message;
-    // msg_arb grants per CYC; tx_ring is the one slave.  Everything above
-    // the capture is rate-bounded by the host or the bus; the capture is the
-    // one continuous source and goes last.  See msg_arb for why that order
-    // is load-bearing.
-    localparam integer N_SRC = 5;
+    // application message (the disk's), the floppy's, the capture.  Each
+    // source is a stream, and msg_master makes it a master that holds CYC
+    // across its message; msg_arb grants per CYC; tx_ring is the one slave.
+    // Everything above the capture is rate-bounded by the host or the bus -
+    // the floppy's by the machine's own head movements and writes; the
+    // capture is the one continuous source and goes last.  See msg_arb for
+    // why that order is load-bearing.
+    localparam integer N_SRC = 6;
 
     wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
     wire [N_SRC*32-1:0] mb_adr, mb_dat;
@@ -726,9 +804,13 @@ module card_link #(
     assign ms_valid[3]         = aux_valid;
     assign aux_take            = ms_take[3];
 
-    assign ms_word[4*32 +: 32] = cap_word;
-    assign ms_valid[4]         = cap_valid;
-    assign cap_take            = ms_take[4];
+    assign ms_word[4*32 +: 32] = fd_word;
+    assign ms_valid[4]         = fd_valid;
+    assign fd_take             = ms_take[4];
+
+    assign ms_word[5*32 +: 32] = cap_word;
+    assign ms_valid[5]         = cap_valid;
+    assign cap_take            = ms_take[5];
 
     genvar gm;
     generate

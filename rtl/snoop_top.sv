@@ -87,6 +87,7 @@ module snoop_top #(
         .apple_clk (apple_clk), .apple_rst (apple_rst),
         .capture_on (capture_on), .capture_real (capture_real),
         .real_data (real_data), .real_valid (real_valid),
+        .real_mark (1'b0), .real_mark_free (16'd0),   // no scanner lock without a CPU
         .phi0_live (phi0_live),
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (),          // nothing here can act on it
@@ -96,14 +97,23 @@ module snoop_top #(
         .menu_en (), .menu_hotkey (), .menu_trigger (),
         .hd_slot_active (),             // nor answer for a hard disk
         .hd_rom_loaded (1'b0), .hd_busy (1'b0), .hd_execs (8'd0),
+        .fd_slot_active (),             // nor for a floppy
+        .fd_rom_loaded (1'b0), .fd_seeks (8'd0),
+        .fd_inserted (), .fd_wp (), .fd_nibbles (), .fd_tracks (), .fd_flush (),
+        .fd_stale (2'd0), .fd_dirty (2'd0), .fd_phase (14'd0), .fd_ctl (4'd0),
+        .fd_late (8'd0), .fd_fill_max (16'd0), .fd_late_clr (), .fd_fill_clr (),
         .kbd_press (), .kbd_press_key (), .kbd_drop (),   // nor type at it
         .kbd_lock (), .kbd_flags (3'd0), .kbd_counts (32'd0),
         .kbd_resolved_key (7'd0), .kbd_changed (1'b0),
         .pb_override (), .pb_hw (3'd0),                  // nor press a button
+        .vbl_start (), .vbl_probe (), .vbl_notify (), .vbl_probe_addr (),
+        .vbl_state (4'd0), .vbl_locked (1'b0), .vbl_pal (1'b0), .vbl_busy (1'b0),
+        .vbl_err (4'd0), .vbl_stat (32'd0), .vbl_pos (32'd0),   // nor find the beam
         .res_drive (),
         .app_msg_valid (), .app_msg_type (), .app_msg_free (),
         .app_msg_len (), .app_pay_data (), .app_pay_valid (),
         .aux_word (32'd0), .aux_valid (1'b0), .aux_take (),
+        .fd_word (32'd0), .fd_valid (1'b0), .fd_take (),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),
@@ -139,6 +149,7 @@ module snoop_top #(
         .apple_dma_pin     (apple_dma_pin),
         .ev_data           (real_data),
         .ev_valid          (real_valid),
+        .data_tick         (),
         .sync_override     (1'b0),
         .sync_override_en  (1'b0),   // the instrument reports only what it saw
         .data_override     (8'h00),

@@ -105,6 +105,12 @@ module apple_bus_read #(
     // one event per phi0 cycle
     output logic [31:0] ev_data,
     output logic        ev_valid,
+    // ...and the same pulse UNGATED: one per phi0 cycle at the data sample
+    // whether or not anyone is capturing.  rtl/vbl_lock.sv counts the
+    // machine's cycles on it, so its counter never stops with the capture
+    // and never has to be resynchronised after one.  On the clock this is
+    // high, ev_valid (if enabled) carries the same cycle's event.
+    output logic        data_tick,
 
     // for the UART report: is there a machine out there at all?
     // Synchronised RES', ACTIVE LOW, straight off the pin.  An output rather
@@ -193,11 +199,13 @@ module apple_bus_read #(
             ctl_q       <= 4'd0;
             ev_data     <= 32'd0;
             ev_valid    <= 1'b0;
+            data_tick   <= 1'b0;
             live_cnt    <= '0;
             phi0_active <= 1'b0;
         end else begin
             prev_phi0 <= phi0;
             ev_valid  <= 1'b0;
+            data_tick <= data_snap;
 
             addr_pipe <= {addr_pipe[ADDR_TAP-1:0], addr_edge};
             data_pipe <= {data_pipe[DATA_TAP-1:0], data_edge};
