@@ -69,7 +69,15 @@ module event_merge #(
     // are gated at the source rather than dropped here: `overflows` keeps
     // meaning something.  Registered, one clock stale; the margin below
     // covers the staleness.
-    output logic        fev_room
+    output logic        fev_room,
+
+    // The DMA line-drain's words (tag 0xB, self-describing - see
+    // docs/HARDDISK.md): pushed one per clock when there is room, behind
+    // the bus's word and the fast op's if either wants the same clock.
+    // dma_take is the acceptance; the drain paces itself on it.
+    input  wire [31:0]  dma_word,
+    input  wire         dma_valid,
+    output wire         dma_take
 );
 
     localparam [3:0] T_FAST = 4'hC;
@@ -84,14 +92,21 @@ module event_merge #(
     wire          empty = (wp == rp);
     wire  [AW:0]  room  = (AW+1)'(DEPTH) - count;
 
-    // Two writers a clock at most: the bus's word first, then the fast op's.
+    // Three writers a clock at most: the bus's word first, then the fast
+    // op's, then the drain's - which needs the most headroom, so a full
+    // FIFO sheds nothing that matters (the drain simply waits).
     wire push_bus  = enable && bus_valid;
     wire push_fast = enable && fast_valid;
     wire [AW:0] need = push_bus ? (AW+1)'(2) : (AW+1)'(1);
     wire fast_fits = room >= need;
     wire take_fast = push_fast && fast_fits;
+    wire [AW:0] dneed = need + (take_fast ? (AW+1)'(1) : (AW+1)'(0));
+    assign dma_take = enable && dma_valid && (room > dneed);
     wire [AW-1:0] wp_fast = wp[AW-1:0] + (push_bus ? (AW)'(1) : (AW)'(0));
-    wire [AW:0]   pushed  = (push_bus ? (AW+1)'(1) : (AW+1)'(0)) + (take_fast ? (AW+1)'(1) : (AW+1)'(0));
+    wire [AW-1:0] wp_dma  = wp_fast + (take_fast ? (AW)'(1) : (AW)'(0));
+    wire [AW:0]   pushed  = (push_bus ? (AW+1)'(1) : (AW+1)'(0)) +
+                            (take_fast ? (AW+1)'(1) : (AW+1)'(0)) +
+                            (dma_take ? (AW+1)'(1) : (AW+1)'(0));
 
     logic [1:0] spacing;                        // clocks until the next pop may go
 
@@ -106,6 +121,7 @@ module event_merge #(
             // ---- push -----------------------------------------------------------
             if (push_bus)  q[wp[AW-1:0]] <= {bus_dummy, bus_mark_free, bus_mark, bus_data};
             if (take_fast) q[wp_fast]    <= {1'b0, 16'd0, 1'b0, fast_word};
+            if (dma_take)  q[wp_dma]     <= {1'b0, 16'd0, 1'b0, dma_word};
             wp <= wp + pushed;
             if (push_fast && !fast_fits) overflows <= overflows + 8'd1;
 

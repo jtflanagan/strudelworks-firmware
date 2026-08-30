@@ -132,6 +132,14 @@ module fb_sim (
     input  wire        cnt_clr,
     input  wire [14:0] peek_addr,    // [14] 0 = text page + [10:0], 1 = hi-res + [13:0]
 
+    // The DMA line-drain's bytes, trickled during line assembly
+    // (docs/HARDDISK.md): a second writer into the side copy.  A classified
+    // op's write wins the clock; fb2_ready says the drain's byte went.
+    input  wire        fb2_we,
+    input  wire [15:0] fb2_addr,     // main-image pa[15:0]
+    input  wire [7:0]  fb2_data,
+    output wire        fb2_ready,
+
     // To master_top's din_sub mux.
     output wire        sub_en,
     output wire [7:0]  sub_data,
@@ -169,12 +177,18 @@ module fb_sim (
     logic [13:0] h_waddr;
     logic [7:0]  wdata;
 
+    // The drain's byte, when the op path is not writing this clock.
+    wire fb2_text = fb2_we && (fb2_addr[15:12] == 4'h0) &&
+                    (fb2_addr[11] ^ fb2_addr[10]);
+    wire fb2_hgr  = fb2_we && !fb2_addr[15] && (fb2_addr[14] ^ fb2_addr[13]);
+    assign fb2_ready = !wr_main;
+
     always_ff @(posedge clk) begin
-        t_we    <= wr_text;
-        h_we    <= wr_hgr;
-        t_waddr <= {pa[11], pa[9:0]};
-        h_waddr <= {pa[14], pa[12:0]};
-        wdata   <= op_wdata;
+        t_we    <= wr_text || (fb2_text && !wr_main);
+        h_we    <= wr_hgr  || (fb2_hgr  && !wr_main);
+        t_waddr <= wr_main ? {pa[11], pa[9:0]}   : {fb2_addr[11], fb2_addr[9:0]};
+        h_waddr <= wr_main ? {pa[14], pa[12:0]}  : {fb2_addr[14], fb2_addr[12:0]};
+        wdata   <= wr_main ? op_wdata : fb2_data;
     end
 
     // ---- the prediction ---------------------------------------------------------

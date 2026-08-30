@@ -101,8 +101,14 @@ module bus_event_filter #(
 
     localparam [3:0] T_SKIP = 4'hD;
     localparam [3:0] T_FAST = 4'hC;
+    localparam [3:0] T_DMAL = 4'hB;     // a DMA-line word (docs/HARDDISK.md)
 
     wire in_fast = (in_data[31:28] == T_FAST);
+    // A DMA-line word: part of a drained block's line, self-describing by
+    // its sequence nibble.  Like a fast op it is not a cycle - never
+    // counted, never consulted for the edge rule - and it is ALWAYS kept:
+    // it is a write's worth of mirror state in both modes.
+    wire in_dmal = (in_data[31:28] == T_DMAL);
     wire in_vbl = in_data[19];
     wire in_res = in_data[17];
     wire in_rw  = in_data[16];
@@ -120,11 +126,13 @@ module bus_event_filter #(
     logic [15:0] hold_free  = '0;
 
     wire on_edge = first || in_mark || (in_vbl != prev_vbl) || (in_res != prev_res);
-    wire keep = in_fast  ? (!sparse || !in_rw) :
+    wire keep = in_dmal  ? 1'b1 :
+                in_fast  ? (!sparse || !in_rw) :
                 in_dummy ? on_edge :
                            (!sparse || on_edge || in_io || !in_rw);
-    // A fast op is not a cycle: it neither counts nor moves the edge rule.
-    wire cycle = in_valid && !in_fast;
+    // A fast op or a DMA-line word is not a cycle: it neither counts nor
+    // moves the edge rule.
+    wire cycle = in_valid && !in_fast && !in_dmal;
 
     always_ff @(posedge clk) begin
         out_valid <= 1'b0;

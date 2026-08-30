@@ -121,6 +121,50 @@ The host refuses a DMA that touches `$C000-$CFFF`, as AppleWin does (its
 where the machine's own MMU sends it - a read into language-card RAM lands in
 language-card RAM - which is better than AppleWin, not worse.
 
+## The line drain: DMA in the closed regime
+
+With the core accelerated in mode 2 and the card serving, every write is
+the image's and the bus never sees one - so a block does not ride the bus
+either.  `fast_dma` routes an HD_DONE's bytes through the DRAIN instead of
+S_DMA_W: line at a time, each line's bytes gathered from the buffer one
+per clock into a 128-bit register with an accumulating byte-enable mask
+(alignment and trimming are the mask; there is no barrel shifter), the
+page translated once per 256-byte page through the MMU's t2 query (a
+map change re-translates), and then, in an order that makes every
+post-busy read fill BEHIND the write in mem_client's one in-order queue:
+the line write, the L2 per-line invalidate, the icache snoop.  fb_sim's
+shadow takes each byte during the gather.  `busy` releases at the last
+line - anything the machine does after its poll queues behind the
+drain's writes by construction.  A machine-side access to the target
+region CONCURRENT with the drain is a program error and undefined, as
+it is with real DMA hardware.  Modes 0 and 1, and HD_FETCH, keep the
+byte-per-bus-cycle override path bit for bit.
+
+The host's mirror learns of each line from SEVEN self-describing stream
+words, tag 0xB, sequence in the next nibble, pushed through the event
+merge one at a time as room allows (and skipped entirely when the
+capture is off):
+
+    W0  {4'hB, 4'd0, addr[15:0], be[15:8]}     the line's base address
+    W1  {4'hB, 4'd1, be[7:0],  d[127:112]}
+    W2  {4'hB, 4'd2, d[111:88]}
+    W3  {4'hB, 4'd3, d[87:64]}
+    W4  {4'hB, 4'd4, d[63:40]}
+    W5  {4'hB, 4'd5, d[39:16]}
+    W6  {4'hB, 4'd6, d[15:0], 8'd0}
+
+d[8k+7:8k] is the line's byte k (base+k); only bytes whose BE bit is set
+are real - the rest are stale gather residue and must not be applied.
+Words are self-describing so other events may interleave between them;
+the host buffers the group and applies it when W6 arrives, classifying
+each byte's address under its mirror's switches at that stream position
+- which drops exactly the bytes the card dropped (write-protected LC,
+non-image pages).  Ordering against a concurrent machine write to the
+SAME bytes is the undefined corner above; disjoint bytes commute.
+
+At ~21 clocks a line through the merge's spacing, a 512-byte block
+drains in ~7 microseconds against the ~500 the bus path costs.
+
 ## The messages
 
 | type | name | direction | payload |

@@ -88,6 +88,16 @@ module card_link #(
     input  wire        fast_vbl,
     output wire [7:0]  merge_overflows,
     output wire        fev_room,       // headroom for turbo events; see event_merge
+    // The DMA line-drain's stream words (tag 0xB), from hd_card's engine.
+    input  wire [31:0] dma_ev_word,
+    input  wire        dma_ev_valid,
+    output wire        dma_ev_take,
+    // The drain's line writes toward mem_client's queue, same crossing as mq.
+    input  wire        hd_dq_valid,
+    input  wire [19:0] hd_dq_line,
+    input  wire [15:0] hd_dq_be,
+    input  wire [127:0] hd_dq_data,
+    output wire        hd_dq_ready,
     input  wire        phi0_live,
 
     // Synchronised RES', for the CPU_SOURCE latch, and what it latched.
@@ -780,7 +790,10 @@ module card_link #(
         .out_mark_free (mg_mark_free),
         .out_dummy     (mg_dummy),
         .overflows     (merge_overflows),
-        .fev_room      (fev_room)
+        .fev_room      (fev_room),
+        .dma_word      (dma_ev_word),
+        .dma_valid     (dma_ev_valid),
+        .dma_take      (dma_ev_take)
     );
 
     // The filter, always in the path: a wire in full mode, the keep rule
@@ -1194,6 +1207,8 @@ module card_link #(
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id),
         .mq_line (mq_line), .mq_byte (mq_byte), .mq_data (mq_data),
         .mq_ready (mq_ready),
+        .dq_valid (hd_dq_valid), .dq_line (hd_dq_line), .dq_be (hd_dq_be),
+        .dq_data (hd_dq_data), .dq_ready (hd_dq_ready),
         .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
         .req   (c_req[2]),  .gnt (c_gnt[2]),  .cyc (c_cyc[2]),
         .stb   (c_stb[2]),  .we (c_we[2]),

@@ -289,6 +289,7 @@ module mem_ddr3_tb;
         .accel (1'b0),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
         .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
+        .dq_valid (1'b0), .dq_line (20'd0), .dq_be (16'd0), .dq_data (128'd0), .dq_ready (),
         .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
         .req (c_req[2]), .gnt (c_gnt[2]), .cyc (c_cyc[2]), .stb (c_stb[2]),
         .we (c_we[2]), .addr (c_addr[3*WB_ADDR_BITS-1:2*WB_ADDR_BITS]),

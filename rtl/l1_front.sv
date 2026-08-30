@@ -96,6 +96,11 @@ module l1_front (
     input  wire        cl_rw,
     input  wire        cl_wr_image,
     input  wire [23:0] cl_pa,
+    // ...and the DMA drain's lines, second in line: the op's snoop wins a
+    // same-clock collision and the drain waits (snoop2_take says it went).
+    input  wire        snoop2_en,
+    input  wire [23:0] snoop2_pa,
+    output wire        snoop2_take,
 
     // The flash triggers.
     input  wire        mem_invalidating,
@@ -192,9 +197,11 @@ module l1_front (
         .inst_en   (inst_en),
         .inst_pa   (inst_pa),
         .inst_line (inst_line),
-        .snoop_en  (cl_valid && !cl_rw && cl_wr_image),
-        .snoop_pa  (cl_pa)
+        .snoop_en  (cl_snoop || snoop2_en),
+        .snoop_pa  (cl_snoop ? cl_pa : snoop2_pa)
     );
+    wire cl_snoop = cl_valid && !cl_rw && cl_wr_image;
+    assign snoop2_take = snoop2_en && !cl_snoop;
 
     // ---- the turbo op -------------------------------------------------------
     wire servable = cyc_is_i && page_match && lp_ok;

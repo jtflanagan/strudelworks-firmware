@@ -275,6 +275,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .data_sync (data_sync),
         .slot_rd_claim (1'b0), .kbd_sub_en (1'b0), .pb_sub_en (1'b0),
         .serve (fb_serve), .cnt_clr (fb_cnt_clr), .peek_addr (peek_addr),
+        .fb2_we (1'b0), .fb2_addr (16'd0), .fb2_data (8'd0), .fb2_ready (),
         .sub_en (sub_en), .sub_data (sub_data),
         .mode (mode), .compared (compared), .mismatches (mismatches),
         .last (last), .last2 (last2), .other (other), .peek_data (peek_data)

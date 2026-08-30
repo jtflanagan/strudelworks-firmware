@@ -114,6 +114,15 @@ module mem_cache #(
     // Control and status, from MEM_CTRL / to MEM_STAT.
     input  wire        serve,          // all-or-nothing: serve every cacheable class, or none
     input  wire        inval,          // pulse: invalidate every line
+    // One line invalidated on request (the DMA drain's): taken in an idle
+    // window, three clocks, sharing no port with an op's read.  A read of
+    // the very line CONCURRENT with the drain is the mid-DMA overlap corner
+    // (program error, undefined - docs/HARDDISK.md); a read after busy
+    // drops misses here and fills from the DDR3 the same in-order queue
+    // just wrote, and is fresh by construction.
+    input  wire        inv_line_en,
+    input  wire [23:0] inv_line_pa,
+    output wire        inv_line_rdy,
     input  wire        cnt_clr,        // pulse: clear the counters
     input  wire        image_ready,
     output logic       invalidating,
@@ -196,9 +205,24 @@ module mem_cache #(
         if (tag_we) tags[tag_waddr] <= tag_wdata;
     end
     always_ff @(posedge clk) begin
-        if (cl_valid) tag_q <= tags[set_in];
+        if (cl_valid)      tag_q <= tags[set_in];
+        else if (li_rd_en) tag_q <= tags[inv_line_pa[IW+3:4]];
         tag_rd <= tag_q;
     end
+
+    // ---- one line, invalidated on request ------------------------------------
+    // IDLE -> RD (the set's word lands in tag_q) -> WR (it is in tag_rd:
+    // clear any way holding the line, write it back).  Starts only with the
+    // pipeline empty, so tag_q/tag_rd are free; an op arriving mid-sequence
+    // reads the tag RAM's other port and is untouched.
+    typedef enum logic [1:0] {LI_IDLE, LI_RD, LI_WR} li_t;
+    li_t li_st;
+    logic [IW-1:0] li_set;
+    logic [TW-1:0] li_tag;
+    wire li_idle_ok = !cl_valid && !v1 && !v2 && !v3 && !v4 &&
+                      !fill_pending && !invalidating;
+    wire li_rd_en   = (li_st == LI_IDLE) && inv_line_en && li_idle_ok;
+    assign inv_line_rdy = (li_st == LI_IDLE) && li_idle_ok;
 
     // ---- the pipeline's valid bits -----------------------------------------------
     logic v1, v2, v3, v4;
@@ -288,6 +312,7 @@ module mem_cache #(
             mismatches <= 32'd0; last_mismatch <= 32'd0; diverted <= 32'd0;
             late_fills <= 8'd0; fifo_drops <= 8'd0;
             inv_idx <= '0;                 // a reset invalidates everything
+            li_st <= LI_IDLE; li_set <= '0; li_tag <= '0;
             way_waddr <= '0; way_wdata <= '0;
             tag_waddr <= '0; tag_wdata <= '0;
             for (w = 0; w < 4; w = w + 1) wbyte[w] <= 8'd0;
@@ -443,6 +468,26 @@ module mem_cache #(
                 mismatches    <= mismatches + 32'd1;
                 last_mismatch <= {p_addr, cmp_byte, data_q};
             end
+
+            // ---- one line invalidated (see the port comment) -------------------
+            case (li_st)
+                LI_IDLE: if (li_rd_en) begin
+                    li_set <= inv_line_pa[IW+3:4];
+                    li_tag <= inv_line_pa[23:IW+4];
+                    li_st  <= LI_RD;
+                end
+                LI_RD: li_st <= LI_WR;
+                LI_WR: begin
+                    tag_we    <= 1'b1;
+                    tag_waddr <= li_set;
+                    tag_wdata <= tag_rd;
+                    for (w = 0; w < 4; w = w + 1)
+                        if (tag_rd[w*EW + TW] && (tag_rd[w*EW +: TW] == li_tag))
+                            tag_wdata[w*EW + TW] <= 1'b0;
+                    li_st <= LI_IDLE;
+                end
+                default: li_st <= LI_IDLE;
+            endcase
 
             // ---- the invalidate walk ---------------------------------------------
             if (inval) inv_idx <= '0;

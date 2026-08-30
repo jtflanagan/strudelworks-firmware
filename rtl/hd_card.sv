@@ -128,7 +128,43 @@ module hd_card #(
     // For the HD_SLOT register.
     output wire        rom_loaded,
     output wire        busy,
-    output logic [7:0] execs
+    output logic [7:0] execs,
+
+    // ---- the line-drain engine (docs/HARDDISK.md) ---------------------------
+    // In the closed regime (fast_dma: accel mode 2, serving) a block drains
+    // from the buffer into the card's image as cache lines - no override, no
+    // bus cycle, no core pause - instead of S_DMA_W's byte-per-cycle path,
+    // which stays, bit for bit, as the compatibility mode.
+    input  wire         fast_dma,
+    input  wire         map_changed,    // apple_mmu's: drop the page register
+    input  wire         ev_enabled,     // the capture is on: emit line words
+    // One line with byte enables, into mem_client's in-order queue.
+    output logic        dq_valid,
+    output logic [19:0] dq_line,
+    output logic [15:0] dq_be,
+    output logic [127:0] dq_data,
+    input  wire         dq_ready,
+    // The L2's per-line invalidate.
+    output logic        inv_line_en,
+    output logic [23:0] inv_line_pa,
+    input  wire         inv_line_rdy,
+    // The icache's snoop, second source.
+    output logic        snoop2_en,
+    output logic [23:0] snoop2_pa,
+    input  wire         snoop2_take,
+    // The MMU's page query, once per page of the block.
+    output wire [7:0]   t2_page,
+    input  wire         t2_w_ok,
+    input  wire [16:0]  t2_w_ppage,
+    // fb_sim's shadow, one byte at a time during assembly.
+    output logic        fb2_we,
+    output logic [15:0] fb2_addr,
+    output logic [7:0]  fb2_data,
+    input  wire         fb2_ready,
+    // The stream words (tag 0xB, self-describing; layout in HARDDISK.md).
+    output logic [31:0] dma_ev_word,
+    output logic        dma_ev_valid,
+    input  wire         dma_ev_take
 );
 
     // ---- what this card answers as -----------------------------------------
@@ -230,11 +266,12 @@ module hd_card #(
     // Arriving while a previous answer's DMA is still in progress it would
     // be lost too: the host spaces its answers for exactly that reason (see
     // strudelworks-host hd_service.cpp).
-    typedef enum logic [1:0] {
+    typedef enum logic [2:0] {
         S_IDLE,     // the core runs; the port answers busy or the status
         S_DMA_W,    // writing the host's bytes into the Apple's memory
         S_DMA_R,    // reading bytes out of it, for the host
-        S_SEND      // streaming them to the host as HD_DATA
+        S_SEND,     // streaming them to the host as HD_DATA
+        S_DRAIN     // the fast regime: lines into the image (see the ports)
     } state_t;
 
     state_t st;
@@ -330,6 +367,72 @@ module hd_card #(
     // The driver latched what was being offered: the presented op is ours.
     wire ours = op_present && op_ovr && (op_addr == ovr_addr) && (op_rw == ovr_rw);
 
+    // ---- the line-drain engine ---------------------------------------------
+    // pidx walks the block's bytes here too (dma_addr and the wbyte mux are
+    // reused; S_DMA_W and S_DRAIN never coexist).  Per line: gather the
+    // bytes into acc/be one per clock, trickling each into fb_sim's shadow;
+    // emit the seven self-describing stream words; then, in this order so a
+    // post-busy read always fills BEHIND the write in mem_client's in-order
+    // queue: the line write, the L2 invalidate, the icache snoop.  `busy`
+    // releases at the last line for the same reason - anything the machine
+    // does after the poll queues behind the drain's writes by construction.
+    // A read of the target region CONCURRENT with the drain is the mid-DMA
+    // overlap corner: program error, undefined, as on real DMA hardware.
+    //
+    // The page register pg_* is the TLB idea again: translated once per
+    // page touched, from t2_*, with a whole clock; map_changed drops it.
+    // A page whose writes do not land in the image (t2_w_ok=0: $Cxxx,
+    // write-protected LC) is skipped in memory and shadow - the host's
+    // mirror, classifying the same addresses under the same switches,
+    // drops the same bytes - but its stream words still go out.
+    typedef enum logic [2:0] {
+        D_PAGE,     // (re)translate the current page
+        D_GATHER,   // one byte per clock into acc/be, fb2 alongside
+        D_EMIT,     // the seven words, paced by the merge
+        D_WRITE,    // the mem_client line write
+        D_INV,      // the L2 per-line invalidate
+        D_SNOOP     // the icache snoop, then the next line
+    } drain_t;
+    drain_t       dst;
+    logic [127:0] acc;
+    logic [15:0]  be;
+    logic [15:0]  lb;               // the line's base machine address
+    logic [2:0]   ev_idx;
+    logic         pg_valid, pg_ok;
+    logic [16:0]  pg_ppage;
+    logic [7:0]   pg;
+
+    assign t2_page = dma_addr[15:8];
+    wire pg_hit    = pg_valid && (dma_addr[15:8] == pg);
+    // Only main memory (image space, bank 0) has a floating-bus shadow.
+    wire pg_main   = pg_ok && !pg_ppage[16] && (pg_ppage[15:8] == 8'd0);
+    wire [23:0] line_pa = {pg_ppage[15:0], lb[7:4], 4'h0};
+
+    // The seven words: W0 {addr, be[15:8]}, W1 {be[7:0], acc[127:112]},
+    // W2..W6 24-bit slices down to acc[15:0] padded.  Bytes are
+    // little-lane: acc[8*k +: 8] is the line's byte k.
+    logic [31:0] ev_mux;
+    always_comb begin
+        case (ev_idx)
+            3'd0:    ev_mux = {4'hB, 4'd0, lb, be[15:8]};
+            3'd1:    ev_mux = {4'hB, 4'd1, be[7:0], acc[127:112]};
+            3'd2:    ev_mux = {4'hB, 4'd2, acc[111:88]};
+            3'd3:    ev_mux = {4'hB, 4'd3, acc[87:64]};
+            3'd4:    ev_mux = {4'hB, 4'd4, acc[63:40]};
+            3'd5:    ev_mux = {4'hB, 4'd5, acc[39:16]};
+            default: ev_mux = {4'hB, 4'd6, acc[15:0], 8'd0};
+        endcase
+    end
+
+    // The shadow byte rides the gather clock; fb2_ready gates the advance,
+    // so a clock the op path owns simply repeats the byte.  The stream word
+    // is a level the merge takes when it has room.
+    assign fb2_we   = (st == S_DRAIN) && (dst == D_GATHER) && pg_main;
+    assign fb2_addr = {pg_ppage[7:0], dma_addr[7:0]};
+    assign fb2_data = wbyte;
+    assign dma_ev_valid = (st == S_DRAIN) && (dst == D_EMIT);
+    assign dma_ev_word  = ev_mux;
+
     // ---- the timeout --------------------------------------------------------------
     localparam integer TO_W = $clog2(STALL_TIMEOUT + 1);
     logic [TO_W-1:0] to_cnt;
@@ -372,6 +475,14 @@ module hd_card #(
             in_flight   <= 1'b0;
             to_cnt      <= '0;
             widx        <= 10'd0;
+            // The drain's control state; its data registers (acc/be/lb/pg
+            // payloads) are set before use and reset nothing.
+            dst         <= D_PAGE;
+            pg_valid    <= 1'b0;
+            ev_idx      <= 3'd0;
+            dq_valid    <= 1'b0;
+            inv_line_en <= 1'b0;
+            snoop2_en   <= 1'b0;
         end else begin
             // The port.  A write arms; an armed read executes, saturating at
             // three outstanding, which no driver reaches.
@@ -395,7 +506,13 @@ module hd_card #(
                         // busy until the block is in memory.
                         if (dma_count != 10'd0) begin
                             pidx <= 10'd0;
-                            st   <= S_DMA_W;
+                            if (fast_dma) begin
+                                pg_valid <= 1'b0;
+                                dst      <= D_PAGE;
+                                st       <= S_DRAIN;
+                            end else begin
+                                st <= S_DMA_W;
+                            end
                         end else begin
                             outstanding <= outstanding - 2'd1;
                         end
@@ -437,8 +554,83 @@ module hd_card #(
                     end
                 end
 
+                S_DRAIN: begin
+                    case (dst)
+                        D_PAGE: if (pg_hit) begin
+                            // Line start: clear the mask, remember the base.
+                            be  <= 16'd0;
+                            lb  <= {dma_addr[15:4], 4'h0};
+                            dst <= D_GATHER;
+                        end else begin
+                            pg       <= dma_addr[15:8];
+                            pg_ok    <= t2_w_ok;
+                            pg_ppage <= t2_w_ppage;
+                            pg_valid <= 1'b1;
+                        end
+                        D_GATHER: if (!pg_main || fb2_ready) begin
+                            acc[8 * dma_addr[3:0] +: 8] <= wbyte;
+                            be[dma_addr[3:0]]           <= 1'b1;
+                            pidx <= pidx + 10'd1;
+                            if ((dma_addr[3:0] == 4'hF) ||
+                                (pidx == dma_count - 10'd1)) begin
+                                ev_idx <= 3'd0;
+                                dst    <= ev_enabled ? D_EMIT : D_WRITE;
+                            end
+                        end
+                        D_EMIT: if (dma_ev_take) begin
+                            if (ev_idx == 3'd6) dst <= D_WRITE;
+                            else                ev_idx <= ev_idx + 3'd1;
+                        end
+                        D_WRITE: begin
+                            if (!pg_ok) begin
+                                dst <= D_SNOOP;         // lands nowhere
+                            end else if (dq_valid && dq_ready) begin
+                                dq_valid <= 1'b0;
+                                dst      <= D_INV;
+                            end else if (!dq_valid) begin
+                                dq_valid <= 1'b1;
+                                dq_line  <= {pg_ppage[15:0], lb[7:4]};
+                                dq_be    <= be;
+                                dq_data  <= acc;
+                            end
+                        end
+                        D_INV: begin
+                            if (inv_line_en && inv_line_rdy) begin
+                                inv_line_en <= 1'b0;
+                                dst         <= D_SNOOP;
+                            end else if (!inv_line_en) begin
+                                inv_line_en <= 1'b1;
+                                inv_line_pa <= line_pa;
+                            end
+                        end
+                        D_SNOOP: begin
+                            if (pg_ok && !snoop2_en) begin
+                                snoop2_en <= 1'b1;
+                                snoop2_pa <= line_pa;
+                            end else if (!pg_ok || snoop2_take) begin
+                                snoop2_en <= 1'b0;
+                                if (pidx == dma_count) begin
+                                    // The last line: anything the machine
+                                    // does after its poll queues behind the
+                                    // drain's writes, so nothing waits.
+                                    st          <= S_IDLE;
+                                    outstanding <= outstanding - 2'd1;
+                                end else begin
+                                    dst <= D_PAGE;
+                                end
+                            end
+                        end
+                        default: dst <= D_PAGE;
+                    endcase
+                end
+
                 default: st <= S_IDLE;
             endcase
+
+            // A map change mid-drain drops the page register, so the next
+            // line (or the rest of this one's issue) re-translates.  Placed
+            // after the case: it wins a same-clock load.
+            if (map_changed) pg_valid <= 1'b0;
         end
     end
 

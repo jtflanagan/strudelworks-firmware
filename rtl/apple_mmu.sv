@@ -210,6 +210,13 @@ module apple_mmu (
     output wire [16:0] t_r_ppage,   // where a read reaches
     output wire        t_w_ok,      // a write lands in the image
     output wire [16:0] t_w_ppage,   // where a write lands
+
+    // A second, identical page query: the DMA line-drain engine's.  It
+    // translates once per page of a block, into registers, with a whole
+    // clock - never on a fast path.
+    input  wire [7:0]  t2_page,
+    output wire        t2_w_ok,
+    output wire [16:0] t2_w_ppage,
     // Any access that moves the map, the clock it takes effect: the TLBs
     // flush on it.  Combinational, so the flush lands at the same edge as the
     // change and no lookup can slip between them.
@@ -384,6 +391,10 @@ module apple_mmu (
                        : {1'b0, pa_page_of(t_page, 1'b1)};
     assign t_w_ok    = t_w_class[0];                        // lands in the image
     assign t_w_ppage = {1'b0, pa_page_of(t_page, 1'b0)};
+
+    wire [2:0] t2_w_class = classify({t2_page, 8'h00}, 1'b0);
+    assign t2_w_ok    = t2_w_class[0];
+    assign t2_w_ppage = {1'b0, pa_page_of(t2_page, 1'b0)};
 
     // ---- map changes, for the TLB flush ------------------------------------
     // Access-based, by decision: touching a mapping switch flushes whether or

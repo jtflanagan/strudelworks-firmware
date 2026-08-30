@@ -179,6 +179,72 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire        rom_loaded, busy;
     wire [7:0]  execs;
 
+    // ---- the drain's world, stubbed and logged ------------------------------
+    // Identity translation into the main bank; a page marked in t2_block
+    // classifies as not-landing (the write-protected LC's shape).  Every
+    // consumer logs its handshakes with a global stamp so per-line ordering
+    // (write, then invalidate, then snoop) is checkable.
+    reg          fast_dma = 1'b0;
+    reg          ev_en = 1'b0;
+    reg          map_pulse = 1'b0;
+    reg  [255:0] t2_block = 256'd0;
+    wire [7:0]   t2_page;
+    wire         t2_w_ok    = !t2_block[t2_page];
+    wire [16:0]  t2_w_ppage = {9'd0, t2_page};
+
+    wire         dq_valid, inv_en, sn_en, fb2_we, ev_valid;
+    wire [19:0]  dq_line;
+    wire [15:0]  dq_be, fb2_addr;
+    wire [127:0] dq_data;
+    wire [23:0]  inv_pa, sn_pa;
+    wire [7:0]   fb2_data;
+    wire [31:0]  ev_word;
+
+    integer      stamp = 0;
+    always @(posedge clk) stamp = stamp + 1;
+
+    // fb2 stalls one clock in five; the event port drains one word in three,
+    // the merge's own pace.
+    reg  [2:0]   fb2_ctr = 3'd0, ev_ctr = 3'd0;
+    always @(posedge clk) begin
+        fb2_ctr <= (fb2_ctr == 3'd4) ? 3'd0 : fb2_ctr + 3'd1;
+        ev_ctr  <= (ev_ctr == 3'd2) ? 3'd0 : ev_ctr + 3'd1;
+    end
+    wire fb2_ready = (fb2_ctr != 3'd4);
+    wire ev_take   = ev_valid && (ev_ctr == 3'd0);
+    wire sn_take   = sn_en;
+    wire inv_rdy   = 1'b1;
+    wire dq_ready  = 1'b1;
+
+    reg [19:0]  dql_line [0:63];
+    reg [15:0]  dql_be   [0:63];
+    reg [127:0] dql_data [0:63];
+    integer     dql_at   [0:63];
+    integer ndq = 0;
+    reg [23:0] invl [0:63];  integer invl_at [0:63];  integer ninv = 0;
+    reg [23:0] snl  [0:63];  integer snl_at  [0:63];  integer nsn  = 0;
+    reg [15:0] fbl_addr [0:1023]; reg [7:0] fbl_data [0:1023]; integer nfb = 0;
+    reg [31:0] evl [0:1023]; integer nev = 0;
+
+    always @(posedge clk) begin
+        if (dq_valid && dq_ready) begin
+            dql_line[ndq] = dq_line; dql_be[ndq] = dq_be;
+            dql_data[ndq] = dq_data; dql_at[ndq] = stamp; ndq = ndq + 1;
+        end
+        if (inv_en && inv_rdy) begin
+            invl[ninv] = inv_pa; invl_at[ninv] = stamp; ninv = ninv + 1;
+        end
+        if (sn_en && sn_take) begin
+            snl[nsn] = sn_pa; snl_at[nsn] = stamp; nsn = nsn + 1;
+        end
+        if (fb2_we && fb2_ready) begin
+            fbl_addr[nfb] = fb2_addr; fbl_data[nfb] = fb2_data; nfb = nfb + 1;
+        end
+        if (ev_take) begin
+            evl[nev] = ev_word; nev = nev + 1;
+        end
+    end
+
     hd_card #(.STALL_TIMEOUT (STALL_TIMEOUT)) dut (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .res_sync (res_n),
         .master_active (master_active), .slot_assign (3'd7),
@@ -190,6 +256,15 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
         .msg_len (msg_len), .pay_data (pay_data), .pay_valid (pay_valid),
         .tx_word (tx_word), .tx_valid (tx_valid), .tx_take (tx_take),
+        .fast_dma (fast_dma), .map_changed (map_pulse), .ev_enabled (ev_en),
+        .dq_valid (dq_valid), .dq_line (dq_line), .dq_be (dq_be),
+        .dq_data (dq_data), .dq_ready (dq_ready),
+        .inv_line_en (inv_en), .inv_line_pa (inv_pa), .inv_line_rdy (inv_rdy),
+        .snoop2_en (sn_en), .snoop2_pa (sn_pa), .snoop2_take (sn_take),
+        .t2_page (t2_page), .t2_w_ok (t2_w_ok), .t2_w_ppage (t2_w_ppage),
+        .fb2_we (fb2_we), .fb2_addr (fb2_addr), .fb2_data (fb2_data),
+        .fb2_ready (fb2_ready),
+        .dma_ev_word (ev_word), .dma_ev_valid (ev_valid), .dma_ev_take (ev_take),
         .rom_loaded (rom_loaded), .busy (busy), .execs (execs)
     );
 
@@ -353,6 +428,11 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
 
     integer i, k, idx, first, n_w, n_r, n_busy, n_claimed, mark, steps_before;
     integer hdr_at, ev_at;
+    integer j, nlines, ebytes, gbytes, nfb0, novr;
+    reg [7:0]  got  [0:65535];      // bytes as the dq writes deliver them
+    reg [7:0]  gev  [0:65535];      // bytes as the event words deliver them
+    reg [15:0] eaddr;
+    reg [15:0] ebe;
 
     initial begin
         $display("hd_card_tb: the hard disk's slot, busy, and the DMA\n");
@@ -653,6 +733,147 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         wait_store(16'h0302, 200);
         if (mem[16'h0302] !== 8'h00) fail("the commands after the reset did not complete");
         else $display("  ok: and executes, and completes, as before");
+
+        // --- case 10 / the line drain: the fast regime -----------------------
+        // The machine reruns its program; the drain answers EXECUTE #2 with
+        // 300 bytes at the unaligned $20F5 - a partial head line, eighteen
+        // full lines, a partial tail, two page crossings - while the core
+        // keeps running.  Checked: no override cycle, every byte in the
+        // right lane of the right line, write -> invalidate -> snoop per
+        // line in order, every byte trickled into the shadow, and the seven
+        // stream words of every line exact.
+        for (i = 16'h0300; i < 16'h0310; i = i + 1) mem[i] = 8'hxx;
+        first = execs;
+        machine_reset(4);
+        wait (execs == first + 1);
+        cycles(2);
+        push_word(hdr(T_HD_DONE, 8'd0, 16'h0000));       // answer #1, no bytes
+        wait (execs == first + 2);
+        cycles(3);
+        fast_dma = 1'b1; ev_en = 1'b1;
+        ndq = 0; ninv = 0; nsn = 0; nfb = 0; nev = 0;
+        mark = nops;
+        push_word(hdr(T_HD_DONE, 8'd130, 16'h0000));
+        push_word({16'd300, 16'h20F5});
+        push_word({16'd0, 16'h1234});
+        for (i = 0; i < 128; i = i + 1)
+            push_word({pat_a(4*i+3), pat_a(4*i+2), pat_a(4*i+1), pat_a(4*i)});
+        wait_store(16'h0302, 700);
+        if (mem[16'h0302] !== 8'h00) fail("drain: the poll did not exit with status $00");
+        else $display("  ok: the drain answered EXECUTE #2 - status $00, busy released");
+        if (busy !== 1'b0) fail("drain: still busy after the last line");
+        k = 0;
+        for (i = mark; i < nops; i = i + 1) if (log_ovr[i]) k = k + 1;
+        if (k != 0) begin
+            $display("FAIL: %0d override cycles in the fast regime", k); errors = errors + 1;
+        end else $display("  ok: no override cycle - the core ran through the drain");
+        for (i = 0; i < 65536; i = i + 1) begin got[i] = 8'hxx; gev[i] = 8'hxx; end
+        for (i = 0; i < ndq; i = i + 1) begin
+            if (dql_line[i][19:12] != 8'd0) fail("drain: a line outside main memory");
+            for (k = 0; k < 16; k = k + 1)
+                if (dql_be[i][k]) got[{dql_line[i][11:0], k[3:0]}] = dql_data[i][8*k +: 8];
+        end
+        ebytes = 0;
+        for (i = 0; i < 300; i = i + 1)
+            if (got[16'h20F5 + i[15:0]] !== pat_a(i)) ebytes = ebytes + 1;
+        if (ebytes != 0) begin
+            $display("FAIL: %0d of 300 drained bytes wrong or missing", ebytes); errors = errors + 1;
+        end else $display("  ok: 300 bytes at $20F5, every one in the right lane of the right line");
+        if (ndq != 20) begin
+            $display("FAIL: %0d line writes, expected 20", ndq); errors = errors + 1;
+        end else $display("  ok: 20 line writes - a trimmed head, eighteen whole, a trimmed tail");
+        if (ninv != ndq || nsn != ndq) fail("drain: invalidate/snoop counts differ from the writes");
+        k = 0;
+        for (i = 0; i < ndq; i = i + 1) begin
+            if (invl[i][23:4] !== dql_line[i]) k = k + 1;
+            if (snl[i][23:4]  !== dql_line[i]) k = k + 1;
+            if (!(dql_at[i] < invl_at[i] && invl_at[i] < snl_at[i])) k = k + 1;
+        end
+        if (k != 0) begin
+            $display("FAIL: %0d per-line order/address violations", k); errors = errors + 1;
+        end else $display("  ok: write -> invalidate -> snoop, per line, same address, in order");
+        if (nfb != 300) begin
+            $display("FAIL: %0d shadow bytes, expected 300", nfb); errors = errors + 1;
+        end else if (fbl_addr[0] !== 16'h20F5 || fbl_data[0] !== pat_a(0) ||
+                     fbl_addr[299] !== 16'h2220 || fbl_data[299] !== pat_a(299))
+            fail("drain: shadow bytes wrong at the edges");
+        else $display("  ok: all 300 bytes trickled into the hi-res shadow in order");
+        if (nev != 140) begin
+            $display("FAIL: %0d stream words, expected 140", nev); errors = errors + 1;
+        end else begin
+            k = 0;
+            for (i = 0; i < 20; i = i + 1) begin
+                for (idx = 0; idx < 7; idx = idx + 1)
+                    if (evl[7*i+idx][31:24] !== {4'hB, idx[3:0]}) k = k + 1;
+                eaddr = evl[7*i][23:8];
+                ebe   = {evl[7*i][7:0], evl[7*i+1][23:16]};
+                if (ebe !== dql_be[i] || eaddr[15:4] !== dql_line[i][11:0]) k = k + 1;
+                gev[eaddr+15] = evl[7*i+1][15:8];  gev[eaddr+14] = evl[7*i+1][7:0];
+                gev[eaddr+13] = evl[7*i+2][23:16]; gev[eaddr+12] = evl[7*i+2][15:8];
+                gev[eaddr+11] = evl[7*i+2][7:0];
+                gev[eaddr+10] = evl[7*i+3][23:16]; gev[eaddr+9] = evl[7*i+3][15:8];
+                gev[eaddr+8]  = evl[7*i+3][7:0];
+                gev[eaddr+7]  = evl[7*i+4][23:16]; gev[eaddr+6] = evl[7*i+4][15:8];
+                gev[eaddr+5]  = evl[7*i+4][7:0];
+                gev[eaddr+4]  = evl[7*i+5][23:16]; gev[eaddr+3] = evl[7*i+5][15:8];
+                gev[eaddr+2]  = evl[7*i+5][7:0];
+                gev[eaddr+1]  = evl[7*i+6][23:16]; gev[eaddr+0] = evl[7*i+6][15:8];
+            end
+            for (i = 0; i < 300; i = i + 1)
+                if (gev[16'h20F5 + i[15:0]] !== pat_a(i)) k = k + 1;
+            if (k != 0) begin
+                $display("FAIL: %0d stream-word decode errors", k); errors = errors + 1;
+            end else $display("  ok: 20 groups of 7 words - tags, sequences, BE, address and every byte exact");
+        end
+
+        // --- case 10b / a page that does not land, capture off ---------------
+        // EXECUTE #3 answered by a drain into $21F0 x 48 with page $22
+        // marked not-landing: one line written, two skipped whole, no
+        // events, busy still released.
+        wait (execs == first + 3);
+        cycles(3);
+        t2_block[8'h22] = 1'b1; ev_en = 1'b0;
+        ndq = 0; ninv = 0; nsn = 0; nev = 0; nfb = 0;
+        push_word(hdr(T_HD_DONE, 8'd14, 16'h0000));
+        push_word({16'd48, 16'h21F0});
+        push_word({16'd0, 16'h1234});
+        for (i = 0; i < 12; i = i + 1)
+            push_word({pat_b(4*i+3), pat_b(4*i+2), pat_b(4*i+1), pat_b(4*i)});
+        wait_store(16'h0306, 700);
+        if (busy !== 1'b0) fail("drain 10b: still busy");
+        if (ndq != 1 || ninv != 1 || nsn != 1) begin
+            $display("FAIL: 10b wrote %0d lines (inv %0d, snoop %0d), expected 1", ndq, ninv, nsn);
+            errors = errors + 1;
+        end else if (dql_be[0] !== 16'hFFFF || dql_line[0] !== {8'd0, 12'h21F}) fail("10b: the one line is wrong");
+        else $display("  ok: a not-landing page is skipped whole; the landing line went alone");
+        if (nev != 0) fail("10b: stream words with the capture off");
+        else $display("  ok: capture off - no stream words, and the drain still ran");
+        t2_block[8'h22] = 1'b0;
+
+        // --- case 10c / RES' mid-drain ---------------------------------------
+        wait (execs == first + 5);
+        cycles(3);
+        ev_en = 1'b1;
+        ndq = 0;
+        push_word(hdr(T_HD_DONE, 8'd130, 16'h0000));
+        push_word({16'd512, 16'h6000});
+        push_word({16'd0, 16'h1234});
+        for (i = 0; i < 128; i = i + 1)
+            push_word({pat_a(4*i+3), pat_a(4*i+2), pat_a(4*i+1), pat_a(4*i)});
+        wait (ndq >= 3);
+        for (i = 16'h0300; i < 16'h0310; i = i + 1) mem[i] = 8'hxx;
+        machine_reset(4);
+        if (busy !== 1'b0) fail("drain 10c: RES' did not drop the command");
+        else $display("  ok: RES' mid-drain drops it - a part-drained block is stale bytes, nothing hangs");
+        wait (execs == first + 6);
+        cycles(2);
+        push_word(hdr(T_HD_DONE, 8'd0, 16'h0000));
+        wait (execs == first + 7);
+        cycles(2);
+        push_word(hdr(T_HD_DONE, 8'd0, 16'h0000));
+        wait_store(16'h0302, 400);
+        if (mem[16'h0302] !== 8'h00) fail("drain 10c: the port did not work after the reset");
+        else $display("  ok: and the port executes and completes as before");
 
         if (unknowns != 0) fail("the receiver reported an unknown type - a disk type is missing from its list");
         else $display("  ok: HD_ROM, HD_DONE and HD_FETCH are known types");

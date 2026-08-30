@@ -224,6 +224,27 @@ module master_top #(
     wire [15:0] u_addr;
     wire [7:0]  u_wdata;
     wire        fev_valid, fev_rw, fev_sync, fev_room;
+    // The DMA line-drain engine's world (rtl/hd_card.sv, docs/HARDDISK.md):
+    // stream words, the line write, the L2 invalidate, the icache snoop,
+    // the page query, the shadow bytes - and the gate: the closed regime
+    // only, where writes are not exposed on the bus by design.
+    wire [31:0] hd_dma_ev_word;
+    wire        hd_dma_ev_valid, hd_dma_ev_take;
+    wire        hd_dq_valid, hd_dq_ready;
+    wire [19:0] hd_dq_line;
+    wire [15:0] hd_dq_be;
+    wire [127:0] hd_dq_data;
+    wire        hd_inv_en, hd_inv_rdy;
+    wire [23:0] hd_inv_pa;
+    wire        hd_snoop2_en, hd_snoop2_take;
+    wire [23:0] hd_snoop2_pa;
+    wire [7:0]  hd_t2_page;
+    wire        hd_t2_w_ok;
+    wire [16:0] hd_t2_w_ppage;
+    wire        hd_fb2_we, hd_fb2_ready;
+    wire [15:0] hd_fb2_addr;
+    wire [7:0]  hd_fb2_data;
+    wire        hd_fast_dma = accel_on && (accel_mode == 2'd2) && mem_serve;
     wire [15:0] fev_addr;
     wire [7:0]  fev_data;
     wire        bus_owns, core_valid, op_dummy, op_inflight, drv_cyc_done;
@@ -250,6 +271,11 @@ module master_top #(
         .real_mark (vbl_mark), .real_mark_free (vbl_mark_free),
         .real_dummy (op_dummy),
         .fev_room (fev_room),
+        .dma_ev_word (hd_dma_ev_word), .dma_ev_valid (hd_dma_ev_valid),
+        .dma_ev_take (hd_dma_ev_take),
+        .hd_dq_valid (hd_dq_valid), .hd_dq_line (hd_dq_line),
+        .hd_dq_be (hd_dq_be), .hd_dq_data (hd_dq_data),
+        .hd_dq_ready (hd_dq_ready),
         .fast_valid (fev_valid), .fast_addr (fev_addr), .fast_rw (fev_rw),
         .fast_data (fev_data), .fast_sync (fev_sync), .fast_vbl (vbl_level),
         .merge_overflows (merge_overflows),
@@ -623,6 +649,9 @@ module master_top #(
         .cl_rw        (cl_rw),
         .cl_wr_image  (cl_wr_image),
         .cl_pa        (cl_pa),
+        .snoop2_en    (hd_snoop2_en),
+        .snoop2_pa    (hd_snoop2_pa),
+        .snoop2_take  (hd_snoop2_take),
         .mem_invalidating (mem_invalidating),
         .rom_ok       (mem_rom_loaded)
     );
@@ -792,6 +821,9 @@ module master_top #(
         .t_r_ppage  (tlb_r_ppage),
         .t_w_ok     (tlb_w_ok),
         .t_w_ppage  (tlb_w_ppage),
+        .t2_page    (hd_t2_page),
+        .t2_w_ok    (hd_t2_w_ok),
+        .t2_w_ppage (hd_t2_w_ppage),
         .map_changed (map_changed)
     );
 
@@ -838,6 +870,8 @@ module master_top #(
         .busy        (mem_busy),
         .serve       (mem_serve),
         .inval       (mem_inval),
+        .inv_line_en (hd_inv_en), .inv_line_pa (hd_inv_pa),
+        .inv_line_rdy (hd_inv_rdy),
         .cnt_clr     (mem_cnt_clr),
         .image_ready (mem_image_ready),
         .invalidating (mem_invalidating),
@@ -886,6 +920,8 @@ module master_top #(
         .serve         (fb_serve),
         .cnt_clr       (fb_cnt_clr),
         .peek_addr     (fb_peek_addr),
+        .fb2_we (hd_fb2_we), .fb2_addr (hd_fb2_addr), .fb2_data (hd_fb2_data),
+        .fb2_ready (hd_fb2_ready),
         .sub_en        (fb_sub_en),
         .sub_data      (fb_sub_data),
         .mode          (fb_mode),
@@ -928,6 +964,30 @@ module master_top #(
         .tx_word       (aux_word),
         .tx_valid      (aux_valid),
         .tx_take       (aux_take),
+        .fast_dma      (hd_fast_dma),
+        .map_changed   (map_changed),
+        .ev_enabled    (capture_on && capture_real),
+        .dq_valid      (hd_dq_valid),
+        .dq_line       (hd_dq_line),
+        .dq_be         (hd_dq_be),
+        .dq_data       (hd_dq_data),
+        .dq_ready      (hd_dq_ready),
+        .inv_line_en   (hd_inv_en),
+        .inv_line_pa   (hd_inv_pa),
+        .inv_line_rdy  (hd_inv_rdy),
+        .snoop2_en     (hd_snoop2_en),
+        .snoop2_pa     (hd_snoop2_pa),
+        .snoop2_take   (hd_snoop2_take),
+        .t2_page       (hd_t2_page),
+        .t2_w_ok       (hd_t2_w_ok),
+        .t2_w_ppage    (hd_t2_w_ppage),
+        .fb2_we        (hd_fb2_we),
+        .fb2_addr      (hd_fb2_addr),
+        .fb2_data      (hd_fb2_data),
+        .fb2_ready     (hd_fb2_ready),
+        .dma_ev_word   (hd_dma_ev_word),
+        .dma_ev_valid  (hd_dma_ev_valid),
+        .dma_ev_take   (hd_dma_ev_take),
         .rom_loaded    (hd_rom_loaded),
         .busy          (hd_busy),
         .execs         (hd_execs)

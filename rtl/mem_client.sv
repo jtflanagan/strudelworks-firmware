@@ -72,6 +72,15 @@ module mem_client #(
     input  wire [3:0]   mq_byte,
     input  wire [7:0]   mq_data,
     output wire         mq_ready,
+    // The DMA line-drain's writes (docs/HARDDISK.md): one whole line with
+    // byte enables, into the SAME in-order queue - so a drained line and a
+    // fill of it can never pass each other.  mem_cache's request wins a
+    // same-clock push; the drain waits on dq_ready.
+    input  wire         dq_valid,
+    input  wire [19:0]  dq_line,
+    input  wire [15:0]  dq_be,
+    input  wire [127:0] dq_data,
+    output wire         dq_ready,
     // To mem_cache: a fill's line.
     output logic        mr_valid,
     output logic [1:0]  mr_id,
@@ -98,13 +107,21 @@ module mem_client #(
 );
 
     // ---- the request FIFO ------------------------------------------------------
-    localparam integer QW = 1 + 2 + 20 + 4 + 8;    // {kind, id, line, byte, data}
+    // Every write is a line with byte enables now - the cache's byte write
+    // is simply a line write with one lane enabled - so a fill is the one
+    // kind the queue distinguishes.  {fill, id, line, be, data}.
+    localparam integer QW = 1 + 2 + 20 + 16 + 128;
     logic [QW-1:0] q [0:3];
     logic [2:0]    q_wp, q_rp;                     // one extra bit for full/empty
     wire  q_empty = (q_wp == q_rp);
     wire  q_full  = (q_wp[1:0] == q_rp[1:0]) && (q_wp[2] != q_rp[2]);
     assign mq_ready = !q_full;
-    wire  q_push = mq_valid && !q_full;
+    assign dq_ready = !q_full && !mq_valid;        // the cache's push wins
+    wire  q_push  = (mq_valid || dq_valid) && !q_full;
+    wire [QW-1:0] q_in = mq_valid
+        ? {mq_kind, mq_id, mq_line,
+           mq_kind ? 16'hFFFF : (16'd1 << mq_byte), {16{mq_data}}}
+        : {1'b0, 2'd0, dq_line, dq_be, dq_data};
 
     // ---- issue ----------------------------------------------------------------------
     logic        issuing;               // stb is up, waiting to be accepted
@@ -156,7 +173,7 @@ module mem_client #(
 
             // ---- the queue ---------------------------------------------------------
             if (q_push) begin
-                q[q_wp[1:0]] <= {mq_kind, mq_id, mq_line, mq_byte, mq_data};
+                q[q_wp[1:0]] <= q_in;
                 q_wp <= q_wp + 3'd1;
             end
 
@@ -169,15 +186,17 @@ module mem_client #(
                     ak_wp   <= ak_wp + 4'd1;
                 end
             end else if (!q_empty) begin
-                // Pop the oldest request onto the port.
+                // Pop the oldest request onto the port.  A fill reads the
+                // whole line; anything else writes its enabled lanes.
                 issuing  <= 1'b1;
                 stb      <= 1'b1;
                 cur_kind <= q[q_rp[1:0]][QW-1];
                 cur_id   <= q[q_rp[1:0]][QW-2 -: 2];
                 we       <= !q[q_rp[1:0]][QW-1];
-                addr     <= line_to_wb(q[q_rp[1:0]][31:12]);
-                data     <= {16{q[q_rp[1:0]][7:0]}};
-                sel      <= q[q_rp[1:0]][QW-1] ? 16'hFFFF : (16'd1 << q[q_rp[1:0]][11:8]);
+                addr     <= line_to_wb(q[q_rp[1:0]][QW-4 -: 20]);
+                data     <= q[q_rp[1:0]][127:0];
+                sel      <= q[q_rp[1:0]][QW-1] ? 16'hFFFF
+                                               : q[q_rp[1:0]][QW-24 -: 16];
                 q_rp     <= q_rp + 3'd1;
             end
 
