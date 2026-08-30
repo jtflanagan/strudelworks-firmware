@@ -103,8 +103,9 @@ low four bits of the "column" are a *sum* of bits from both - which is why
 the horizontal blanking cycles read from another row's tail, and why the
 lines of vertical blanking, where the vertical counter has both of its top
 bits set as no displayed line does, read the holes and then a row's first
-32 bytes. `rtl/vbl_lock.sv` carries the formula in `scan_addr`, and
-`sim/vbl_lock_tb.sv` carries an *independent* one: the counters themselves,
+32 bytes. `rtl/scan_addr.vh` carries the formula in `scan_addr` - shared with the
+floating-bus simulator (FLOATING_BUS.md), which uses it in every mode where
+this uses text page 1 - and `sim/vbl_lock_tb.sv` carries an *independent* one: the counters themselves,
 as Sather draws them, a 7-bit H that presets from `$00` to `$40` and a 9-bit
 V that presets from `$1FF` to `$FA` (NTSC) or `$C8` (PAL), with the address
 bits picked off them. The two derivations agreeing on every non-hole cycle
@@ -316,7 +317,12 @@ the cycle subtracts one.
 - **Aux memory.** The pattern goes to main memory and the scanner reads main
   memory in 40-column modes. Whether a //e's floating bus shows the aux byte
   in any configuration this sets up is answered by the mismatch count, not
-  assumed.
+  assumed - and the floating-bus simulator's monitor now keeps a separate
+  count for 80-column cycles, which is where the answer will show
+  (FLOATING_BUS.md).
+- **`$C020` as a probe address.** Not side-effect free: it toggles the
+  cassette output, harmless with nothing plugged in. `PAGE2 ? $C055 : $C054`
+  is the idempotent floating read.
 - **Nothing here has run on hardware with the bit yet.** The level and the
   bit are checked in `sim/vbl_lock_tb.sv` against the testbench's scanner
   on every cycle of NTSC and PAL frames, with the m2b0 pin tied high to

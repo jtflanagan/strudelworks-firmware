@@ -15,22 +15,25 @@
 // Written in the two-process shape Vivado infers a true dual-port block RAM
 // from (UG901, "Dual-Port Block RAM with Two Write Ports"), read-first on
 // both ports.  1664 x 8 is one RAMB18; the buffer is two RAMB36 per drive.
+// The floating-bus simulator (rtl/fb_sim.sv) keeps its side copy of the
+// text and hi-res pages in two of these, deeper: AW is the address width.
 // A collision - both ports at one index, one of them writing - returns
 // stale data on the reader's port for that one access, and the bus side
 // refreshes its copy a few clocks later anyway.
 //////////////////////////////////////////////////////////////////////////////////
 module fd_bank #(
-    parameter integer DEPTH = 1664
+    parameter integer DEPTH = 1664,
+    parameter integer AW    = 11
 ) (
     input  wire        clk,
 
     input  wire        a_we,
-    input  wire [10:0] a_addr,
+    input  wire [AW-1:0] a_addr,
     input  wire [7:0]  a_wdata,
     output logic [7:0] a_rdata,
 
     input  wire        b_we,
-    input  wire [10:0] b_addr,
+    input  wire [AW-1:0] b_addr,
     input  wire [7:0]  b_wdata,
     output logic [7:0] b_rdata
 );

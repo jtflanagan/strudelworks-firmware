@@ -119,6 +119,9 @@ module snoop_top #(
         .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),
         .mem_hits (32'd0), .mem_misses (32'd0), .mem_mismatch (32'd0),
         .mem_served (32'd0), .mem_last (32'd0), .mem_diverted (32'd0),
+        .fb_serve (), .fb_cnt_clr (), .fb_peek_addr (),   // nor simulate the floating bus
+        .fb_mode (7'd0), .fb_compared (32'd0), .fb_mismatch (32'd0), .fb_last (32'd0),
+        .fb_last2 (32'd0), .fb_other (32'd0), .fb_peek_data (8'd0),
         .res_drive (),
         .app_msg_valid (), .app_msg_type (), .app_msg_free (),
         .app_msg_len (), .app_pay_data (), .app_pay_valid (),

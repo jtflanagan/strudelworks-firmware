@@ -171,6 +171,10 @@ module reg_map_tb;
 
     wire       mem_serve;
     wire       mem_cnt_clr, mem_inval;
+    wire        fb_serve, fb_cnt_clr;
+    wire [14:0] fb_peek_addr;
+    integer     fb_cnt_clrs = 0;
+    always @(posedge clk) if (fb_cnt_clr) fb_cnt_clrs = fb_cnt_clrs + 1;
     integer    mem_cnt_clrs = 0, mem_invals = 0;
     always @(posedge clk) begin
         if (mem_cnt_clr) mem_cnt_clrs = mem_cnt_clrs + 1;
@@ -211,6 +215,10 @@ module reg_map_tb;
         .mem_hits (32'h0000_1111), .mem_misses (32'h0000_0022),
         .mem_mismatch (32'h0000_0003), .mem_served (32'h0000_0444), .mem_diverted (32'h0000_0777),
         .mem_last (32'h1234_5C3A),
+        .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
+        .fb_mode (7'b1010101), .fb_compared (32'h0004_2870), .fb_mismatch (32'h0000_0005),
+        .fb_last (32'hA55A_C0A3), .fb_last2 (32'h5427_D8C2), .fb_other (32'h0002_0001),
+        .fb_peek_data (fb_peek_addr[14] ? 8'hD5 : 8'h2A),
         .ring_status (32'h0200_1234),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
@@ -1254,6 +1262,53 @@ module reg_map_tb;
             $display("FAIL: MEM_DIVERTED reads %08x", out_mem[base+2]);
             errors = errors + 1;
         end else $display("  ok: MEM_DIVERTED reads straight through");
+
+        $display("");
+        // ---- FB_CTRL, FB_PEEK and the floating-bus counters ---------------------
+        base = out_n;
+        do_read(32'h8000_0070);
+        if (out_mem[base+2] !== 32'h0055_0000 || fb_serve !== 1'b0) begin
+            $display("FAIL: FB_CTRL reads %08x, expected the mode bits and serve clear", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: FB_CTRL reads the mode in [22:16] and serve clear");
+        do_write(32'h8000_0070, 32'h0000_0101);           // serve on, clear
+        base = out_n;
+        do_read(32'h8000_0070);
+        if (out_mem[base+2] !== 32'h0055_0001 || fb_serve !== 1'b1 || fb_cnt_clrs != 1) begin
+            $display("FAIL: FB_CTRL after write reads %08x, serve %b, %0d clears", out_mem[base+2], fb_serve, fb_cnt_clrs);
+            errors = errors + 1;
+        end else $display("  ok: FB_CTRL's serve is a level and its clear pulses once");
+        do_write(32'h8000_0070, 32'h0000_0000);
+        if (fb_serve !== 1'b0 || fb_cnt_clrs != 1) begin
+            $display("FAIL: FB_CTRL serve stuck, or a write with bit 8 clear pulsed"); errors = errors + 1;
+        end
+        base = out_n;
+        do_read(32'h8000_0074);
+        do_read(32'h8000_0078);
+        do_read(32'h8000_007C);
+        do_read(32'h8000_0080);
+        do_read(32'h8000_0084);
+        if (out_mem[base+2] !== 32'h0004_2870 || out_mem[base+5] !== 32'h0000_0005 ||
+            out_mem[base+8] !== 32'hA55A_C0A3 || out_mem[base+11] !== 32'h5427_D8C2 ||
+            out_mem[base+14] !== 32'h0002_0001) begin
+            $display("FAIL: FB counters read %08x %08x %08x %08x %08x", out_mem[base+2],
+                     out_mem[base+5], out_mem[base+8], out_mem[base+11], out_mem[base+14]);
+            errors = errors + 1;
+        end else $display("  ok: FB_COMPARED, MISMATCH, LAST, LAST2 and OTHER read straight through");
+        do_write(32'h8000_0088, 32'hFFFF_4123);           // the hi-res copy, index $0123
+        base = out_n;
+        do_read(32'h8000_0088);
+        if (out_mem[base+2] !== 32'h00D5_4123 || fb_peek_addr !== 15'h4123) begin
+            $display("FAIL: FB_PEEK reads %08x, expected the byte D5 and the address 4123", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: FB_PEEK holds its address and reads the copy's byte");
+        do_write(32'h8000_0088, 32'h0000_0400);           // the text copy
+        base = out_n;
+        do_read(32'h8000_0088);
+        if (out_mem[base+2] !== 32'h002A_0400) begin
+            $display("FAIL: FB_PEEK (text) reads %08x", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: FB_PEEK's bit 14 picks the text copy");
 
         if (errors == 0) $display("PASS");
         else             $display("FAIL: %0d error(s)", errors);

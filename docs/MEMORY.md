@@ -233,6 +233,8 @@ does, and the check needs no hardware but the capture.
   running a cycle per clock needs a write-then-read bypass on the ways and the
   tag word, a write buffer, and a rendezvous with the bus for BUS-class reads.
   The cache's hit path is registered at every stage so that work starts from
-  here rather than from a rewrite.
+  here rather than from a rewrite. One family of BUS-class reads no longer
+  needs the rendezvous: the floating bus is simulated from a side copy of
+  the display pages (FLOATING_BUS.md), fed from the same classified op.
 - **INH'.** A card asserting INH' or DMA' is out of scope (DERISK.md, "Two
   memory modes"); serving trusts the image.

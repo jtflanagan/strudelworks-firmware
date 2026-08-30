@@ -84,6 +84,10 @@
 //   $C006/7  INTCXROM  write only        $C008/9  ALTZP      write only
 //   $C00A/B  SLOTC3ROM write only
 //   $C054/5  PAGE2     read or write     $C056/7  HIRES      read or write
+//   and three the memory map does not need but the video scanner does, kept
+//   here so one decoder tracks every switch (rtl/fb_sim.sv reads them):
+//   $C00C/D  80COL     write only        $C050/1  TEXT       read or write
+//   $C052/3  MIXED     read or write
 //   $C080-F  the language card, read or write:
 //              A3 = 0 selects bank 2, A3 = 1 bank 1;
 //              A0 == A1 (i.e. $x0, $x3) reads RAM, otherwise ROM;
@@ -138,6 +142,9 @@ module apple_mmu (
     //   {prewrite, wren, lc_ramrd, bank2, slotc3rom, intcxrom, hires, page2,
     //    altzp, ramwrt, ramrd, store80}
     output wire [11:0] sw_state,
+    // The video switches: {col80, mixed, text}.  Separate from sw_state,
+    // whose packing MEM_STAT and the host's mirror carry bit for bit.
+    output wire [2:0]  vid_sw,
     // The RamWorks bank register, for MEM_CTRL's readback.
     output logic [7:0] rw_bank,
 
@@ -162,11 +169,13 @@ module apple_mmu (
     // ---- the switches ----------------------------------------------------------
     logic store80, ramrd, ramwrt, intcxrom, altzp, slotc3rom;
     logic page2, hires;
+    logic text, mixed, col80;
     logic lc_bank2, lc_ramrd, lc_wren, lc_prewrite;
 
     assign sw_state = {lc_prewrite, lc_wren, lc_ramrd, lc_bank2,
                        slotc3rom, intcxrom, hires, page2,
                        altzp, ramwrt, ramrd, store80};
+    assign vid_sw   = {col80, mixed, text};
 
     wire io_page = (op_addr[15:8] == 8'hC0);
     wire sw_c00x = io_page && (op_addr[7:4] == 4'h0);      // $C000-$C00F
@@ -186,6 +195,9 @@ module apple_mmu (
             slotc3rom   <= 1'b0;
             page2       <= 1'b0;
             hires       <= 1'b0;
+            text        <= 1'b1;       // the IOU's reset state: 40-column text
+            mixed       <= 1'b0;
+            col80       <= 1'b0;
             lc_bank2    <= 1'b1;
             lc_ramrd    <= 1'b0;
             lc_wren     <= 1'b1;
@@ -202,13 +214,16 @@ module apple_mmu (
                     3'd3: intcxrom  <= op_addr[0];
                     3'd4: altzp     <= op_addr[0];
                     3'd5: slotc3rom <= op_addr[0];
+                    3'd6: col80     <= op_addr[0];
                     default: ;
                 endcase
             end
             // $C071/$C073: the RamWorks bank, if it exists.
             if (sw_rwbk && !op_rw && op_wdata < RW_BANKS) rw_bank <= op_wdata;
-            // $C054-$C057: read or write alike.
+            // $C050-$C057: read or write alike.
             if (sw_c05x) begin
+                if (op_addr[3:1] == 3'd0) text  <= op_addr[0];
+                if (op_addr[3:1] == 3'd1) mixed <= op_addr[0];
                 if (op_addr[3:1] == 3'd2) page2 <= op_addr[0];
                 if (op_addr[3:1] == 3'd3) hires <= op_addr[0];
             end
