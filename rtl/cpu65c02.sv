@@ -130,6 +130,17 @@ module cpu65c02 #(
                                     // serving fetches combinationally off it
                                     // cannot close a loop through din
     output wire  [15:0] i_pred,     // next program-stream address (see next_pc)
+    output wire  [15:0] i_steer,    // the REGISTER-ONLY prediction: equals
+                                    // i_pred wherever the difference could
+                                    // matter to a cache steering a row.  The
+                                    // 6502's grant makes it so - every
+                                    // carried or data-borne PC load is
+                                    // followed by an extra cycle (the taken
+                                    // branch's dummy, the page-cross fixup,
+                                    // RTS's increment) in which the PC
+                                    // registers settle, and JMP/JSR's low
+                                    // nibble sits in md, a register.  No din,
+                                    // no AGU, no condition logic behind it.
     output wire  [15:0] d_addr,     // = addr; the D view, meaningful when !cyc_is_i
     output wire         d_rw,       // = rw
     output wire  [7:0]  d_dout      // = dout
@@ -531,6 +542,22 @@ module cpu65c02 #(
         end
     end
     assign i_pred = next_pc;
+
+    // The register-only steer (see the port comment).  Three legs, every
+    // source a flip-flop: sequential advance, JMP/JSR's target low byte from
+    // md, and hold - which the architecture's granted cycles make correct
+    // for every AGU-borne load.  ~f_ld_if rather than ld_en on the INC leg,
+    // deliberately: ld_en drags cond_met's carry back in, and f_ld_if with
+    // INC never occurs on the base part (BBR/BBS are NOPs) - if it ever did,
+    // the hold leg costs one mis-steered clock, not correctness.
+    assign i_steer =
+        (f_ld_pc == UC_LD_PC_INC && !f_ld_if && !int_pc_hold)
+            ? {pch_inc, pcl_inc} :
+        (f_ld_pc == UC_LD_PC_JMP)
+            ? {pch, md}                 // high byte meaningless: the steer
+                                        // uses [7:4]; the page rides the
+                                        // front's same-page assumption
+            : {pch, pcl};
 
     always_ff @(posedge clk) begin
         if (rst) begin

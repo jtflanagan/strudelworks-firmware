@@ -48,14 +48,6 @@ module class_tlb (
     output wire        l_w_ok,      // a write lands in the image
     output wire [16:0] l_w_ppage,   // {1'b0, pa[23:8]} for writes
 
-    // A second lookup, read view only: the icache steers its row by the
-    // PREDICTED next fetch while port A answers for the current one.  Same
-    // LUTRAM; the tools replicate it.
-    input  wire [15:0] b_addr,
-    output wire        b_hit,
-    output wire        b_r_ok,
-    output wire [16:0] b_r_ppage,
-
     // Install: one entry per clock, apple_mmu's t_* answer for w_page.
     input  wire        w_en,
     input  wire [7:0]  w_page,
@@ -78,12 +70,6 @@ module class_tlb (
     assign l_r_ppage = ent[34:18];
     assign l_w_ok    = ent[17];
     assign l_w_ppage = ent[16:0];
-
-    wire [7:0]    bidx = b_addr[15:8];
-    wire [EW-1:0] bent = entries[bidx];
-    assign b_hit     = vld[bidx];
-    assign b_r_ok    = bent[35];
-    assign b_r_ppage = bent[34:18];
 
     always_ff @(posedge clk) begin
         if (w_en) entries[w_page] <= {w_r_ok, w_r_ppage, w_w_ok, w_w_ppage};

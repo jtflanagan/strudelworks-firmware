@@ -249,6 +249,18 @@ those the front end takes the nine down to ONE:
   place - and the entries refill lazily. The two pages that are not uniform
   or that mutate the map by mere access, `$C3` and `$CF`, are never
   L1-servable, so INTC8ROM's triggers always reach the MMU as presented ops.
+  **The fetch clock never reads the TLB.**  The first build proved it could
+  not (WNS -4.8 ns: the PC through one 256-deep LUTRAM into another, 22
+  levels, mostly routing).  Instead a PAGE REGISTER holds the last entry
+  used - the prediction that the next fetch shares it, which only a page
+  crossing breaks - and the fetch clock is flip-flops on both sides: an
+  8-bit page compare, a concatenated physical address, an index off
+  registers.  A mismatch stalls one clock, during which the TLB is read
+  register-to-register with a whole clock to make it, the page register
+  reloads, and the row re-steers from the TLB's live answer: +1 clock per
+  page cross, and a hot loop straddling a boundary pays it twice per lap
+  (the mix line's page-stall count is what would justify a second,
+  previous-page register).
 
 - **The icache** (`rtl/icache_l1.sv`): 4 KB, 256 lines of 16 bytes,
   direct-mapped, physically indexed and tagged in the 25-bit space
@@ -256,9 +268,14 @@ those the front end takes the nine down to ONE:
   ALTZP and every RamWorks bank coexist without aliasing, which is also why
   a TLB flush does NOT flush the icache: only translations refetch. A block
   RAM answers a clock late, so the row register is steered a clock EARLY:
-  by `i_pred` - the core's own next-PC mux, exported, so sequential flow,
-  taken branches, jumps and returns all predict exactly - while the core
-  runs, and by the live address while it retries.
+  by `i_steer` - the core's REGISTER-ONLY prediction - while the core
+  runs, and by the live address while it retries.  i_steer leans on the
+  6502's own grants: every carried or data-borne PC load is followed by
+  an extra cycle (the taken branch's dummy, the page-cross fixup, RTS's
+  increment) in which the PC registers settle, and JMP/JSR's target low
+  nibble sits in `md`, a register - so a steer with no din, no AGU and
+  no condition logic behind it is dynamically identical to the exact
+  predictor, and the row-verdict's whole cone stays flip-flop-shallow.
 
 - **The late cancel**: the core launches every clock as if the steered row
   were right; `cyc_en`, now a last-moment combinational signal, simply

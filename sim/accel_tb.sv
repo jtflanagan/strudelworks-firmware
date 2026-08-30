@@ -101,13 +101,13 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        cpu_rw, cpu_sync, cpu_cyc_en;
     wire [7:0]  cpu_dout, cpu_din;
     wire        cpu_cyc_is_i;
-    wire [15:0] cpu_i_pred, cpu_i_addr;
+    wire [15:0] cpu_i_pred, cpu_i_addr, cpu_i_steer;
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
         .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted (),
         .cyc_is_i (cpu_cyc_is_i), .i_addr (cpu_i_addr), .i_pred (cpu_i_pred),
-        .d_addr (), .d_rw (), .d_dout ()
+        .i_steer (cpu_i_steer), .d_addr (), .d_rw (), .d_dout ()
     );
 
     // ACCEL_CTRL, as the testbench drives it.
@@ -164,7 +164,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .op_present (op_present), .op_commit (op_commit), .op_dummy (op_dummy), .op_ovr (op_ovr),
         .op_divert (op_divert), .op_sync (drv_sync), .op_addr (op_addr), .op_rw (op_rw),
         .op_wdata (op_wdata), .cyc_done (drv_cyc_done), .drv_din (drv_din),
-        .op_inflight (op_inflight), .ovr_en (ovr_en),
+        .op_inflight (op_inflight), .ovr_en (ovr_en), .ovr_hold (boot_ovr_en),
         .bus_owns (bus_owns), .core_valid (core_valid),
         .mem_sub_en (mem_sub_en), .mem_sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .mq_valid (mq_valid_w),
@@ -185,7 +185,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     l1_front u_l1 (
         .clk (clk), .rst (rst),
         .i_addr (cpu_i_addr), .cpu_sync (cpu_sync),
-        .cyc_is_i (cpu_cyc_is_i), .i_pred (cpu_i_pred),
+        .cyc_is_i (cpu_cyc_is_i), .i_steer (cpu_i_steer),
         .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
         .accel_cyc_en (accel_cyc_en), .accel_din (accel_din),
         .turbo_ok (turbo_ok), .l1_claim (l1_claim),
@@ -648,13 +648,14 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     integer mix_sum [0:4];
     integer mix_max [0:4];
     integer gov_clocks = 0;
+    integer pstalls = 0;
     task clear_mix;
         integer k;
         begin
             for (k = 0; k < 5; k = k + 1) begin
                 mix_cnt[k] = 0; mix_sum[k] = 0; mix_max[k] = 0;
             end
-            gov_clocks = 0; mix_clk = 0;
+            gov_clocks = 0; mix_clk = 0; pstalls = 0;
         end
     endtask
     initial clear_mix();
@@ -668,12 +669,14 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                      mix_cnt[3], mix_cnt[3] ? real'(mix_sum[3]) / mix_cnt[3] : 0.0,
                      mix_cnt[4], mix_cnt[4] ? real'(mix_sum[4]) / mix_cnt[4] : 0.0, mix_max[4],
                      gov_clocks);
+            $display("    ...page-register stalls: %0d clocks", pstalls);
         end
     endtask
     integer mix_cat;
     always @(posedge clk) begin
         mix_clk = mix_clk + 1;
         if (u_seq.held_governor) gov_clocks = gov_clocks + 1;
+        if (u_l1.cyc_is_i && !u_l1.page_match) pstalls = pstalls + 1;
         if (cpu_cyc_en) begin
             if (turbo_commit)                  mix_cat = 0;
             else if (u_seq.st == u_seq.S_FAST) mix_cat = !cpu_rw ? 3 : (cpu_cyc_is_i ? 1 : 2);

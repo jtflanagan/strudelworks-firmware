@@ -135,6 +135,15 @@ module accel_seq (
     input  wire [7:0]  drv_din,
     input  wire        op_inflight,
     input  wire        ovr_en,
+    // The HOLD's override alone, LIVE: its contract - the core stopped at
+    // the exact SYNC, an instruction boundary with every register defined -
+    // needs turbo blocked the very clock it engages, and its engage is a
+    // few gates off flip-flops.  The other overrides (the disk's DMA, the
+    // VBL lock) reach turbo through the registered dq_ovr instead: their
+    // one-clock slide is harmless - a DMA lands its blocks via the bus
+    // wherever the core's PC sits - and hd_card's DMA-active comparison is
+    // a carry chain that must never sit in front of the fetch path.
+    input  wire        ovr_hold,
     output wire        bus_owns,
     output wire        core_valid,
 
@@ -251,11 +260,17 @@ module accel_seq (
     // dq_* are the registered copies the decision is made from; `settled`
     // says they describe the op the core has up now (see the header).
     logic [1:0] dq_cls;
-    logic       dq_rw, dq_ovr, settled;
+    logic       dq_rw, dq_ovr, dq_rst, settled;
     always_ff @(posedge clk) begin
         dq_cls <= q_cls;
         dq_rw  <= cpu_rw;
         dq_ovr <= ovr_en;
+        // cpu_rst arrives through the link's command-reset counter and a
+        // fanout-2393 reset network - the last live head into turbo_ok's
+        // cone.  Registered here: S_RST was always a registered transition,
+        // and a turbo cyc_en on the reset clock itself is void (the core's
+        // rst branch outranks cyc_en at that edge).
+        dq_rst <= cpu_rst;
     end
     wire needs_bus = off || (dq_cls == CLS_BUS) || (!dq_rw && mode == MODE_READS) ||
                      !mem_serve || reset_seq;
@@ -273,9 +288,9 @@ module accel_seq (
     // dispatch can never fire on one clock: the dispatch waits for !l1_claim,
     // and once the claim has lapsed the op is the dispatcher's for good.
     // Everything here is a registered term - no loop through the front.
-    assign turbo_ok = (st == S_DECIDE) && !off && master_active && !cpu_rst &&
-                      can_pay && !ovr_en && !reset_seq && mem_serve &&
-                      !mem_invalidating && l1_claim;
+    assign turbo_ok = (st == S_DECIDE) && !off && master_active && !dq_rst &&
+                      can_pay && !ovr_hold && !dq_ovr && !reset_seq &&
+                      mem_serve && !mem_invalidating && l1_claim;
 
     wire decide_go = (st == S_DECIDE) && settled && !dq_ovr && can_pay && !l1_claim;
     wire go_bus    = decide_go && needs_bus;
@@ -351,7 +366,9 @@ module accel_seq (
             if (bus_tick && accel_on) cycles <= cycles + 32'd1;
 
             // ---- a turbo op: the front served it; the books are ours --------
-            if (turbo_commit) begin
+            // (!cpu_rst: the one op that can retire on the reset clock
+            // itself is void in the core, so it gets no books either.)
+            if (turbo_commit && !cpu_rst) begin
                 turbo_ops <= turbo_ops + 32'd1;
                 if (fev_room) begin
                     fev_valid <= 1'b1;

@@ -42,8 +42,13 @@ module icache_l1 (
     output wire         look_hit,
     output wire [7:0]   look_byte,
 
-    // Steering: the row the next clock's lookup will want.
+    // Steering: the row the next clock's lookup will want, and the physical
+    // tag the steered address expects there.  The tag table is read and
+    // compared HERE, at the steer edge, with a whole clock to do it - the
+    // fetch clock then only checks registered bits (the first build proved
+    // the fetch clock cannot afford a LUTRAM: docs/ACCELERATION.md).
     input  wire [7:0]   steer_idx,
+    input  wire [12:0]  steer_tag,
 
     // Install: a whole line, from the L2's sub_line or the ROM filler.
     input  wire         inst_en,
@@ -63,10 +68,13 @@ module icache_l1 (
     logic [127:0] row;               // the BRAM's one-clock-late answer
     logic [7:0]   row_idx;           // which row it is
     logic         row_ok;            // and whether it postdates every install
+    logic         row_hit;           // the steer-time verdict: the row being
+                                     // loaded is valid AND is the line the
+                                     // steered address wants
 
+    // The fetch clock: flip-flops on both sides, nothing else.
     wire [7:0]  l_idx = look_pa[11:4];
-    assign look_hit  = vld[l_idx] && (tags[l_idx] == look_pa[24:12]) &&
-                       (row_idx == l_idx) && row_ok;
+    assign look_hit  = row_hit && (row_idx == l_idx) && row_ok;
     assign look_byte = row[8 * look_pa[3:0] +: 8];
 
     wire [7:0] i_idx = inst_pa[11:4];
@@ -79,6 +87,15 @@ module icache_l1 (
         row     <= mem[steer_idx];
         row_idx <= steer_idx;
         row_ok  <= !(inst_en && i_idx == steer_idx);
+        // The verdict, with everything that could kill the steered row at
+        // this same edge folded in as forced-low terms: the flash, a snoop
+        // landing on it, an install colliding with it (the row register
+        // would hold pre-install data - one extra miss clock, as row_ok
+        // already imposes).  Nothing stale can ever serve.
+        row_hit <= !(rst || flash) && vld[steer_idx] &&
+                   (tags[steer_idx] == steer_tag) &&
+                   !(inst_en && i_idx == steer_idx) &&
+                   !(snoop_here && s_idx == steer_idx);
 
         if (inst_en) begin
             mem[i_idx]  <= inst_line;

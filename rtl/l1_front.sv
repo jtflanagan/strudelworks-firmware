@@ -55,7 +55,12 @@ module l1_front (
     input  wire [15:0] i_addr,
     input  wire        cpu_sync,
     input  wire        cyc_is_i,
-    input  wire [15:0] i_pred,
+    // The core's register-only prediction (cpu65c02.i_steer): equal to the
+    // exact i_pred wherever a steer could tell the difference - the 6502's
+    // granted cycles cover every carried or data-borne PC load - and with
+    // no din, AGU or condition logic behind it, which is what keeps the
+    // steer cone flip-flop-shallow.
+    input  wire [15:0] i_steer,
     output wire        cyc_en,
     output wire [7:0]  cpu_din,
 
@@ -97,11 +102,17 @@ module l1_front (
     input  wire        rom_ok
 );
 
-    // ---- the I-TLB ----------------------------------------------------------
-    // Port A answers for the core's live address, port B for the prediction -
-    // the steering needs next clock's physical index this clock.
-    wire        a_hit, a_r_ok, b_hit, b_r_ok;
-    wire [16:0] a_r_ppage, b_r_ppage;
+    // ---- the I-TLB and the page register ------------------------------------
+    // The TLB LUTRAM is too slow for the fetch clock (the first build: 22
+    // levels, -4.8 ns, two LUTRAMs chained), so the fetch clock never reads
+    // it.  Instead ONE entry - the last one used - is held in registers,
+    // and the prediction is that the next fetch uses it too.  It almost
+    // always does: only a page CROSSING mismatches, and then the fetch
+    // stalls one clock while the TLB - now a register-to-register read
+    // with a whole clock to make it - reloads the register and the row
+    // re-steers.  The user's design.
+    wire        a_hit, a_r_ok;
+    wire [16:0] a_r_ppage;
     wire        a_w_ok_nc;
     wire [16:0] a_w_ppage_nc;
 
@@ -115,10 +126,6 @@ module l1_front (
         .l_r_ppage (a_r_ppage),
         .l_w_ok    (a_w_ok_nc),        // the I side never writes
         .l_w_ppage (a_w_ppage_nc),
-        .b_addr    (i_pred),
-        .b_hit     (b_hit),
-        .b_r_ok    (b_r_ok),
-        .b_r_ppage (b_r_ppage),
         .w_en      (cyc_is_i && !a_hit),        // cold page: refill, retry free
         .w_page    (i_addr[15:8]),
         .w_r_ok    (t_r_ok),
@@ -128,10 +135,35 @@ module l1_front (
     );
     assign t_page = i_addr[15:8];
 
-    wire [24:0] cur_pa  = {a_r_ppage, i_addr[7:0]};
+    // The page register: {page, servable, physical page}, standing until
+    // the map moves.  Reloaded - from the TLB, itself refilled first when
+    // cold - on the fetch clock that mismatches it.
+    logic        lp_valid, lp_ok;
+    logic [7:0]  lp_page;
+    logic [16:0] lp_ppage;
+    wire page_match = lp_valid && (i_addr[15:8] == lp_page);
+    always_ff @(posedge clk) begin
+        if (rst || map_changed) begin
+            lp_valid <= 1'b0;
+        end else if (cyc_is_i && !page_match && a_hit) begin
+            lp_valid <= 1'b1;
+            lp_page  <= i_addr[15:8];
+            lp_ok    <= a_r_ok;
+            lp_ppage <= a_r_ppage;
+        end
+    end
+
+    // Everything the fetch clock needs is now flip-flops on both sides:
+    // the page compare, the physical address, the icache index.
+    wire [24:0] cur_pa  = {lp_ppage, i_addr[7:0]};
     wire [7:0]  cur_idx = cur_pa[11:4];
-    wire [7:0]  pred_idx = (b_hit && b_r_ok) ? {b_r_ppage[3:0], i_pred[7:4]}
-                                             : cur_idx;
+    // The predicted fetch is assumed IN the page.  A cross-page prediction
+    // steers a wrong row, and that fetch then stalls on the page mismatch
+    // anyway - the stall that fixes it.
+    wire [7:0]  pred_idx = {lp_ppage[3:0], i_steer[7:4]};
+    // During a page-mismatch stall, steer from the TLB's live output, so
+    // the reload and the re-steer share the one stall clock.
+    wire [7:0]  mm_idx   = {a_r_ppage[3:0], i_addr[7:4]};
 
     // ---- the icache ---------------------------------------------------------
     wire ic_hit;
@@ -151,8 +183,12 @@ module l1_front (
         .look_pa   (cur_pa),
         .look_hit  (ic_hit),
         .look_byte (ic_byte),
-        // Advancing: have the predicted fetch ready.  Stalled: have THIS one.
-        .steer_idx (cyc_en ? pred_idx : cur_idx),
+        // Advancing: have the predicted fetch ready.  Stalled: have THIS
+        // one - from the TLB's live answer while the page register reloads.
+        // The tag rides with the index, from the same source.
+        .steer_idx (cyc_en ? pred_idx : (page_match ? cur_idx : mm_idx)),
+        .steer_tag ((cyc_en || page_match) ? lp_ppage[16:4]
+                                           : a_r_ppage[16:4]),
         .inst_en   (inst_en),
         .inst_pa   (inst_pa),
         .inst_line (inst_line),
@@ -161,7 +197,7 @@ module l1_front (
     );
 
     // ---- the turbo op -------------------------------------------------------
-    wire servable = cyc_is_i && a_hit && a_r_ok;
+    wire servable = cyc_is_i && page_match && lp_ok;
     wire turbo_hit = turbo_ok && servable && ic_hit;
 
     assign cyc_en   = accel_cyc_en || turbo_hit;
@@ -179,7 +215,9 @@ module l1_front (
         if (rst || cyc_en || !cyc_is_i) tries <= 2'd0;
         else if (tries != 2'd3)         tries <= tries + 2'd1;
     end
-    assign l1_claim = cyc_is_i && (tries != 2'd3) && !(a_hit && !a_r_ok);
+    // A page the register says is unservable drops the claim at once; an
+    // unmatched page burns at most the window while it reloads.
+    assign l1_claim = cyc_is_i && (tries != 2'd3) && !(page_match && !lp_ok);
 
     // ---- the image install: observation -------------------------------------
     // The op that missed here completed on the sequencer's path; its line

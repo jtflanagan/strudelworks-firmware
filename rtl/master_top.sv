@@ -373,7 +373,7 @@ module master_top #(
     // fill and snoop.  cyc_en and din now reach the core THROUGH the front
     // (rtl/l1_front.sv); the sequencer's own become accel_cyc_en/accel_din.
     wire        cpu_cyc_is_i;
-    wire [15:0] cpu_i_pred, cpu_i_addr;
+    wire [15:0] cpu_i_pred, cpu_i_addr, cpu_i_steer;
     wire        accel_cyc_en;
     wire [7:0]  accel_din;
     wire        turbo_ok, l1_claim, turbo_commit, turbo_sync;
@@ -417,7 +417,8 @@ module master_top #(
         .d_addr (),                 // lookup address
         .d_rw   (),
         .d_dout (),
-        .i_pred (cpu_i_pred)
+        .i_pred (cpu_i_pred),
+        .i_steer (cpu_i_steer)
     );
 
     // ---- driving ------------------------------------------------------------
@@ -543,6 +544,7 @@ module master_top #(
         .drv_din       (drv_din),
         .op_inflight   (op_inflight),
         .ovr_en        (ovr_en),
+        .ovr_hold      (boot_ovr_en),
         .bus_owns      (bus_owns),
         .core_valid    (core_valid),
         .mem_sub_en    (mem_sub_en),
@@ -595,7 +597,7 @@ module master_top #(
         .i_addr       (cpu_i_addr),
         .cpu_sync     (cpu_sync),
         .cyc_is_i     (cpu_cyc_is_i),
-        .i_pred       (cpu_i_pred),
+        .i_steer      (cpu_i_steer),
         .cyc_en       (cpu_cyc_en),
         .cpu_din      (cpu_din),
         .accel_cyc_en (accel_cyc_en),
