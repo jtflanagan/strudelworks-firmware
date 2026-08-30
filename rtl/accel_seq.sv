@@ -148,6 +148,26 @@ module accel_seq (
     // Time.
     input  wire        bus_tick,
 
+    // The L1 front (rtl/l1_front.sv).  A turbo op is one the front served in
+    // a single clock: this module never sees it as an op, only as the books -
+    // the governor's charge, the counter, the capture event, the tick.
+    input  wire        l1_claim,      // an I-fetch the front may yet serve: hold dispatch
+    input  wire        ext_cyc_en,    // the front's turbo cyc_en, for settled's bookkeeping
+    input  wire        turbo_commit,  // one turbo op retired this clock
+    input  wire [15:0] turbo_addr,
+    input  wire [7:0]  turbo_data,
+    input  wire        turbo_sync,
+    output wire        turbo_ok,      // this module's permission: S_DECIDE, credit, no override
+    output logic       op_tick,       // one pulse per op served off the bus, for the op-time clocks
+    input  wire        fev_room,      // the event merge has headroom: a turbo
+                                      // event may be emitted.  Turbo runs
+                                      // outpace the merge's drain three to
+                                      // one, so their events - fetches, which
+                                      // a sparse capture discards anyway -
+                                      // are shed HERE, and the merge's
+                                      // overflow counter stays a fault flag.
+                                      // The books are never shed.
+
     // The unified op stream, registered.
     output logic        u_present,
     output wire         u_commit,
@@ -175,7 +195,8 @@ module accel_seq (
     output logic [31:0] bus_ops,
     output logic [31:0] cycles,
     output logic [31:0] wait_clocks,
-    output logic [7:0]  retries
+    output logic [7:0]  retries,
+    output logic [31:0] turbo_ops
 );
 
     localparam [1:0] CLS_BUS = 2'd0;
@@ -206,6 +227,19 @@ module accel_seq (
     wire  unlimited = (target == 16'd0);
     wire  can_pay   = unlimited || (credit >= 20'd256);
 
+    // Next clock's credit: deposit, cap, then this clock's payment.  The one
+    // place credit moves (outside the resets); `pay` is defined below with
+    // the dispatch.
+    logic [19:0] gov_next;
+    always_comb begin
+        gov_next = credit;
+        if (bus_tick) begin
+            gov_next = (credit + {4'd0, target} > cap) ? cap
+                                                       : credit + {4'd0, target};
+        end
+        if (pay) gov_next = gov_next - 20'd256;
+    end
+
     // ---- the decision -------------------------------------------------------
     // What goes to the bus is a matter of class, mode and policy - never of
     // the card's momentary state.  An invalidate in progress, or the image not
@@ -234,6 +268,20 @@ module accel_seq (
     wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en);
     wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en;
 
+    // ---- turbo permission and the dispatch ----------------------------------
+    // turbo_ok requires the CLAIM as well as S_DECIDE, so a turbo op and a
+    // dispatch can never fire on one clock: the dispatch waits for !l1_claim,
+    // and once the claim has lapsed the op is the dispatcher's for good.
+    // Everything here is a registered term - no loop through the front.
+    assign turbo_ok = (st == S_DECIDE) && !off && master_active && !cpu_rst &&
+                      can_pay && !ovr_en && !reset_seq && mem_serve &&
+                      !mem_invalidating && l1_claim;
+
+    wire decide_go = (st == S_DECIDE) && settled && !dq_ovr && can_pay && !l1_claim;
+    wire go_bus    = decide_go && needs_bus;
+    wire go_fast   = decide_go && !needs_bus && fast_ok;
+    wire pay       = (go_bus || go_fast || turbo_commit) && !unlimited;
+
     // ---- the core's side ----------------------------------------------------
     assign cyc_en     = off ? cyc_done : (st == S_BUS) ? cyc_done : fast_hit;
     assign cpu_din    = (off || st == S_BUS) ? drv_din : mem_sub_data;
@@ -253,10 +301,15 @@ module accel_seq (
     always_ff @(posedge clk) begin
         u_present <= 1'b0;
         fev_valid <= 1'b0;
+        // The op-time clocks' tick: one pulse per op served off the bus,
+        // turbo or fast - bus ops tick at their own commit in the cards.
+        op_tick   <= ((st == S_FAST) && fast_hit) || turbo_commit;
 
         // The registers above describe the op the core has up once the
-        // core has sat still for a clock: never on the clock of arrival.
-        settled <= (st == S_DECIDE) && !cyc_en;
+        // core has sat still for a clock: never on the clock of arrival -
+        // and a clock the FRONT advanced the core on counts as an arrival
+        // too, or dq_* would describe the op before the one that is up.
+        settled <= (st == S_DECIDE) && !cyc_en && !ext_cyc_en;
 
         // From reset until $FFFD has ridden the bus (see the header).  Cleared
         // in mode 0 too, where it could not be observed but must not stick.
@@ -273,7 +326,7 @@ module accel_seq (
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
             fev_addr <= 16'd0; fev_rw <= 1'b1; fev_data <= 8'd0; fev_sync <= 1'b0;
             fast_ops <= 32'd0; bus_ops <= 32'd0; cycles <= 32'd0;
-            wait_clocks <= 32'd0; retries <= 8'd0;
+            wait_clocks <= 32'd0; retries <= 8'd0; turbo_ops <= 32'd0;
         end else begin
             // ---- the stream: what the bus carried ---------------------------
             if (bus_op_present) begin
@@ -287,11 +340,27 @@ module accel_seq (
             end
 
             // ---- the governor ------------------------------------------------
-            if (bus_tick && !off) begin
-                if (credit + {4'd0, target} > cap) credit <= cap;
-                else                               credit <= credit + {4'd0, target};
+            // One writer: the tick's deposit and this clock's payment (a
+            // dispatch, or a turbo op) settle together.  They used to be
+            // separate non-blocking writes, and a tick landing on a dispatch
+            // clock lost one or the other.  Payment never underflows: every
+            // payer is gated on can_pay.
+            if (!off) begin
+                credit <= gov_next;
             end
             if (bus_tick && accel_on) cycles <= cycles + 32'd1;
+
+            // ---- a turbo op: the front served it; the books are ours --------
+            if (turbo_commit) begin
+                turbo_ops <= turbo_ops + 32'd1;
+                if (fev_room) begin
+                    fev_valid <= 1'b1;
+                    fev_addr  <= turbo_addr;
+                    fev_rw    <= 1'b1;
+                    fev_data  <= turbo_data;
+                    fev_sync  <= turbo_sync;
+                end
+            end
 
             // ---- the state machine --------------------------------------------
             if (cpu_rst || !master_active) begin
@@ -315,19 +384,15 @@ module accel_seq (
                             st <= S_HELD;
                             bus_owns_q   <= 1'b1;
                             core_valid_q <= 1'b0;
-                        end else if (!can_pay) begin
-                            // Wait for credit.
-                        end else if (needs_bus) begin
+                        end else if (go_bus) begin
                             st <= S_BUS;
                             bus_owns_q   <= 1'b1;
                             core_valid_q <= 1'b1;
-                            credit       <= unlimited ? credit : credit - 20'd256;
-                        end else if (fast_ok) begin
+                        end else if (go_fast) begin
                             st <= S_FAST;
                             bus_owns_q   <= 1'b0;
                             core_valid_q <= 1'b0;
                             fast_rw      <= cpu_rw;
-                            credit       <= unlimited ? credit : credit - 20'd256;
                             // The op, onto the stream.
                             u_present <= 1'b1;
                             u_addr    <= cpu_addr;
@@ -380,7 +445,7 @@ module accel_seq (
 
             if (cnt_clr) begin
                 fast_ops <= 32'd0; bus_ops <= 32'd0; cycles <= 32'd0;
-                wait_clocks <= 32'd0; retries <= 8'd0;
+                wait_clocks <= 32'd0; retries <= 8'd0; turbo_ops <= 32'd0;
             end
         end
     end

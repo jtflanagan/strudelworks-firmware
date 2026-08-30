@@ -100,10 +100,14 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [15:0] cpu_addr;
     wire        cpu_rw, cpu_sync, cpu_cyc_en;
     wire [7:0]  cpu_dout, cpu_din;
+    wire        cpu_cyc_is_i;
+    wire [15:0] cpu_i_pred;
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
-        .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
+        .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted (),
+        .cyc_is_i (cpu_cyc_is_i), .i_addr (), .i_pred (cpu_i_pred),
+        .d_addr (), .d_rw (), .d_dout ()
     );
 
     // ACCEL_CTRL, as the testbench drives it.
@@ -136,13 +140,27 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [7:0]  retries;
     wire        mem_image_ready, mem_invalidating;
 
+    // The L1 front between the core and the sequencer, as in master_top.
+    wire        accel_cyc_en, turbo_ok, l1_claim, turbo_commit, turbo_sync;
+    wire [7:0]  accel_din, turbo_data;
+    wire [15:0] turbo_addr;
+    wire [31:0] turbo_ops;
+    wire [127:0] mem_sub_line;
+    wire         mem_sub_line_ok;
+    wire        rom_r2_en;
+    wire [11:0] rom_r2_addr;
+    wire [31:0] rom_r2_data;
+    wire [7:0]  tlb_t_page;
+    wire        tlb_r_ok, tlb_w_ok, map_changed;
+    wire [16:0] tlb_r_ppage, tlb_w_ppage;
+
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
-        .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
+        .cyc_en (accel_cyc_en), .cpu_din (accel_din),
         .op_present (op_present), .op_commit (op_commit), .op_dummy (op_dummy), .op_ovr (op_ovr),
         .op_divert (op_divert), .op_sync (drv_sync), .op_addr (op_addr), .op_rw (op_rw),
         .op_wdata (op_wdata), .cyc_done (drv_cyc_done), .drv_din (drv_din),
@@ -151,13 +169,34 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .mem_sub_en (mem_sub_en), .mem_sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .mq_valid (mq_valid_w),
         .bus_tick (bus_tick),
+        .l1_claim (l1_claim), .ext_cyc_en (turbo_commit),
+        .turbo_commit (turbo_commit), .turbo_addr (turbo_addr),
+        .turbo_data (turbo_data), .turbo_sync (turbo_sync),
+        .turbo_ok (turbo_ok), .op_tick (), .fev_room (1'b1),
         .u_present (u_present), .u_commit (u_commit), .u_addr (u_addr), .u_rw (u_rw),
         .u_wdata (u_wdata), .u_sync (u_sync), .u_ovr (u_ovr), .u_divert (u_divert),
         .fev_valid (fev_valid), .fev_addr (fev_addr), .fev_rw (fev_rw), .fev_data (fev_data),
         .fev_sync (fev_sync),
         .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
         .fast_ops (fast_ops), .bus_ops (bus_ops), .cycles (cycles), .wait_clocks (wait_clocks),
-        .retries (retries)
+        .retries (retries), .turbo_ops (turbo_ops)
+    );
+
+    l1_front u_l1 (
+        .clk (clk), .rst (rst),
+        .cpu_addr (cpu_addr), .cpu_sync (cpu_sync),
+        .cyc_is_i (cpu_cyc_is_i), .i_pred (cpu_i_pred),
+        .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
+        .accel_cyc_en (accel_cyc_en), .accel_din (accel_din),
+        .turbo_ok (turbo_ok), .l1_claim (l1_claim),
+        .turbo_commit (turbo_commit), .turbo_addr (turbo_addr),
+        .turbo_data (turbo_data), .turbo_sync (turbo_sync),
+        .t_page (tlb_t_page), .t_r_ok (tlb_r_ok), .t_r_ppage (tlb_r_ppage),
+        .t_w_ok (tlb_w_ok), .t_w_ppage (tlb_w_ppage), .map_changed (map_changed),
+        .sub_line (mem_sub_line), .sub_line_ok (mem_sub_line_ok),
+        .rom_r2_en (rom_r2_en), .rom_r2_addr (rom_r2_addr), .rom_r2_data (rom_r2_data),
+        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_pa (cl_pa),
+        .mem_invalidating (mem_invalidating), .rom_ok (rom_loaded)
     );
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
@@ -182,7 +221,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     boot_hold u_hold (
         .clk (clk), .cpu_rst (cpu_rst), .master_active (master_active),
         .arm (arm), .release_req (release_req), .menu_trigger (menu_trigger), .hotkey_hit (1'b0),
-        .cpu_sync (cpu_sync),
+        .cpu_sync (cpu_sync), .aux_sync (turbo_commit && turbo_sync),
         .op_present (u_present), .op_commit (u_commit), .op_sync (u_sync), .op_ovr (u_ovr),
         .op_addr (u_addr), .op_rw (u_rw), .din (drv_din),
         .ovr_en (boot_ovr_en), .ovr_addr (boot_ovr_addr), .held (held), .runtime (hold_runtime)
@@ -226,13 +265,17 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (cl_rom_addr),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .intc8rom (intc8rom),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
-        .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls)
+        .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
+        .t_page (tlb_t_page), .t_r_ok (tlb_r_ok), .t_r_ppage (tlb_r_ppage),
+        .t_w_ok (tlb_w_ok), .t_w_ppage (tlb_w_ppage), .map_changed (map_changed)
     );
     apple_rom u_rom (
         .clk (clk), .rst (rst),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
-        .rd_en (cl_valid), .rd_addr (cl_rom_addr), .rd_data (rom_byte_int), .rom_loaded (rom_loaded)
+        .rd_en (cl_valid), .rd_addr (cl_rom_addr), .rd_data (rom_byte_int),
+        .r2_en (rom_r2_en), .r2_addr (rom_r2_addr), .r2_data (rom_r2_data),
+        .rom_loaded (rom_loaded)
     );
     mem_cache u_cache (
         .clk (clk), .rst (rst),
@@ -240,7 +283,9 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_wr_image (cl_wr_image), .op_addr (u_addr), .op_wdata (u_wdata),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .rom_byte (rom_byte), .rom_loaded (1'b1),
-        .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
+        .sub_en (mem_sub_en), .sub_data (mem_sub_data),
+        .sub_line (mem_sub_line), .sub_line_ok (mem_sub_line_ok),
+        .decided (decided), .busy (busy),
         .serve (serve), .inval (inval), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
         .hits (hits), .misses (misses), .served (served), .mismatches (mismatches),
@@ -567,6 +612,9 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                 last_bus_present = presents; last_was_bus = 1;
             end else last_was_bus = 0;
         end
+        // A turbo op between two bus ops breaks their adjacency exactly as
+        // an on-stream fast op used to: they were not consecutive.
+        if (turbo_commit) last_was_bus = 0;
         if (op_present) begin
             presents = presents + 1;
             if (op_dummy) dummies = dummies + 1;
@@ -708,12 +756,12 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     task check_ratio(input real want, input string what);
         real got;
         begin
-            got = real'(fast_ops + bus_ops) / real'(cycles);
+            got = real'(fast_ops + bus_ops + turbo_ops) / real'(cycles);
             if (cycles == 0) fail($sformatf("%0s: no bus cycles counted", what));
             else if (got < want * 0.95 || got > want * 1.05)
-                fail($sformatf("%0s: %0d ops over %0d cycles = %.2f per cycle, wanted %.2f", what, fast_ops + bus_ops, cycles, got, want));
-            else ok($sformatf("%0s: %.2f ops per bus cycle (wanted %.2f; %0d fast, %0d bus over %0d cycles)",
-                              what, got, want, fast_ops, bus_ops, cycles));
+                fail($sformatf("%0s: %0d ops over %0d cycles = %.2f per cycle, wanted %.2f", what, fast_ops + bus_ops + turbo_ops, cycles, got, want));
+            else ok($sformatf("%0s: %.2f ops per bus cycle (wanted %.2f; %0d turbo, %0d fast, %0d bus over %0d cycles)",
+                              what, got, want, turbo_ops, fast_ops, bus_ops, cycles));
         end
     endtask
 
@@ -784,9 +832,11 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         common_checks("mode 1");
         if (fast_ops == 0 || dummies == 0) fail("mode 1: no fast ops or no dummies");
         else ok($sformatf("mode 1: %0d fast ops, %0d bus ops, %0d bus cycles, %0d dummies", fast_ops, bus_ops, cycles, dummies));
-        check_ratio(real'(fast_ops + bus_ops) / real'(cycles), "mode 1 measured");
-        if (fast_ops + bus_ops < 3 * cycles) fail("mode 1: less than 3x");
-        else ok($sformatf("mode 1: %.1fx", real'(fast_ops + bus_ops) / real'(cycles)));
+        check_ratio(real'(fast_ops + bus_ops + turbo_ops) / real'(cycles), "mode 1 measured");
+        if (fast_ops + bus_ops + turbo_ops < 3 * cycles) fail("mode 1: less than 3x");
+        else ok($sformatf("mode 1: %.1fx", real'(fast_ops + bus_ops + turbo_ops) / real'(cycles)));
+        if (turbo_ops == 0) fail("mode 1: no fetch was served in one clock");
+        else ok($sformatf("mode 1: %0d fetches served in one clock by the icache", turbo_ops));
         if (phys_diff(1) != 0) fail("mode 1: the machine's memory differs from the reference - a write missed the bus");
         else ok("mode 1: every write reached the machine; its memory equals the reference");
         if (merge_gaps != 0) fail($sformatf("mode 1: %0d consecutive bus ops did not ride consecutive cycles", merge_gaps));
@@ -807,8 +857,10 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         common_checks("mode 2");
         if (pin_ram_writes != 0) fail($sformatf("mode 2: %0d RAM writes reached the pins", pin_ram_writes));
         else ok("mode 2: no RAM write reached the pins");
-        if (fast_ops + bus_ops < 6 * cycles) fail($sformatf("mode 2: only %.1fx", real'(fast_ops + bus_ops) / real'(cycles)));
-        else ok($sformatf("mode 2: %.1fx (%0d fast, %0d bus over %0d cycles)", real'(fast_ops + bus_ops) / real'(cycles), fast_ops, bus_ops, cycles));
+        if (fast_ops + bus_ops + turbo_ops < 6 * cycles) fail($sformatf("mode 2: only %.1fx", real'(fast_ops + bus_ops + turbo_ops) / real'(cycles)));
+        else ok($sformatf("mode 2: %.1fx (%0d turbo, %0d fast, %0d bus over %0d cycles)", real'(fast_ops + bus_ops + turbo_ops) / real'(cycles), turbo_ops, fast_ops, bus_ops, cycles));
+        if (turbo_ops == 0) fail("mode 2: no fetch was served in one clock");
+        else ok($sformatf("mode 2: %0d fetches served in one clock by the icache", turbo_ops));
         if (merge_gaps != 0) fail($sformatf("mode 2: %0d consecutive bus ops did not ride consecutive cycles", merge_gaps));
         else ok("mode 2: consecutive bus ops rode consecutive cycles");
         if (phys_diff(0) == 0) fail("mode 2: the machine's memory still equals the reference - writes went out");
@@ -857,9 +909,9 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             if (u_seq.st != u_seq.S_HELD) fail($sformatf("held, but the sequencer is in state %0d", seq_state));
             else ok("...and the sequencer is holding the bus for it");
         end
-        fast0 = fast_ops;
+        fast0 = fast_ops + turbo_ops;
         repeat (3 * CYCLE) @(negedge clk);
-        if (fast_ops != fast0) fail("the core moved while held");
+        if (fast_ops + turbo_ops != fast0) fail("the core moved while held");
         else ok("the core did not move while held");
         @(negedge clk); arm <= 1'b0; release_req <= 1'b1; @(negedge clk); release_req <= 1'b0;
         c = 0;

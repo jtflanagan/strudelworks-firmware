@@ -180,7 +180,7 @@ module kbd_inject_tb;
         .master_active (master_active),
         .arm (arm), .release_req (release_req),
         .menu_trigger (1'b0), .hotkey_hit (hotkey_hit),
-        .cpu_sync (cpu_sync),
+        .cpu_sync (cpu_sync), .aux_sync (1'b0),
         .op_present (op_present), .op_commit (op_commit),
         .op_sync (drv_sync), .op_ovr (op_ovr),
         .op_addr (op_addr), .op_rw (op_rw), .din (cpu_din),

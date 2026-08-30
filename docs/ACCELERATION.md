@@ -36,7 +36,8 @@ target ratio on average. Mode 0 is the old machine to the clock.
 
 | piece | file | what it does |
 |---|---|---|
-| the sequencer | `rtl/accel_seq.sv` | owns `cyc_en` and `din`; decides every op; the unified stream; the governor; the counters |
+| the L1 front | `rtl/l1_front.sv` (+ `rtl/class_tlb.sv`, `rtl/icache_l1.sv`) | the icache and its page-TLB ahead of the sequencer: a fetch both know retires in ONE clock - a TURBO op the sequencer sees only as the books; the claim, the fills, the write snoop |
+| the sequencer | `rtl/accel_seq.sv` | owns `cyc_en` and `din` (through the front); decides every op; the unified stream; the governor; the counters |
 | the driver | `rtl/apple_bus_write.sv` | `bus_owns` / `core_valid` in, dummies out (`op_dummy`), `op_inflight` |
 | the class | `rtl/apple_mmu.sv` | the classifier as a function, asked of the core's live op (`q_cls`); the **CX class** (the motherboard's `$Cxxx` ROM) and INTC8ROM |
 | the cache | `rtl/mem_cache.sv` | `decided` and `busy`, nothing else |
@@ -47,6 +48,7 @@ target ratio on average. Mode 0 is the old machine to the clock.
 
 | kind | on the pins | the unified stream | the driver's `op_*` |
 |---|---|---|---|
+| **turbo** - a program-stream fetch whose page the I-TLB knows and whose line the icache holds | nothing | **no** - only its capture event and the books | no |
 | **fast** - a read of RAM, LC, the system ROM or the motherboard's own `$Cxxx` ROM; a RAM/LC write in mode 2 | nothing (a dummy may be in flight) | yes | no |
 | **bus** - every `$Cxxx` access a slot answers, and every I/O access; every write in mode 1; everything in mode 0 or with serving off | driven at T_PRESENT as always | yes | yes |
 | **override** - the boot hold's, the disk's DMA, the VBL lock's | driven as always | yes (`u_ovr`) | yes |
@@ -58,10 +60,17 @@ fast or bus or override, with `op_present` where it was and `op_commit` only
 for the ops that had a data phase on the bus. Nothing that acts on a commit
 can be a fast op: every soft switch is `$Cxxx`. Every peripheral that decodes
 `$Cxxx` watches the **driver**, whose ops those always are: a `$0000` read
-decodes to nothing in any of them. The two that keep time - the floppy's
-nibble clock and the Mockingboard's VIA timers - keep the **core's** time,
-one tick per op the core completes (`op_commit && !op_dummy`, or the
-sequencer's `fev_valid` for a fast op); see below.
+decodes to nothing in any of them.
+
+A TURBO op is not even on the unified stream: it is a read of a line the
+card already holds, so no consumer needs it - the MMU's shadow moves only on
+`$Cxxx` and the two pages that can flip INTC8ROM (`$C3xx`, `$CFxx`) are
+never turbo-servable, the hold learns of the fetch by `aux_sync`, and the
+capture gets the event word. The two that keep time - the floppy's nibble
+clock and the Mockingboard's VIA timers - keep the **core's** time, one tick
+per op the core completes: `op_commit && !op_dummy` for a bus op, the
+sequencer's `op_tick` for a fast or turbo one. `op_tick` exists because a
+turbo event can be shed under capture pressure but a timer tick never may.
 
 ## The decision, and merging
 
@@ -222,6 +231,76 @@ Neither was in the plan the user set - "a `$Cxxx` slot that is not
 motherboard ROM is slow, otherwise fast" - and the served slot ROM is where
 the hard disk stopped booting on hardware; both are gone.
 
+## The L1 front: one clock per fetch
+
+The serialised fast path costs nine clocks an op. Two thirds of a 6502's
+cycles are program-stream fetches (the Klaus suites measure 66/34), and for
+those the front end takes the nine down to ONE:
+
+- **The I-TLB** (`rtl/class_tlb.sv`): the MMU's answer cached per 256-byte
+  page - which is the grain everything on a IIe is decided at - 256 entries
+  direct-mapped by `addr[15:8]`, each holding both the read and the write
+  view of its page (class, physical page, write-lands-in-image). Full
+  coverage, so only cold misses exist; a miss refills from `apple_mmu`'s
+  `t_*` page query in a clock. Any access that moves the map
+  (`apple_mmu.map_changed`: the mapping soft switches, the RamWorks bank
+  register, every `$C08x` touch, INTC8ROM moving, RES', the ROM arriving)
+  clears the whole valid vector at that same edge - never an update in
+  place - and the entries refill lazily. The two pages that are not uniform
+  or that mutate the map by mere access, `$C3` and `$CF`, are never
+  L1-servable, so INTC8ROM's triggers always reach the MMU as presented ops.
+
+- **The icache** (`rtl/icache_l1.sv`): 4 KB, 256 lines of 16 bytes,
+  direct-mapped, physically indexed and tagged in the 25-bit space
+  `{rom, pa[23:0]}` - the internal ROM is its own space, and LC banks,
+  ALTZP and every RamWorks bank coexist without aliasing, which is also why
+  a TLB flush does NOT flush the icache: only translations refetch. A block
+  RAM answers a clock late, so the row register is steered a clock EARLY:
+  by `i_pred` - the core's own next-PC mux, exported, so sequential flow,
+  taken branches, jumps and returns all predict exactly - while the core
+  runs, and by the live address while it retries.
+
+- **The late cancel**: the core launches every clock as if the steered row
+  were right; `cyc_en`, now a last-moment combinational signal, simply
+  stays low when it was not, and the identical cycle retries. cpu65c02
+  (`cyc_is_i`, `i_pred`, the classified views) proves this contract under
+  `sim/run_cpu_predict_tb.sh` with garbage driven on `din` through every
+  cancelled clock.
+
+- **The claim**: an I-fetch the front might yet serve raises `l1_claim` for
+  its first three clocks, holding the dispatcher off - clock 0 looks (and
+  refills a cold TLB page), clock 1 retries with the row steered right (a
+  mispredicted branch: two clocks, not nine), clock 2 covers the cold-page
+  case - then falls, and the op rides the sequencer exactly as before, at
+  most two clocks later than it would have. `turbo_ok` (S_DECIDE, credit,
+  no override, no reset sequence, serving, the claim itself) and the
+  claim's `!l1_claim` in the dispatch make a turbo op and a dispatch
+  mutually exclusive by construction.
+
+- **Fills**: an image line is installed by OBSERVATION - the fetch that
+  missed rides the sequencer, and `mem_cache`'s new `sub_line` (the whole
+  16 bytes the byte came from, hit or fill) is taken as it flies past. A
+  ROM line is streamed by the front itself from `apple_rom`'s second read
+  port, four words racing the op's own nine-clock service. Both are gated
+  on the TLB entry still standing.
+
+- **Coherence**: every write that lands in the image - the core's, a
+  diverted RamWorks write, the disk's DMA - snoops the icache by physical
+  line address on the clock it is classified (`cl_*`), BEFORE it reaches
+  the image; the refetch rides the sequencer behind it, in order.
+  Self-modifying code therefore cannot fetch stale - `sim/accel.s`'s
+  `smctest` rewrites an operand and an opcode every pass and reads them
+  back through the data side. The flash (the host invalidating, the ROM
+  reloading) clears every line at an edge, same as the TLB.
+
+- **The books**: the sequencer charges the governor 256 per turbo op,
+  counts it (ACCEL_TURBO), pulses `op_tick` for the op-time clocks, and
+  emits the capture event - the last only when `event_merge` has room
+  (`fev_room`), because turbo runs outpace the merge's drain three to one
+  and shedding fetch events at the source is what keeps the merge's
+  overflow counter a fault flag. A sparse capture discards fast reads
+  anyway; nothing a trace keeps is lost.
+
 ## The stream
 
 The reader still produces one event per bus cycle from the pins, dummies
@@ -267,7 +346,10 @@ ACCEL_FAST    0x8000_0094   fast ops
 ACCEL_BUS     0x8000_0098   the core's ops that rode a bus cycle
 ACCEL_CYCLES  0x8000_009C   bus cycles while accelerating
 ACCEL_WAIT    0x8000_00A0   clocks the core spent waiting to merge
+ACCEL_TURBO   0x8000_00A4   ops the L1 front served in a single clock
 ```
+
+The ratio the card achieved is (TURBO + FAST + BUS) / CYCLES.
 
 Levels, like MEM_CTRL's, safe under a running machine - with **one rule**:
 mode 2 leaves the machine's own RAM stale (only its video reads it), and a
@@ -364,7 +446,11 @@ count flat in mode 1, no floating-bus trip in mode 2.
   machine's RAM - so mode 0 could follow mode 2 without a reset.
 - **A hold-off after a slot access** (a TransWarp's "slot speed", or a
   Disk II's motor): the core at the bus's pace for a while around a slot's
-  I/O. Not asked for; word 41 of the register map is left for it if it is.
+  I/O. Not asked for. (Word 41, once left for it, now carries ACCEL_TURBO.)
+- **The D-side L1**: the same TLB already carries the write view; a 2-clock
+  dcache with a small write buffer is the planned next rung, and a 1-clock
+  one (LUTRAM or a falling-edge RAM) the rung after. The I side alone
+  covers two thirds of all cycles.
 - **Any slot's ROM served from the card**: BUS, always, by the rule above.
 - **The periodic timestamp record** in the trace (DDR3_USAGE.md): a trace of
   an accelerated machine is not a cycle stream; the host flags it

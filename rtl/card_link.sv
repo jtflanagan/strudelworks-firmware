@@ -87,6 +87,7 @@ module card_link #(
     input  wire        fast_sync,
     input  wire        fast_vbl,
     output wire [7:0]  merge_overflows,
+    output wire        fev_room,       // headroom for turbo events; see event_merge
     input  wire        phi0_live,
 
     // Synchronised RES', for the CPU_SOURCE latch, and what it latched.
@@ -226,6 +227,7 @@ module card_link #(
     input  wire [31:0]  accel_stat,
     input  wire [31:0]  accel_fast,
     input  wire [31:0]  accel_bus,
+    input  wire [31:0]  accel_turbo,
     input  wire [31:0]  accel_cycles,
     input  wire [31:0]  accel_wait,
     // The floating-bus simulator's seam (rtl/fb_sim.sv <-> wb_regfile,
@@ -777,7 +779,8 @@ module card_link #(
         .out_mark      (mg_mark),
         .out_mark_free (mg_mark_free),
         .out_dummy     (mg_dummy),
-        .overflows     (merge_overflows)
+        .overflows     (merge_overflows),
+        .fev_room      (fev_room)
     );
 
     // The filter, always in the path: a wire in full mode, the keep rule
@@ -940,6 +943,7 @@ module card_link #(
         .accel_stat        (accel_stat),
         .accel_fast        (accel_fast),
         .accel_bus         (accel_bus),
+        .accel_turbo       (accel_turbo),
         .accel_cycles      (accel_cycles),
         .accel_wait        (accel_wait),
         .fb_serve          (fb_serve),

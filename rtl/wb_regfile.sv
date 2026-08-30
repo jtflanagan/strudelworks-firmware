@@ -192,6 +192,7 @@ module wb_regfile #(
     input  wire [31:0]     accel_bus,
     input  wire [31:0]     accel_cycles,
     input  wire [31:0]     accel_wait,
+    input  wire [31:0]     accel_turbo,
 
     // The floating-bus simulator (rtl/fb_sim.sv, docs/FLOATING_BUS.md):
     // FB_CTRL's serve level and its clear pulse, FB_PEEK's address; the mode
@@ -281,6 +282,7 @@ module wb_regfile #(
     localparam [13:0] R_ACCEL_BUS  = 'd38;  // 0x8000_0098, RO
     localparam [13:0] R_ACCEL_CYCLES = 'd39; // 0x8000_009C, RO
     localparam [13:0] R_ACCEL_WAIT = 'd40;  // 0x8000_00A0, RO
+    localparam [13:0] R_ACCEL_TURBO = 'd41; // 0x8000_00A4, RO: one-clock icache ops
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -996,6 +998,7 @@ module wb_regfile #(
                         R_ACCEL_BUS:  wb_dat_r <= accel_bus;
                         R_ACCEL_CYCLES: wb_dat_r <= accel_cycles;
                         R_ACCEL_WAIT: wb_dat_r <= accel_wait;
+                        R_ACCEL_TURBO: wb_dat_r <= accel_turbo;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end

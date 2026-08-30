@@ -223,7 +223,7 @@ module master_top #(
     wire        u_present, u_commit, u_rw, u_sync, u_ovr, u_divert;
     wire [15:0] u_addr;
     wire [7:0]  u_wdata;
-    wire        fev_valid, fev_rw, fev_sync;
+    wire        fev_valid, fev_rw, fev_sync, fev_room;
     wire [15:0] fev_addr;
     wire [7:0]  fev_data;
     wire        bus_owns, core_valid, op_dummy, op_inflight, drv_cyc_done;
@@ -249,6 +249,7 @@ module master_top #(
         .real_data (real_data), .real_valid (real_valid),
         .real_mark (vbl_mark), .real_mark_free (vbl_mark_free),
         .real_dummy (op_dummy),
+        .fev_room (fev_room),
         .fast_valid (fev_valid), .fast_addr (fev_addr), .fast_rw (fev_rw),
         .fast_data (fev_data), .fast_sync (fev_sync), .fast_vbl (vbl_level),
         .merge_overflows (merge_overflows),
@@ -301,6 +302,7 @@ module master_top #(
         .accel_on (accel_on),
         .accel_stat ({7'd0, accel_reset_seq, accel_retries, merge_overflows, seq_state, bus_owns, 1'b0, accel_held, accel_on}),
         .accel_fast (accel_fast), .accel_bus (accel_bus),
+        .accel_turbo (accel_turbo_ops),
         .accel_cycles (accel_cycles), .accel_wait (accel_wait),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (fb_mode), .fb_compared (fb_compared), .fb_mismatch (fb_mismatch),
@@ -366,6 +368,29 @@ module master_top #(
     wire [7:0]  cpu_dout, cpu_din;
     wire        cpu_cyc_en, cpu_sync;
 
+    // The L1 front's world: the core's stream classification and prediction,
+    // the sequencer's permission and books, the I-TLB's refill, the icache's
+    // fill and snoop.  cyc_en and din now reach the core THROUGH the front
+    // (rtl/l1_front.sv); the sequencer's own become accel_cyc_en/accel_din.
+    wire        cpu_cyc_is_i;
+    wire [15:0] cpu_i_pred;
+    wire        accel_cyc_en;
+    wire [7:0]  accel_din;
+    wire        turbo_ok, l1_claim, turbo_commit, turbo_sync;
+    wire [15:0] turbo_addr;
+    wire [7:0]  turbo_data;
+    wire        accel_op_tick;
+    wire [31:0] accel_turbo_ops;
+    wire [7:0]  tlb_t_page;
+    wire        tlb_r_ok, tlb_w_ok;
+    wire [16:0] tlb_r_ppage, tlb_w_ppage;
+    wire        map_changed;
+    wire [127:0] mem_sub_line;
+    wire         mem_sub_line_ok;
+    wire        rom_r2_en;
+    wire [11:0] rom_r2_addr;
+    wire [31:0] rom_r2_data;
+
     // The Mockingboard's IRQ takes the short route into the core, the same
     // route drv_sync takes out of it: a real card would pull the slot's IRQ'
     // line and this card's CPU is on the near side of that pin, so the VIA
@@ -386,7 +411,13 @@ module master_top #(
         .irq_n  (apple_irq_sync && !mb_irq),
         .nmi_n  (1'b1),             // the slot brings out no NMI
         .sync   (cpu_sync),
-        .halted ()                  // STP is not on the base part; see the RTL
+        .halted (),                 // STP is not on the base part; see the RTL
+        .cyc_is_i (cpu_cyc_is_i),
+        .i_addr (),                 // the views restate cpu_addr; the front
+        .d_addr (),                 // takes the address and the classification
+        .d_rw   (),
+        .d_dout (),
+        .i_pred (cpu_i_pred)
     );
 
     // ---- driving ------------------------------------------------------------
@@ -497,8 +528,8 @@ module master_top #(
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
         .cpu_sync      (cpu_sync),
-        .cyc_en        (cpu_cyc_en),
-        .cpu_din       (cpu_din),
+        .cyc_en        (accel_cyc_en),
+        .cpu_din       (accel_din),
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
@@ -520,6 +551,15 @@ module master_top #(
         .busy          (mem_busy),
         .mq_valid      (mq_valid),
         .bus_tick      (bus_tick),
+        .l1_claim      (l1_claim),
+        .ext_cyc_en    (turbo_commit),
+        .turbo_commit  (turbo_commit),
+        .turbo_addr    (turbo_addr),
+        .turbo_data    (turbo_data),
+        .turbo_sync    (turbo_sync),
+        .turbo_ok      (turbo_ok),
+        .op_tick       (accel_op_tick),
+        .fev_room      (fev_room),
         .u_present     (u_present),
         .u_commit      (u_commit),
         .u_addr        (u_addr),
@@ -541,7 +581,48 @@ module master_top #(
         .bus_ops       (accel_bus),
         .cycles        (accel_cycles),
         .wait_clocks   (accel_wait),
-        .retries       (accel_retries)
+        .retries       (accel_retries),
+        .turbo_ops     (accel_turbo_ops)
+    );
+
+    // ---- the L1 front -------------------------------------------------------
+    // The icache and its TLB, between the core and the sequencer: a fetch
+    // both know retires in one clock, and everything else falls through to
+    // the sequencer exactly as before.  See rtl/l1_front.sv.
+    l1_front u_l1 (
+        .clk          (apple_clk),
+        .rst          (apple_rst),
+        .cpu_addr     (cpu_addr),
+        .cpu_sync     (cpu_sync),
+        .cyc_is_i     (cpu_cyc_is_i),
+        .i_pred       (cpu_i_pred),
+        .cyc_en       (cpu_cyc_en),
+        .cpu_din      (cpu_din),
+        .accel_cyc_en (accel_cyc_en),
+        .accel_din    (accel_din),
+        .turbo_ok     (turbo_ok),
+        .l1_claim     (l1_claim),
+        .turbo_commit (turbo_commit),
+        .turbo_addr   (turbo_addr),
+        .turbo_data   (turbo_data),
+        .turbo_sync   (turbo_sync),
+        .t_page       (tlb_t_page),
+        .t_r_ok       (tlb_r_ok),
+        .t_r_ppage    (tlb_r_ppage),
+        .t_w_ok       (tlb_w_ok),
+        .t_w_ppage    (tlb_w_ppage),
+        .map_changed  (map_changed),
+        .sub_line     (mem_sub_line),
+        .sub_line_ok  (mem_sub_line_ok),
+        .rom_r2_en    (rom_r2_en),
+        .rom_r2_addr  (rom_r2_addr),
+        .rom_r2_data  (rom_r2_data),
+        .cl_valid     (cl_valid),
+        .cl_rw        (cl_rw),
+        .cl_wr_image  (cl_wr_image),
+        .cl_pa        (cl_pa),
+        .mem_invalidating (mem_invalidating),
+        .rom_ok       (mem_rom_loaded)
     );
 
     // ---- the hold: the boot menu's door and the runtime menu's -------------
@@ -557,6 +638,7 @@ module master_top #(
         .menu_trigger  (menu_trigger),
         .hotkey_hit    (hotkey_hit),
         .cpu_sync      (cpu_sync),
+        .aux_sync      (turbo_commit && turbo_sync),
         .op_present    (u_present),
         .op_commit     (u_commit),
         .op_sync       (u_sync),
@@ -702,7 +784,13 @@ module master_top #(
         .q_addr     (nxt_addr),
         .q_divert   (mmu_q_divert),
         .q_rw       (cpu_rw),
-        .q_cls      (q_cls)
+        .q_cls      (q_cls),
+        .t_page     (tlb_t_page),
+        .t_r_ok     (tlb_r_ok),
+        .t_r_ppage  (tlb_r_ppage),
+        .t_w_ok     (tlb_w_ok),
+        .t_w_ppage  (tlb_w_ppage),
+        .map_changed (map_changed)
     );
 
 
@@ -718,6 +806,9 @@ module master_top #(
         .rd_en      (cl_valid),
         .rd_addr    (cl_rom_addr),
         .rd_data    (rom_byte),
+        .r2_en      (rom_r2_en),
+        .r2_addr    (rom_r2_addr),
+        .r2_data    (rom_r2_data),
         .rom_loaded (mem_rom_loaded)
     );
 
@@ -739,6 +830,8 @@ module master_top #(
         .rom_loaded  (1'b1),            // a ROM-class op always has its byte: the MMU folds the load in
         .sub_en      (mem_sub_en),
         .sub_data    (mem_sub_data),
+        .sub_line    (mem_sub_line),
+        .sub_line_ok (mem_sub_line_ok),
         .decided     (mem_decided),
         .busy        (mem_busy),
         .serve       (mem_serve),
@@ -855,7 +948,7 @@ module master_top #(
         .op_commit     (op_commit),
         .op_ovr        (op_ovr),
         .op_dummy      (op_dummy),
-        .fast_tick     (fev_valid),
+        .fast_tick     (accel_op_tick),
         .rd_claim      (fd_rd_claim),
         .rd_data       (fd_rd_data),
         .msg_valid     (app_msg_valid),
@@ -929,7 +1022,7 @@ module master_top #(
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
-        .fast_tick     (fev_valid),
+        .fast_tick     (accel_op_tick),
         .rd_claim      (mb_rd_claim),
         .rd_data       (mb_rd_data),
         .irq           (mb_irq)

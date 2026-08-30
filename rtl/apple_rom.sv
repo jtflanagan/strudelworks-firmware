@@ -37,6 +37,15 @@ module apple_rom #(
     input  wire [13:0] rd_addr,
     output wire [7:0]  rd_data,
 
+    // A second, independent read port: a whole word, two clocks after r2_en.
+    // The icache's line filler streams four of these per 16-byte line.  Its
+    // own port so a fill never disturbs an op's byte in flight above; Vivado
+    // meets the third port by duplicating the array, four more RAMB36 - which
+    // this design has (docs/MEMORY.md's utilization: 19 free).
+    input  wire        r2_en,
+    input  wire [11:0] r2_addr,      // word index: offset from $C000 >> 2
+    output logic [31:0] r2_data,
+
     output wire        rom_loaded
 );
 
@@ -58,6 +67,13 @@ module apple_rom #(
     end
 
     assign rd_data = word_qq[8 * lane_qq +: 8];
+
+    // The filler's port, same two-register shape.
+    logic [31:0] r2_q;
+    always_ff @(posedge clk) begin
+        if (r2_en) r2_q <= rom[r2_addr];
+        r2_data <= r2_q;
+    end
 
     // ---- the load: MEM_ROM chunks ------------------------------------------
     // Payload word 0 names the chunk; the 128 after it are its words.  A

@@ -204,7 +204,7 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .master_active (master_active),
         .arm (arm), .release_req (release_req),
         .menu_trigger (menu_trigger), .hotkey_hit (1'b0),
-        .cpu_sync (cpu_sync),
+        .cpu_sync (cpu_sync), .aux_sync (1'b0),
         .op_present (op_present), .op_commit (op_commit),
         .op_sync (drv_sync), .op_ovr (op_ovr),
         .op_addr (op_addr), .op_rw (op_rw), .din (cpu_din),

@@ -97,6 +97,11 @@ module mem_cache #(
     // To the din mux: hold from the decision until the next op_present.
     output logic       sub_en,
     output logic [7:0] sub_data,
+    // The whole 16-byte line sub_data came from, for an L1 install: valid
+    // with sub_en when the answer came from the image (a way hit or a fill),
+    // never for ROM - rtl/apple_rom.sv hands its lines out itself.
+    output logic [127:0] sub_line,
+    output logic         sub_line_ok,
     // For rtl/accel_seq.sv, which presents the next op only when this one is
     // over: `decided` pulses on the clock the op's outcome is known - P6 for a
     // hit, a ROM read, a write or an op nothing here answers; the clock the
@@ -197,6 +202,7 @@ module mem_cache #(
 
     // ---- the pipeline's valid bits -----------------------------------------------
     logic v1, v2, v3, v4;
+    logic [127:0] hline;               // P5: the hit way's whole line
 
     // P4: compares and byte selects, registered.
     logic [3:0]      hitv;
@@ -271,6 +277,7 @@ module mem_cache #(
             hit <= 1'b0; rbyte <= 8'd0; hway <= 2'd0; victim <= 2'd0;
             plru_after_hit <= 3'd0; plru_after_fill <= 3'd0;
             sub_en <= 1'b0; sub_data <= 8'd0;
+            sub_line <= 128'd0; sub_line_ok <= 1'b0;
             fill_pending <= 1'b0; fill_id <= 2'd0; fill_serve <= 1'b0;
             fill_cmp <= 1'b0; fill_byte <= 8'd0;
             cmp_valid <= 1'b0; cmp_byte <= 8'd0;
@@ -291,6 +298,7 @@ module mem_cache #(
             // ---- a new op: the previous one is over -------------------------
             if (op_present) begin
                 sub_en       <= 1'b0;
+                sub_line_ok  <= 1'b0;
                 fill_pending <= 1'b0;
                 cmp_valid    <= 1'b0;
             end
@@ -322,6 +330,12 @@ module mem_cache #(
             // ---- P5: one way, one byte, one victim ---------------------------
             v4 <= v3;
             if (v3) begin
+                // The hit way's whole line, while way_rd still holds it (the
+                // way RAM's output registers only move on rd_en).
+                hline <= (hitv[0] ? way_rd[0] : 128'd0) |
+                         (hitv[1] ? way_rd[1] : 128'd0) |
+                         (hitv[2] ? way_rd[2] : 128'd0) |
+                         (hitv[3] ? way_rd[3] : 128'd0);
                 hit   <= |hitv;
                 rbyte <= (hitv[0] ? wbyte[0] : 8'd0) | (hitv[1] ? wbyte[1] : 8'd0) |
                          (hitv[2] ? wbyte[2] : 8'd0) | (hitv[3] ? wbyte[3] : 8'd0);
@@ -341,6 +355,8 @@ module mem_cache #(
                             if (serve_cls && may_touch) begin
                                 sub_en   <= 1'b1;
                                 sub_data <= rbyte;
+                                sub_line <= hline;
+                                sub_line_ok <= 1'b1;
                                 served   <= served + 32'd1;
                             end
                             cmp_valid <= 1'b1;
@@ -408,6 +424,8 @@ module mem_cache #(
                     if (fill_serve) begin
                         sub_en   <= 1'b1;
                         sub_data <= mr_data[8 * p_byte +: 8];
+                        sub_line <= mr_data;
+                        sub_line_ok <= 1'b1;
                         served   <= served + 32'd1;
                     end
                     cmp_valid <= 1'b1;

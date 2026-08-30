@@ -125,6 +125,7 @@ module snoop_top #(
         .mem_intc8rom (1'b0),
         .accel_mode (), .accel_target (), .accel_cnt_clr (),
         .accel_on (1'b0), .accel_stat (32'd0), .accel_fast (32'd0), .accel_bus (32'd0),
+        .accel_turbo (32'd0),
         .accel_cycles (32'd0), .accel_wait (32'd0),
         .fb_serve (), .fb_cnt_clr (), .fb_peek_addr (),   // nor simulate the floating bus
         .fb_mode (7'd0), .fb_compared (32'd0), .fb_mismatch (32'd0), .fb_last (32'd0),

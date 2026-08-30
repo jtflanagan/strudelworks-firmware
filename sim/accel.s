@@ -132,6 +132,11 @@ ver:    tya
 norw:
         jsr cxtest
 
+        ; ---- 6. self-modifying code: the operand and the opcode change
+        ; under the icache's feet.  A stale line shows as the wrong A or X.
+        jsr smctest
+        bcs fail
+
         inc PASS
         jmp loop
 
@@ -165,6 +170,41 @@ sub:    lda #$C3
 fail:   lda #$FF
         sta FAILF
 halt:   jmp halt
+
+; The operand of an immediate is rewritten and at once executed; then an
+; instruction's OPCODE is rewritten, both ways.  The compares read the
+; patched byte back through the data side, so a fetch served stale from an
+; instruction cache disagrees with its own memory and fails here.  Below
+; `fail` so the branches above keep their range.
+smctest:
+        ldx #4
+smloop: txa
+        ora #$30
+        sta smimm+1             ; patch the operand below
+smimm:  lda #$00
+        cmp smimm+1             ; the byte, read back as data
+        jne smfail
+        dex
+        bne smloop
+        lda #$E8                ; INX
+        sta smop
+        ldx #7
+        jsr smrun
+        cpx #8
+        jne smfail
+        lda #$CA                ; DEX: the same byte, the other way
+        sta smop
+        ldx #7
+        jsr smrun
+        cpx #6
+        jne smfail
+        clc
+        rts
+smrun:
+smop:   nop                     ; becomes INX, then DEX
+        rts
+smfail: sec
+        rts
 
 .import __CODE_LOAD__, __CODE_RUN__, __CODE_SIZE__
 

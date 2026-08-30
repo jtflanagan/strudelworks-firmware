@@ -133,9 +133,10 @@ protocol.
 | `0x8000_008C` | ACCEL_CTRL | RW bits 1:0, 23:8, 24; W1 bit 31 | the accelerated core (ACCELERATION.md): `[1:0]` mode - 0 off (the core locked to the bus, the old machine to the clock), 1 reads served on the card and every write on the bus, 2 reads and writes on the card; `[23:8]` the target, ops per bus cycle, 8.8 fixed point, 0 = unlimited; W1 clear the ACCEL_* counters. What is slow is a matter of class alone: every `$Cxxx` access a slot answers rides the bus in every mode. Levels, safe under a running machine - except that leaving mode 2 for mode 0 or serving off runs the machine's stale RAM; the host refuses it |
 | `0x8000_0090` | ACCEL_STAT | RO | `[0]` accelerating; `[1]` the core held by the governor; `[3]` the bus owns the op stream; `[7:4]` the sequencer's state; `[15:8]` event-merge overflows (must be 0); `[23:16]` fast ops decided twice; `[24]` the core's reset sequence has not yet reached `$FFFD` on the bus (every op rides the bus until it has - the IIe's MMU infers a reset from that sequence, not from RES′) |
 | `0x8000_0094` | ACCEL_FAST | RO | ops served on the card |
-| `0x8000_0098` | ACCEL_BUS | RO | the core's ops that rode a bus cycle; (FAST + BUS) / CYCLES is the ratio achieved |
+| `0x8000_0098` | ACCEL_BUS | RO | the core's ops that rode a bus cycle; (TURBO + FAST + BUS) / CYCLES is the ratio achieved |
 | `0x8000_009C` | ACCEL_CYCLES | RO | bus cycles while accelerating |
 | `0x8000_00A0` | ACCEL_WAIT | RO | clocks the core spent waiting to merge |
+| `0x8000_00A4` | ACCEL_TURBO | RO | ops the L1 front served in a single clock (ACCELERATION.md, "The L1 front") |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

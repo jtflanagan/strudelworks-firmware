@@ -62,7 +62,14 @@ module event_merge #(
     output logic [15:0] out_mark_free,
     output logic        out_dummy,
 
-    output logic [7:0]  overflows
+    output logic [7:0]  overflows,
+
+    // Headroom for the sequencer's TURBO events - fetches the L1 front
+    // serves at one per clock, three times this FIFO's drain rate, so they
+    // are gated at the source rather than dropped here: `overflows` keeps
+    // meaning something.  Registered, one clock stale; the margin below
+    // covers the staleness.
+    output logic        fev_room
 );
 
     localparam [3:0] T_FAST = 4'hC;
@@ -90,6 +97,7 @@ module event_merge #(
 
     always_ff @(posedge clk) begin
         out_valid <= 1'b0;
+        fev_room  <= (room > (AW+1)'(4));
         if (rst || !enable) begin
             wp <= '0; rp <= '0;
             spacing <= 2'd0;

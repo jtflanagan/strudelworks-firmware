@@ -232,8 +232,11 @@ does, and the check needs no hardware but the capture.
   "one op at a time" this keeps: the sequencer presents the next op only when
   the last is decided (`decided`, `busy`), so the cache needed no bypass and
   no write buffer, and a BUS-class read's rendezvous with the bus is the
-  sequencer's merge. Pipelining the cache past ~11x is the follow-on, behind
-  the same interface. The motherboard's own `$C100-$CFFF` reads the
+  sequencer's merge. The follow-on past ~11x went IN FRONT rather than
+  through: the L1 front (ACCELERATION.md, "The L1 front") serves fetches in
+  one clock and this cache became its L2, unchanged but for `sub_line` -
+  the whole 16-byte line handed out beside the byte, hit or fill, for the
+  icache's installs. The motherboard's own `$C100-$CFFF` reads the
   classifier used to leave to the bus are ROM class now - the CX class,
   ACCELERATION.md; every slot's page stays the bus's.
 - **INH'.** A card asserting INH' or DMA' is out of scope (DERISK.md, "Two

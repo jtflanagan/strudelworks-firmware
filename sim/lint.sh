@@ -73,6 +73,9 @@ run tx_ring       rtl/tx_ring.sv rtl/sync_fifo.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 run apple_bus_write rtl/apple_bus_write.sv
 run accel_seq     rtl/accel_seq.sv
+run class_tlb     rtl/class_tlb.sv
+run icache_l1     rtl/icache_l1.sv
+run l1_front      rtl/l1_front.sv rtl/class_tlb.sv rtl/icache_l1.sv
 run boot_hold     rtl/boot_hold.sv
 run kbd_inject    rtl/kbd_inject.sv
 run kbd_notice    rtl/kbd_notice.sv
