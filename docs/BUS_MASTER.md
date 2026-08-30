@@ -225,9 +225,11 @@ still answering about the previous reset.
 mastering** when it is. The instrument carries the register so the host can read
 it uniformly across builds, and cannot lie about being the machine's CPU.
 
-Host side: `swhost --cpu native|soft` writes it, and the banner reports it —
-including saying plainly when the bitstream cannot master, rather than leaving
-someone to wonder why a write had no effect.
+Host side: strudelworks-host writes `desired = soft` at every start - there is
+no native option any more; the host is built on being the machine's CPU - and
+the banner reports the readback, including saying plainly when the bitstream
+cannot master, rather than leaving someone to wonder why the request never
+took.
 
 Covered by `sim/run_reg_map_tb.sh`, end to end from a REG_WRITE message: that a
 write alone does **not** hand over, that a reset does, that every field reads

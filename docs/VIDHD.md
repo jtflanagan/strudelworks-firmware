@@ -46,7 +46,7 @@ answer with.
 The ROM's contents are the host's business. strudelworks-host synthesises
 one - `$24 $EA $4C`, then `JMP $Cn05` to an `RTS` at `$Cn05`, then zeros - so
 the signature is there and the bytes are harmless if anything ever executes
-them (`PR#3` with SLOTC3ROM set lands on the JMP and returns). `--vidhd-rom`
+them (`PR#3` with SLOTC3ROM set lands on the JMP and returns). `vidhd_rom`
 substitutes a dump of a real card's first page, which is only ever the
 signature as far as the machine is concerned, since there is no `$C800` space
 to reach the rest of it.

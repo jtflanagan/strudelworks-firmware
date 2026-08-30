@@ -278,7 +278,7 @@ Return, bit-7 bytes pass verbatim, a IIe uppercases under caps lock, a ][+
 refuses `` ` { | } ~ `` and Delete), unchanged from the first cut.
 
 **The keys arrive on the control socket** (`src/control_socket.cpp`,
-`--control PATH`, default `swhost.sock`) - the one command channel into a
+`control = PATH` in the configuration, default `swhost.sock`) - the one command channel into a
 running `swhost`. Text lines in, one reply line per command: `type TEXT`,
 `key NAME`, `reset`, `continue`, `status`, `screen`, `pause MS`, and now:
 

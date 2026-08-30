@@ -139,8 +139,9 @@ does not promise.
 
 ## The host
 
-`swhost --cpu soft --boot-menu [--hdv ...] [--disk-dir DIR]`. At start the
-host arms the hold; on every `CPU_HOLD` with `held = 1` it replaces the
+`boot_menu = on` in swhost's configuration file (with `hd1 = ...` and
+`disk_dir = DIR` as wanted; swhost takes no options - a run is a file). At
+start the host arms the hold; on every `CPU_HOLD` with `held = 1` it replaces the
 machine's picture with the menu -
 drawn through the same text renderer, character ROM and NTSC path as the
 machine's own screen, so it looks like the machine drew it - and watches the
@@ -176,21 +177,29 @@ same capture stream (strudelworks-host `src/boot_menu.cpp`). The items:
 - **Mockingboard** - off, or the slot it answers as.
 - **Hard disk** - off, or the slot it answers as.
 - **Boot disk** - which image the disk serves as unit 1, scrolled from the
-  files in the disk directory (`--disk-dir`), matched case-insensitively
+  files in the disk directory (`disk_dir`), matched case-insensitively
   because the images are a mix of `.hdv` and `.HDV`.
+- **Disk II** - off, or the floppy controller's slot; **Floppy 1 / 2** -
+  the image in each drive, or empty.
+- **VidHD** - off, or its slot.
+- **Card memory**, **Floating bus**, **Accelerator**, **Accel ratio** - the
+  levels (MEMORY.md, FLOATING_BUS.md, ACCELERATION.md), written to their
+  registers before the release; the runtime menu offers the same four.
 - **Continue boot.**
 
-The two slots may not coincide - the card makes the disk yield, but the menu
-does not offer the clash: cycling a slot skips the one the other holds. Keys
+No two cards may hold one slot - the card makes the later ones yield, but the
+menu does not offer the clash: cycling a slot skips the ones the others hold,
+and enabling a card whose remembered slot is taken moves it to the nearest
+free one. Keys
 are the arrow keys where the machine has them and `WASD` where it does not
 (a ][+ has no up/down arrows), uppercased so caps lock is irrelevant; `Return`
 or `Escape` continues the boot from anywhere.
 
 **Selections persist.** The `BootMenu` object outlives the resets, so a
 Ctrl-Reset re-enters the hold showing what was set last. They are also written
-to a defaults file at boot (`--boot-config`, default `boot_menu.conf`) and
-loaded at startup, so they survive a restart of swhost. The disk is stored by
-name, not index, so it survives the directory listing changing.
+back into the configuration file swhost was started from, in place - only the
+keys the menu owns are rewritten, every other line left alone - so they survive
+a restart of swhost, and the file both starts the machine and remembers it.
 
 ## A cold boot, the machine's way
 

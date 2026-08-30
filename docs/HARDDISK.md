@@ -174,7 +174,9 @@ now share. DEVICE SELECT' (`$C0nx`) is not gated by either switch.
 ## On the host
 
 ```
-swhost --real --cpu soft --hdv PRODOS.hdv [--hdv MORE.2mg ...] [--hd 7] [--hd-blk]
+source = real              # swhost's configuration file; there are no options
+hd1 = disks/PRODOS.hdv     # hd2 .. hd8 for more units; hd = 7 unless told otherwise
+hd_blk = off               # on: patch the ROM to a plain block device
 ```
 
 Up to eight images as SmartPort units 1..8 (ProDOS drives 1..4 through the
@@ -240,7 +242,7 @@ timeout, and the mock taking the messages without dropping the link. And
 
 ## Bring-up, when it happens
 
-The order that finds the most with the least: `--hdv` an image with
+The order that finds the most with the least: `hd1 =` an image with
 `tools/pi.sh trace out.swbt --reset`, and look for the slot scan reading `$C700`, the FIFO
 writes to `$C0FA`, and the poll loop's run of `$C0F0` reads ending in a
 status.

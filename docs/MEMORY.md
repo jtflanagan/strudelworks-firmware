@@ -217,9 +217,9 @@ does, and the check needs no hardware but the capture.
 
 ## The bring-up ladder, on hardware
 
-1. `swhost --cpu soft --mem off` through a long ProDOS / Total Replay session:
+1. `mem = off` through a long ProDOS / Total Replay session:
    `late_fills` and `fifo_drops` stay 0, hits climb, mismatches plateau.
-2. `--mem ram`. 3. `--mem ram,lc`. 4. `--mem all`. At each rung the mismatch
+2. `mem = ram`. 3. `mem = ram,lc`. 4. `mem = on`. At each rung the mismatch
    counter keeps running and `MEM_LAST` names the first bad byte. The control
    socket's `status` carries the counters (`mem=`, `mhits=`, `mmismatch=`, ...).
 

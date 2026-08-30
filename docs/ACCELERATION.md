@@ -306,7 +306,7 @@ connect in full mode the FT601 dropped off the Pi's USB in its first
 milliseconds (dmesg: a disconnect and a re-enumeration). With `--sparse`,
 and the mode set once the link is up, it has run for as long as it was
 watched. Whether the rate or the timing is what the FT601 objected to is not
-yet known; `--accel` should be used with `--sparse`.
+yet known; `accel` should be used with `sparse = on`.
 
 **Programs that count CPU cycles between floating-bus reads break**,
 inherently: the floating bus is real time and the core is not. Every

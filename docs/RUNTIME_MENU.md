@@ -182,9 +182,9 @@ Keys as the boot menu: arrows or `WASD`, `Return` chooses, `Escape` resumes
 from anywhere - and so does **Control-6** pressed again, which the card
 passes through while held.
 
-The host writes `MENU_HOLD` at start (`--menu-key`, default `ctrl-6`;
-`--menu-key none` shuts the door) and clears it at exit, releasing a hold
-in progress first. The control socket's `menu`
+The host writes `MENU_HOLD` at start (`menu_key` in its configuration file,
+default `ctrl-6`; `menu_key = none` shuts the door) and clears it at exit,
+releasing a hold in progress first. The control socket's `menu`
 knocks through the register, `resume` chooses resume; `status` says which
 menu is showing.
 
@@ -193,7 +193,7 @@ menu is showing.
 - **Draw on the Apple's own screen.** Same answer as BOOT_MENU.md: the
   override input is the shape a host→card op queue would take.
 - **A ][+ hotkey.** A ][+ keyboard produces `$36` for Control-6; the
-  register takes any 7-bit code, so `--menu-key` can name another.
+  register takes any 7-bit code, so `menu_key` can name another.
 - **Hold a core parked in `WAI`.** The core implements `WAI` (it parks on
   its own microcode slot until an interrupt arrives, `cpu65c02.sv`), and a
   parked core presents no fetch, so the door stays knocked-on until the
@@ -230,7 +230,7 @@ menu is showing.
 ## Bring-up
 
 1. `build/build.sh --master`, load the bitstream to SRAM.
-2. `swhost --real --cpu soft --boot-menu --disk-dir disks`, boot the ProDOS
+2. swhost with `source = real`, `boot_menu = on`, `disk_dir = disks`, boot the ProDOS
    master copy through the menu (the `kbd_test.sh` pattern).
 3. At the Applesoft prompt: Control-6 at the Apple. Expect the runtime
    menu on HDMI, `status` saying `menu=runtime`, and nothing typed at the

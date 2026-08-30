@@ -71,8 +71,9 @@ CPU_SOURCE and for the same reason scaled down - slot cards are discovered at
 boot, so a reset is when the answer may change. Gated by CAN_MASTER, so a
 snoop build reads back `desired` honestly and `active` stays 0.
 
-From the host: `swhost --cpu soft --mb 4`, then Ctrl-Reset. Slot 4 is where
-Mockingboard software looks first. The host flag does both halves: writes the
+From the host: `mb = 4` in the configuration file (or the boot menu's row),
+then Ctrl-Reset. Slot 4 is where Mockingboard software looks first. The key
+does both halves: writes the
 register, and starts the AY reconstruction and the ALSA output
 (`--audio-dev` to pick the device; an unopenable device is reported and the
 stats still track whether software is playing).
