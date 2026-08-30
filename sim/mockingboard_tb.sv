@@ -128,6 +128,8 @@ module mockingboard_tb;
         .slot_assign (slot_assign),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
+        // Without the sequencer: every cycle carries an op, no fast ops.
+        .op_dummy (1'b0), .fast_tick (1'b0),
         .rd_claim (rd_claim), .rd_data (rd_data),
         .irq (mb_irq)
     );

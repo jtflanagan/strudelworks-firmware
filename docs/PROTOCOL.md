@@ -103,7 +103,7 @@ protocol.
 | `0x8000_0014` | HD_SLOT | RW bits 2:0 | the hard disk's slot, 0 = off; latched at RES', never MB_SLOT's; `rom`, `busy`, `execs` — see HARDDISK.md |
 | `0x8000_0018` | RESET | W1 bit 0, W bits 31:16 | pulse the Apple's RES' low, for a programmatic Ctrl-Reset; `pulsing`, `pulses` — see BUS_MASTER.md |
 | `0x8000_001C` | KBD_INJECT | W bits 6:0, W1 bits 7-8 | a key on the keyboard the soft core reads: `key`, `press`, `drop`; `strobe`, `seen`, `pressed` — see KEYBOARD.md |
-| `0x8000_0020` | BUTTONS | RW bits 5:0 | Open-Apple, Closed-Apple and PB2 as the host holds them, two bits each (hardware / up / down); `hw` — see KEYBOARD.md |
+| `0x8000_0020` | BUTTONS | RW bits 5:0 | Open-Apple, Closed-Apple and PB2 as the host holds them, two bits each (hardware / up / down); `hw` — see KEYBOARD.md|
 | `0x8000_0024` | RING_STATUS | RO | the DDR3 TX ring: `[21:0]` occupancy in lines, `[24]` full, `[25]` DDR3 calibrated, `[26]` a message was torn on the bus (sticky) — see TX_RING.md |
 | `0x8000_0028` | KBD_CTRL | RW bits 1:0 | `lock` the machine's own keyboard out, `notify` ask for KBD_EVENT; `touched`, `taken`, `flushed`, `replaced` — see KEYBOARD.md |
 | `0x8000_002C` | MENU_HOLD | RW bits 7:0, W1 bit 8 | the runtime menu's door into the same hold: `enable`, `hotkey`, `trigger`, `menus` — see RUNTIME_MENU.md |
@@ -130,8 +130,8 @@ protocol.
 | `0x8000_0080` | FB_LAST2 | RO | `{addr[7:0] of $C0xx, scanner address[15:0], mode[7:0]}` of the last mismatch |
 | `0x8000_0084` | FB_OTHER | RO | `[15:0]` mismatches on screen-hole cycles, `[31:16]` on 80-column cycles — counted apart, see FLOATING_BUS.md |
 | `0x8000_0088` | FB_PEEK | RW bits 14:0 | a byte of the side copy: `[14]` 0 = text (`[10:0]` from $0400), 1 = hi-res (`[13:0]` from $2000); `[23:16]` the byte |
-| `0x8000_008C` | ACCEL_CTRL | RW bits 1:0, 23:8, 24; W1 bit 31 | the accelerated core (ACCELERATION.md): `[1:0]` mode - 0 off (the core locked to the bus, the old machine to the clock), 1 reads served on the card and every write on the bus, 2 reads and writes on the card; `[23:8]` the target, ops per bus cycle, 8.8 fixed point, 0 = unlimited; `[24]` the bus's pace while a floppy drive turns (default 1); W1 clear the ACCEL_* counters. Levels, safe under a running machine - except that leaving mode 2 for mode 0 or serving off runs the machine's stale RAM; the host refuses it |
-| `0x8000_0090` | ACCEL_STAT | RO | `[0]` accelerating; `[2:1]` the core held {by the floppy, by the governor}; `[3]` the bus owns the op stream; `[7:4]` the sequencer's state; `[15:8]` event-merge overflows (must be 0); `[23:16]` fast ops decided twice |
+| `0x8000_008C` | ACCEL_CTRL | RW bits 1:0, 23:8, 24; W1 bit 31 | the accelerated core (ACCELERATION.md): `[1:0]` mode - 0 off (the core locked to the bus, the old machine to the clock), 1 reads served on the card and every write on the bus, 2 reads and writes on the card; `[23:8]` the target, ops per bus cycle, 8.8 fixed point, 0 = unlimited; W1 clear the ACCEL_* counters. What is slow is a matter of class alone: every `$Cxxx` access a slot answers rides the bus in every mode. Levels, safe under a running machine - except that leaving mode 2 for mode 0 or serving off runs the machine's stale RAM; the host refuses it |
+| `0x8000_0090` | ACCEL_STAT | RO | `[0]` accelerating; `[1]` the core held by the governor; `[3]` the bus owns the op stream; `[7:4]` the sequencer's state; `[15:8]` event-merge overflows (must be 0); `[23:16]` fast ops decided twice; `[24]` the core's reset sequence has not yet reached `$FFFD` on the bus (every op rides the bus until it has - the IIe's MMU infers a reset from that sequence, not from RES′) |
 | `0x8000_0094` | ACCEL_FAST | RO | ops served on the card |
 | `0x8000_0098` | ACCEL_BUS | RO | the core's ops that rode a bus cycle; (FAST + BUS) / CYCLES is the ratio achieved |
 | `0x8000_009C` | ACCEL_CYCLES | RO | bus cycles while accelerating |

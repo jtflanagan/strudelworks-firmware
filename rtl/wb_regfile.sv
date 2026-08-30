@@ -186,7 +186,6 @@ module wb_regfile #(
     // outputs unconnected.
     output logic [1:0]     accel_mode,
     output logic [15:0]    accel_target,
-    output logic           accel_slow_fd,
     output logic           accel_cnt_clr,   // pulses
     input  wire [31:0]     accel_stat,
     input  wire [31:0]     accel_fast,
@@ -689,6 +688,9 @@ module wb_regfile #(
                                mem_invalidating, mem_intc8rom, mem_image_ready, mem_sw};
 
     // ---- ACCEL_CTRL ---------------------------------------------------------
+    // (ACCEL_STAT, read straight through from the sequencer: [0] accelerating,
+    // [1] held by the governor, [3] bus_owns, [7:4] state, [15:8] merge
+    // overflows, [23:16] retries, [24] the reset sequence still on the bus.)
     //
     //   [1:0]    mode       RW   0 off - the core locked to the bus, the old
     //                           machine to the clock; 1 reads served on the
@@ -696,8 +698,6 @@ module wb_regfile #(
     //                           writes on the card
     //   [23:8]   target     RW   ops per bus cycle, 8.8 fixed point; 0 = as
     //                           fast as the card can
-    //   [24]     slow_fd    RW   the bus's pace while a floppy drive turns
-    //                           (default 1)
     //   [31]     cnt_clr    W1   clear the ACCEL_* counters
     //
     // Levels, like MEM_CTRL's: safe under a running machine, with the one
@@ -708,19 +708,17 @@ module wb_regfile #(
         if (rst) begin
             accel_mode    <= 2'd0;
             accel_target  <= 16'd0;
-            accel_slow_fd <= 1'b1;
             accel_cnt_clr <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
                 accel_mode    <= wb_dat_w[1:0];
                 accel_target  <= wb_dat_w[23:8];
-                accel_slow_fd <= wb_dat_w[24];
             end
             accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
         end
     end
 
-    wire [31:0] accel_ctrl_rd = {7'd0, accel_slow_fd, accel_target, 6'd0, accel_mode};
+    wire [31:0] accel_ctrl_rd = {8'd0, accel_target, 6'd0, accel_mode};
 
     // ---- FB_CTRL ------------------------------------------------------------
     //

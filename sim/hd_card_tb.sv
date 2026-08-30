@@ -190,8 +190,7 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
         .msg_len (msg_len), .pay_data (pay_data), .pay_valid (pay_valid),
         .tx_word (tx_word), .tx_valid (tx_valid), .tx_take (tx_take),
-        .rom_loaded (rom_loaded), .busy (busy), .execs (execs),
-        .rom_rd_addr (8'd0), .rom_rd_byte ()
+        .rom_loaded (rom_loaded), .busy (busy), .execs (execs)
     );
 
     // ---- card -> host: through the real arbiter -----------------------------

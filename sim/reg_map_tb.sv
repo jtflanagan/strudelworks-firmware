@@ -173,7 +173,7 @@ module reg_map_tb;
     wire       mem_cnt_clr, mem_inval;
     wire [1:0] accel_mode;
     wire [15:0] accel_target;
-    wire       accel_slow_fd, accel_cnt_clr;
+    wire       accel_cnt_clr;
     integer    accel_cnt_clrs = 0;
     always @(posedge clk) if (accel_cnt_clr) accel_cnt_clrs = accel_cnt_clrs + 1;
     wire        fb_serve, fb_cnt_clr;
@@ -221,7 +221,7 @@ module reg_map_tb;
         .mem_mismatch (32'h0000_0003), .mem_served (32'h0000_0444), .mem_diverted (32'h0000_0777),
         .mem_last (32'h1234_5C3A), .mem_intc8rom (1'b1),
         .accel_mode (accel_mode), .accel_target (accel_target),
-        .accel_slow_fd (accel_slow_fd), .accel_cnt_clr (accel_cnt_clr),
+        .accel_cnt_clr (accel_cnt_clr),
         .accel_stat (32'h0000_0A11), .accel_fast (32'h0001_F00D), .accel_bus (32'h0000_0B05),
         .accel_cycles (32'h000C_0CE5), .accel_wait (32'h0000_0A17),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
@@ -1275,20 +1275,20 @@ module reg_map_tb;
         // ---- ACCEL_CTRL and the sequencer's counters -----------------------------
         base = out_n;
         do_read(32'h8000_008C);
-        if (out_mem[base+2] !== 32'h0100_0000 || accel_mode !== 2'd0 || accel_slow_fd !== 1'b1) begin
-            $display("FAIL: ACCEL_CTRL reads %08x at reset, expected mode 0, target 0, slow_fd set", out_mem[base+2]);
+        if (out_mem[base+2] !== 32'h0000_0000 || accel_mode !== 2'd0) begin
+            $display("FAIL: ACCEL_CTRL reads %08x at reset, expected mode 0, target 0", out_mem[base+2]);
             errors = errors + 1;
-        end else $display("  ok: ACCEL_CTRL resets to mode 0, unlimited, the floppy's slow zone on");
-        do_write(32'h8000_008C, 32'h8104_0002);           // clear, slow_fd, 4.0, mode 2
+        end else $display("  ok: ACCEL_CTRL resets to mode 0, unlimited");
+        do_write(32'h8000_008C, 32'h8004_0002);           // clear, 4.0, mode 2
         base = out_n;
         do_read(32'h8000_008C);
-        if (out_mem[base+2] !== 32'h0104_0002 || accel_mode !== 2'd2 || accel_target !== 16'h0400 || accel_slow_fd !== 1'b1) begin
-            $display("FAIL: ACCEL_CTRL after write reads %08x (mode %0d target %04x slow %b)", out_mem[base+2], accel_mode, accel_target, accel_slow_fd);
+        if (out_mem[base+2] !== 32'h0004_0002 || accel_mode !== 2'd2 || accel_target !== 16'h0400) begin
+            $display("FAIL: ACCEL_CTRL after write reads %08x (mode %0d target %04x)", out_mem[base+2], accel_mode, accel_target);
             errors = errors + 1;
         end else if (accel_cnt_clrs != 1) begin
             $display("FAIL: ACCEL_CTRL's clear pulsed %0d times", accel_cnt_clrs); errors = errors + 1;
-        end else $display("  ok: ACCEL_CTRL's mode, target and slow_fd are levels; its clear pulses once");
-        do_write(32'h8000_008C, 32'h0000_0001);           // mode 1, unlimited, slow_fd off, no clear
+        end else $display("  ok: ACCEL_CTRL's mode and target are levels; its clear pulses once");
+        do_write(32'h8000_008C, 32'h0000_0001);           // mode 1, unlimited, no clear
         base = out_n;
         do_read(32'h8000_008C);
         if (out_mem[base+2] !== 32'h0000_0001 || accel_cnt_clrs != 1) begin

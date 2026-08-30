@@ -250,9 +250,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
-        // No on-card slot ROMs here; the internal ROM is loaded.
-        .hd_slot (3'd0), .fd_slot (3'd0), .vidhd_slot (3'd0), .rom_ok (4'b0001),
-        .cl_rom_src (), .intc8rom (), .q_rw (1'b1), .q_cls (),
+        .rom_ok (1'b1), .intc8rom (), .q_rw (1'b1), .q_cls (),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
         .sw_state (sw_state), .vid_sw (vid_sw), .rw_bank (),

@@ -87,9 +87,13 @@ A real Mockingboard pulls the slot's IRQ' line. This card's CPU is on the
 near side of that pin, so the VIA IRQs are OR'd straight into the soft core's
 `irq_n` in `master_top` - the same argument as `drv_sync`: logically the same
 signal, electrically absent. Physical cards still interrupt through the pin,
-which is ANDed in (active low) unchanged. The VIA timers count `op_commit`
-pulses, one per phi0 cycle, so a T1 period is a period in machine time - the
-rate every music player's arithmetic assumes.
+which is ANDed in (active low) unchanged. The VIA timers count the CORE's
+cycles - one tick per op the core completes, which is one per phi0 cycle
+with the core at the bus's pace and one per fast op under acceleration
+(`op_dummy`/`fast_tick`, the floppy's arrangement) - so a T1 period is a
+period in the core's time, the rate every music player's arithmetic and
+every detection routine's instruction count assumes. See
+`docs/ACCELERATION.md`.
 
 ## What is deliberately not there
 

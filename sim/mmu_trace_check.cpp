@@ -199,10 +199,9 @@ int main(int argc, char** argv) {
 
     top.rst = 1; top.res_sync = 1; top.op_present = 0; top.op_commit = 0;
     top.op_addr = 0; top.op_rw = 1; top.op_wdata = 0; top.q_addr = 0; top.q_rw = 1;
-    // No on-card slot ROMs in a capture of the native machine; the internal ROM
-    // is loaded, so $C100-$CFFF reads the internal ROM answers are ROM class
-    // and compared against the file like $D000-$FFFF.
-    top.hd_slot = 0; top.fd_slot = 0; top.vidhd_slot = 0; top.rom_ok = 1;
+    // The internal ROM is loaded, so $C100-$CFFF reads the internal ROM
+    // answers are ROM class and compared against the file like $D000-$FFFF.
+    top.rom_ok = 1;
     for (int i = 0; i < 4; ++i) tick();
     top.rst = 0;
     tick();

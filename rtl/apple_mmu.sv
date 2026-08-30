@@ -113,33 +113,31 @@
 // flips a switch is a BUS cycle anyway.  The IIe's own MMU has the same
 // ordering.
 //
-// THE CX CLASS: $C100-$CFFF.  A read there is ROM class - served from the
-// card, never a bus rendezvous for the accelerated core (docs/ACCELERATION.md)
-// - when the card holds the byte, and BUS otherwise.  UTAIIe 5-28, as
-// AppleWin's Memory.cpp implements it:
+// THE CX CLASS: $C100-$CFFF.  A read the MOTHERBOARD'S ROM answers there is
+// ROM class - served from the card, never a bus rendezvous for the
+// accelerated core (docs/ACCELERATION.md); everything a slot answers is BUS.
+// UTAIIe 5-28, as AppleWin's Memory.cpp implements it:
 //
 //   $C100-$C7FF, page n   INTCXROM, or n == 3 with SLOTC3ROM clear
 //                                      -> the internal ROM (rtl/apple_rom.sv)
-//                         else n is the slot of an on-card ROM peripheral (the
-//                         hard disk, the floppy, the VidHD) whose ROM the host
-//                         has loaded    -> that card's ROM, cl_rom_src says which
-//                         else          -> BUS: the Mockingboard's VIAs (reads
-//                                          with side effects), a physical card,
-//                                          or an empty slot's floating bus
+//                         else          -> BUS: the slot's - on this card or
+//                                          not, a ROM or a VIA or nothing -
+//                                          every slot is hardware and rides
+//                                          the bus, by the user's rule
 //   $C800-$CFFE           INTCXROM or INTC8ROM -> the internal ROM
-//                         else          -> BUS: a physical card's expansion ROM
+//                         else          -> BUS: a slot's expansion ROM
 //   $CFFF, every write, every $C0xx    -> BUS
 //
 // INTC8ROM is the IIe's unreadable latch: set by any access to $C3xx while
 // INTCXROM and SLOTC3ROM are both clear, cleared by any access to $CFFF or by
-// RES'.  It is set at op_present rather than op_commit, because a $C3xx fetch
+// RES'.  It decides whether $C800-$CFFF is the internal ROM's.  It is set at op_present rather than op_commit, because a $C3xx fetch
 // served from the card has no data phase on the bus - and for one that does,
 // present-versus-commit only differs for the NEXT op, which cannot be presented
 // before this one's commit.  $CFFF is a bus op and clears it at commit like
 // every other switch.  MEM_STAT[13] reads it.
 //
-// A ROM source that is not loaded classifies as BUS, so "ROM class" always
-// means "the card has the byte": rtl/mem_cache.sv needs no per-source check.
+// The internal ROM not yet loaded classifies as BUS, so "ROM class" always
+// means "the card has the byte": rtl/mem_cache.sv needs no further check.
 //
 // NOT MODELLED, deliberately: a physical card's $C800-$CFFF expansion ROM and
 // the per-slot I/O SELECT flip-flops that pick it - that page is BUS unless the
@@ -158,21 +156,15 @@ module apple_mmu (
     input  wire        op_present,     // pulse: op_* have just been latched
     input  wire        op_commit,      // pulse: the data phase
 
-    // The on-card slot ROMs, for the CX class: the slot each answers as (0 =
-    // none; latched at RES' by wb_regfile) and whether the host has loaded
-    // it.  rom_ok[0] is the internal ROM's (rtl/apple_rom.sv), [1] the hard
-    // disk's, [2] the floppy's, [3] the VidHD's - the ROM_* source numbers.
-    input  wire [2:0]  hd_slot,
-    input  wire [2:0]  fd_slot,
-    input  wire [2:0]  vidhd_slot,
-    input  wire [3:0]  rom_ok,
+    // The internal ROM has arrived (rtl/apple_rom.sv): until then a read it
+    // would answer is BUS class.
+    input  wire        rom_ok,
 
     // The classified op, one clock after op_present.
     output logic        cl_valid,
     output logic [1:0]  cl_cls,        // CLS_*
     output logic [23:0] cl_pa,         // physical address in the image
     output logic [13:0] cl_rom_addr,   // offset from $C000 in the ROM
-    output logic [1:0]  cl_rom_src,    // ROM_*: which ROM answers a ROM-class op
     output logic        cl_rw,
     output logic        cl_wr_image,   // a write that lands in the image
     // The INTC8ROM latch, for MEM_STAT.
@@ -210,11 +202,6 @@ module apple_mmu (
     localparam [1:0] CLS_RAM = 2'd1;
     localparam [1:0] CLS_LC  = 2'd2;
     localparam [1:0] CLS_ROM = 2'd3;
-
-    localparam [1:0] ROM_INT   = 2'd0;
-    localparam [1:0] ROM_HD    = 2'd1;
-    localparam [1:0] ROM_FD    = 2'd2;
-    localparam [1:0] ROM_VIDHD = 2'd3;
 
     // ---- the switches ----------------------------------------------------------
     logic store80, ramrd, ramwrt, intcxrom, altzp, slotc3rom;
@@ -305,11 +292,11 @@ module apple_mmu (
     end
 
     // ---- the classifier, as a function of the address and the switches -----
-    // Returns {class, ROM source, write lands in the image}.  Called twice: on
-    // the presented op (registered at op_present) and on the sequencer's
-    // question (combinational).
-    function automatic [4:0] classify(input [15:0] a, input rw);
-        logic [1:0] c, src;
+    // Returns {class, write lands in the image}.  Called twice: on the
+    // presented op (registered at op_present) and on the sequencer's question
+    // (combinational).
+    function automatic [2:0] classify(input [15:0] a, input rw);
+        logic [1:0] c;
         logic       wr;
         logic [3:0] page;
         logic       in_io_f, in_hi_f, int_cx, int_c8;
@@ -319,24 +306,14 @@ module apple_mmu (
             page    = a[11:8];
             int_cx  = intcxrom || (page == 4'd3 && !slotc3rom);
             int_c8  = intcxrom || intc8rom;
-            c = CLS_BUS; src = ROM_INT; wr = 1'b0;
+            c = CLS_BUS; wr = 1'b0;
             if (in_io_f) begin
-                if (rw && page != 4'd0 && a != 16'hCFFF) begin
-                    if (page[3]) begin                      // $C800-$CFFE
-                        if (int_c8 && rom_ok[ROM_INT]) c = CLS_ROM;
-                    end else if (int_cx) begin              // $C100-$C7FF, internal
-                        if (rom_ok[ROM_INT]) c = CLS_ROM;
-                    end else if (page[2:0] == hd_slot && rom_ok[ROM_HD]) begin
-                        c = CLS_ROM; src = ROM_HD;
-                    end else if (page[2:0] == fd_slot && rom_ok[ROM_FD]) begin
-                        c = CLS_ROM; src = ROM_FD;
-                    end else if (page[2:0] == vidhd_slot && rom_ok[ROM_VIDHD]) begin
-                        c = CLS_ROM; src = ROM_VIDHD;
-                    end
-                end
+                // The internal ROM's pages, and only those: every slot is BUS.
+                if (rw && rom_ok && page != 4'd0 && a != 16'hCFFF &&
+                    (page[3] ? int_c8 : int_cx)) c = CLS_ROM;
             end else if (in_hi_f) begin
                 if (rw) begin
-                    c = lc_ramrd ? CLS_LC : (rom_ok[ROM_INT] ? CLS_ROM : CLS_BUS);
+                    c = lc_ramrd ? CLS_LC : (rom_ok ? CLS_ROM : CLS_BUS);
                 end else begin
                     c  = lc_wren ? CLS_LC : CLS_ROM;
                     wr = lc_wren;
@@ -345,12 +322,12 @@ module apple_mmu (
                 c  = CLS_RAM;
                 wr = !rw;
             end
-            classify = {c, src, wr};
+            classify = {c, wr};
         end
     endfunction
 
-    wire [4:0] q_class = classify(q_addr, q_rw);
-    assign q_cls = q_class[4:3];
+    wire [2:0] q_class = classify(q_addr, q_rw);
+    assign q_cls = q_class[2:1];
 
     // ---- the driver's query ---------------------------------------------------------
     wire q_zp    = (q_addr[15:9]  == 7'd0);
@@ -385,9 +362,8 @@ module apple_mmu (
     // The language card's RAM: bank 1 of $D000 lives in the image's $C000 hole.
     wire [15:0] lc_off = (in_d && !lc_bank2) ? {4'hC, op_addr[11:0]} : op_addr;
 
-    wire [4:0]  n_class    = classify(op_addr, op_rw);
-    wire [1:0]  n_cls      = n_class[4:3];
-    wire [1:0]  n_src      = n_class[2:1];
+    wire [2:0]  n_class    = classify(op_addr, op_rw);
+    wire [1:0]  n_cls      = n_class[2:1];
     wire        n_wr_image = n_class[0];
     wire [23:0] n_pa       = in_hi ? {altzp ? aux_bank : 8'd0, lc_off}
                                    : {aux_sel ? aux_bank : 8'd0, op_addr};
@@ -398,7 +374,6 @@ module apple_mmu (
             cl_cls      <= CLS_BUS;
             cl_pa       <= 24'd0;
             cl_rom_addr <= 14'd0;
-            cl_rom_src  <= ROM_INT;
             cl_rw       <= 1'b1;
             cl_wr_image <= 1'b0;
         end else begin
@@ -407,7 +382,6 @@ module apple_mmu (
                 cl_cls      <= n_cls;
                 cl_pa       <= n_pa;
                 cl_rom_addr <= op_addr[13:0];
-                cl_rom_src  <= n_src;
                 cl_rw       <= op_rw;
                 cl_wr_image <= n_wr_image;
             end

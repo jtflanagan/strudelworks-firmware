@@ -10,6 +10,13 @@ one deliberate departure: the data register's timing is taken from
 AppleWin's LSS path instead, because that is the physical one, and this card
 can afford to be physical - it counts bus cycles.
 
+
+> **Under acceleration (ACCELERATION.md)** the card's tick is one per op of
+> the core rather than one per bus cycle - a fast op the bus never saw ticks
+> too, a dummy cycle does not - so the disk turns as fast as the core runs
+> and the cycle-counted loops see what they always did. `fill_max` and `late`
+> are in those ticks.
+
 ## Where the seam is, and why
 
 **Per nibble.** The RWTS reads the register every seven cycles and expects a

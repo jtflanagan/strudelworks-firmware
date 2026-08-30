@@ -109,7 +109,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // ACCEL_CTRL, as the testbench drives it.
     reg  [1:0]  mode = 2'd0;
     reg  [15:0] target = 16'd0;
-    reg         slow_fd = 1'b1, fd_spinning = 1'b0, cnt_clr = 1'b0;
+    reg         cnt_clr = 1'b0;
     reg         serve = 1'b0, inval = 1'b0;
 
     // The overrides: the testbench's DMA and the boot hold.
@@ -130,7 +130,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [15:0] fev_addr;
     wire [7:0]  fev_data;
     wire        accel_on, decided, busy, mq_valid_w;
-    wire [1:0]  hold_reason, q_cls;
+    wire [1:0]  q_cls;
     wire [3:0]  seq_state;
     wire [31:0] fast_ops, bus_ops, cycles, wait_clocks;
     wire [7:0]  retries;
@@ -138,7 +138,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
-        .mode (mode), .target (target), .slow_fd (slow_fd), .cnt_clr (cnt_clr),
+        .mode (mode), .target (target), .cnt_clr (cnt_clr),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
@@ -150,12 +150,12 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .bus_owns (bus_owns), .core_valid (core_valid),
         .mem_sub_en (mem_sub_en), .mem_sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .mq_valid (mq_valid_w),
-        .bus_tick (bus_tick), .fd_spinning (fd_spinning),
+        .bus_tick (bus_tick),
         .u_present (u_present), .u_commit (u_commit), .u_addr (u_addr), .u_rw (u_rw),
         .u_wdata (u_wdata), .u_sync (u_sync), .u_ovr (u_ovr), .u_divert (u_divert),
         .fev_valid (fev_valid), .fev_addr (fev_addr), .fev_rw (fev_rw), .fev_data (fev_data),
         .fev_sync (fev_sync),
-        .accel_on (accel_on), .hold_reason (hold_reason), .state_o (seq_state),
+        .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
         .fast_ops (fast_ops), .bus_ops (bus_ops), .cycles (cycles), .wait_clocks (wait_clocks),
         .retries (retries)
     );
@@ -190,7 +190,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     // ---- the memory path, on the unified stream ---------------------------------------
     wire        cl_valid, cl_rw, cl_wr_image, intc8rom;
-    wire [1:0]  cl_cls, cl_rom_src;
+    wire [1:0]  cl_cls;
     wire [23:0] cl_pa;
     wire [13:0] cl_rom_addr;
     wire [11:0] sw_state;
@@ -212,21 +212,19 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     assign mem_image_ready = image_ready;
     assign mem_invalidating = invalidating;
 
-    // A slot-5 card ROM, the way the hard disk holds one: 256 bytes, read a
-    // clock behind its address.
+    // A slot-5 card ROM on the pins, the way the hard disk holds one: every
+    // slot is BUS class, so the core reads it over the bus in every mode.
     localparam [2:0] HD_SLOT = 3'd5;
     reg  [7:0] hd_rom [0:255];
-    reg  [7:0] hd_rom_q = 8'd0;
-    always @(posedge clk) hd_rom_q <= hd_rom[cl_rom_addr[7:0]];
-    wire [7:0] rom_byte = (cl_rom_src == 2'd1) ? hd_rom_q : rom_byte_int;
+    wire [7:0] rom_byte = rom_byte_int;
 
     apple_mmu u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_addr (u_addr), .op_rw (u_rw), .op_wdata (u_wdata),
         .op_present (u_present), .op_commit (u_commit),
-        .hd_slot (HD_SLOT), .fd_slot (3'd0), .vidhd_slot (3'd0), .rom_ok ({2'b00, 1'b1, rom_loaded}),
+        .rom_ok (rom_loaded),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (cl_rom_addr),
-        .cl_rom_src (cl_rom_src), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .intc8rom (intc8rom),
+        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .intc8rom (intc8rom),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls)
     );
@@ -395,6 +393,28 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     endfunction
 
+    // THE MACHINE'S MMU RESETS ON THE BUS SEQUENCE, NOT ON RES'.  The IIe's
+    // MMU infers a reset from three reads on the stack page followed by the
+    // vector fetch reads of $FFFC and $FFFD, and only then puts its switches
+    // back.  So the model's switches go back when the PINS show that - a
+    // reset sequence the card served from its own memory leaves them where
+    // the last program put them, which is what happened on hardware.  The
+    // card's own shadow resets on RES', as the card's MMU should.
+    integer m_stack_run = 0;        // consecutive $01xx reads seen on the pins
+    reg     m_saw_fffc = 1'b0;
+    integer m_mmu_resets = 0;
+    always @(posedge clk) if (since_fall == BUS_AT && driving) begin
+        if (rw_drive && addr_drive[15:8] == 8'h01) m_stack_run <= m_stack_run + 1;
+        else if (rw_drive && addr_drive == 16'hFFFC && m_stack_run >= 3) begin m_saw_fffc <= 1'b1; m_stack_run <= 0; end
+        else if (rw_drive && addr_drive == 16'hFFFD && m_saw_fffc) begin
+            m_saw_fffc <= 1'b0; m_mmu_resets <= m_mmu_resets + 1;
+            m_store80 <= 0; m_ramrd <= 0; m_ramwrt <= 0; m_altzp <= 0; m_page2 <= 0; m_hires <= 0;
+            m_bank2 <= 1; m_lcrd <= 0; m_wren <= 1; m_pre <= 0;
+            m_intcx <= 0; m_slotc3 <= 0; m_intc8 <= 0;
+            m_bank <= 0;
+        end else begin m_stack_run <= 0; m_saw_fffc <= 1'b0; end
+    end
+
     // The pins: the machine answers a read, takes a write, moves its switches.
     reg [7:0] mach_byte = 8'h00;
     always @(posedge clk) if (since_fall == BUS_AT && driving) begin
@@ -479,7 +499,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // ---- the running checks --------------------------------------------------------
     integer reads = 0, reads_bad = 0, fast_reads = 0, bus_reads = 0, ovr_cycles = 0;
     integer dummies = 0, dummies_bad = 0, pin_ram_writes = 0;
-    integer fast_bus_cls = 0, bus_bus_cls = 0, u_core_ops = 0, cx_fast = 0, cx_bus = 0;
+    integer fast_bus_cls = 0, bus_bus_cls = 0, u_core_ops = 0, cx_fast = 0, cx_bus = 0, cx_slot_fast = 0;
     integer merge_gaps = 0, presents = 0, last_bus_present = -1, last_was_bus = 0;
     integer check_gaps = 0, drv_cycen = 0, seq_cycen = 0, mode0_bad = 0, bus_ram_reads = 0;
     reg [7:0] pass_count = 8'd0;
@@ -498,7 +518,10 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         if (u_ovr && u_addr == 16'h210F) dma_last_ok = 1'b1;
         if (u_rw) begin
             reads = reads + 1; bus_reads = bus_reads + 1;
-            if ((cl_cls == 2'd1 || cl_cls == 2'd2) && !u_ovr) bus_ram_reads = bus_ram_reads + 1;
+            // ...except the reset sequence's, which ride the bus by rule, and
+            // mode 0's, where everything does.
+            if ((cl_cls == 2'd1 || cl_cls == 2'd2) && !u_ovr && !u_seq.reset_seq && mode != 2'd0)
+                bus_ram_reads = bus_ram_reads + 1;
             if (cl_cls == 2'd0 && u_addr[15:8] == 8'hC0) begin
                 if (cpu_din !== mach_byte && !u_ovr) begin
                     reads_bad = reads_bad + 1;
@@ -520,7 +543,12 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                 reads_bad = reads_bad + 1;
                 if (reads_bad <= 5) $display("    fast read $%04X: core got %02x, the reference says %02x", fev_addr, fev_data, exp_read(fev_addr));
             end
-            if (fev_addr[15:12] == 4'hC) cx_fast = cx_fast + 1;
+            if (fev_addr[15:12] == 4'hC) begin
+                cx_fast = cx_fast + 1;
+                // A slot's page, or $C800+ without the internal ROM: never fast.
+                if (!fev_addr[11] && !(m_intcx || (fev_addr[11:8] == 4'd3 && !m_slotc3))) cx_slot_fast = cx_slot_fast + 1;
+                if ( fev_addr[11] && !(m_intcx || m_intc8)) cx_slot_fast = cx_slot_fast + 1;
+            end
         end
     end
     // The stream's bookkeeping: passes, the failure flag, classes, merging.
@@ -727,9 +755,12 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         if (!rom_loaded) fail("the ROM did not load");
         serve <= 1'b1;
 
+        // The machine comes out of reset; the core with it.  The model's
+        // switches are NOT reset here: its MMU waits for the sequence on the
+        // pins (above), as the machine's does.  The power-on state was set
+        // by m_reset() at the start.
         res_n <= 1'b0;
         repeat (5 * CYCLE) @(negedge clk);
-        m_reset();
         res_n <= 1'b1;
 
         // ---- 1. mode 0: the old machine, to the clock ----------------------------------
@@ -744,7 +775,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok("mode 0: the machine's memory equals the reference");
 
         // ---- 2. mode 1: reads on the card, writes on the bus ----------------------------
-        clear_counters();
+        clear_counters(); bus_ram_reads = 0;
         n0 = pass_count; check_gaps = 1; merge_gaps = 0;
         @(negedge clk); mode <= 2'd1;
         wait_passes(n0 + 3, "mode 1, unlimited");
@@ -760,8 +791,10 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok("mode 1: every write reached the machine; its memory equals the reference");
         if (merge_gaps != 0) fail($sformatf("mode 1: %0d consecutive bus ops did not ride consecutive cycles", merge_gaps));
         else ok("mode 1: consecutive bus ops rode consecutive cycles");
-        if (cx_fast == 0) fail("mode 1: no $C100-$CFFF read was served fast");
-        else ok($sformatf("mode 1: %0d reads of $C100-$CFFF served from the card, every one the model's byte", cx_fast));
+        if (cx_fast == 0) fail("mode 1: no internal-ROM read of $C100-$CFFF was served fast");
+        else ok($sformatf("mode 1: %0d internal-ROM reads of $C100-$CFFF served from the card, every one the model's byte", cx_fast));
+        if (cx_slot_fast != 0) fail($sformatf("mode 1: %0d slot reads were served fast", cx_slot_fast));
+        else ok("mode 1: every slot read - the slot-5 ROM, the empty slots - rode the bus");
         check_image("mode 1: the image equals the reference");
 
         // ---- 3. mode 2: reads and writes on the card ------------------------------------
@@ -813,7 +846,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         @(negedge clk); arm <= 1'b1;
         res_n <= 1'b0;
         repeat (5 * CYCLE) @(negedge clk);
-        m_reset(); resets = resets + 1;
+        resets = resets + 1;
         res_n <= 1'b1;
         c = 0;
         while (!held && c < 20 * CYCLE) begin @(posedge clk); c = c + 1; end
@@ -847,12 +880,28 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         common_checks("the holds");
 
         // ---- 7. a reset under it -------------------------------------------------------------
+        // First leave INTCXROM set, through the override path as the last
+        // program on the machine would have: the reset must put it back on
+        // the machine, or the program's $C500 read finds the internal ROM
+        // where the model expects the slot's - the failure seen on hardware.
+        @(negedge clk);
+        tb_ovr_en <= 1'b1; tb_ovr_rw <= 1'b0; tb_ovr_addr <= 16'hC007; tb_ovr_wdata <= 8'h00;
+        @(posedge clk);
+        while (!(op_present && op_ovr && op_addr == 16'hC007)) @(posedge clk);
+        @(negedge clk); tb_ovr_en <= 1'b0;
+        repeat (2 * CYCLE) @(negedge clk);
+        if (!m_intcx) fail("INTCXROM was not set on the machine before the reset");
+        n1 = m_mmu_resets;
         res_n <= 1'b0;
         repeat (5 * CYCLE) @(negedge clk);
-        m_reset(); resets = resets + 1;
+        resets = resets + 1;
         res_n <= 1'b1;
         pass_count = 0;
         wait_passes(2, "after a reset, still accelerating");
+        if (m_mmu_resets != n1 + 1) fail($sformatf("the machine's MMU saw %0d reset sequences on the pins, expected one", m_mmu_resets - n1));
+        else ok("the reset sequence rode the bus: three stack reads, then $FFFC and $FFFD, and the machine's MMU reset");
+        if (m_intcx) fail("INTCXROM is still set on the machine after the reset");
+        else ok("...so INTCXROM is clear on the machine again, and the slot ROM answers");
         if (late_fills > resets) fail($sformatf("late fills %0d over %0d resets", late_fills, resets));
         else ok($sformatf("late fills %0d, no more than the %0d resets", late_fills, resets));
         if (reads_bad != 0) fail($sformatf("after the reset: %0d reads disagreed", reads_bad)); reads_bad = 0;
@@ -878,23 +927,19 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("%0d fast ops the cache declined were decided again, and read right", retries - r0));
         if (reads_bad != 0) fail($sformatf("through the invalidate: %0d reads disagreed", reads_bad)); reads_bad = 0;
 
-        // ---- 9. the slow zone ----------------------------------------------------------------------
-        @(negedge clk); fd_spinning <= 1'b1;
-        repeat (3 * CYCLE) @(negedge clk);
-        fast0 = fast_ops; n1 = bus_ops;
+        // ---- 9. the end --------------------------------------------------------------------------
         repeat (40 * CYCLE) @(negedge clk);
-        if (fast_ops != fast0) fail($sformatf("%0d fast ops while the floppy spun", fast_ops - fast0));
-        else if (bus_ops - n1 < 30) fail("the core did not run on the bus while the floppy spun");
-        else ok($sformatf("while the floppy spins every op is a bus op: %0d of them, no fast op", bus_ops - n1));
-        @(negedge clk); fd_spinning <= 1'b0;
         n0 = pass_count;
-        wait_passes(n0 + 1, "after the slow zone");
-        // In mode 2 a RAM read that rides the bus - the slow zone's - is served
-        // from the card and compared with the machine's stale byte: the
-        // monitor counts, as it must, and that is the one place it should.
-        if (bus_ram_reads == n1) fail("the slow zone put no RAM read on the bus");
-        if (mismatches == 0) fail("mode 2's slow zone put RAM reads on the bus and the monitor saw no stale byte");
-        else ok($sformatf("the monitor counted %0d stale bytes on mode 2's slow-zone bus reads, and nowhere else", mismatches));
+        wait_passes(n0 + 1, "the end");
+        // In mode 2 no RAM read ever rides the bus - there is nothing that
+        // sends one there - so the monitor, which compares only bus reads,
+        // has nothing to count.
+        // At most the op the driver had already latched when a mode was
+        // switched on under it: once per switch into an accelerated mode.
+        if (bus_ram_reads > 2) fail($sformatf("%0d RAM reads rode the bus in modes 1 and 2", bus_ram_reads));
+        else ok($sformatf("no RAM read rode the bus while accelerating beyond the %0d in flight at the mode switches: a read the card holds is fast", bus_ram_reads));
+        if (mismatches != 0) fail($sformatf("the monitor counted %0d mismatches", mismatches));
+        else ok("the monitor saw nothing to disagree with");
         if (reads_bad != 0) fail($sformatf("the end: %0d reads disagreed with the reference", reads_bad));
         else ok($sformatf("the end: %0d reads (%0d fast), every one the reference's byte", reads, fast_reads));
         if (dummies_bad != 0 || fast_bus_cls != 0 || late_fills != 0 || fifo_drops != 0)

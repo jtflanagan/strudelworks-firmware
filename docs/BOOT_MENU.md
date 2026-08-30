@@ -206,9 +206,13 @@ any more. **The host holds Open-Apple down across the release** through
 releases, decides "cold" itself, and everything that follows is what a
 person holding Open-Apple-Ctrl-Reset gets. The host writes the button down
 before the release and back to hardware 50 ms after it - generous cover for
-the handler's reads, which are over within a millisecond or two, and
-harmless to what follows, which does not read Open-Apple. The hold itself
-is back to being purely keyboard reads until told to go.
+the handler's reads, which are over within a millisecond or two. What
+follows must not care about Open-Apple, and one thing did: the SmartPort
+ROM vendored from AppleWin checked it 20 000 cycles later and skipped its
+slot - AppleWin's own convention, which the boot menu makes redundant, and
+which an accelerated core reached inside the 50 ms (ACCELERATION.md). The
+check is gone from `firmware/hdc_smartport.s`. The hold itself is back to
+being purely keyboard reads until told to go.
 
 This is a //e mechanism. A ][+ has no Open-Apple, so an Autostart ROM
 warm-starts as it always did; the DMA route that worked there is in the

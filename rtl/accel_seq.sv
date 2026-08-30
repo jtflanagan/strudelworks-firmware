@@ -67,13 +67,34 @@
 // MODE 0 IS THE OLD MACHINE TO THE CLOCK: bus_owns and core_valid are forced
 // high, cyc_en is the driver's, din is the driver's, and the state machine
 // merely follows along in S_BUS so that switching the mode under a running
-// program lands in a defined place.  The slow zone is the same thing, by
-// another door: while the floppy spins every op is a BUS op.
+// program lands in a defined place.
+//
+// WHAT IS SLOW IS A MATTER OF CLASS, AND NOTHING ELSE.  Every access to
+// $C000-$CFFF that is not the motherboard's own ROM - the I/O page, every
+// slot's I/O and ROM pages, a slot's $C800 expansion ROM - is BUS class and
+// rides a real cycle, in every mode; a read the card's memory answers is
+// fast.  There is no hold-off after a slot access and no rule about a drive
+// turning: a peripheral's code runs at the bus's pace exactly as far as it
+// touches the bus, which is the rule the user set.
 //
 // RESET (RES' included) parks this module: nothing offered, no bus owned, the
 // driver drives dummies until the core comes out of reset and its first op is
 // decided.  A bus op the reset interrupted completes on the bus and its
 // cyc_done is ignored; a fast op in flight is waited out (busy).
+//
+// THE RESET SEQUENCE RIDES THE BUS.  The IIe's MMU does not act on RES': it
+// infers a reset from the bus sequence the 6502 makes coming out of one -
+// three reads on the stack page, then the vector fetch reads of $FFFC and
+// $FFFD - and only then puts its soft switches back.  Those seven cycles are
+// RAM and ROM class, and the first cut served them from the card: the bus
+// saw dummies, the machine's MMU never reset, INTCXROM stayed set from the
+// last program, and the autostart ROM's slot scan read the motherboard ROM's
+// self-test in place of every slot ROM.  Found on hardware, by the user, who
+// had met it before.  So from reset until the core's read of $FFFD has
+// COMPLETED on the bus (reset_seq), every op is a bus op - the two reads at
+// PC, the three on the stack, the vector - exactly as in mode 0.  The op
+// after that, the first opcode fetch, is decided normally; an armed boot
+// hold takes it through the override path as before.
 //////////////////////////////////////////////////////////////////////////////////
 module accel_seq (
     input  wire        clk,
@@ -84,7 +105,6 @@ module accel_seq (
     // ACCEL_CTRL.
     input  wire [1:0]  mode,            // 0 off, 1 reads fast, 2 reads and writes fast
     input  wire [15:0] target,          // ops per bus cycle, 8.8; 0 = unlimited
-    input  wire        slow_fd,         // 1:1 while a floppy drive spins
     input  wire        cnt_clr,
 
     // What the card can serve right now.
@@ -125,9 +145,8 @@ module accel_seq (
     input  wire        busy,
     input  wire        mq_valid,
 
-    // Time, and the slow zone.
+    // Time.
     input  wire        bus_tick,
-    input  wire        fd_spinning,
 
     // The unified op stream, registered.
     output logic        u_present,
@@ -149,8 +168,9 @@ module accel_seq (
 
     // Status and counters (ACCEL_STAT and friends).
     output wire         accel_on,
-    output wire [1:0]   hold_reason,    // {floppy, governor}
+    output wire         held_governor,  // the core is waiting for credit
     output wire [3:0]   state_o,
+    output wire         reset_seq_o,    // the reset sequence is still on the bus
     output logic [31:0] fast_ops,
     output logic [31:0] bus_ops,
     output logic [31:0] cycles,
@@ -170,9 +190,11 @@ module accel_seq (
     } state_t;
     state_t st;
     assign state_o = {1'b0, st};
+    assign reset_seq_o = reset_seq;
 
     logic bus_owns_q, core_valid_q;
     logic fast_rw;                      // the fast op in flight is a read
+    logic reset_seq;                    // the reset sequence has not reached $FFFD on the bus
 
     wire off = (mode == MODE_OFF);
     assign accel_on = !off && master_active;
@@ -201,9 +223,10 @@ module accel_seq (
         dq_rw  <= cpu_rw;
         dq_ovr <= ovr_en;
     end
-    wire slow      = slow_fd && fd_spinning;
     wire needs_bus = off || (dq_cls == CLS_BUS) || (!dq_rw && mode == MODE_READS) ||
-                     slow || !mem_serve;
+                     !mem_serve || reset_seq;
+    // The core's read of $FFFD, over: the machine's MMU has seen its reset.
+    wire vector_done = cyc_done && op_rw && !op_ovr && !op_dummy && (op_addr == 16'hFFFD);
     wire fast_ok   = mem_image_ready && !mem_invalidating &&
                      !op_inflight && !busy && !mq_valid;
 
@@ -217,7 +240,7 @@ module accel_seq (
     assign bus_owns   = off || bus_owns_q;
     assign core_valid = off || core_valid_q;
 
-    assign hold_reason = {slow, (st == S_DECIDE) && settled && !can_pay};
+    assign held_governor = (st == S_DECIDE) && settled && !can_pay;
 
 
     // ---- the unified stream -------------------------------------------------
@@ -235,8 +258,14 @@ module accel_seq (
         // core has sat still for a clock: never on the clock of arrival.
         settled <= (st == S_DECIDE) && !cyc_en;
 
+        // From reset until $FFFD has ridden the bus (see the header).  Cleared
+        // in mode 0 too, where it could not be observed but must not stick.
+        if (cpu_rst)                 reset_seq <= 1'b1;
+        else if (vector_done || off) reset_seq <= 1'b0;
+
         if (rst) begin
             st <= S_RST;
+            reset_seq <= 1'b1;
             settled <= 1'b0;
             bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1;
             credit <= 20'd0;

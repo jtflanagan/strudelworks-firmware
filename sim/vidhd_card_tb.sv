@@ -162,8 +162,7 @@ module vidhd_card_tb;
         .rd_claim (rd_claim), .rd_data (rd_data),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
         .msg_len (msg_len), .pay_data (pay_data), .pay_valid (pay_valid),
-        .rom_loaded (rom_loaded),
-        .rom_rd_addr (8'd0), .rom_rd_byte ()
+        .rom_loaded (rom_loaded)
     );
 
     // ---- observers ----------------------------------------------------------

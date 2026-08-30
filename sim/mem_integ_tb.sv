@@ -149,9 +149,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
-        // No on-card slot ROMs here; the internal ROM is loaded.
-        .hd_slot (3'd0), .fd_slot (3'd0), .vidhd_slot (3'd0), .rom_ok ({3'b000, rom_loaded}),
-        .cl_rom_src (), .intc8rom (), .q_rw (1'b1), .q_cls (),
+        .rom_ok (rom_loaded), .intc8rom (), .q_rw (1'b1), .q_cls (),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (cl_rom_addr),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .sw_state (sw_state), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert)

@@ -34,15 +34,24 @@
 // reads and the head still steps; deselecting a drive coasts it the same
 // way, as the drive's own enable line would.
 //
-// THE DATA REGISTER, in read mode.  A nibble is 32 bus cycles - eight 4 us
-// bit cells - and the register presents it, high bit set, for the seven
-// cycles after the last bit lands; after that it shows the next nibble
-// shifting in, high bit clear (UTAIIe 9-15; AppleWin's LSS path,
-// Disk.cpp DataLatchReadWOZ, m_latchDelay = 7).  That window is why the
-// RWTS's seven-cycle `LDA $C0EC,X / BPL` loop reads every nibble exactly
-// once, and it is counted here in bus cycles, so it is exact whatever the
-// core is doing.  The stream is free-running: the platter turns whether or
-// not anyone reads, at the drive's own count of nibbles per revolution.
+// THE DATA REGISTER, in read mode.  A nibble is 32 cycles - eight 4 us bit
+// cells - and the register presents it, high bit set, for the seven cycles
+// after the last bit lands; after that it shows the next nibble shifting
+// in, high bit clear (UTAIIe 9-15; AppleWin's LSS path, Disk.cpp
+// DataLatchReadWOZ, m_latchDelay = 7).  That window is why the RWTS's
+// seven-cycle `LDA $C0EC,X / BPL` loop reads every nibble exactly once.
+// The stream is free-running: the platter turns whether or not anyone
+// reads, at the drive's own count of nibbles per revolution.
+//
+// THE CYCLES ARE THE CORE'S.  A cycle here is one op of the core - a bus
+// cycle that carried one, an override's, or a fast op the accelerated core
+// took from the card (rtl/accel_seq.sv, docs/ACCELERATION.md) - and never a
+// dummy cycle the bus ran with no op on it.  With the core locked to the bus
+// that is one tick per bus cycle, exactly as before; with it accelerated the
+// platter turns as fast as the core runs, so every loop counted in cycles
+// sees the count it always saw.  There is no drive on the card, only a
+// track in BRAM: nothing here is real time, and the one clock the fiction
+// has to keep is the program's.  fill_max and late are in these ticks too.
 // $C0nD samples write-protect into the register as $FF or $00, and the
 // $C0nE read that follows delivers it in bit 7.  A stopped drive holds the
 // register.  A drive with no disk - or no track yet, below - answers $80
@@ -126,6 +135,10 @@ module floppy_card #(
     input  wire        op_present,     // pulse: a new op has been presented
     input  wire        op_commit,      // pulse: the cycle's data phase
     input  wire        op_ovr,
+    input  wire        op_dummy,       // this bus cycle carried no op: no tick
+    // A fast op of the accelerated core completed: a tick of the core's
+    // time that the bus never saw.  Tied low without the sequencer.
+    input  wire        fast_tick,
 
     // A claimed READ cycle and the byte to emit.  Registered at op_present.
     output logic       rd_claim,
@@ -157,20 +170,10 @@ module floppy_card #(
 
     // For the registers' readback.
     output wire        rom_loaded,
-
-    // The ROM's second read port, for the CX class - see below.
-    input  wire [7:0]  rom_rd_addr,
-    output logic [7:0] rom_rd_byte,
     output wire [1:0]  stale_o,
     output wire [1:0]  dirty_o,
     output wire [13:0] phase_o,         // [6:0] drive 1, [13:7] drive 2
     output wire        motor_o,
-    // A drive is turning - the motor on, or either drive still coasting.
-    // rtl/accel_seq.sv runs the core at the bus's pace while this is high:
-    // the RWTS reads the data register on a count of cycles, and a core that
-    // ran ahead would read a nibble twice or land two stores in one slot.
-    // `motor` is in the term because the coast count loads a tick after it.
-    output wire        spinning_o,
     output wire        drive_sel_o,
     output wire        q6_o,
     output wire        q7_o,
@@ -209,14 +212,6 @@ module floppy_card #(
     wire [31:0] rom_word = rom[op_addr[7:2]];
     wire [7:0]  rom_byte = rom_word[8 * op_addr[1:0] +: 8];
 
-    // A second read port, for the accelerated core: rtl/apple_mmu.sv classes
-    // a read of this page as ROM and rtl/mem_cache.sv takes the byte from
-    // here instead of from the bus (the CX class, docs/ACCELERATION.md).
-    // Registered once so it lands where apple_rom's does, and held until the
-    // address moves.  A LUT RAM has as many read ports as it is asked for.
-    wire [31:0] rom_rd_word = rom[rom_rd_addr[7:2]];
-    always_ff @(posedge clk) rom_rd_byte <= rom_rd_word[8 * rom_rd_addr[1:0] +: 8];
-
     // ---- decode ------------------------------------------------------------------
     wire       hit_page = enabled && !op_ovr &&
                           (op_addr[15:4] == {8'hC0, 1'b1, slot_assign});
@@ -224,9 +219,10 @@ module floppy_card #(
     wire       hit_rom  = enabled && !op_ovr && op_rw && io_select &&
                           (op_addr[15:8] == {4'hC, 1'b0, slot_assign});
 
-    // The machine's clock: one tick per bus cycle, override cycles included -
-    // the platter turns during a DMA too.
-    wire tick = op_commit && enabled;
+    // The core's clock: one tick per op - a bus cycle that carried one,
+    // override cycles included (the platter turns during a DMA too), and
+    // every fast op.  Never a dummy.  See the header.
+    wire tick = enabled && ((op_commit && !op_dummy) || fast_tick);
     wire page_commit = op_commit && hit_page;
 
     // ---- the controller's latches ---------------------------------------------
@@ -240,7 +236,6 @@ module floppy_card #(
     logic [3:0] step_timer;             // ticks until a phase write moves the cog
 
     assign motor_o     = motor;
-    assign spinning_o  = motor || (spin[0] != 20'd0) || (spin[1] != 20'd0);
     assign drive_sel_o = drive_sel;
     assign q6_o        = q6;
     assign q7_o        = q7;

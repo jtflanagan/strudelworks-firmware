@@ -221,7 +221,6 @@ module card_link #(
     // memory client's windows.  A watching top ties the inputs to 0.
     output wire [1:0]   accel_mode,
     output wire [15:0]  accel_target,
-    output wire         accel_slow_fd,
     output wire         accel_cnt_clr,
     input  wire         accel_on,
     input  wire [31:0]  accel_stat,
@@ -937,7 +936,6 @@ module card_link #(
         .mem_intc8rom      (mem_intc8rom),
         .accel_mode        (accel_mode),
         .accel_target      (accel_target),
-        .accel_slow_fd     (accel_slow_fd),
         .accel_cnt_clr     (accel_cnt_clr),
         .accel_stat        (accel_stat),
         .accel_fast        (accel_fast),

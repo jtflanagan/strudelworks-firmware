@@ -1,8 +1,13 @@
 # The core faster than the bus
 
-Status: **✅ built and proven in simulation, 2026-08-29; master build closes
-(WNS +0.053 ns before the decision was registered, see "Numbers"); not yet
-run on hardware.** Branch `acceleration`, both repositories.
+Status: **✅ on hardware, 2026-08-30** - BASIC at 12.6x, the governor holding
+4.00 at a target of 4, ProDOS booting from slot 7 and the floppy, and the
+Mockingboard detected and playing, all in mode 2 - after three findings the
+simulation had not modelled: the machine's MMU infers a reset from the bus,
+so the reset sequence has to ride it ("The reset sequence"); the floppy and
+the Mockingboard's timers must keep the core's time, not the bus's ("What
+watches which stream"); and the SmartPort ROM inherited an Open-Apple skip
+from AppleWin. Branch `acceleration`, both repositories.
 
 The card is the Apple's CPU (BUS_MASTER.md) and keeps the machine's memory
 (MEMORY.md). Until now the soft core was locked to the bus: one op per phi0
@@ -33,19 +38,17 @@ target ratio on average. Mode 0 is the old machine to the clock.
 |---|---|---|
 | the sequencer | `rtl/accel_seq.sv` | owns `cyc_en` and `din`; decides every op; the unified stream; the governor; the counters |
 | the driver | `rtl/apple_bus_write.sv` | `bus_owns` / `core_valid` in, dummies out (`op_dummy`), `op_inflight` |
-| the class | `rtl/apple_mmu.sv` | the classifier as a function, asked of the core's live op (`q_cls`); the **CX class** and INTC8ROM |
+| the class | `rtl/apple_mmu.sv` | the classifier as a function, asked of the core's live op (`q_cls`); the **CX class** (the motherboard's `$Cxxx` ROM) and INTC8ROM |
 | the cache | `rtl/mem_cache.sv` | `decided` and `busy`, nothing else |
 | the stream | `rtl/event_merge.sv`, `rtl/bus_event_filter.sv` | fast-op words (tag `0xC`) merged with the bus's, dummies folded into SKIPs |
-| the ROMs | `rtl/hd_card.sv`, `rtl/floppy_card.sv`, `rtl/vidhd_card.sv` | a second read port each, for the CX class |
-| the slow zone | `rtl/floppy_card.sv` | `spinning_o`: a drive turning holds the core to the bus's pace |
 | the registers | `rtl/wb_regfile.sv` | ACCEL_CTRL, ACCEL_STAT and four counters (PROTOCOL.md) |
 
 ## Four kinds of op
 
 | kind | on the pins | the unified stream | the driver's `op_*` |
 |---|---|---|---|
-| **fast** - a read of RAM, LC or a ROM the card holds; a RAM/LC write in mode 2 | nothing (a dummy may be in flight) | yes | no |
-| **bus** - `$Cxxx` the card does not hold; every write in mode 1; everything in mode 0, in a slow zone, or with serving off | driven at T_PRESENT as always | yes | yes |
+| **fast** - a read of RAM, LC, the system ROM or the motherboard's own `$Cxxx` ROM; a RAM/LC write in mode 2 | nothing (a dummy may be in flight) | yes | no |
+| **bus** - every `$Cxxx` access a slot answers, and every I/O access; every write in mode 1; everything in mode 0 or with serving off | driven at T_PRESENT as always | yes | yes |
 | **override** - the boot hold's, the disk's DMA, the VBL lock's | driven as always | yes (`u_ovr`) | yes |
 | **dummy** - nothing offered at T_PRESENT | a read of `$0000` | **no** | yes, `op_dummy` |
 
@@ -54,10 +57,11 @@ copy, the hold - watches the **unified stream**: every op in program order,
 fast or bus or override, with `op_present` where it was and `op_commit` only
 for the ops that had a data phase on the bus. Nothing that acts on a commit
 can be a fast op: every soft switch is `$Cxxx`. Every peripheral that decodes
-`$Cxxx` or counts bus cycles watches the **driver**, whose ops those always
-are, and needed no change: a `$0000` read decodes to nothing in any of them
-and `op_commit` still ticks once a cycle, so the Mockingboard's timers and
-the floppy's nibbles keep machine time.
+`$Cxxx` watches the **driver**, whose ops those always are: a `$0000` read
+decodes to nothing in any of them. The two that keep time - the floppy's
+nibble clock and the Mockingboard's VIA timers - keep the **core's** time,
+one tick per op the core completes (`op_commit && !op_dummy`, or the
+sequencer's `fev_valid` for a fast op); see below.
 
 ## The decision, and merging
 
@@ -67,8 +71,36 @@ the direction, the override request - the clock after it appears: made in
 the same clock it was the longest path in the build (the microcode ROM
 through the classifier into the state register, 16 levels, +0.05 ns).
 
-`needs_bus = mode == 0 || class == BUS || (write && mode == 1) || slow || !serving`.
-Nothing else sends an op to the bus. An invalidate in progress, or the image
+`needs_bus = mode == 0 || class == BUS || (write && mode == 1) || !serving`.
+Nothing else sends an op to the bus. **What is slow is a matter of class
+alone**, the rule the user set: a `$Cxxx` access that is not the motherboard's
+own ROM - the I/O page, every slot's I/O and ROM pages, a slot's expansion
+ROM, on this card or in a socket - is BUS class and rides a real cycle, in
+every mode; a read the card's memory answers is fast. There is no hold-off
+after a slot access and no rule about a drive turning; a peripheral's code
+runs at the bus's pace exactly as far as it touches the bus.
+
+**The floppy keeps the core's time, not the bus's.** There is no drive on
+the card, only a track in BRAM, and the one clock that fiction has to keep
+is the program's: `floppy_card` ticks once per op of the core - a bus cycle
+that carried one, an override's, every fast op, never a dummy - so with the
+core locked to the bus it is one tick per cycle as before, and with it
+accelerated the platter turns as fast as the core runs and every loop RWTS
+and the boot block count in cycles sees the count it always saw. (The user's
+point, after the first cut held the core to the bus's pace while a drive
+turned, as a real accelerator must for a real drive.) The Mockingboard's
+VIA timers tick the same way (`mockingboard.op_dummy/fast_tick`), for the
+same reason: every detection routine writes a timer, runs a known number of
+instructions, reads it back and accepts the card only if the count moved by
+the cycles those instructions took - on bus time under a 12x core it moved
+by a twelfth of that and the game found no Mockingboard (the user's report,
+after the floppy fix). A real Mockingboard in a real accelerated machine
+keeps bus time and those same routines fail there too, which is why the
+accelerators of the day had slot slow-down switches; a virtual one has no
+reason to.
+`fill_max` and `late` are in the floppy's ticks, so the host's track budget
+shrinks by the ratio - its fills measured half a millisecond against the
+RWTS's 37 ms, room enough at 12x. An invalidate in progress, or the image
 not ready, makes a fast op **wait**: in mode 2 the bus would answer a RAM
 read with the machine's stale byte. A fast op also waits for the cache to be
 idle (`busy`), for its last request to have been taken (`mq_valid`, which is
@@ -96,6 +128,36 @@ cycles - "stay merged" - because the decision fits in that gap;
 `sim/run_accel_tb.sh` sweeps it down to 3 clocks. When the next op does not
 need the bus, `bus_owns` drops and the driver is back to dummies.
 
+**The reset sequence rides the bus.** The IIe's MMU does not act on RES′: it
+infers a reset from the sequence the 6502 makes coming out of one - three
+reads on the stack page, then the vector fetch reads of `$FFFC` and `$FFFD` -
+and only then puts its soft switches back. Those seven cycles are RAM and
+ROM class, and the first cut served them from the card: the bus saw dummies,
+the machine's MMU never reset, INTCXROM stayed set from the last program, and
+the autostart ROM's slot scan read the motherboard ROM's memory self-test in
+place of every slot ROM - `PR#7` printed its digits, and no disk booted.
+Found on hardware by the user, who had met it in another accelerator. So
+from reset until the core's read of `$FFFD` has **completed on the bus**
+(`reset_seq`, ACCEL_STAT [24]) every op is a bus op, exactly as in mode 0;
+the op after it - the first opcode fetch - is decided normally, and an armed
+boot hold takes it through the override path as before. The testbench's
+machine model now resets its switches the way the machine does - on the
+sequence seen on the pins, not on RES′ - and the run without the rule fails
+as the hardware did.
+
+**The SmartPort ROM no longer looks at Open-Apple.** The host holds
+Open-Apple down across the boot hold's release so the //e's reset handler
+takes its cold path, and lets go 50 ms later. The SmartPort ROM vendored
+from AppleWin checked Open-Apple again 20 000 cycles after the reset handler
+and skipped its slot if the button was still down - AppleWin's convention
+for "boot from the next slot"; at 5-12x that check came inside the 50 ms,
+and slot 7 never booted while every floppy did (found with a trace of the
+boot: the scan read the signature, jumped to `$C700`, read `$C061` as `A0`
+and took the branch to `$FABA`). The boot menu is where this machine decides
+whether the disk is in play, so the check is simply gone from the ROM
+(`firmware/hdc_smartport.s`, the user's call); a once-only button level on
+the card was built for it first and taken out again.
+
 An **override** wanting the bus is honoured at the next decision: the bus is
 handed over (`bus_owns`, nothing offered) until `ovr_en` has dropped *and*
 its last cycle has had its data phase (`op_inflight` - hd_card releases the
@@ -122,35 +184,22 @@ machine's own speed, 0 is unlimited, and the bucket holds four cycles'
 worth: a run of merged cycles is followed by at most that much of a burst.
 Measured in the testbench: 3.99 at a target of 4.00, 1.00 at 1.00.
 
-## The slow zone
+## The CX class: the motherboard's `$C100-$CFFF` served
 
-The RWTS reads the floppy's data register on a count of bus cycles - its
-seven-cycle `LDA $C0EC,X / BPL` loop reads every nibble exactly once because
-the register holds a nibble for seven cycles - and a core that ran ahead
-would read the same nibble twice, and writing, land two stores in one
-32-cycle slot. Real accelerators drop to 1 MHz on slot 6 for the same
-reason. Here the floppy is on the card and says so: while a drive is turning
-(`spinning_o`: the motor on, or either drive still coasting - the `motor`
-term because the coast count loads a tick after it) every op is a bus op.
-ACCEL_CTRL [24] turns that off, for a test.
-
-## The CX class: `$C100-$CFFF` served
-
-Before this every fetch from `$C100-$CFFF` - the internal ROM's `$Cxxx` half,
-the slot ROMs, the 80-column firmware ProDOS runs so much of its time in -
-was BUS class, and under acceleration every one would have merged. Now,
-UTAIIe 5-28 as AppleWin's `Memory.cpp` implements it:
+Before this every fetch from `$C100-$CFFF` - including the internal ROM's
+`$Cxxx` half, the 80-column firmware ProDOS runs so much of its time in -
+was BUS class, and under acceleration every one would have merged. Now the
+reads the **motherboard's own ROM** answers are ROM class, and every slot's
+page stays BUS - UTAIIe 5-28 as AppleWin's `Memory.cpp` implements it:
 
 ```
 read of $C100-$C7FF, page n:  INTCXROM, or n == 3 and SLOTC3ROM clear
                                         -> ROM, from the internal ROM
-                              else n the hard disk's, the floppy's or the
-                              VidHD's slot, its ROM loaded
-                                        -> ROM, from that card's own ROM
-                              else (the Mockingboard's VIAs, a physical
-                              card, an empty slot)  -> BUS
+                              else (a slot's: a ROM on this card or in a
+                              socket, the Mockingboard's VIAs, nothing)
+                                        -> BUS
 read of $C800-$CFFE:          INTCXROM or INTC8ROM -> ROM, internal
-                              else                 -> BUS
+                              else (a slot's expansion ROM) -> BUS
 $CFFF, every write, every $C0xx        -> BUS
 ```
 
@@ -159,16 +208,19 @@ while INTCXROM and SLOTC3ROM are both clear, cleared by any access to `$CFFF`
 and by RES′. It is set at `op_present` rather than `op_commit`, because a
 `$C3xx` fetch served from the card has no data phase; for one that does the
 difference only reaches the *next* op, which cannot be presented before this
-one's commit. `MEM_STAT[13]` reads it. A ROM source that is not loaded
-classifies as BUS, so "ROM class" always means the card has the byte, and
-the cache needs no per-source check. The three slot ROMs are 64×32 LUT RAMs
-read combinationally, so a second port each was a mux.
+one's commit. `MEM_STAT[13]` reads it. The internal ROM not yet loaded classifies as BUS,
+so "ROM class" always means the card has the byte.
 
 Proven where the old ROM class was: `sim/run_mmu_trace.sh` on the three real
 captures compares every ROM-class read with the file - **4.7 M of them on
 `apple.bustrace`, 0 mismatches**, half a million more than before, the
-`$C100-$CFFF` reads among them. The Mockingboard's page stays BUS: its
-`$Cnxx` are VIA registers with read side effects.
+`$C100-$CFFF` reads among them.
+
+The first cut served the on-card slot ROMs too, through a second read port
+on each, and held the core to the bus's pace while a floppy drive turned.
+Neither was in the plan the user set - "a `$Cxxx` slot that is not
+motherboard ROM is slow, otherwise fast" - and the served slot ROM is where
+the hard disk stopped booting on hardware; both are gone.
 
 ## The stream
 
@@ -206,10 +258,11 @@ stream.
 ACCEL_CTRL    0x8000_008C   [1:0] mode: 0 off, 1 reads on the card / writes on
                             the bus, 2 reads and writes on the card; [23:8]
                             target, ops per bus cycle, 8.8, 0 = unlimited;
-                            [24] slow_fd (default 1); [31] W1 clear counters
-ACCEL_STAT    0x8000_0090   [0] accelerating; [2:1] held {floppy, governor};
+                            [31] W1 clear counters
+ACCEL_STAT    0x8000_0090   [0] accelerating; [1] held by the governor;
                             [3] bus_owns; [7:4] state; [15:8] merge overflows
-                            (must be 0); [23:16] fast ops decided twice
+                            (must be 0); [23:16] fast ops decided twice;
+                            [24] the reset sequence is still on the bus
 ACCEL_FAST    0x8000_0094   fast ops
 ACCEL_BUS     0x8000_0098   the core's ops that rode a bus cycle
 ACCEL_CYCLES  0x8000_009C   bus cycles while accelerating
@@ -246,10 +299,14 @@ testbench's read-heavy one). Posting writes - a queue the core need not wait
 on, drained one per bus cycle, ordered ahead of any later `$Cxxx` op - is
 the follow-on that lifts it towards mode 2's speed.
 
-**The mismatch monitor counts in mode 2's slow zones.** A RAM read that rides
-the bus there - the floppy's - is served from the card and compared with the
-machine's stale byte: the count moves, as it must, and only there. In mode 1
-the monitor stays meaningful (writes keep the machine coherent).
+**Sparse capture goes with acceleration.** In full mode every fast read is a
+word to the host - some 12 M a second at 12x, none of which the host has a
+use for - and the one time the card was started with mode 2 written at
+connect in full mode the FT601 dropped off the Pi's USB in its first
+milliseconds (dmesg: a disconnect and a re-enumeration). With `--sparse`,
+and the mode set once the link is up, it has run for as long as it was
+watched. Whether the rate or the timing is what the FT601 objected to is not
+yet known; `--accel` should be used with `--sparse`.
 
 **Programs that count CPU cycles between floating-bus reads break**,
 inherently: the floating bus is real time and the core is not. Every
@@ -263,11 +320,12 @@ not a wrong answer (DDR3_USAGE.md).
 
 ## Numbers
 
-Master build of 2026-08-29 with the decision in the same clock as the core's
-ROM: **10 640 LUTs (51 %, +1.6 k)**, 8 334 flops, BRAM unchanged at 35.5 of
-50, setup WNS **+0.053 ns** on the path `u_cpu/uc_reg → … → u_seq/st_reg`
-(16 levels), hold +0.031 ns. The decision was then registered (one more clock
-per fast op) and the build re-run; see the commit for the figures.
+Master build of 2026-08-29: **10 042 LUTs (48 %, +1.0 k)**, BRAM unchanged at
+35.5 of 50, setup WNS **+0.134 ns**, hold +0.049 ns. The worst path is the
+driver's divert decision off the core's ROM (`u_cpu/uc_reg → u_write/drv_div`,
+16 levels), which predates this work. With the decision made in the same clock
+as the core's ROM the build had closed at +0.053 ns on `uc_reg → u_seq/st_reg`
+and 10 640 LUTs; registering it bought the 0.08 ns for one clock a fast op.
 
 In simulation (`sim/run_accel_tb.sh`, the real core on sim/accel.s against
 the 128K IIe model): **mode 2 unlimited 10.0x** (32 814 fast + 178 bus ops
@@ -275,11 +333,20 @@ over 3 284 cycles), mode 1 7.5x on that read-heavy program, the governor
 3.99 at 4.00 and 1.00 at 1.00; 280 K reads, every one the reference's byte;
 `late_fills` 0, `fifo_drops` 0, merge overflows 0.
 
+On the machine (`tools/accel_test.sh`, a `FOR I=1 TO 20000:NEXT` loop from a
+ProDOS BASIC prompt, sparse capture): at the bus's pace **22.4 s**; mode 1
+**4.18 s (5.4x)**, the card counting 4.13 ops a cycle; mode 2 at a target of
+4.0 **5.4 s** with the card at exactly 4.00; mode 2 unlimited **1.78 s
+(12.6x)** - the card's count over the interval is lower (7.0) because the
+interval takes in the prompt's keyboard polling, every read of `$C000` a bus
+cycle. `mlate`, `mdrops`, `aovf` 0 throughout, no beam slip, the mismatch
+count flat in mode 1, no floating-bus trip in mode 2.
+
 ## What proves it
 
 | | what it settles |
 |---|---|
-| `sim/run_accel_tb.sh` | the real core, driver, reader, sequencer, MMU, ROM, cache, client, arbiter and hold against the 128K IIe model, running `sim/accel.s`: mode 0 bit-exact (no dummy, no fast op, every cyc_en the driver's); modes 1 and 2 unlimited and the governor at 4.0 and 1.0; every read the reference's byte, fast or bus; every dummy the parked read; no BUS-class op served fast; every write on the pins in mode 1 and none in mode 2; consecutive bus ops on consecutive cycles; a DMA of the disk's shape mid-run with its last byte's commit its own; the armed boot hold at the post-reset fetch and a runtime knock at the next SYNC, accelerating; a reset; an invalidate landed on a fast read (decided again, and no RAM read on the bus); the floppy's slow zone; the CX class's every case; swept over the core-to-present margin down to 3 clocks |
+| `sim/run_accel_tb.sh` | the real core, driver, reader, sequencer, MMU, ROM, cache, client, arbiter and hold against the 128K IIe model, running `sim/accel.s`: mode 0 bit-exact (no dummy, no fast op, every cyc_en the driver's); modes 1 and 2 unlimited and the governor at 4.0 and 1.0; every read the reference's byte, fast or bus; every dummy the parked read; no BUS-class op served fast; every write on the pins in mode 1 and none in mode 2; consecutive bus ops on consecutive cycles; a DMA of the disk's shape mid-run with its last byte's commit its own; the armed boot hold at the post-reset fetch and a runtime knock at the next SYNC, accelerating; a reset; an invalidate landed on a fast read (decided again, and no RAM read on the bus); the CX class's every case, every slot read on the bus; swept over the core-to-present margin down to 3 clocks |
 | `sim/run_bus_write_tb.sh` | the driver: a dummy when nothing is offered, an override refused while the bus is not owned, `op_inflight` spanning present to data phase; and the old checks unchanged with the levels tied |
 | `sim/run_bus_event_filter_tb.sh` | the three rules, both modes; the merge's order, spacing and the same-clock collision |
 | `sim/run_mmu_trace.sh` | the CX class against three real captures, 0 mismatches |
@@ -295,10 +362,10 @@ over 3 284 cycles), mode 1 7.5x on that read-heavy program, the governor
   and the tag word, behind the same `present`/`decided`/`busy` interface.
 - **A flush walk** when leaving mode 2 - copying the image back into the
   machine's RAM - so mode 0 could follow mode 2 without a reset.
-- **A slot mask for physical cards** (a TransWarp's "slot speed"): a `$C0nx`
-  or `$Cnxx` access to a masked slot holding the core to the bus's pace for
-  a while. Word 41 of the register map is left for it.
-- **A physical card's `$C800` expansion ROM**: BUS, always.
+- **A hold-off after a slot access** (a TransWarp's "slot speed", or a
+  Disk II's motor): the core at the bus's pace for a while around a slot's
+  I/O. Not asked for; word 41 of the register map is left for it if it is.
+- **Any slot's ROM served from the card**: BUS, always, by the rule above.
 - **The periodic timestamp record** in the trace (DDR3_USAGE.md): a trace of
   an accelerated machine is not a cycle stream; the host flags it
   (`kFlagAccel`) and the replay tool refuses it, while the MMU check still

@@ -210,6 +210,7 @@ module floppy_card_tb;
         .master_active (master_active), .slot_assign (slot_assign),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit), .op_ovr (op_ovr),
+        .op_dummy (1'b0), .fast_tick (1'b0),
         .rd_claim (rd_claim), .rd_data (rd_data),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
         .msg_len (msg_len), .pay_data (pay_data), .pay_valid (pay_valid),
@@ -218,7 +219,6 @@ module floppy_card_tb;
         .drv_nibbles (drv_nibbles), .drv_tracks (drv_tracks), .drv_flush (drv_flush),
         .late_clr (late_clr), .fill_clr (fill_clr),
         .rom_loaded (rom_loaded), .stale_o (stale), .dirty_o (dirty),
-        .rom_rd_addr (8'd0), .rom_rd_byte (),
         .phase_o (phase), .motor_o (motor), .drive_sel_o (drive_sel),
         .q6_o (q6), .q7_o (q7), .seeks (seeks), .late (late), .fill_max (fill_max)
     );
