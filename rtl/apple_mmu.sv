@@ -191,7 +191,29 @@ module apple_mmu (
     // write, be if presented now?  Same switches, same function as the
     // classifier below, combinational.  rtl/accel_seq.sv decides on it.
     input  wire        q_rw,
-    output wire [1:0]  q_cls
+    output wire [1:0]  q_cls,
+
+    // ---- the TLB's question, combinational ---------------------------------
+    // The two views of one 256-byte page, on the switches as they stand.  All
+    // Apple II mapping is page-oriented, so within any page the class and
+    // pa[23:8] depend only on the switches and on rw - never on the low byte.
+    // The two exceptions are exactly why t_r_ok excludes them: $CFFF breaks
+    // page $CF's uniformity AND clears INTC8ROM, and any $C3xx access can SET
+    // INTC8ROM - both must keep reaching this module as presented ops, so
+    // those pages are never servable from an L1.
+    //
+    // ppage is a 17-bit physical page: {1'b1, 10'd0, rom index} for the
+    // internal ROM (its own space - the ROM is not in the image, and its
+    // lines must not alias the image's), {1'b0, pa[23:8]} for the image.
+    input  wire [7:0]  t_page,
+    output wire        t_r_ok,      // reads L1-servable (RAM/LC/ROM class)
+    output wire [16:0] t_r_ppage,   // where a read reaches
+    output wire        t_w_ok,      // a write lands in the image
+    output wire [16:0] t_w_ppage,   // where a write lands
+    // Any access that moves the map, the clock it takes effect: the TLBs
+    // flush on it.  Combinational, so the flush lands at the same edge as the
+    // change and no lookup can slip between them.
+    output wire        map_changed
 );
 
     // RamWorks banks: 0..RW_BANKS-1 exist; a write of any other number is
@@ -328,6 +350,60 @@ module apple_mmu (
 
     wire [2:0] q_class = classify(q_addr, q_rw);
     assign q_cls = q_class[2:1];
+
+    // ---- the TLB's page views ----------------------------------------------
+    // The physical page a 256-byte page maps to, as a function of the page and
+    // the switches - the page-granular restatement of the op path's "physical
+    // address" block below, and kept textually parallel to it on purpose.
+    function automatic [15:0] pa_page_of(input [7:0] pg, input rw);
+        logic p_zp, p_text, p_hires, p_d, p_hi, p_aux_mid;
+        logic [7:0] lc_pg, bank;
+        begin
+            p_zp    = (pg[7:1] == 7'd0);            // $0000-$01FF
+            p_text  = (pg[7:2] == 6'b000001);       // $0400-$07FF
+            p_hires = (pg[7:5] == 3'b001);          // $2000-$3FFF
+            p_d     = (pg[7:4] == 4'hD);            // $D000-$DFFF
+            p_hi    = (pg[7:4] >= 4'hD);            // $D000-$FFFF
+            p_aux_mid = (store80 && p_text)           ? page2 :
+                        (store80 && hires && p_hires) ? page2 :
+                        (rw ? ramrd : ramwrt);
+            lc_pg = (p_d && !lc_bank2) ? {4'hC, pg[3:0]} : pg;
+            bank  = ((p_hi || p_zp) ? altzp : p_aux_mid) ? (rw_bank + 8'd1)
+                                                         : 8'd0;
+            pa_page_of = {bank, p_hi ? lc_pg : pg};
+        end
+    endfunction
+
+    wire [2:0] t_r_class = classify({t_page, 8'h00}, 1'b1);
+    wire [2:0] t_w_class = classify({t_page, 8'h00}, 1'b0);
+
+    assign t_r_ok    = (t_r_class[2:1] != CLS_BUS) &&
+                       (t_page != 8'hC3) && (t_page != 8'hCF);
+    assign t_r_ppage = (t_r_class[2:1] == CLS_ROM)
+                       ? {1'b1, 10'd0, t_page[5:0]}         // rom index a[13:8]
+                       : {1'b0, pa_page_of(t_page, 1'b1)};
+    assign t_w_ok    = t_w_class[0];                        // lands in the image
+    assign t_w_ppage = {1'b0, pa_page_of(t_page, 1'b0)};
+
+    // ---- map changes, for the TLB flush ------------------------------------
+    // Access-based, by decision: touching a mapping switch flushes whether or
+    // not the value changed.  TEXT/MIXED/80COL are video-only and excluded -
+    // split-screen code hammers $C050/$C052 every frame and none of them
+    // enter the map.  PAGE2/HIRES do (80STORE), so $C054-$C057 flush.
+    wire map_c00x = sw_c00x && !op_rw && (op_addr[3:1] <= 3'd5);
+    wire map_c05x = sw_c05x && (op_addr[3:1] == 3'd2 || op_addr[3:1] == 3'd3);
+    wire map_c8_set = op_present && acc_c3xx && !intcxrom && !slotc3rom &&
+                      !intc8rom;
+    wire map_c8_clr = op_commit && acc_cfff && intc8rom;
+
+    logic rom_ok_q;
+    always_ff @(posedge clk) rom_ok_q <= rom_ok;
+
+    assign map_changed = rst || !res_sync ||
+                         (op_commit && (map_c00x || (sw_rwbk && !op_rw) ||
+                                        map_c05x || sw_c08x)) ||
+                         map_c8_set || map_c8_clr ||
+                         (rom_ok != rom_ok_q);
 
     // ---- the driver's query ---------------------------------------------------------
     wire q_zp    = (q_addr[15:9]  == 7'd0);
