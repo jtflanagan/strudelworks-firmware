@@ -101,12 +101,12 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        cpu_rw, cpu_sync, cpu_cyc_en;
     wire [7:0]  cpu_dout, cpu_din;
     wire        cpu_cyc_is_i;
-    wire [15:0] cpu_i_pred;
+    wire [15:0] cpu_i_pred, cpu_i_addr;
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
         .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted (),
-        .cyc_is_i (cpu_cyc_is_i), .i_addr (), .i_pred (cpu_i_pred),
+        .cyc_is_i (cpu_cyc_is_i), .i_addr (cpu_i_addr), .i_pred (cpu_i_pred),
         .d_addr (), .d_rw (), .d_dout ()
     );
 
@@ -184,7 +184,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     l1_front u_l1 (
         .clk (clk), .rst (rst),
-        .cpu_addr (cpu_addr), .cpu_sync (cpu_sync),
+        .i_addr (cpu_i_addr), .cpu_sync (cpu_sync),
         .cyc_is_i (cpu_cyc_is_i), .i_pred (cpu_i_pred),
         .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
         .accel_cyc_en (accel_cyc_en), .accel_din (accel_din),
@@ -637,6 +637,54 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         $display("    ...%0d clocks, %0d reads (%0d fast), fast_ops %0d bus_ops %0d cycles %0d, state %0d",
                  now + 1, reads, fast_reads, fast_ops, bus_ops, cycles, seq_state);
 
+    // ---- the op-cost mix -------------------------------------------------------------
+    // Where the clocks go: every retired op classified - turbo, a fast read
+    // of the program stream (an icache miss), a fast data read, a fast
+    // write, a bus op - with the clocks from the previous retirement to
+    // this one charged to it.  The answer to "the other 23% average
+    // thirteen clocks: thirteen of what?", per phase.
+    integer mix_clk = 0;
+    integer mix_cnt [0:4];
+    integer mix_sum [0:4];
+    integer mix_max [0:4];
+    integer gov_clocks = 0;
+    task clear_mix;
+        integer k;
+        begin
+            for (k = 0; k < 5; k = k + 1) begin
+                mix_cnt[k] = 0; mix_sum[k] = 0; mix_max[k] = 0;
+            end
+            gov_clocks = 0; mix_clk = 0;
+        end
+    endtask
+    initial clear_mix();
+    task report_mix(input string what);
+        begin
+            $display("    mix %0s: turbo %0d @%.1f | fastI %0d @%.1f (max %0d) | fastD %0d @%.1f (max %0d) | fastW %0d @%.1f | bus %0d @%.1f (max %0d) | gov-held %0d clks",
+                     what,
+                     mix_cnt[0], mix_cnt[0] ? real'(mix_sum[0]) / mix_cnt[0] : 0.0,
+                     mix_cnt[1], mix_cnt[1] ? real'(mix_sum[1]) / mix_cnt[1] : 0.0, mix_max[1],
+                     mix_cnt[2], mix_cnt[2] ? real'(mix_sum[2]) / mix_cnt[2] : 0.0, mix_max[2],
+                     mix_cnt[3], mix_cnt[3] ? real'(mix_sum[3]) / mix_cnt[3] : 0.0,
+                     mix_cnt[4], mix_cnt[4] ? real'(mix_sum[4]) / mix_cnt[4] : 0.0, mix_max[4],
+                     gov_clocks);
+        end
+    endtask
+    integer mix_cat;
+    always @(posedge clk) begin
+        mix_clk = mix_clk + 1;
+        if (u_seq.held_governor) gov_clocks = gov_clocks + 1;
+        if (cpu_cyc_en) begin
+            if (turbo_commit)                  mix_cat = 0;
+            else if (u_seq.st == u_seq.S_FAST) mix_cat = !cpu_rw ? 3 : (cpu_cyc_is_i ? 1 : 2);
+            else                               mix_cat = 4;
+            mix_cnt[mix_cat] = mix_cnt[mix_cat] + 1;
+            mix_sum[mix_cat] = mix_sum[mix_cat] + mix_clk;
+            if (mix_clk > mix_max[mix_cat]) mix_max[mix_cat] = mix_clk;
+            mix_clk = 0;
+        end
+    end
+
     // ---- helpers -----------------------------------------------------------------------
     task send_chunk(input integer c);
         integer k;
@@ -823,10 +871,11 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok("mode 0: the machine's memory equals the reference");
 
         // ---- 2. mode 1: reads on the card, writes on the bus ----------------------------
-        clear_counters(); bus_ram_reads = 0;
+        clear_counters(); clear_mix(); bus_ram_reads = 0;
         n0 = pass_count; check_gaps = 1; merge_gaps = 0;
         @(negedge clk); mode <= 2'd1;
         wait_passes(n0 + 3, "mode 1, unlimited");
+        report_mix("mode 1");
         @(negedge clk); mode <= 2'd0; check_gaps = 0;
         repeat (3 * CYCLE) @(negedge clk);
         common_checks("mode 1");
@@ -848,10 +897,11 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         check_image("mode 1: the image equals the reference");
 
         // ---- 3. mode 2: reads and writes on the card ------------------------------------
-        clear_counters(); pin_ram_writes = 0; dummies = 0; cx_fast = 0;
+        clear_counters(); clear_mix(); pin_ram_writes = 0; dummies = 0; cx_fast = 0;
         n0 = pass_count; check_gaps = 1; merge_gaps = 0;
         @(negedge clk); mode <= 2'd2;
         wait_passes(n0 + 3, "mode 2, unlimited");
+        report_mix("mode 2");
         repeat (3 * CYCLE) @(negedge clk);
         check_gaps = 0;
         common_checks("mode 2");

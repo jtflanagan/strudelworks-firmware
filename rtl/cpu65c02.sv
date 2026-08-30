@@ -123,7 +123,12 @@ module cpu65c02 #(
                                     //    cycle addressed from PC, dummies
                                     //    included); 0: data, stack, vectors,
                                     //    and the LAST/FIXUP dummy re-reads
-    output wire  [15:0] i_addr,     // = addr; the I view, meaningful when cyc_is_i
+    output wire  [15:0] i_addr,     // the I view: the PC REGISTERS, not the
+                                    // address mux - equal to addr on every
+                                    // cyc_is_i cycle, but with no AGU and no
+                                    // din anywhere behind it, so a cache
+                                    // serving fetches combinationally off it
+                                    // cannot close a loop through din
     output wire  [15:0] i_pred,     // next program-stream address (see next_pc)
     output wire  [15:0] d_addr,     // = addr; the D view, meaningful when !cyc_is_i
     output wire         d_rw,       // = rw
@@ -293,7 +298,7 @@ module cpu65c02 #(
     // The classified views.  Same wires, two names: which one is meaningful
     // this cycle is exactly what cyc_is_i says.
     assign cyc_is_i = asel_is_pc;
-    assign i_addr   = addr_mux;
+    assign i_addr   = {pch, pcl};   // registers only - see the port comment
     assign d_addr   = addr_mux;
     assign d_rw     = rw;
     assign d_dout   = dout;

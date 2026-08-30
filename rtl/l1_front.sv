@@ -47,8 +47,12 @@ module l1_front (
     input  wire        clk,
     input  wire        rst,          // the card's
 
-    // The core.
-    input  wire [15:0] cpu_addr,
+    // The core.  i_addr is the PC registers, not the address mux: equal to
+    // the bus address on every I cycle, and with no din behind it - which is
+    // what keeps the combinational serve loop-free (a D cycle's address can
+    // contain live din through the AGU, and cpu_din must never descend from
+    // it).
+    input  wire [15:0] i_addr,
     input  wire        cpu_sync,
     input  wire        cyc_is_i,
     input  wire [15:0] i_pred,
@@ -105,7 +109,7 @@ module l1_front (
         .clk       (clk),
         .rst       (rst),
         .flush     (map_changed),
-        .l_addr    (cpu_addr),
+        .l_addr    (i_addr),
         .l_hit     (a_hit),
         .l_r_ok    (a_r_ok),
         .l_r_ppage (a_r_ppage),
@@ -116,15 +120,15 @@ module l1_front (
         .b_r_ok    (b_r_ok),
         .b_r_ppage (b_r_ppage),
         .w_en      (cyc_is_i && !a_hit),        // cold page: refill, retry free
-        .w_page    (cpu_addr[15:8]),
+        .w_page    (i_addr[15:8]),
         .w_r_ok    (t_r_ok),
         .w_r_ppage (t_r_ppage),
         .w_w_ok    (t_w_ok),
         .w_w_ppage (t_w_ppage)
     );
-    assign t_page = cpu_addr[15:8];
+    assign t_page = i_addr[15:8];
 
-    wire [24:0] cur_pa  = {a_r_ppage, cpu_addr[7:0]};
+    wire [24:0] cur_pa  = {a_r_ppage, i_addr[7:0]};
     wire [7:0]  cur_idx = cur_pa[11:4];
     wire [7:0]  pred_idx = (b_hit && b_r_ok) ? {b_r_ppage[3:0], i_pred[7:4]}
                                              : cur_idx;
@@ -164,7 +168,7 @@ module l1_front (
     assign cpu_din  = turbo_hit ? ic_byte : accel_din;
 
     assign turbo_commit = turbo_hit;
-    assign turbo_addr   = cpu_addr;
+    assign turbo_addr   = i_addr;
     assign turbo_data   = ic_byte;
     assign turbo_sync   = cpu_sync;
 

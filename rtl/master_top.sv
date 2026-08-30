@@ -373,7 +373,7 @@ module master_top #(
     // fill and snoop.  cyc_en and din now reach the core THROUGH the front
     // (rtl/l1_front.sv); the sequencer's own become accel_cyc_en/accel_din.
     wire        cpu_cyc_is_i;
-    wire [15:0] cpu_i_pred;
+    wire [15:0] cpu_i_pred, cpu_i_addr;
     wire        accel_cyc_en;
     wire [7:0]  accel_din;
     wire        turbo_ok, l1_claim, turbo_commit, turbo_sync;
@@ -413,8 +413,8 @@ module master_top #(
         .sync   (cpu_sync),
         .halted (),                 // STP is not on the base part; see the RTL
         .cyc_is_i (cpu_cyc_is_i),
-        .i_addr (),                 // the views restate cpu_addr; the front
-        .d_addr (),                 // takes the address and the classification
+        .i_addr (cpu_i_addr),       // the PC registers: the front's loop-free
+        .d_addr (),                 // lookup address
         .d_rw   (),
         .d_dout (),
         .i_pred (cpu_i_pred)
@@ -592,7 +592,7 @@ module master_top #(
     l1_front u_l1 (
         .clk          (apple_clk),
         .rst          (apple_rst),
-        .cpu_addr     (cpu_addr),
+        .i_addr       (cpu_i_addr),
         .cpu_sync     (cpu_sync),
         .cyc_is_i     (cpu_cyc_is_i),
         .i_pred       (cpu_i_pred),

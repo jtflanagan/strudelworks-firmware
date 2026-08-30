@@ -133,7 +133,10 @@ int main(int argc, char **argv) {
         unsigned syn = dut->sync, is_i = dut->cyc_is_i;
 
         // The views are the bus, reclassified - never a different bus.
-        if (dut->i_addr != addr) { fail("i_addr != addr", dut->i_addr, addr); break; }
+        // i_addr is the PC registers, so it equals the bus address exactly
+        // when the cycle is the program stream's (and holds the next fetch's
+        // address the rest of the time - not checked, i_pred covers that).
+        if (is_i && dut->i_addr != addr) { fail("i_addr != addr on an I cycle", dut->i_addr, addr); break; }
         if (dut->d_addr != addr) { fail("d_addr != addr", dut->d_addr, addr); break; }
         if (dut->d_rw != rw)     { fail("d_rw != rw", dut->d_rw, rw); break; }
         if (dut->d_dout != dout) { fail("d_dout != dout", dut->d_dout, dout); break; }
