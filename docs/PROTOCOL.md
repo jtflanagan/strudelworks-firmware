@@ -123,6 +123,13 @@ protocol.
 | `0x8000_0064` | MEM_LAST | RO | `{addr16, card byte, bus byte}` of the last mismatch |
 | `0x8000_0068` | MEM_DIVERTED | RO | writes to a RamWorks bank the machine does not have, sent out on the bus as reads so the machine's own auxiliary memory is untouched — see MEMORY.md, "The RamWorks" |
 | `0x8000_006C` | VIDHD_SLOT | RW bits 2:0 | the VidHD's slot, 0 = off; latched at RES', never MB_SLOT's, HD_SLOT's or FD_SLOT's; `rom` — see VIDHD.md |
+| `0x8000_0070` | FB_CTRL | RW bit 0, W1 bit 8 | the floating-bus simulator: `serve` the simulated byte to the core (a level); W1 clear-counters; [22:16] the mode the prediction is built from (`locked`, `text`, `mixed`, `hires`, `page2` as displayed, `col80`, `store80`) — see FLOATING_BUS.md |
+| `0x8000_0074` | FB_COMPARED | RO | floating-bus reads compared with the prediction |
+| `0x8000_0078` | FB_MISMATCH | RO | ...that disagreed, on ordinary cycles (noise until the screen is drawn; watch for a plateau) |
+| `0x8000_007C` | FB_LAST | RO | `{predicted, bus byte, line[8:0], cycle[6:0]}` of the last mismatch on an ordinary cycle (the hole and 80-column counts never overwrite it) |
+| `0x8000_0080` | FB_LAST2 | RO | `{addr[7:0] of $C0xx, scanner address[15:0], mode[7:0]}` of the last mismatch |
+| `0x8000_0084` | FB_OTHER | RO | `[15:0]` mismatches on screen-hole cycles, `[31:16]` on 80-column cycles — counted apart, see FLOATING_BUS.md |
+| `0x8000_0088` | FB_PEEK | RW bits 14:0 | a byte of the side copy: `[14]` 0 = text (`[10:0]` from $0400), 1 = hi-res (`[13:0]` from $2000); `[23:16]` the byte |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

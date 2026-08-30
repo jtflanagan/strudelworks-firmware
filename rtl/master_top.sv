@@ -155,15 +155,18 @@ module master_top #(
     wire [7:0]  kbd_sub_data, pb_sub_data;
     wire [5:0]  pb_override;
     wire [2:0]  pb_hw;
-    // The three substitutions answer for disjoint addresses - the keyboard
+    // The four substitutions answer for disjoint addresses - the keyboard
     // $C00x, the buttons $C061-3, the memory image nothing in $C000-$CFFF at
-    // all - so at most one asserts on any cycle; the mux only has to be
-    // defined.  The memory comes last so the two that were here are untouched.
-    wire        mem_sub_en;
-    wire [7:0]  mem_sub_data;
-    wire        sub_en   = kbd_sub_en | pb_sub_en | mem_sub_en;
+    // all, the floating-bus simulator $C020-$C05F and $C070-$C08F (and it
+    // stands down for the other two by name) - so at most one asserts on any
+    // cycle; the mux only has to be defined.  Each newcomer goes last so the
+    // ones that were here are untouched.
+    wire        mem_sub_en, fb_sub_en;
+    wire [7:0]  mem_sub_data, fb_sub_data;
+    wire        sub_en   = kbd_sub_en | pb_sub_en | mem_sub_en | fb_sub_en;
     wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data :
-                           pb_sub_en  ? pb_sub_data  : mem_sub_data;
+                           pb_sub_en  ? pb_sub_data  :
+                           mem_sub_en ? mem_sub_data : fb_sub_data;
     // The memory image's seam through card_link (rtl/mem_client.sv is there,
     // beside the DDR3; the MMU shadow, the ROM and the cache are here, beside
     // the core).  See docs/MEMORY.md.
@@ -187,6 +190,14 @@ module master_top #(
     wire        vbl_mark;
     wire [15:0] vbl_mark_free;
     wire        vbl_level;      // the lock's counter in blanking: bit 19 of every event
+    wire [8:0]  scan_v;         // ...and where it is, for the floating-bus simulator
+    wire [6:0]  scan_h;
+    wire [2:0]  vid_sw;         // the MMU shadow's video switches, for the same
+    wire        fb_serve, fb_cnt_clr;
+    wire [14:0] fb_peek_addr;
+    wire [6:0]  fb_mode;
+    wire [31:0] fb_compared, fb_mismatch, fb_last, fb_last2, fb_other;
+    wire [7:0]  fb_peek_data;
     wire        app_msg_valid, app_pay_valid;
     wire [7:0]  app_msg_type, app_msg_len;
     wire [15:0] app_msg_free;
@@ -248,6 +259,10 @@ module master_top #(
         .mem_late_fills (mem_late_fills), .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
         .mem_served (mem_served), .mem_last (mem_last), .mem_diverted (mem_diverted),
+        .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
+        .fb_mode (fb_mode), .fb_compared (fb_compared), .fb_mismatch (fb_mismatch),
+        .fb_last (fb_last), .fb_last2 (fb_last2), .fb_other (fb_other),
+        .fb_peek_data (fb_peek_data),
         .res_drive (res_drive),
         .app_msg_valid (app_msg_valid), .app_msg_type (app_msg_type),
         .app_msg_free (app_msg_free), .app_msg_len (app_msg_len),
@@ -463,6 +478,8 @@ module master_top #(
         .mark          (vbl_mark),
         .mark_free     (vbl_mark_free),
         .vbl_level     (vbl_level),
+        .scan_v        (scan_v),
+        .scan_h        (scan_h),
         .state         (vbl_state),
         .locked        (vbl_locked),
         .pal           (vbl_pal),
@@ -556,6 +573,7 @@ module master_top #(
         .cl_rw      (cl_rw),
         .cl_wr_image (cl_wr_image),
         .sw_state   (mem_sw),
+        .vid_sw     (vid_sw),
         .rw_bank    (mem_rw_bank),
         .q_addr     (nxt_addr),
         .q_divert   (mmu_q_divert)
@@ -609,6 +627,49 @@ module master_top #(
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
         .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
         .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)
+    );
+
+    // ---- the floating bus, simulated ----------------------------------------
+    // A side copy of main memory's text and hi-res pages, read at the video
+    // scanner's address for the cycle in flight: the byte a floating-bus
+    // read would return, without the bus.  Compared with the real byte on
+    // every such read; substituted for it when FB_CTRL says so.  See
+    // rtl/fb_sim.sv and docs/FLOATING_BUS.md.
+    fb_sim u_fb (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_wdata      (op_wdata),
+        .op_present    (op_present),
+        .op_commit     (op_commit),
+        .op_ovr        (op_ovr),
+        .cl_valid      (cl_valid),
+        .cl_wr_image   (cl_wr_image),
+        .cl_pa         (cl_pa),
+        .sw_state      (mem_sw),
+        .vid_sw        (vid_sw),
+        .locked        (vbl_locked),
+        .scan_v        (scan_v),
+        .scan_h        (scan_h),
+        .pal           (vbl_pal),
+        .master_active (cpu_source_active),
+        .data_sync     (apple_data_sync),
+        .slot_rd_claim (slot_rd_claim),
+        .kbd_sub_en    (kbd_sub_en),
+        .pb_sub_en     (pb_sub_en),
+        .serve         (fb_serve),
+        .cnt_clr       (fb_cnt_clr),
+        .peek_addr     (fb_peek_addr),
+        .sub_en        (fb_sub_en),
+        .sub_data      (fb_sub_data),
+        .mode          (fb_mode),
+        .compared      (fb_compared),
+        .mismatches    (fb_mismatch),
+        .last          (fb_last),
+        .last2         (fb_last2),
+        .other         (fb_other),
+        .peek_data     (fb_peek_data)
     );
 
     // ---- the hard disk ------------------------------------------------------

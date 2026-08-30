@@ -38,7 +38,9 @@ docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRA
             reads), VBL.md (the video scanner found on the floating bus during the
             boot hold and followed to the cycle from then on), MEMORY.md (the
             machine's memory on the card: the IIe map shadowed, a cache in
-            front of the DDR3, the ROM in BRAM), and on this branch
+            front of the DDR3, the ROM in BRAM), FLOATING_BUS.md (the floating
+            bus simulated from a side copy of the display pages, proven
+            against the machine's on every read), and on this branch
             UCODE816.md - a first stab at a microcoded 65816, what it costs and
             what can verify it.  Exploratory, not on the milestone plan.
 ```

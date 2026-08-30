@@ -202,7 +202,19 @@ module card_link #(
     input  wire [31:0] mem_served,
     input  wire [31:0]  mem_last,
     input  wire [31:0]  mem_diverted,
-    // The mismatch log's seam (rtl/mem_cache.sv <-> wb_regfile).
+    // The floating-bus simulator's seam (rtl/fb_sim.sv <-> wb_regfile,
+    // docs/FLOATING_BUS.md): FB_CTRL's serve level and clear pulse and
+    // FB_PEEK's address out, the mode, the counters and the peeked byte back.
+    output wire        fb_serve,
+    output wire        fb_cnt_clr,
+    output wire [14:0] fb_peek_addr,
+    input  wire [6:0]  fb_mode,
+    input  wire [31:0] fb_compared,
+    input  wire [31:0] fb_mismatch,
+    input  wire [31:0] fb_last,
+    input  wire [31:0] fb_last2,
+    input  wire [31:0] fb_other,
+    input  wire [7:0]  fb_peek_data,
 
     // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
     // mastering top wires it to the pin; a snooper leaves it unconnected.
@@ -861,6 +873,16 @@ module card_link #(
         .mem_served        (mem_served),
         .mem_last          (mem_last),
         .mem_diverted      (mem_diverted),
+        .fb_serve          (fb_serve),
+        .fb_cnt_clr        (fb_cnt_clr),
+        .fb_peek_addr      (fb_peek_addr),
+        .fb_mode           (fb_mode),
+        .fb_compared       (fb_compared),
+        .fb_mismatch       (fb_mismatch),
+        .fb_last           (fb_last),
+        .fb_last2          (fb_last2),
+        .fb_other          (fb_other),
+        .fb_peek_data      (fb_peek_data),
         .res_drive         (res_drive),
         .ring_status       (ring_status),
         .wb_cyc   (rwb_cyc),

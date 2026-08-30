@@ -131,6 +131,12 @@ module vbl_lock #(
     // in a word the host already asked for, not a message.
     output wire        vbl_level,
 
+    // THE POSITION, for the floating-bus simulator (rtl/fb_sim.sv): the line
+    // and the cycle within it that the counter is on now - the cycle whose
+    // data phase is next, as `pos` counts it.  Meaningful only while locked.
+    output wire [8:0]  scan_v,
+    output wire [6:0]  scan_h,
+
     // For the registers.
     output wire [3:0]  state,
     output logic       locked,
@@ -145,30 +151,16 @@ module vbl_lock #(
 );
 
     // ---- the scanner model ------------------------------------------------
-    // Text mode, 40 columns, page 1.  `line` is 0..lines-1, `hc` 0..64 with
-    // 0..24 the horizontal blanking; `lines` is 262 or 312.  The V state is
-    // $100 + line until the vertical preset at line 256 takes it to $FA
-    // (NTSC) or $C8 (PAL); the H state is $00 for the first blanking cycle,
-    // $40-$57 for the rest, $58-$7F for the forty displayed - and AppleWin
-    // keeps only its low six bits, which is all the address uses, so from
-    // the second cycle of a line on the state is simply hc - 1.
+    // rtl/scan_addr.vh: Sather's formula as AppleWin writes it, shared with
+    // the floating-bus simulator (rtl/fb_sim.sv).  Used here in text mode, 40
+    // columns, page 1 - the picture the fill paints.  `line` is 0..lines-1,
+    // `hc` 0..64 with 0..24 the horizontal blanking.
     //
     // The testbench's counters caught the first cut of this reading $18 as
     // eighteen: the displayed columns were six states early, the
     // acquisition still passed - the shifted cycles fell on holes and on
     // bytes of the same letter - and only the verify frame said so.
-    function automatic [15:0] scan_addr(input [8:0] line, input [6:0] hc, input [8:0] lines);
-        logic [8:0] vs;
-        logic [5:0] h6;
-        logic [4:0] sum;
-        begin
-            vs = (line < 9'd256) ? (line | 9'h100) : (line + 9'd256 - lines);
-            h6 = (hc == 7'd0) ? 6'd0 : 6'(hc - 7'd1);
-            // A3-A6: H5 H4 H3 + V4 V3 V4 V3 + 1101, kept to four bits.
-            sum = {2'b00, h6[5:3]} + {1'b0, vs[7:6], 2'b00} + {3'b000, vs[7:6]} + 5'd13;
-            scan_addr = {6'b000001, vs[5:3], sum[3:0], h6[2:0]};
-        end
-    endfunction
+    `include "scan_addr.vh"
 
     // What the fill put at a text-page address: the row's byte.  Rows are
     // 8*group + stride, the group by where in the 128-byte stride the
@@ -189,8 +181,8 @@ module vbl_lock #(
     localparam [7:0]  ROW7   = ROW_BASE + 8'd7;    // 'H'
     localparam [7:0]  ROW16  = ROW_BASE + 8'd16;   // 'Q'
     localparam [15:0] PROBE  = 16'hC054;           // PAGE2 off: what we want anyway
-    localparam [8:0]  NTSC_LINES = 9'd262;
-    localparam [8:0]  PAL_LINES  = 9'd312;
+    localparam [8:0]  NTSC_LINES = SCAN_NTSC_LINES;
+    localparam [8:0]  PAL_LINES  = SCAN_PAL_LINES;
     localparam [14:0] NTSC_CYC   = 15'd17030;
     localparam [14:0] PAL_CYC    = 15'd20280;
 
@@ -223,6 +215,8 @@ module vbl_lock #(
     wire [14:0] fc_next = at_end ? 15'd0 : fc + 15'd1;
 
     assign pos       = fc;
+    assign scan_v    = v;
+    assign scan_h    = h;
     assign mark      = tick && locked && notify && (v == 9'd0) && (h == 7'd0);
     assign mark_free = {frames, 7'd0, pal};
     // Combinational from the counter, which steps at `tick`: on the clock
@@ -281,7 +275,7 @@ module vbl_lock #(
     // line is taken from the hypothesis's origin.
     wire [8:0]  c_base = (st == S_PERIOD) ? ((cl >= PAL_LINES) ? PAL_LINES : NTSC_LINES) : 9'd0;
     wire [8:0]  c_line = cl - c_base;
-    wire [15:0] c_addr = scan_addr(c_line, ch, NTSC_LINES);   // lines only matter past 255
+    wire [15:0] c_addr = scan_addr(c_line, ch, 1'b0, 1'b0, 1'b0);   // the preset only matters past 255
     wire [7:0]  c_exp  = pat(c_addr);
     wire        c_hole = hole(c_addr);
     wire        c_ok   = cur_probe && (c_hole || (din == c_exp));
@@ -291,7 +285,7 @@ module vbl_lock #(
     wire win_end = (c_line == 9'd1) && (ch == 7'd64);
 
     // ...and for the live counter, in VERIFY.
-    wire [15:0] l_addr = scan_addr(v, h, lines);
+    wire [15:0] l_addr = scan_addr(v, h, pal, 1'b0, 1'b0);
     wire        l_ok   = cur_probe && (hole(l_addr) || (din == pat(l_addr)));
 
     always_ff @(posedge clk) begin

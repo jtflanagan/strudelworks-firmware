@@ -151,6 +151,7 @@ if {$snoop || $master} {
             [file join $root rtl floppy_card.sv] \
             [file join $root rtl vidhd_card.sv] \
             [file join $root rtl vbl_lock.sv] \
+            [file join $root rtl fb_sim.sv] \
             [file join $root rtl master_top.sv] \
         ]
         # cpu65c02 loads its microcode with $readmemh at elaboration, so the

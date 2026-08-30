@@ -179,6 +179,21 @@ module wb_regfile #(
     input  wire [31:0]     mem_last,
     input  wire [31:0]     mem_diverted,
 
+    // The floating-bus simulator (rtl/fb_sim.sv, docs/FLOATING_BUS.md):
+    // FB_CTRL's serve level and its clear pulse, FB_PEEK's address; the mode
+    // bits, the counters and the peeked byte back.  A watching top ties the
+    // inputs to 0 and leaves the outputs unconnected.
+    output logic           fb_serve,
+    output logic           fb_cnt_clr,      // pulses
+    output logic [14:0]    fb_peek_addr,
+    input  wire [6:0]      fb_mode,
+    input  wire [31:0]     fb_compared,
+    input  wire [31:0]     fb_mismatch,
+    input  wire [31:0]     fb_last,
+    input  wire [31:0]     fb_last2,
+    input  wire [31:0]     fb_other,
+    input  wire [7:0]      fb_peek_data,
+
     // Programmatic Ctrl-Reset.  Held low while pulsing; the master top turns
     // this into an open-drain drive of the Apple's RES' line, exactly as it
     // drives DMA'.  A snoop build ties CAN_MASTER low, so this never asserts
@@ -239,6 +254,13 @@ module wb_regfile #(
     localparam [13:0] R_MEM_LAST   = 'd25;  // 0x8000_0064, RO
     localparam [13:0] R_MEM_DIVERTED = 'd26; // 0x8000_0068, RO
     localparam [13:0] R_VIDHD_SLOT = 'd27;  // 0x8000_006C, RW in bits 2:0
+    localparam [13:0] R_FB_CTRL    = 'd28;  // 0x8000_0070, RW bit 0, W1 bit 8
+    localparam [13:0] R_FB_COMPARED = 'd29; // 0x8000_0074, RO
+    localparam [13:0] R_FB_MISMATCH = 'd30; // 0x8000_0078, RO
+    localparam [13:0] R_FB_LAST    = 'd31;  // 0x8000_007C, RO
+    localparam [13:0] R_FB_LAST2   = 'd32;  // 0x8000_0080, RO
+    localparam [13:0] R_FB_OTHER   = 'd33;  // 0x8000_0084, RO
+    localparam [13:0] R_FB_PEEK    = 'd34;  // 0x8000_0088, RW bits 14:0
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -645,6 +667,47 @@ module wb_regfile #(
     wire [31:0] mem_stat_rd = {mem_fifo_drops, mem_late_fills, mem_rom_loaded,
                                mem_invalidating, 1'b0, mem_image_ready, mem_sw};
 
+    // ---- FB_CTRL ------------------------------------------------------------
+    //
+    //   [0]      serve      RW   answer every floating-bus read the core makes
+    //                            with the simulator's byte instead of the bus's
+    //   [8]      cnt_clr    W1   clear the counters
+    //   [16]     locked     RO   the scanner counter is set (VBL_CTRL's)
+    //   [17]     text       RO   the video switches as the MMU shadow holds
+    //   [18]     mixed      RO   them - what the prediction is built from
+    //   [19]     hires      RO
+    //   [20]     page2      RO   PAGE2 as displayed: PAGE2 && !80STORE
+    //   [21]     col80      RO
+    //   [22]     store80    RO
+    //
+    // A level, like MEM_CTRL's serve: safe under a running machine, because
+    // the monitor was already comparing every floating read, and card-reset
+    // only.  The simulator itself needs no enabling - the side copy follows
+    // every write and the monitor runs from the lock on.  FB_COMPARED,
+    // FB_MISMATCH, FB_LAST, FB_LAST2 and FB_OTHER read straight through from
+    // rtl/fb_sim.sv; FB_PEEK's address is a level and its data the copy's
+    // byte there.  docs/FLOATING_BUS.md.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            fb_serve     <= 1'b0;
+            fb_cnt_clr   <= 1'b0;
+            fb_peek_addr <= 15'd0;
+        end else begin
+            if (wr_fb_ctrl) fb_serve <= wb_dat_w[0];
+            fb_cnt_clr <= wr_fb_ctrl && wb_dat_w[8];
+            if (wr_fb_peek) fb_peek_addr <= wb_dat_w[14:0];
+        end
+    end
+
+    wire [31:0] fb_ctrl_rd = {9'd0, fb_mode, 15'd0, fb_serve};
+
+    // ---- FB_PEEK ------------------------------------------------------------
+    //
+    //   [14:0]   addr       RW   [14] 0 = the text copy, [10:0] from $0400;
+    //                            1 = the hi-res copy, [13:0] from $2000
+    //   [23:16]  data       RO   the copy's byte there
+    wire [31:0] fb_peek_rd = {8'd0, fb_peek_data, 1'b0, fb_peek_addr};
+
     // ---- RESET --------------------------------------------------------------
     //
     //   [0]      pulse     W1   assert the Apple's RES' low for a while
@@ -867,6 +930,13 @@ module wb_regfile #(
                         R_MEM_LAST:   wb_dat_r <= mem_last;
                         R_MEM_DIVERTED: wb_dat_r <= mem_diverted;
                         R_VIDHD_SLOT: wb_dat_r <= vidhd_slot_rd;
+                        R_FB_CTRL:    wb_dat_r <= fb_ctrl_rd;
+                        R_FB_COMPARED: wb_dat_r <= fb_compared;
+                        R_FB_MISMATCH: wb_dat_r <= fb_mismatch;
+                        R_FB_LAST:    wb_dat_r <= fb_last;
+                        R_FB_LAST2:   wb_dat_r <= fb_last2;
+                        R_FB_OTHER:   wb_dat_r <= fb_other;
+                        R_FB_PEEK:    wb_dat_r <= fb_peek_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -914,6 +984,10 @@ module wb_regfile #(
                          (word == R_MEM_CTRL);
     wire wr_vidhd_slot = access && !wb_ack && in_region && wb_we &&
                          (word == R_VIDHD_SLOT);
+    wire wr_fb_ctrl    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_FB_CTRL);
+    wire wr_fb_peek    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_FB_PEEK);
 
     // A boot-hold RELEASE re-latches MB_SLOT, HD_SLOT, FD_SLOT and VIDHD_SLOT above, so the menu's
     // choices reach the boot it releases into.  Same qualification as the
