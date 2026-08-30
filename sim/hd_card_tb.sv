@@ -125,6 +125,8 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .clk (clk), .rst (rst),
         .phi0_sync (phi0), .data_sync (data_sync),
         .master_active (master_active),
+        // Without the sequencer: the bus owns every cycle, the core is always on offer.
+        .bus_owns (1'b1), .core_valid (1'b1),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),
         .cpu_sync (cpu_sync), .drv_sync (drv_sync),
         .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
@@ -188,7 +190,8 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
         .msg_len (msg_len), .pay_data (pay_data), .pay_valid (pay_valid),
         .tx_word (tx_word), .tx_valid (tx_valid), .tx_take (tx_take),
-        .rom_loaded (rom_loaded), .busy (busy), .execs (execs)
+        .rom_loaded (rom_loaded), .busy (busy), .execs (execs),
+        .rom_rd_addr (8'd0), .rom_rd_byte ()
     );
 
     // ---- card -> host: through the real arbiter -----------------------------

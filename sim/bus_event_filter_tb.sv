@@ -29,7 +29,7 @@ module bus_event_filter_tb;
 
     reg         enable = 1'b0, sparse = 1'b0;
     reg  [31:0] in_data = 32'd0;
-    reg         in_valid = 1'b0, in_mark = 1'b0;
+    reg         in_valid = 1'b0, in_mark = 1'b0, in_dummy = 1'b0;
     reg  [15:0] in_mark_free = 16'd0;
     wire [31:0] out_data;
     wire        out_valid, out_mark;
@@ -38,6 +38,7 @@ module bus_event_filter_tb;
     bus_event_filter #(.CAP (CAP)) dut (
         .clk (clk), .rst (rst), .enable (enable), .sparse (sparse),
         .in_data (in_data), .in_valid (in_valid), .in_mark (in_mark), .in_mark_free (in_mark_free),
+        .in_dummy (in_dummy),
         .out_data (out_data), .out_valid (out_valid), .out_mark (out_mark), .out_mark_free (out_mark_free)
     );
 
@@ -57,8 +58,9 @@ module bus_event_filter_tb;
             if (clk_n == last_out_clk + 1) begin
                 consecutive = consecutive + 1;
                 // Only a SKIP may be followed on the next clock, and only
-                // by an event.
-                if (got[got_n - 1][31:28] != 4'hD || out_data[31:28] != 4'hF) consecutive_bad = consecutive_bad + 1;
+                // by an event - a cycle's or a fast op's.
+                if (got[got_n - 1][31:28] != 4'hD || (out_data[31:28] != 4'hF && out_data[31:28] != 4'hC))
+                    consecutive_bad = consecutive_bad + 1;
             end
             last_out_clk = clk_n;
             got_n = got_n + 1;
@@ -95,12 +97,41 @@ module bus_event_filter_tb;
         end
     endtask
 
+    // A dummy cycle: the parked read, flagged.  A cycle, so it counts.
+    task dummy;
+        begin
+            @(negedge clk);
+            in_data  = ev(16'h0000, 1'b1, 8'h00, cur_vbl, cur_res);
+            in_valid = 1'b1; in_dummy = 1'b1;
+            sent[sent_n] = in_data; sent_n = sent_n + 1;
+            cycles = cycles + 1;
+            @(negedge clk);
+            in_valid = 1'b0; in_dummy = 1'b0;
+            repeat (2) @(negedge clk);
+        end
+    endtask
+    // A fast op's word: tag 0xC, the current levels.  Not a cycle.
+    function [31:0] fw(input [15:0] addr, input rw, input [7:0] data);
+        fw = {4'hC, data, cur_vbl, 1'b0, cur_res, rw, addr};
+    endfunction
+    task fast(input [15:0] addr, input rw, input [7:0] data);
+        begin
+            @(negedge clk);
+            in_data  = fw(addr, rw, data);
+            in_valid = 1'b1;
+            sent[sent_n] = in_data; sent_n = sent_n + 1;
+            @(negedge clk);
+            in_valid = 1'b0;
+            repeat (2) @(negedge clk);
+        end
+    endtask
+
     task rd(input [15:0] addr);  begin cycle(addr, 1'b1, 8'h5A, 1'b0); end endtask
     task wr(input [15:0] addr);  begin cycle(addr, 1'b0, 8'hA5, 1'b0); end endtask
     task settle;                 begin repeat (8) @(negedge clk); end endtask
 
     integer errors = 0;
-    task fail(input [8*80-1:0] what);
+    task fail(input string what);
         begin $display("FAIL: %0s", what); errors = errors + 1; end
     endtask
 
@@ -245,6 +276,75 @@ module bus_event_filter_tb;
         $display("case 6: through bus_event_capture - the cut lands between the SKIP and the marked event");
         run_chain;
 
+        // --- case 7 / accelerated, full mode: dummies counted unless an edge, fast words through
+        $display("case 7: full mode under acceleration - dummies become SKIPs, fast words pass, edges survive");
+        enable = 1'b0; settle; sparse = 1'b0; enable = 1'b1; @(negedge clk);
+        reset_record;
+        dummy();                              // first after enable: kept, as the $0000 read
+        dummy(); dummy();                     // counted: 2
+        fast(16'h1000, 1'b1, 8'h11);          // kept, SKIP 2 first; not a cycle
+        fast(16'h1001, 1'b0, 8'h22);          // kept
+        dummy();                              // counted: 1
+        cur_vbl = 1'b1; dummy();              // blanking begins on a dummy: kept, SKIP 1 first
+        dummy();                              // counted: 1
+        rd(16'h0300);                         // an ordinary cycle, full mode: kept, SKIP 1 first
+        cur_vbl = 1'b0;
+        fast(16'h1002, 1'b1, 8'h33);          // carries the new level; kept, and must not eat the edge
+        dummy();                              // the cycle the level changed on: kept
+        cur_res = 1'b0; dummy();              // RES' fell on a dummy: kept
+        cur_res = 1'b1; dummy();              // ...and rose: kept
+        wr(16'h0400);                         // kept
+        settle;
+        // Expected: D S2 F F S1 D S1 E F D D D W = 13 words
+        if (got_n != 13) fail($sformatf("case 7: expected 13 words out, got %0d", got_n));
+        else begin
+            bad = 0;
+            if (got[0] !== sent[0]) bad = bad + 1;                        // first dummy, kept
+            if (got[1] !== {4'hD, 28'd2}) bad = bad + 1;
+            if (got[2] !== sent[3] || got[3] !== sent[4]) bad = bad + 1;  // the fast words
+            if (got[4] !== {4'hD, 28'd1} || got[5] !== sent[6]) bad = bad + 1;   // the blanking edge, on a dummy
+            if (got[6] !== {4'hD, 28'd1} || got[7] !== sent[8]) bad = bad + 1;   // the ordinary cycle
+            if (got[8] !== sent[9]) bad = bad + 1;                        // the fast word with the new level
+            if (got[9] !== sent[10]) bad = bad + 1;                       // the dummy on which the level changed: kept, no SKIP
+            if (got[10] !== sent[11] || got[11] !== sent[12]) bad = bad + 1;  // RES' edges on dummies
+            if (got[12] !== sent[13]) bad = bad + 1;
+            if (bad != 0) fail("case 7: the words out are not the expected ones");
+            else $display("  ok: dummies counted, kept on the first cycle and on every edge; fast words pass and leave the edge to the cycle");
+        end
+        if (skipped_total() + kept_total() != cycles) fail($sformatf("case 7: skipped %0d + kept %0d != %0d cycles", skipped_total(), kept_total(), cycles));
+        else $display("  ok: %0d skipped + %0d kept = %0d cycles; the %0d fast words are not cycles", skipped_total(), kept_total(), cycles, 3);
+        if (consecutive_bad != 0) fail("case 7: bad adjacency");
+
+        // --- case 8 / accelerated, sparse: fast reads dropped uncounted, fast writes kept ----
+        $display("case 8: sparse under acceleration");
+        enable = 1'b0; settle; sparse = 1'b1; enable = 1'b1; @(negedge clk);
+        reset_record;
+        dummy();                              // first: kept
+        fast(16'h1000, 1'b1, 8'h11);          // a fast read: dropped, not counted
+        fast(16'h1001, 1'b0, 8'h22);          // a fast write: kept
+        dummy(); dummy(); dummy();            // counted: 3
+        wr(16'h0400);                         // kept, SKIP 3 first
+        rd(16'h0300);                         // an ordinary RAM read: counted 1
+        cur_vbl = 1'b1;
+        fast(16'h1002, 1'b1, 8'h33);          // dropped; carries the new level, must not eat the edge
+        rd(16'h0301);                         // the edge's cycle: kept, SKIP 1 first
+        settle;
+        if (got_n != 6) fail($sformatf("case 8: expected 6 words out, got %0d", got_n));
+        else begin
+            bad = 0;
+            if (got[0] !== sent[0]) bad = bad + 1;
+            if (got[1] !== sent[2]) bad = bad + 1;
+            if (got[2] !== {4'hD, 28'd3} || got[3] !== sent[6]) bad = bad + 1;
+            if (got[4] !== {4'hD, 28'd1} || got[5] !== sent[9]) bad = bad + 1;
+            if (bad != 0) fail("case 8: the words out are not the expected ones");
+            else $display("  ok: a fast read vanishes uncounted, a fast write is kept, the edge stays with its cycle");
+        end
+        if (skipped_total() + kept_total() != cycles) fail("case 8: skipped + kept != cycles");
+
+        // --- case 9 / the merge in front of the filter ------------------------------------
+        $display("case 9: event_merge - order, spacing, the same-clock collision, the dummy flag");
+        run_merge;
+
         if (errors == 0) $display("PASS");
         else             $display("FAIL: %0d error(s)", errors);
         $finish;
@@ -267,6 +367,7 @@ module bus_event_filter_tb;
     bus_event_filter #(.CAP (CAP)) dut2 (
         .clk (clk), .rst (rst), .enable (c_enable), .sparse (1'b1),
         .in_data (c_in_data), .in_valid (c_in_valid), .in_mark (c_in_mark), .in_mark_free (16'h0700),
+        .in_dummy (1'b0),
         .out_data (f_data), .out_valid (f_valid), .out_mark (f_mark), .out_mark_free (f_free)
     );
     bus_event_capture #(.DEPTH (64), .FRAME_EVENTS (8), .FLUSH_TICKS (200)) cap (
@@ -320,6 +421,97 @@ module bus_event_filter_tb;
             if (captured !== words_pushed) begin $display("FAIL: case 6: captured=%0d, expected %0d words", captured, words_pushed); errors = errors + 1; end
             else $display("  ok: captured counts words: %0d", captured);
             c_enable = 1'b0;
+        end
+    endtask
+
+    // ---- case 9: the merge into the filter ----------------------------------------
+    reg         m_enable = 1'b0;
+    reg         m_bus_valid = 1'b0, m_bus_dummy = 1'b0, m_bus_mark = 1'b0;
+    reg  [31:0] m_bus_data = 32'd0;
+    reg         m_fast_valid = 1'b0, m_fast_rw = 1'b1, m_vbl = 1'b0;
+    reg  [15:0] m_fast_addr = 16'd0;
+    reg  [7:0]  m_fast_data = 8'd0;
+    wire [31:0] m_data, m3_data;
+    wire        m_valid, m_mark, m_dummy, m3_valid, m3_mark;
+    wire [15:0] m_free, m3_free;
+    wire [7:0]  m_overflows;
+
+    event_merge #(.DEPTH (8)) mrg (
+        .clk (clk), .rst (rst), .enable (m_enable),
+        .bus_valid (m_bus_valid), .bus_data (m_bus_data), .bus_mark (m_bus_mark),
+        .bus_mark_free (16'h0700), .bus_dummy (m_bus_dummy),
+        .fast_valid (m_fast_valid), .fast_addr (m_fast_addr), .fast_rw (m_fast_rw),
+        .fast_data (m_fast_data), .fast_sync (1'b0), .vbl_level (m_vbl), .res_level (1'b1),
+        .out_valid (m_valid), .out_data (m_data), .out_mark (m_mark), .out_mark_free (m_free),
+        .out_dummy (m_dummy), .overflows (m_overflows)
+    );
+    bus_event_filter #(.CAP (CAP)) dut3 (
+        .clk (clk), .rst (rst), .enable (m_enable), .sparse (1'b0),
+        .in_data (m_data), .in_valid (m_valid), .in_mark (m_mark), .in_mark_free (m_free),
+        .in_dummy (m_dummy),
+        .out_data (m3_data), .out_valid (m3_valid), .out_mark (m3_mark), .out_mark_free (m3_free)
+    );
+    reg  [31:0] m_got [0:255];
+    reg         m_got_mark [0:255];
+    integer     m_got_n = 0, m_last_clk = -10, m_gap_bad = 0, m_in_clk = -10, m_in_gap_bad = 0, m_clk = 0;
+    always @(posedge clk) begin
+        m_clk = m_clk + 1;                  // this block's own clock: no race with clk_n
+        if (m_valid) begin
+            if (m_clk - m_in_clk < 3) m_in_gap_bad = m_in_gap_bad + 1;
+            m_in_clk = m_clk;
+        end
+        if (m3_valid) begin
+            m_got[m_got_n] = m3_data; m_got_mark[m_got_n] = m3_mark;
+            if (m_clk == m_last_clk + 1 && !(m_got[m_got_n - 1][31:28] == 4'hD)) m_gap_bad = m_gap_bad + 1;
+            m_last_clk = m_clk; m_got_n = m_got_n + 1;
+        end
+    end
+    integer j;
+    task run_merge;
+        begin
+            m_enable = 1'b1; repeat (2) @(negedge clk);
+            // An ordinary cycle's event and a fast op on the SAME clock.
+            m_bus_valid = 1'b1; m_bus_data = {4'hF, 8'h33, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0300};
+            m_fast_valid = 1'b1; m_fast_addr = 16'h1000; m_fast_rw = 1'b0; m_fast_data = 8'h44;
+            @(negedge clk);
+            m_bus_valid = 1'b0;
+            // ...and four more fast ops on the clocks right after, closer than
+            // the filter can take them.
+            for (j = 1; j < 5; j = j + 1) begin
+                m_fast_addr = 16'h1000 + j[15:0]; m_fast_data = 8'h44 + j[7:0];
+                @(negedge clk);
+            end
+            m_fast_valid = 1'b0;
+            repeat (30) @(negedge clk);
+            // Then a dummy cycle, a fast op, a marked cycle.
+            m_bus_valid = 1'b1; m_bus_dummy = 1'b1; m_bus_data = {4'hF, 8'h00, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0000};
+            @(negedge clk); m_bus_valid = 1'b0; m_bus_dummy = 1'b0;
+            repeat (3) @(negedge clk);
+            m_fast_valid = 1'b1; m_fast_addr = 16'h2000; m_fast_rw = 1'b1; m_fast_data = 8'h55; m_vbl = 1'b1;
+            @(negedge clk); m_fast_valid = 1'b0;
+            repeat (3) @(negedge clk);
+            m_bus_valid = 1'b1; m_bus_mark = 1'b1; m_bus_data = {4'hF, 8'h33, 1'b1, 1'b0, 1'b1, 1'b1, 16'h0468};
+            @(negedge clk); m_bus_valid = 1'b0; m_bus_mark = 1'b0;
+            repeat (40) @(negedge clk);
+            // Expected out of the filter: E300 F1000..F1004 S1(the dummy) F2000 E468(marked) = 9 words
+            if (m_got_n != 9) fail($sformatf("case 9: expected 9 words, got %0d", m_got_n));
+            else begin
+                bad = 0;
+                if (m_got[0] !== {4'hF, 8'h33, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0300}) bad = bad + 1;
+                for (j = 0; j < 5; j = j + 1)
+                    if (m_got[1 + j] !== {4'hC, 8'h44 + j[7:0], 1'b0, 1'b0, 1'b1, 1'b0, 16'h1000 + j[15:0]}) bad = bad + 1;
+                if (m_got[6] !== {4'hD, 28'd1}) bad = bad + 1;
+                if (m_got[7] !== {4'hC, 8'h55, 1'b1, 1'b0, 1'b1, 1'b1, 16'h2000}) bad = bad + 1;
+                if (m_got[8] !== {4'hF, 8'h33, 1'b1, 1'b0, 1'b1, 1'b1, 16'h0468} || !m_got_mark[8]) bad = bad + 1;
+                for (j = 0; j < 8; j = j + 1) if (m_got_mark[j]) bad = bad + 1;
+                if (bad != 0) fail("case 9: the words out are not the expected ones, in order");
+                else $display("  ok: the bus's word first on a collision, the fast ops in order behind it, the dummy a SKIP, the mark on its cycle");
+            end
+            if (m_in_gap_bad != 0) fail($sformatf("case 9: %0d words left the merge closer than three clocks apart", m_in_gap_bad));
+            else $display("  ok: never two words within three clocks");
+            if (m_overflows != 0) fail("case 9: the merge overflowed");
+            if (m_gap_bad != 0) fail("case 9: bad adjacency after the filter");
+            m_enable = 1'b0;
         end
     endtask
 

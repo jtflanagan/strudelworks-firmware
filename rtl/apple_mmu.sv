@@ -106,16 +106,44 @@
 // with the RAM write-protected lands nowhere.  cl_wr_image says whether this
 // write changes the image at all.
 //
-// TIMING.  The switches change at op_commit, the data phase, as on the bus;
+// TIMING.  The switches change at op_commit, the data phase, as on the bus
+// (INTC8ROM excepted, below);
 // the classification is registered at op_present, one clock after the op is
 // stable, so it reflects every earlier cycle and not this one - a cycle that
 // flips a switch is a BUS cycle anyway.  The IIe's own MMU has the same
 // ordering.
 //
-// NOT MODELLED, deliberately: the $C800-$CFFF expansion-ROM select and $CFFF,
-// and INTCXROM/SLOTC3ROM's effect on what answers in $C100-$CFFF.  The two
-// switches are tracked and exported so a CX class can be added when something
-// needs the internal ROM served; until then that whole page is BUS.
+// THE CX CLASS: $C100-$CFFF.  A read there is ROM class - served from the
+// card, never a bus rendezvous for the accelerated core (docs/ACCELERATION.md)
+// - when the card holds the byte, and BUS otherwise.  UTAIIe 5-28, as
+// AppleWin's Memory.cpp implements it:
+//
+//   $C100-$C7FF, page n   INTCXROM, or n == 3 with SLOTC3ROM clear
+//                                      -> the internal ROM (rtl/apple_rom.sv)
+//                         else n is the slot of an on-card ROM peripheral (the
+//                         hard disk, the floppy, the VidHD) whose ROM the host
+//                         has loaded    -> that card's ROM, cl_rom_src says which
+//                         else          -> BUS: the Mockingboard's VIAs (reads
+//                                          with side effects), a physical card,
+//                                          or an empty slot's floating bus
+//   $C800-$CFFE           INTCXROM or INTC8ROM -> the internal ROM
+//                         else          -> BUS: a physical card's expansion ROM
+//   $CFFF, every write, every $C0xx    -> BUS
+//
+// INTC8ROM is the IIe's unreadable latch: set by any access to $C3xx while
+// INTCXROM and SLOTC3ROM are both clear, cleared by any access to $CFFF or by
+// RES'.  It is set at op_present rather than op_commit, because a $C3xx fetch
+// served from the card has no data phase on the bus - and for one that does,
+// present-versus-commit only differs for the NEXT op, which cannot be presented
+// before this one's commit.  $CFFF is a bus op and clears it at commit like
+// every other switch.  MEM_STAT[13] reads it.
+//
+// A ROM source that is not loaded classifies as BUS, so "ROM class" always
+// means "the card has the byte": rtl/mem_cache.sv needs no per-source check.
+//
+// NOT MODELLED, deliberately: a physical card's $C800-$CFFF expansion ROM and
+// the per-slot I/O SELECT flip-flops that pick it - that page is BUS unless the
+// internal ROM answers, and the machine does the rest.
 //////////////////////////////////////////////////////////////////////////////////
 module apple_mmu (
     input  wire        clk,
@@ -130,13 +158,25 @@ module apple_mmu (
     input  wire        op_present,     // pulse: op_* have just been latched
     input  wire        op_commit,      // pulse: the data phase
 
+    // The on-card slot ROMs, for the CX class: the slot each answers as (0 =
+    // none; latched at RES' by wb_regfile) and whether the host has loaded
+    // it.  rom_ok[0] is the internal ROM's (rtl/apple_rom.sv), [1] the hard
+    // disk's, [2] the floppy's, [3] the VidHD's - the ROM_* source numbers.
+    input  wire [2:0]  hd_slot,
+    input  wire [2:0]  fd_slot,
+    input  wire [2:0]  vidhd_slot,
+    input  wire [3:0]  rom_ok,
+
     // The classified op, one clock after op_present.
     output logic        cl_valid,
     output logic [1:0]  cl_cls,        // CLS_*
     output logic [23:0] cl_pa,         // physical address in the image
     output logic [13:0] cl_rom_addr,   // offset from $C000 in the ROM
+    output logic [1:0]  cl_rom_src,    // ROM_*: which ROM answers a ROM-class op
     output logic        cl_rw,
     output logic        cl_wr_image,   // a write that lands in the image
+    // The INTC8ROM latch, for MEM_STAT.
+    output logic        intc8rom,
 
     // The switches, for a status register:
     //   {prewrite, wren, lc_ramrd, bank2, slotc3rom, intcxrom, hires, page2,
@@ -154,7 +194,12 @@ module apple_mmu (
     // decided on the switches as they stood before the cycle - the same
     // switches the classifier below will use for that op.
     input  wire [15:0] q_addr,
-    output wire        q_divert
+    output wire        q_divert,
+    // ...and the sequencer's: what class would an op at q_addr, read or
+    // write, be if presented now?  Same switches, same function as the
+    // classifier below, combinational.  rtl/accel_seq.sv decides on it.
+    input  wire        q_rw,
+    output wire [1:0]  q_cls
 );
 
     // RamWorks banks: 0..RW_BANKS-1 exist; a write of any other number is
@@ -165,6 +210,11 @@ module apple_mmu (
     localparam [1:0] CLS_RAM = 2'd1;
     localparam [1:0] CLS_LC  = 2'd2;
     localparam [1:0] CLS_ROM = 2'd3;
+
+    localparam [1:0] ROM_INT   = 2'd0;
+    localparam [1:0] ROM_HD    = 2'd1;
+    localparam [1:0] ROM_FD    = 2'd2;
+    localparam [1:0] ROM_VIDHD = 2'd3;
 
     // ---- the switches ----------------------------------------------------------
     logic store80, ramrd, ramwrt, intcxrom, altzp, slotc3rom;
@@ -244,6 +294,64 @@ module apple_mmu (
         end
     end
 
+    // ---- INTC8ROM ---------------------------------------------------------------------
+    // Set at present, cleared at commit - see the header for why they differ.
+    wire acc_c3xx = (op_addr[15:8] == 8'hC3);
+    wire acc_cfff = (op_addr == 16'hCFFF);
+    always_ff @(posedge clk) begin
+        if (rst || !res_sync)                                   intc8rom <= 1'b0;
+        else if (op_present && acc_c3xx && !intcxrom && !slotc3rom) intc8rom <= 1'b1;
+        else if (op_commit && acc_cfff)                         intc8rom <= 1'b0;
+    end
+
+    // ---- the classifier, as a function of the address and the switches -----
+    // Returns {class, ROM source, write lands in the image}.  Called twice: on
+    // the presented op (registered at op_present) and on the sequencer's
+    // question (combinational).
+    function automatic [4:0] classify(input [15:0] a, input rw);
+        logic [1:0] c, src;
+        logic       wr;
+        logic [3:0] page;
+        logic       in_io_f, in_hi_f, int_cx, int_c8;
+        begin
+            in_io_f = (a[15:12] == 4'hC);
+            in_hi_f = (a[15:12] >= 4'hD);
+            page    = a[11:8];
+            int_cx  = intcxrom || (page == 4'd3 && !slotc3rom);
+            int_c8  = intcxrom || intc8rom;
+            c = CLS_BUS; src = ROM_INT; wr = 1'b0;
+            if (in_io_f) begin
+                if (rw && page != 4'd0 && a != 16'hCFFF) begin
+                    if (page[3]) begin                      // $C800-$CFFE
+                        if (int_c8 && rom_ok[ROM_INT]) c = CLS_ROM;
+                    end else if (int_cx) begin              // $C100-$C7FF, internal
+                        if (rom_ok[ROM_INT]) c = CLS_ROM;
+                    end else if (page[2:0] == hd_slot && rom_ok[ROM_HD]) begin
+                        c = CLS_ROM; src = ROM_HD;
+                    end else if (page[2:0] == fd_slot && rom_ok[ROM_FD]) begin
+                        c = CLS_ROM; src = ROM_FD;
+                    end else if (page[2:0] == vidhd_slot && rom_ok[ROM_VIDHD]) begin
+                        c = CLS_ROM; src = ROM_VIDHD;
+                    end
+                end
+            end else if (in_hi_f) begin
+                if (rw) begin
+                    c = lc_ramrd ? CLS_LC : (rom_ok[ROM_INT] ? CLS_ROM : CLS_BUS);
+                end else begin
+                    c  = lc_wren ? CLS_LC : CLS_ROM;
+                    wr = lc_wren;
+                end
+            end else begin
+                c  = CLS_RAM;
+                wr = !rw;
+            end
+            classify = {c, src, wr};
+        end
+    endfunction
+
+    wire [4:0] q_class = classify(q_addr, q_rw);
+    assign q_cls = q_class[4:3];
+
     // ---- the driver's query ---------------------------------------------------------
     wire q_zp    = (q_addr[15:9]  == 7'd0);
     wire q_text  = (q_addr[15:10] == 6'b000001);
@@ -255,11 +363,10 @@ module apple_mmu (
     wire q_aux   = (q_hi || q_zp) ? altzp : q_aux_mid;
     assign q_divert = (rw_bank != 8'd0) && !q_io && q_aux;
 
-    // ---- the classifier ----------------------------------------------------------
+    // ---- the physical address ----------------------------------------------------
     wire in_zp    = (op_addr[15:9]  == 7'd0);           // $0000-$01FF
     wire in_text  = (op_addr[15:10] == 6'b000001);      // $0400-$07FF
     wire in_hires = (op_addr[15:13] == 3'b001);         // $2000-$3FFF
-    wire in_io    = (op_addr[15:12] == 4'hC);           // $C000-$CFFF
     wire in_d     = (op_addr[15:12] == 4'hD);           // $D000-$DFFF
     wire in_hi    = (op_addr[15:12] >= 4'hD);           // $D000-$FFFF
 
@@ -278,29 +385,12 @@ module apple_mmu (
     // The language card's RAM: bank 1 of $D000 lives in the image's $C000 hole.
     wire [15:0] lc_off = (in_d && !lc_bank2) ? {4'hC, op_addr[11:0]} : op_addr;
 
-    logic [1:0]  n_cls;
-    logic [23:0] n_pa;
-    logic        n_wr_image;
-
-    always_comb begin
-        n_cls      = CLS_BUS;
-        n_pa       = {aux_sel ? aux_bank : 8'd0, op_addr};
-        n_wr_image = 1'b0;
-        if (in_io) begin
-            n_cls = CLS_BUS;
-        end else if (in_hi) begin
-            n_pa = {altzp ? aux_bank : 8'd0, lc_off};
-            if (op_rw) begin
-                n_cls = lc_ramrd ? CLS_LC : CLS_ROM;
-            end else begin
-                n_cls      = lc_wren ? CLS_LC : CLS_ROM;
-                n_wr_image = lc_wren;
-            end
-        end else begin
-            n_cls      = CLS_RAM;
-            n_wr_image = !op_rw;
-        end
-    end
+    wire [4:0]  n_class    = classify(op_addr, op_rw);
+    wire [1:0]  n_cls      = n_class[4:3];
+    wire [1:0]  n_src      = n_class[2:1];
+    wire        n_wr_image = n_class[0];
+    wire [23:0] n_pa       = in_hi ? {altzp ? aux_bank : 8'd0, lc_off}
+                                   : {aux_sel ? aux_bank : 8'd0, op_addr};
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -308,6 +398,7 @@ module apple_mmu (
             cl_cls      <= CLS_BUS;
             cl_pa       <= 24'd0;
             cl_rom_addr <= 14'd0;
+            cl_rom_src  <= ROM_INT;
             cl_rw       <= 1'b1;
             cl_wr_image <= 1'b0;
         end else begin
@@ -316,6 +407,7 @@ module apple_mmu (
                 cl_cls      <= n_cls;
                 cl_pa       <= n_pa;
                 cl_rom_addr <= op_addr[13:0];
+                cl_rom_src  <= n_src;
                 cl_rw       <= op_rw;
                 cl_wr_image <= n_wr_image;
             end

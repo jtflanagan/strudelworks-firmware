@@ -178,6 +178,8 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .clk (clk), .rst (rst),
         .phi0_sync (phi0_sync), .data_sync (data_sync),
         .master_active (master_active),
+        // Without the sequencer: the bus owns every cycle, the core is always on offer.
+        .bus_owns (1'b1), .core_valid (1'b1),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),
         .cpu_sync (cpu_sync), .drv_sync (drv_sync),
         .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
@@ -248,6 +250,9 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
+        // No on-card slot ROMs here; the internal ROM is loaded.
+        .hd_slot (3'd0), .fd_slot (3'd0), .vidhd_slot (3'd0), .rom_ok (4'b0001),
+        .cl_rom_src (), .intc8rom (), .q_rw (1'b1), .q_cls (),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
         .sw_state (sw_state), .vid_sw (vid_sw), .rw_bank (),

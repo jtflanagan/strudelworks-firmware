@@ -75,6 +75,18 @@ module card_link #(
     input  wire        real_valid,
     input  wire        real_mark,
     input  wire [15:0] real_mark_free,
+    // ...and, under acceleration (rtl/accel_seq.sv, rtl/event_merge.sv):
+    // whether that cycle was a dummy, and the core's fast ops as they
+    // happen, with the blanking level their word carries.  A watching top
+    // ties them to 0.
+    input  wire        real_dummy,
+    input  wire        fast_valid,
+    input  wire [15:0] fast_addr,
+    input  wire        fast_rw,
+    input  wire [7:0]  fast_data,
+    input  wire        fast_sync,
+    input  wire        fast_vbl,
+    output wire [7:0]  merge_overflows,
     input  wire        phi0_live,
 
     // Synchronised RES', for the CPU_SOURCE latch, and what it latched.
@@ -202,6 +214,21 @@ module card_link #(
     input  wire [31:0] mem_served,
     input  wire [31:0]  mem_last,
     input  wire [31:0]  mem_diverted,
+    input  wire         mem_intc8rom,
+
+    // The accelerated core (rtl/accel_seq.sv in a mastering top): ACCEL_CTRL
+    // out, the sequencer's status and counters back, and `accel_on` for the
+    // memory client's windows.  A watching top ties the inputs to 0.
+    output wire [1:0]   accel_mode,
+    output wire [15:0]  accel_target,
+    output wire         accel_slow_fd,
+    output wire         accel_cnt_clr,
+    input  wire         accel_on,
+    input  wire [31:0]  accel_stat,
+    input  wire [31:0]  accel_fast,
+    input  wire [31:0]  accel_bus,
+    input  wire [31:0]  accel_cycles,
+    input  wire [31:0]  accel_wait,
     // The floating-bus simulator's seam (rtl/fb_sim.sv <-> wb_regfile,
     // docs/FLOATING_BUS.md): FB_CTRL's serve level and clear pulse and
     // FB_PEEK's address out, the mode, the counters and the peeked byte back.
@@ -722,10 +749,43 @@ module card_link #(
     // The synthetic source has no scanner, so no frame to mark.
     wire        ev_mark  = source_real && real_mark;
 
+    // The merge, always in the path: the bus's cycles and the accelerated
+    // core's fast ops into one stream in program order, spaced for the
+    // filter (rtl/event_merge.sv).  Fast ops and the dummy flag belong to the
+    // real bus only.
+    wire [31:0] mg_data;
+    wire        mg_valid, mg_mark, mg_dummy;
+    wire [15:0] mg_mark_free;
+
+    event_merge #(.DEPTH (8)) u_merge (
+        .clk           (clk_ctrl),
+        .rst           (rst),
+        .enable        (capture_enable),
+        .bus_valid     (ev_valid),
+        .bus_data      (ev_data),
+        .bus_mark      (ev_mark),
+        .bus_mark_free (real_mark_free),
+        .bus_dummy     (source_real && real_dummy),
+        .fast_valid    (source_real && fast_valid),
+        .fast_addr     (fast_addr),
+        .fast_rw       (fast_rw),
+        .fast_data     (fast_data),
+        .fast_sync     (fast_sync),
+        .vbl_level     (fast_vbl),
+        .res_level     (apple_res_sync),
+        .out_valid     (mg_valid),
+        .out_data      (mg_data),
+        .out_mark      (mg_mark),
+        .out_mark_free (mg_mark_free),
+        .out_dummy     (mg_dummy),
+        .overflows     (merge_overflows)
+    );
+
     // The filter, always in the path: a wire in full mode, the keep rule
-    // and the SKIP words in sparse.  Sparse applies to the real bus only -
-    // the synthetic stream is the link's self-test, and the host checks
-    // its every word.
+    // and the SKIP words in sparse - and under acceleration the dummies'
+    // count and the fast words' rule in both.  Sparse applies to the real
+    // bus only - the synthetic stream is the link's self-test, and the host
+    // checks its every word.
     wire [31:0] fev_data;
     wire        fev_valid, fev_mark;
     wire [15:0] fev_mark_free;
@@ -735,10 +795,11 @@ module card_link #(
         .rst           (rst),
         .enable        (capture_enable),
         .sparse        (sparse_ctrl && source_real),
-        .in_data       (ev_data),
-        .in_valid      (ev_valid),
-        .in_mark       (ev_mark),
-        .in_mark_free  (real_mark_free),
+        .in_data       (mg_data),
+        .in_valid      (mg_valid),
+        .in_mark       (mg_mark),
+        .in_mark_free  (mg_mark_free),
+        .in_dummy      (mg_dummy),
         .out_data      (fev_data),
         .out_valid     (fev_valid),
         .out_mark      (fev_mark),
@@ -873,6 +934,16 @@ module card_link #(
         .mem_served        (mem_served),
         .mem_last          (mem_last),
         .mem_diverted      (mem_diverted),
+        .mem_intc8rom      (mem_intc8rom),
+        .accel_mode        (accel_mode),
+        .accel_target      (accel_target),
+        .accel_slow_fd     (accel_slow_fd),
+        .accel_cnt_clr     (accel_cnt_clr),
+        .accel_stat        (accel_stat),
+        .accel_fast        (accel_fast),
+        .accel_bus         (accel_bus),
+        .accel_cycles      (accel_cycles),
+        .accel_wait        (accel_wait),
         .fb_serve          (fb_serve),
         .fb_cnt_clr        (fb_cnt_clr),
         .fb_peek_addr      (fb_peek_addr),
@@ -1117,6 +1188,7 @@ module card_link #(
         .calib_complete (calib_complete),
         .master_active  (cpu_source_active),
         .op_present     (mem_op_present),
+        .accel          (accel_on),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id),
         .mq_line (mq_line), .mq_byte (mq_byte), .mq_data (mq_data),
         .mq_ready (mq_ready),

@@ -81,7 +81,16 @@ one clock of latency, and the pass-through exercised by every capture there
 has ever been. Events arrive some ninety clocks apart and the capture takes
 one word a clock, so the SKIP-then-event pair on consecutive clocks costs
 nothing; the module's one contract is that events are at least three clocks
-apart.
+apart - which `rtl/event_merge.sv`, now in front of it, guarantees.
+
+**Under acceleration (ACCELERATION.md) full mode is no longer a wire.** The
+core's fast ops arrive as words of their own (tag `0xC`) and the bus's dummy
+cycles carry no op: a dummy is counted in both modes - so a full capture of
+an accelerated machine has SKIPs in it - unless it is the first cycle after
+enable, the marked cycle, or a cycle where the blanking level or RES′
+changes, which are kept as the `$0000` reads they are; a fast op is kept by
+the rule an event would be, never counted, and never consulted for the edge
+rule. The host's `sparse_filter.hpp` says the same.
 
 ## What the host does
 

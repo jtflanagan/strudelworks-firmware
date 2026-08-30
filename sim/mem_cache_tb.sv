@@ -129,6 +129,7 @@ module mem_cache_tb;
     mem_client u_client (
         .clk (clk), .rst (rst), .calib_complete (calib_complete),
         .master_active (master_active), .op_present (op_present),
+        .accel (1'b0),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
         .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
         .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),

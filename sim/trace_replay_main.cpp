@@ -92,6 +92,12 @@ constexpr uint32_t kFlagSelfTest = 1u << 4;
 // that chip's output - so the card substitutes its own core's.  Everything else
 // in the word was measured on the wire; this bit was reconstructed.
 constexpr uint32_t kFlagSyncSynth = 1u << 2;
+// The host's flag: the core was ACCELERATED when the trace began
+// (docs/ACCELERATION.md).  Fast-op words (tag 0xC) are ops that never rode
+// the bus and SKIPs stand for the dummy cycles, in full mode too - so the
+// trace is not a cycle stream and a lockstep replay has nothing to align on.
+// Bit 5: 4 is kFlagSelfTest above.
+constexpr uint32_t kFlagAccel = 1u << 5;
 
 struct Header {
     uint32_t magic;
@@ -218,6 +224,14 @@ bool load(const std::string& path, std::string* err) {
                       path.c_str(), g_header.version, g_header.word_bytes,
                       trace::kVersion);
         *err = b;
+        std::fclose(f);
+        return false;
+    }
+    if (g_header.flags & trace::kFlagAccel) {
+        *err = path + ": an accelerated capture - the core ran from the card faster than the bus,\n"
+               "so this is not a cycle stream: fast-op words (0xC) are ops with no cycle and SKIPs\n"
+               "stand for the dummy cycles.  Nothing here can be replayed cycle by cycle;\n"
+               "sim/run_mmu_trace.sh can still follow the memory shadow through it.";
         std::fclose(f);
         return false;
     }

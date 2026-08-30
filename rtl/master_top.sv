@@ -58,6 +58,16 @@
 // Its mark on the frame-origin event goes to the capture with the event, so
 // the host is told to the cycle; see rtl/vbl_lock.sv and docs/VBL.md.
 //
+// THE SEQUENCER sits between the core and the driver.  With ACCEL_CTRL off it
+// is a wire and every cycle is the core's, exactly as before it existed; on,
+// the core runs from the card's memory at a handful of clocks an op and the
+// driver fills the bus with dummy cycles, merging the core in for the ops the
+// machine must see.  Every memory-side consumer - the MMU shadow, the cache,
+// the floating-bus copy, the hold - watches the sequencer's unified stream of
+// ops; every peripheral that decodes $Cxxx or counts bus cycles watches the
+// driver, whose ops those always are.  See rtl/accel_seq.sv and
+// docs/ACCELERATION.md.
+//
 // WHAT IS NOT HERE YET: INH, RDY and NMI.  INH would let the card override the
 // machine's own memory, which is a memory-mode decision that has not been made;
 // RDY is not used by the Apple II for the CPU; the slot brings out no NMI.
@@ -161,12 +171,16 @@ module master_top #(
     // stands down for the other two by name) - so at most one asserts on any
     // cycle; the mux only has to be defined.  Each newcomer goes last so the
     // ones that were here are untouched.
+    // The cache's answer reaches this mux only while the bus owns the op
+    // stream: a fast op's byte goes to the core through the sequencer, and
+    // must not linger into a dummy cycle's event.
     wire        mem_sub_en, fb_sub_en;
     wire [7:0]  mem_sub_data, fb_sub_data;
-    wire        sub_en   = kbd_sub_en | pb_sub_en | mem_sub_en | fb_sub_en;
+    wire        mem_sub_bus = mem_sub_en && bus_owns;
+    wire        sub_en   = kbd_sub_en | pb_sub_en | mem_sub_bus | fb_sub_en;
     wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data :
                            pb_sub_en  ? pb_sub_data  :
-                           mem_sub_en ? mem_sub_data : fb_sub_data;
+                           mem_sub_bus ? mem_sub_data : fb_sub_data;
     // The memory image's seam through card_link (rtl/mem_client.sv is there,
     // beside the DDR3; the MMU shadow, the ROM and the cache are here, beside
     // the core).  See docs/MEMORY.md.
@@ -198,6 +212,24 @@ module master_top #(
     wire [6:0]  fb_mode;
     wire [31:0] fb_compared, fb_mismatch, fb_last, fb_last2, fb_other;
     wire [7:0]  fb_peek_data;
+    // The sequencer: ACCEL_CTRL in, its stream, status and counters out.
+    wire [1:0]  accel_mode, hold_reason;
+    wire [15:0] accel_target;
+    wire        accel_slow_fd, accel_cnt_clr, accel_on;
+    wire [3:0]  seq_state;
+    wire [31:0] accel_fast, accel_bus, accel_cycles, accel_wait;
+    wire [7:0]  accel_retries, merge_overflows;
+    wire        u_present, u_commit, u_rw, u_sync, u_ovr, u_divert;
+    wire [15:0] u_addr;
+    wire [7:0]  u_wdata;
+    wire        fev_valid, fev_rw, fev_sync;
+    wire [15:0] fev_addr;
+    wire [7:0]  fev_data;
+    wire        bus_owns, core_valid, op_dummy, op_inflight, drv_cyc_done;
+    wire [7:0]  drv_din;
+    wire        mem_decided, mem_busy, mem_intc8rom, fd_spinning;
+    wire [1:0]  q_cls, cl_rom_src;
+    wire [7:0]  hd_rom_rd, fd_rom_rd, vidhd_rom_rd;
     wire        app_msg_valid, app_pay_valid;
     wire [7:0]  app_msg_type, app_msg_len;
     wire [15:0] app_msg_free;
@@ -216,6 +248,10 @@ module master_top #(
         .capture_on (capture_on), .capture_real (capture_real),
         .real_data (real_data), .real_valid (real_valid),
         .real_mark (vbl_mark), .real_mark_free (vbl_mark_free),
+        .real_dummy (op_dummy),
+        .fast_valid (fev_valid), .fast_addr (fev_addr), .fast_rw (fev_rw),
+        .fast_data (fev_data), .fast_sync (fev_sync), .fast_vbl (vbl_level),
+        .merge_overflows (merge_overflows),
         .phi0_live (phi0_live),
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (cpu_source_active),
@@ -259,6 +295,13 @@ module master_top #(
         .mem_late_fills (mem_late_fills), .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
         .mem_served (mem_served), .mem_last (mem_last), .mem_diverted (mem_diverted),
+        .mem_intc8rom (mem_intc8rom),
+        .accel_mode (accel_mode), .accel_target (accel_target),
+        .accel_slow_fd (accel_slow_fd), .accel_cnt_clr (accel_cnt_clr),
+        .accel_on (accel_on),
+        .accel_stat ({8'd0, accel_retries, merge_overflows, seq_state, bus_owns, hold_reason, accel_on}),
+        .accel_fast (accel_fast), .accel_bus (accel_bus),
+        .accel_cycles (accel_cycles), .accel_wait (accel_wait),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (fb_mode), .fb_compared (fb_compared), .fb_mismatch (fb_mismatch),
         .fb_last (fb_last), .fb_last2 (fb_last2), .fb_other (fb_other),
@@ -330,6 +373,8 @@ module master_top #(
     // through the pin, via apple_irq_sync, exactly as before.
     wire mb_irq;
 
+    // cyc_en and din come from the sequencer: the driver's for a bus op, the
+    // cache's for a fast one.
     cpu65c02 u_cpu (
         .clk    (apple_clk),
         .rst    (cpu_rst),
@@ -396,12 +441,14 @@ module master_top #(
         .phi0_sync     (apple_phi0_sync),
         .data_sync     (apple_data_sync),
         .master_active (cpu_source_active),
+        .bus_owns      (bus_owns),
+        .core_valid    (core_valid),
         .cpu_addr      (cpu_addr),
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
         .cpu_sync      (cpu_sync),
-        .cyc_en        (cpu_cyc_en),
-        .cpu_din       (cpu_din),
+        .cyc_en        (drv_cyc_done),
+        .cpu_din       (drv_din),
         .op_addr       (op_addr),
         .op_rw         (op_rw),
         .op_wdata      (op_wdata),
@@ -416,6 +463,8 @@ module master_top #(
         .ovr_rw        (ovr_rw),
         .ovr_wdata     (ovr_wdata),
         .op_ovr        (op_ovr),
+        .op_dummy      (op_dummy),
+        .op_inflight   (op_inflight),
         .nxt_addr      (nxt_addr),
         .divert        (mem_serve && mmu_q_divert),
         .op_divert     (op_divert),
@@ -429,7 +478,77 @@ module master_top #(
         .driving       ()
     );
 
+    // ---- the sequencer ------------------------------------------------------
+    // The core's ops, decided: served from the card, or handed to the driver
+    // for a bus cycle.  See rtl/accel_seq.sv.
+    accel_seq u_seq (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .cpu_rst       (cpu_rst),
+        .master_active (cpu_source_active),
+        .mode          (accel_mode),
+        .target        (accel_target),
+        .slow_fd       (accel_slow_fd),
+        .cnt_clr       (accel_cnt_clr),
+        .mem_serve     (mem_serve),
+        .mem_image_ready (mem_image_ready),
+        .mem_invalidating (mem_invalidating),
+        .q_cls         (q_cls),
+        .cpu_addr      (cpu_addr),
+        .cpu_rw        (cpu_rw),
+        .cpu_dout      (cpu_dout),
+        .cpu_sync      (cpu_sync),
+        .cyc_en        (cpu_cyc_en),
+        .cpu_din       (cpu_din),
+        .op_present    (op_present),
+        .op_commit     (op_commit),
+        .op_dummy      (op_dummy),
+        .op_ovr        (op_ovr),
+        .op_divert     (op_divert),
+        .op_sync       (drv_sync),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_wdata      (op_wdata),
+        .cyc_done      (drv_cyc_done),
+        .drv_din       (drv_din),
+        .op_inflight   (op_inflight),
+        .ovr_en        (ovr_en),
+        .bus_owns      (bus_owns),
+        .core_valid    (core_valid),
+        .mem_sub_en    (mem_sub_en),
+        .mem_sub_data  (mem_sub_data),
+        .decided       (mem_decided),
+        .busy          (mem_busy),
+        .mq_valid      (mq_valid),
+        .bus_tick      (bus_tick),
+        .fd_spinning   (fd_spinning),
+        .u_present     (u_present),
+        .u_commit      (u_commit),
+        .u_addr        (u_addr),
+        .u_rw          (u_rw),
+        .u_wdata       (u_wdata),
+        .u_sync        (u_sync),
+        .u_ovr         (u_ovr),
+        .u_divert      (u_divert),
+        .fev_valid     (fev_valid),
+        .fev_addr      (fev_addr),
+        .fev_rw        (fev_rw),
+        .fev_data      (fev_data),
+        .fev_sync      (fev_sync),
+        .accel_on      (accel_on),
+        .hold_reason   (hold_reason),
+        .state_o       (seq_state),
+        .fast_ops      (accel_fast),
+        .bus_ops       (accel_bus),
+        .cycles        (accel_cycles),
+        .wait_clocks   (accel_wait),
+        .retries       (accel_retries)
+    );
+
     // ---- the hold: the boot menu's door and the runtime menu's -------------
+    // On the unified stream: a SYNC the core fetched from the card must count
+    // as a fetch, or an arm given later would hold at a random one.  Its own
+    // ops are bus ops and their byte is the driver's.
     boot_hold u_hold (
         .clk           (apple_clk),
         .cpu_rst       (cpu_rst),
@@ -439,13 +558,13 @@ module master_top #(
         .menu_trigger  (menu_trigger),
         .hotkey_hit    (hotkey_hit),
         .cpu_sync      (cpu_sync),
-        .op_present    (op_present),
-        .op_commit     (op_commit),
-        .op_sync       (drv_sync),
-        .op_ovr        (op_ovr),
-        .op_addr       (op_addr),
-        .op_rw         (op_rw),
-        .din           (cpu_din),
+        .op_present    (u_present),
+        .op_commit     (u_commit),
+        .op_sync       (u_sync),
+        .op_ovr        (u_ovr),
+        .op_addr       (u_addr),
+        .op_rw         (u_rw),
+        .din           (drv_din),
         .ovr_en        (boot_ovr_en),
         .ovr_addr      (boot_ovr_addr),
         .held          (boot_held),
@@ -466,7 +585,7 @@ module master_top #(
         .op_ovr        (op_ovr),
         .op_addr       (op_addr),
         .op_rw         (op_rw),
-        .din           (cpu_din),
+        .din           (drv_din),
         .start         (vbl_start),
         .probe         (vbl_probe),
         .probe_addr    (vbl_probe_addr),
@@ -557,27 +676,45 @@ module master_top #(
     wire [13:0] cl_rom_addr;
     wire [7:0]  rom_byte;
 
+    // The MMU shadow follows the unified stream - every op, fast or bus or
+    // override - and answers two questions of the address about to be
+    // presented: the driver's (divert this write?) and the sequencer's (what
+    // class is this op?).  The CX class needs the on-card slot ROMs' slots.
     apple_mmu u_mmu (
         .clk        (apple_clk),
         .rst        (apple_rst),
         .res_sync   (apple_res_sync),
-        .op_addr    (op_addr),
-        .op_rw      (op_rw),
-        .op_wdata   (op_wdata),
-        .op_present (op_present),
-        .op_commit  (op_commit),
+        .op_addr    (u_addr),
+        .op_rw      (u_rw),
+        .op_wdata   (u_wdata),
+        .op_present (u_present),
+        .op_commit  (u_commit),
+        .hd_slot    (hd_slot_active),
+        .fd_slot    (fd_slot_active),
+        .vidhd_slot (vidhd_slot_active),
+        .rom_ok     ({vidhd_rom_loaded, fd_rom_loaded, hd_rom_loaded, mem_rom_loaded}),
         .cl_valid   (cl_valid),
         .cl_cls     (cl_cls),
         .cl_pa      (cl_pa),
         .cl_rom_addr (cl_rom_addr),
+        .cl_rom_src (cl_rom_src),
         .cl_rw      (cl_rw),
         .cl_wr_image (cl_wr_image),
+        .intc8rom   (mem_intc8rom),
         .sw_state   (mem_sw),
         .vid_sw     (vid_sw),
         .rw_bank    (mem_rw_bank),
         .q_addr     (nxt_addr),
-        .q_divert   (mmu_q_divert)
+        .q_divert   (mmu_q_divert),
+        .q_rw       (cpu_rw),
+        .q_cls      (q_cls)
     );
+
+    // The byte a ROM-class op reads: the internal ROM's, or a slot card's
+    // (the CX class).  All four land by the cache's P3.
+    wire [7:0] rom_byte_sel = (cl_rom_src == 2'd1) ? hd_rom_rd :
+                              (cl_rom_src == 2'd2) ? fd_rom_rd :
+                              (cl_rom_src == 2'd3) ? vidhd_rom_rd : rom_byte;
 
     apple_rom u_rom (
         .clk        (apple_clk),
@@ -601,16 +738,18 @@ module master_top #(
         .cl_pa       (cl_pa),
         .cl_rw       (cl_rw),
         .cl_wr_image (cl_wr_image),
-        .op_addr     (op_addr),
-        .op_wdata    (op_wdata),
-        .op_present  (op_present),
-        .op_commit   (op_commit),
-        .op_divert   (op_divert),
+        .op_addr     (u_addr),
+        .op_wdata    (u_wdata),
+        .op_present  (u_present),
+        .op_commit   (u_commit),
+        .op_divert   (u_divert),
         .data_sync   (apple_data_sync),
-        .rom_byte    (rom_byte),
-        .rom_loaded  (mem_rom_loaded),
+        .rom_byte    (rom_byte_sel),
+        .rom_loaded  (1'b1),            // a ROM-class op always has its byte: the MMU folds the loads in
         .sub_en      (mem_sub_en),
         .sub_data    (mem_sub_data),
+        .decided     (mem_decided),
+        .busy        (mem_busy),
         .serve       (mem_serve),
         .inval       (mem_inval),
         .cnt_clr     (mem_cnt_clr),
@@ -638,12 +777,12 @@ module master_top #(
     fb_sim u_fb (
         .clk           (apple_clk),
         .rst           (apple_rst),
-        .op_addr       (op_addr),
-        .op_rw         (op_rw),
-        .op_wdata      (op_wdata),
-        .op_present    (op_present),
-        .op_commit     (op_commit),
-        .op_ovr        (op_ovr),
+        .op_addr       (u_addr),
+        .op_rw         (u_rw),
+        .op_wdata      (u_wdata),
+        .op_present    (u_present),
+        .op_commit     (u_commit),
+        .op_ovr        (u_ovr),
         .cl_valid      (cl_valid),
         .cl_wr_image   (cl_wr_image),
         .cl_pa         (cl_pa),
@@ -687,7 +826,7 @@ module master_top #(
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_ovr        (op_ovr),
-        .din           (cpu_din),
+        .din           (drv_din),
         .ovr_en        (hd_ovr_en),
         .ovr_addr      (hd_ovr_addr),
         .ovr_rw        (hd_ovr_rw),
@@ -704,6 +843,8 @@ module master_top #(
         .tx_valid      (aux_valid),
         .tx_take       (aux_take),
         .rom_loaded    (hd_rom_loaded),
+        .rom_rd_addr   (cl_rom_addr[7:0]),
+        .rom_rd_byte   (hd_rom_rd),
         .busy          (hd_busy),
         .execs         (hd_execs)
     );
@@ -743,6 +884,9 @@ module master_top #(
         .late_clr      (fd_late_clr),
         .fill_clr      (fd_fill_clr),
         .rom_loaded    (fd_rom_loaded),
+        .rom_rd_addr   (cl_rom_addr[7:0]),
+        .rom_rd_byte   (fd_rom_rd),
+        .spinning_o    (fd_spinning),
         .stale_o       (fd_stale),
         .dirty_o       (fd_dirty),
         .phase_o       (fd_phase),
@@ -779,7 +923,9 @@ module master_top #(
         .msg_len       (app_msg_len),
         .pay_data      (app_pay_data),
         .pay_valid     (app_pay_valid),
-        .rom_loaded    (vidhd_rom_loaded)
+        .rom_loaded    (vidhd_rom_loaded),
+        .rom_rd_addr   (cl_rom_addr[7:0]),
+        .rom_rd_byte   (vidhd_rom_rd)
     );
 
     // ---- the Mockingboard ---------------------------------------------------

@@ -144,6 +144,8 @@ module floppy_card_tb;
         .clk (clk), .rst (rst),
         .phi0_sync (phi0), .data_sync (data_sync),
         .master_active (master_active),
+        // Without the sequencer: the bus owns every cycle, the core is always on offer.
+        .bus_owns (1'b1), .core_valid (1'b1),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),
         .cpu_sync (1'b0), .drv_sync (drv_sync),
         .cyc_en (cyc_en), .cpu_din (cpu_din),
@@ -216,6 +218,7 @@ module floppy_card_tb;
         .drv_nibbles (drv_nibbles), .drv_tracks (drv_tracks), .drv_flush (drv_flush),
         .late_clr (late_clr), .fill_clr (fill_clr),
         .rom_loaded (rom_loaded), .stale_o (stale), .dirty_o (dirty),
+        .rom_rd_addr (8'd0), .rom_rd_byte (),
         .phase_o (phase), .motor_o (motor), .drive_sel_o (drive_sel),
         .q6_o (q6), .q7_o (q7), .seeks (seeks), .late (late), .fill_max (fill_max)
     );

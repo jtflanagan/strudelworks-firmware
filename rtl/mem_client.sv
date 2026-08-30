@@ -57,6 +57,12 @@ module mem_client #(
     input  wire         calib_complete,
     input  wire         master_active,
     input  wire         op_present,
+    // The core is accelerated (rtl/accel_seq.sv): fills and writes land at
+    // any point in the bus cycle, so the windows below would only starve the
+    // ring's batches and hold refreshes back for no deadline that exists
+    // any more - a refresh under a fast op is a stall, not a wrong answer.
+    // With this high both windows are the whole cycle.
+    input  wire         accel,
 
     // From mem_cache: one request, held until taken.
     input  wire         mq_valid,
@@ -128,8 +134,8 @@ module mem_client #(
     wire in_rot_win = (phase >= PH_ROT_LO[7:0]) && (phase <= PH_ROT_HI[7:0]);
 
     assign mem_idle    = q_empty && !issuing && (outstanding == 8'd0);
-    assign refresh_ok  = calib_complete && mem_idle && (!master_active || in_ref_win);
-    assign rot_ok      = q_empty && !issuing && (!master_active || in_rot_win);
+    assign refresh_ok  = calib_complete && mem_idle && (!master_active || accel || in_ref_win);
+    assign rot_ok      = q_empty && !issuing && (!master_active || accel || in_rot_win);
     assign image_ready = calib_complete;
 
     always_ff @(posedge clk) begin

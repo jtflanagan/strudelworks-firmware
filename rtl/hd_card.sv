@@ -127,6 +127,10 @@ module hd_card #(
 
     // For the HD_SLOT register.
     output wire        rom_loaded,
+
+    // The ROM's second read port, for the CX class - see below.
+    input  wire [7:0]  rom_rd_addr,
+    output logic [7:0] rom_rd_byte,
     output wire        busy,
     output logic [7:0] execs
 );
@@ -151,6 +155,14 @@ module hd_card #(
 
     wire [31:0] rom_word = rom[op_addr[7:2]];
     wire [7:0]  rom_byte = rom_word[8 * op_addr[1:0] +: 8];
+
+    // A second read port, for the accelerated core: rtl/apple_mmu.sv classes
+    // a read of this page as ROM and rtl/mem_cache.sv takes the byte from
+    // here instead of from the bus (the CX class, docs/ACCELERATION.md).
+    // Registered once so it lands where apple_rom's does, and held until the
+    // address moves.  A LUT RAM has as many read ports as it is asked for.
+    wire [31:0] rom_rd_word = rom[rom_rd_addr[7:2]];
+    always_ff @(posedge clk) rom_rd_byte <= rom_rd_word[8 * rom_rd_addr[1:0] +: 8];
 
     // ---- the block buffer ----------------------------------------------------
     // 512 bytes as four 128-byte banks, byte i in bank i[1:0] at i[8:2].  A

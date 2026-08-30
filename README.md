@@ -38,7 +38,9 @@ docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRA
             reads), VBL.md (the video scanner found on the floating bus during the
             boot hold and followed to the cycle from then on), MEMORY.md (the
             machine's memory on the card: the IIe map shadowed, a cache in
-            front of the DDR3, the ROM in BRAM), FLOATING_BUS.md (the floating
+            front of the DDR3, the ROM in BRAM), ACCELERATION.md (the core
+            faster than the bus: served from the card, merged in for the
+            bus, paced by a governor), FLOATING_BUS.md (the floating
             bus simulated from a side copy of the display pages, proven
             against the machine's on every read), and on this branch
             UCODE816.md - a first stab at a microcoded 65816, what it costs and
@@ -85,6 +87,7 @@ sim/run_bus_snoop_tb.sh    # bus event capture, framing, overflow, ~1 s
 sim/run_bus_event_filter_tb.sh # sparse capture: the keep rule and SKIP words, ~1 s
 sim/run_bus_write_tb.sh    # driving the Apple bus as its CPU, ~1 s
 sim/run_reg_map_tb.sh      # control registers end to end, ~1 s
+sim/run_accel_tb.sh        # the core faster than the bus: modes, the governor, merging, the holds, ~3 min
 sim/run_mockingboard_tb.sh # the Mockingboard's VIAs behind the driver, ~2 s
 sim/run_cpu_irq_tb.sh      # a live hardware IRQ, taken between instructions, ~1 s
 sim/run_boot_hold_tb.sh    # the soft core held at its reset vector, ~1 s

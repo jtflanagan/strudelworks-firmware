@@ -56,9 +56,14 @@
 // instead gives exactly one stable value per bus cycle, anchored to the cycle
 // that carries it.
 //
-// The core's outputs are settled by then with an enormous margin: cyc_en fired
-// ~50 fabric cycles earlier, near the end of the previous cycle, and nothing
-// moves them again until the next one.  An earlier staging tap was tried and
+// The core's outputs are settled by then: cyc_en fires at T_CYCEN after the
+// rising edge, the core's new outputs appear the clock after, and the falling
+// edge - the start of the next cycle - is a couple of clocks later still; the
+// present tap is T_PRESENT after that.  So the margin is a handful of clocks,
+// not the "~50" an earlier version of this comment claimed (T_CYCEN is counted
+// from the RISING edge; the cycle is ~98 clocks; the arithmetic is rise+47 for
+// cyc_en against rise+52 for the present).  rtl/accel_seq.sv lives on exactly
+// that margin - see core_valid below.  An earlier staging tap was tried and
 // removed - putting it after cyc_en on the RISING pipe left one fabric cycle
 // before the next falling edge, which is not a margin, it is a coincidence.
 //
@@ -107,6 +112,22 @@
 // the interface rtl/cpu65c02.sv was built for.  din is latched at T_DIN and is
 // therefore already stable when the core samples it at T_CYCEN.
 //
+// ...UNLESS THE SEQUENCER SAYS OTHERWISE.  rtl/accel_seq.sv runs the core
+// faster than the bus and hands this module only the ops that must reach the
+// machine (docs/ACCELERATION.md).  Two levels carry that: bus_owns - the bus
+// owns the op stream, so an op (the override's or the core's) is latched at
+// T_PRESENT as always - and core_valid - the core's op is on offer.  When
+// neither applies the cycle is a DUMMY: the parked read of $0000 is presented,
+// op_present/op_commit still pulse (the peripherals that count bus cycles on
+// op_commit keep counting, and $0000 decodes to nothing in any of them), op_dummy
+// says so, and cyc_en is withheld exactly as for an override.  A build without
+// the sequencer ties both levels high and gets the old behaviour to the clock.
+// op_inflight spans a carried cycle from its present to its data phase, so the
+// sequencer can tell "the override has released" from "its last cycle is still
+// on the bus" - hd_card drops ovr_en the clock after its last byte's present,
+// some 45 clocks before that byte's data phase - and never starts a fast op
+// over a core op the bus is still carrying (a reset can leave one there).
+//
 // AN OVERRIDE OP takes a cycle away from the core.  rtl/boot_hold.sv holds the
 // core at its reset vector and reads the keyboard for the host in the
 // meantime; rtl/hd_card.sv stalls the core on its hard disk's EXECUTE port and
@@ -141,6 +162,10 @@ module apple_bus_write #(
     // 1 while this card owns the bus.  Latched from CPU_SOURCE at a RES'
     // assertion by wb_regfile - never mid-cycle, never mid-instruction.
     input  wire        master_active,
+
+    // From rtl/accel_seq.sv - see the header.  Tie both high without it.
+    input  wire        bus_owns,
+    input  wire        core_valid,
 
     // The core.  addr/rw/dout are its live outputs; they are sampled at T_LATCH
     // and held for the whole of the bus cycle that carries them.
@@ -190,6 +215,12 @@ module apple_bus_write #(
     // The op just presented was an override, not the core's.  Announced with
     // op_present, for boot_hold to follow what the bus actually carried.
     output wire        op_ovr,
+    // The op just presented was a DUMMY - nobody's, a parked read - and the
+    // cycle carries no op for the unified stream.  A level, present to present.
+    output wire        op_dummy,
+    // A cycle that carries an op - the core's or an override's, not a dummy -
+    // is on the bus: from its present to its data phase.
+    output logic       op_inflight,
 
     // The address about to be latched at T_PRESENT, for apple_mmu's query,
     // and its answer: divert this op if it is a write.  Combinational both
@@ -249,6 +280,7 @@ module apple_bus_write #(
     logic        drv_sync_q;
     logic        drv_ovr;         // this cycle is the override's, not the core's
     logic        drv_div;         // this write goes out as a read (see the header)
+    logic        drv_dummy;       // this cycle carries no op at all
 
     // The data bus is ours only inside the emit window, and only on a write.
     logic emit_window;
@@ -276,8 +308,13 @@ module apple_bus_write #(
     assign op_rw    = drv_rw;
     assign op_wdata = drv_dout;
     assign op_ovr   = drv_ovr;
+    assign op_dummy = drv_dummy;
     assign nxt_addr  = ovr_en ? ovr_addr : cpu_addr;
     assign op_divert = drv_div;
+
+    // What the next T_PRESENT latches: the override's op, the core's, or nothing.
+    wire take_ovr  = bus_owns && ovr_en;
+    wire take_core = bus_owns && !ovr_en && core_valid;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -290,6 +327,8 @@ module apple_bus_write #(
             drv_sync_q  <= 1'b0;
             drv_ovr     <= 1'b0;
             drv_div     <= 1'b0;
+            drv_dummy   <= 1'b1;
+            op_inflight <= 1'b0;
             emit_window <= 1'b0;
             cyc_en      <= 1'b0;
             cpu_din     <= 8'd0;
@@ -319,6 +358,8 @@ module apple_bus_write #(
                 drv_sync_q  <= 1'b0;
                 drv_ovr     <= 1'b0;
                 drv_div     <= 1'b0;
+                drv_dummy   <= 1'b1;
+                op_inflight <= 1'b0;
                 emit_window <= 1'b0;
                 driving     <= 1'b0;
             end else begin
@@ -327,13 +368,16 @@ module apple_bus_write #(
                 // cycle that samples it.
                 if (t_present) begin
                     // An override is never a SYNC: it is not an instruction,
-                    // and the trace must not decode it as one.
-                    drv_addr    <= ovr_en ? ovr_addr  : cpu_addr;
-                    drv_rw      <= ovr_en ? ovr_rw    : cpu_rw;
-                    drv_dout    <= ovr_en ? ovr_wdata : cpu_dout;
-                    drv_sync_q  <= ovr_en ? 1'b0      : cpu_sync;
-                    drv_ovr     <= ovr_en;
-                    drv_div     <= divert && !(ovr_en ? ovr_rw : cpu_rw);
+                    // and the trace must not decode it as one.  Neither is a
+                    // dummy, which is the parked read and nobody's op.
+                    drv_addr    <= take_ovr ? ovr_addr  : take_core ? cpu_addr : PARK_ADDR;
+                    drv_rw      <= take_ovr ? ovr_rw    : take_core ? cpu_rw   : 1'b1;
+                    drv_dout    <= take_ovr ? ovr_wdata : cpu_dout;
+                    drv_sync_q  <= take_core && cpu_sync;
+                    drv_ovr     <= take_ovr;
+                    drv_dummy   <= !take_ovr && !take_core;
+                    drv_div     <= divert && (take_ovr ? !ovr_rw : take_core && !cpu_rw);
+                    op_inflight <= take_ovr || take_core;
                     emit_window <= 1'b0;      // release the data bus
                     driving     <= 1'b1;
                 end
@@ -341,8 +385,9 @@ module apple_bus_write #(
                 if (t_emit)  emit_window <= 1'b1;
                 if (t_din)   cpu_din     <= din_sub_en ? din_sub_data : data_sync;
                 if (t_din)   op_commit   <= 1'b1;
+                if (t_din)   op_inflight <= 1'b0;
                 // The core advances only through cycles that were its own.
-                if (t_cycen && !drv_ovr) cyc_en <= 1'b1;
+                if (t_cycen && !drv_ovr && !drv_dummy) cyc_en <= 1'b1;
             end
         end
     end

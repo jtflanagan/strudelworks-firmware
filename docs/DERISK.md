@@ -1333,6 +1333,13 @@ handover, no cross-mode flush, and no dirty-line writeback path to design. Worth
 stating because a mode switch that could happen *while running* would need all
 three.
 
+*Relaxed, 2026-08-29 (ACCELERATION.md).* ACCEL_CTRL is a live level like
+MEM_CTRL's, and the modes switch under a running machine - with the one
+consequence above kept as a rule rather than designed away: leaving the
+internal-memory mode (mode 2) for any state where the core reads the machine's
+RAM again runs the stale memory, so the host refuses it without a reset. The
+flush walk stays undesigned.
+
 Forbidding DMA in internal-memory mode is a deliberate scope decision, and it is
 worth the trade: it is what makes the line buffer trivially correct. With no
 external writer there is nothing to snoop and nothing to invalidate but our own

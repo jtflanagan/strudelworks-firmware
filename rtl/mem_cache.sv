@@ -97,6 +97,14 @@ module mem_cache #(
     // To the din mux: hold from the decision until the next op_present.
     output logic       sub_en,
     output logic [7:0] sub_data,
+    // For rtl/accel_seq.sv, which presents the next op only when this one is
+    // over: `decided` pulses on the clock the op's outcome is known - P6 for a
+    // hit, a ROM read, a write or an op nothing here answers; the clock the
+    // fill lands for a miss - with sub_en/sub_data valid on the same edge.
+    // `busy` is high from the op's arrival until then, fill included, and is
+    // what a fresh start (after reset, after a hold) waits on.
+    output logic       decided,
+    output wire        busy,
 
     // Control and status, from MEM_CTRL / to MEM_STAT.
     input  wire        serve,          // all-or-nothing: serve every cacheable class, or none
@@ -242,6 +250,8 @@ module mem_cache #(
     wire cacheable = (p_cls == CLS_RAM) || (p_cls == CLS_LC);
     wire may_touch = image_ready && !invalidating;
 
+    assign busy = v1 || v2 || v3 || v4 || fill_pending;
+
     integer w;
     always_ff @(posedge clk) begin
         // Defaults: single-cycle strobes.
@@ -249,6 +259,9 @@ module mem_cache #(
         way_wsel  <= 4'd0;
         tag_we    <= 1'b0;
         data_q    <= data_sync;
+        // Decided on this edge: P6 unless a fill is being raised, or the fill.
+        decided   <= (v4 && !(p_rw && cacheable && !hit && may_touch)) ||
+                     (mr_valid && fill_pending && mr_id == fill_id);
 
         if (rst) begin
             v1 <= 1'b0; v2 <= 1'b0; v3 <= 1'b0; v4 <= 1'b0;
@@ -261,6 +274,7 @@ module mem_cache #(
             fill_pending <= 1'b0; fill_id <= 2'd0; fill_serve <= 1'b0;
             fill_cmp <= 1'b0; fill_byte <= 8'd0;
             cmp_valid <= 1'b0; cmp_byte <= 8'd0;
+            decided <= 1'b0;
             mq_valid <= 1'b0; mq_kind <= 1'b0; mq_id <= 2'd0;
             mq_line <= 20'd0; mq_byte <= 4'd0; mq_data <= 8'd0;
             hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
