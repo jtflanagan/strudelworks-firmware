@@ -361,6 +361,51 @@ out a different shape.  The chain, each step measured:
    real workloads.  Final build: WNS +0.021 / WHS +0.032, LUT 79.6%,
    BRAM 81% - both below where the phase started.
 
+## DIAGNOSED IN SIMULATION (2026-08-31, the boot bench)
+
+The failure was reproduced and root-caused entirely in simulation, the
+user's plan: `sim/run_boot_tb.sh` boots the real nox_los.hdv from reset
+through the whole accelerated path (sim/boot_tb.sv - accel_tb's machine
+model + the real IIe ROM + hd_card with the tb playing the host), under
+Verilator at ~1.1M clk/s.  2M bus cycles at mode 2 UNLIMITED reproduced
+the hardware failure exactly; the same boot at target 1.0 ran clean and
+op-for-op identical to a pre-D$ (7106cbd) checkout's run - 1,999,993
+ops, zero differences - which is why 1x testing would never have shown
+it.  Controls: pre-D$ at unlimited clean; post-D$ unlimited with
+`dcache off` clean (the ladder would have worked).
+
+THE BUG.  Nox's loader copies an aux-copy routine onto the STACK PAGE
+and runs it; the routine's own STA $C003 pulses map_changed.  d_front's
+maps-to-main proof (maps_main) then took a three-clock mm_pend /
+mm_asking walk to re-prove itself through the t3 view, while the zs
+verdict could fire ONLY at tries==1 of a claim window that ends at 2 -
+so the very next fetch, $011B of the routine's own dirty line, missed
+its single verdict clock, the claim lapsed, and the sequencer served
+mem_cache's copy of page 1: all zeros, STALE BY DESIGN (the store is
+the authority; zs writes go no further).  $00 = BRK, the LC held zero
+vectors, and the machine died at $0000 - Nox's cursor never drawn, TR
+frozen on its title.  The race is a one-clock alignment, provoked only
+at speed; and mem_cache's monitor EXEMPTS zs-valid lines, so every
+hardware counter read clean.  The plan's own rule 4 named the stale
+path; the mm walk was a lapse cause nobody listed.  A second latent
+hole found beside it: during the same dead window the floating-page
+reload accepted pages 0/1, so the D$ could install (and later serve)
+the L2's stale view of the store's own lines.
+
+THE FIX (this session): maps_main is now a registered copy of ALTZP
+(sw_state[3], the one switch that moves zp/stack - the plan's original
+"registered ALTZP-effective bit"), dropped for the map_changed edge
+clock and re-proven the next - no TLB round trip, no walk; the zs
+verdict fires at ANY primed try (1..3) and the zp/stack claim window
+ends at 4 like the D$'s; the D$ and the floating reload refuse
+PHYSICAL main pages 0/1 outright (fm_pp[16:1] != 0), mirroring the
+icache's rule; and the authority invariant is an executable sim
+assertion in d_front (a sequencer-path read of a valid main-zp/stack
+line under run_w $fatals).  accel.s grew phases 2b/2c - a dirty zp
+byte and Nox's own stack-page-routine shape read right on a soft
+switch's heels (2c's immediate byte varies per pass so a stale fetch
+cannot be byte-identical).
+
 ## HARDWARE: FIRST LOAD FAILED (2026-08-31 ~01:15, mark only)
 
 The first bit on hardware (fw 2e3ec60 built at WNS +0.021, host

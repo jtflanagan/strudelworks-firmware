@@ -67,6 +67,57 @@ ver:    tya
         cmp #$5A
         jne fail
 
+        ; ---- 2b. a dirty zp byte read right on a soft switch's heels ---------
+        ; The zp/stack store is the AUTHORITY for main pages 0/1 - DDR3 goes
+        ; stale behind it by design - so a read of a dirty line must never
+        ; fall to the sequencer's stale path.  A soft-switch access flushes
+        ; the TLB, and the store's maps-to-main proof must not die with it:
+        ; this reads the byte back within a few ops of the switch, the exact
+        ; shape that killed the D side's first bit on hardware (Nox's
+        ; stack-page loader, docs/DCACHE_PLAN.md 2026-08-31).
+        lda $F0                 ; warm the line: an observed install
+        lda PASS
+        eor #$A7
+        tax                     ; X = the byte the store must answer
+        sta $F0                 ; dirty it: the store now leads DDR3
+        sta $C000               ; 80STOREOFF - already off; only the flush
+        cpx $F0                 ; the read, inside the TLB's cold window
+        jne fail
+        lda $C083               ; a read-side switch access flushes too
+        lda $C083
+        cpx $F0
+        jne fail
+        lda $C08B               ; put the language card back as 3. expects
+        lda $C08B
+
+        ; ---- 2c. the boot's own shape: stack-page code flips the switch ------
+        ; Nox's loader runs an aux-copy routine FROM the stack page, and the
+        ; routine's own STA $C0xx flushes the map out from under its next
+        ; fetch - which is a dirty byte of the same authoritative line.  The
+        ; copy below is zs-served (DDR3 keeps zeros there), so a fetch that
+        ; falls to the sequencer executes a stale $00 and the program dies -
+        ; the D side's first hardware failure, reproduced.
+        lda $0100               ; warm line $010x: an observed install
+        lda #$8D
+        sta $0100
+        lda #$00
+        sta $0101
+        lda #$C0
+        sta $0102               ; $0100: STA $C000
+        lda #$A2
+        sta $0103               ; $0103: LDX #nn
+        lda PASS
+        eor #$33
+        sta $0104               ; nn varies per pass, so the stale copy differs
+        lda #$60
+        sta $0105               ; $0105: RTS
+        ldx #$00
+        jsr $0100
+        txa
+        eor #$33
+        cmp PASS
+        jne fail
+
         ; ---- 3. the language card --------------------------------------------
         lda $C083               ; bank 2, read RAM, two reads: write enabled
         lda $C083

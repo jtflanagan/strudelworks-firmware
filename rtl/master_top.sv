@@ -779,6 +779,7 @@ module master_top #(
         .t3_w_ok      (t3_w_ok),
         .t3_w_ppage   (t3_w_ppage),
         .map_changed  (map_changed),
+        .sw_altzp     (mem_sw[3]),
         .fev_room     (fev_room),
         .accel_cyc_en (accel_cyc_en),
         .sub_line     (mem_sub_line),

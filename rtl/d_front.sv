@@ -104,6 +104,10 @@ module d_front #(
     input  wire        t3_w_ok,
     input  wire [16:0] t3_w_ppage,
     input  wire        map_changed,
+    // ALTZP as apple_mmu's register holds it (sw_state[3]): the one switch
+    // that moves zp/stack, and the whole of the zp/stack store's
+    // maps-to-main proof.
+    input  wire        sw_altzp,
 
     // The event merge's headroom: a serve may not retire without room for
     // its word (registered, one clock stale; the merge's margin covers it).
@@ -217,8 +221,18 @@ module d_front #(
     wire        fm_ok  = drw_q ? fm_rok : fm_wok;
 
     // ---- main zp/stack: does the map still point at main? --------------------
-    logic maps_main, mm_pend, mm_asking;
-    assign t3_page = mm_asking ? 8'h00 : da_q[15:8];
+    // A REGISTERED copy of the one switch that moves zp/stack - ALTZP - not
+    // a question to the TLB view.  The first cut asked t3 through a
+    // three-clock mm_pend/mm_asking walk after every map change, and the
+    // walk raced the try window: a stack-page fetch dispatched right behind
+    // the soft-switch write missed its one zs verdict clock and fell to the
+    // sequencer's stale path - the D side's first hardware failure (Nox's
+    // loader runs an aux-copy routine FROM the stack page, and its own
+    // STA $C003 flushed the proof out from under the next fetch).  The
+    // switch register is the truth the TLB was derived from anyway; one
+    // conservative dead clock at map_changed covers the update ordering.
+    logic maps_main;
+    assign t3_page = da_q[15:8];
 
     // ---- the zp/stack store --------------------------------------------------
     // ONE write port with byte enables and ONE read port, in their own
@@ -237,7 +251,7 @@ module d_front #(
 
     assign zs_vld_o = zvld;
 
-    wire zs_region  = (da_q[15:9] == 7'd0) && maps_main && !mm_pend;
+    wire zs_region  = (da_q[15:9] == 7'd0) && maps_main;
     wire zs_line_ok = zvld[da_q[8:4]] && zrow_ok && (zrow_idx == da_q[8:4]);
 
     // A classified (bus-path) write landing in a VALID main-zp/stack line:
@@ -250,7 +264,7 @@ module d_front #(
     // What the store's serve terms will be next clock: the region for the
     // address being sampled, and the valid bit folded to its next value
     // (an install or a clear landing this edge included).
-    wire zs_nx    = (cpu_addr[15:9] == 7'd0) && maps_main && !mm_pend;
+    wire zs_nx    = (cpu_addr[15:9] == 7'd0) && maps_main;
     wire zvld_set = zw_inst && (da_q[8:4] == cpu_addr[8:4]);
     wire zvld_clr = (sn2_here && (snoop2_pa[23:9] == 15'd0) &&
                      (snoop2_pa[8:4] == cpu_addr[8:4])) ||
@@ -301,7 +315,7 @@ module d_front #(
     wire        fresh = (tries == 3'd0);
     wire [16:0] steer_pp  = fresh  ? g_pp
                           : fm_any ? fm_pp
-                          : (!mm_asking && !dis_i_q) ? t3_pp
+                          : !dis_i_q ? t3_pp
                           : spp1;
     wire [7:0]  steer_idx = {steer_pp[3:0], fresh ? cpu_addr[7:4] : da_q[7:4]};
 
@@ -382,7 +396,13 @@ module d_front #(
     // levels, instead of the compare-and-mux cone that was the worst path
     // into the steer, the din mux and the AGU.
     wire sr_next = CAM_D ? 1'b1 : (spp1 == fm_pp);
-    wire vq_zs = !dis_q && (tries == 3'd1);
+    // The zs verdict fires at ANY primed try in the window, not only try 1:
+    // maps_main takes two clocks to come back after a map change (the drop
+    // clock, then the register), and an op dispatched right behind the
+    // switch write must still get its serve - the pre-verdicts recompute
+    // every edge from registered terms, so a later try is the same verdict
+    // a clock later, and dis_q keeps a served op from serving twice.
+    wire vq_zs = !dis_q && (tries >= 3'd1) && (tries < 3'd4);
     wire vq_dc = !dis_q &&
                  ((tries == 3'd2) || ((tries == 3'd3) && (resteered || reloaded)));
     logic zs_pre_rd, zs_pre_wr, zs_pre_cold;
@@ -410,7 +430,13 @@ module d_front #(
     // The D$: data ops only, never the zp/stack region, never a ROM ppage
     // (no ROM fill path in this first cut - ROM data reads ride the
     // sequencer at the old cost).
-    wire dc_zone   = !dis_i_q && !zs_region && fm_any && !fm_pp[16];
+    // ...and never a PHYSICAL main page 0/1 (fm_pp[16:1] == 0): those lines
+    // are the zp/stack store's alone whenever they are reachable at all,
+    // and a map change's dead clock must not let the D$ install or serve
+    // the L2's stale view of them.  (Aux zp/stack under ALTZP lands in an
+    // auxiliary bank's ppage and stays ordinary D$ business.)
+    wire dc_zone   = !dis_i_q && !zs_region && fm_any && !fm_pp[16] &&
+                     (fm_pp[16:1] != 16'd0);
     wire dc_rd_hit = vq_dc && dc_pre_rd && d_ok;
     // A write serves only through a PROVEN row (steered_right AND look_ok):
     // the row then answers whether the line is present - updated in place -
@@ -441,6 +467,15 @@ module d_front #(
         if ((zs_wr_hit || (accel_cyc_en && sub_line_ok && drw_q && zs_region))
             && zs_cl_upd)
             $fatal(1, "d_front: zs write/install and cl update on one clock");
+        // THE AUTHORITY INVARIANT, executable: in the writes-served regime a
+        // read of a VALID main-zp/stack line must never retire off the
+        // sequencer's path - the store is ahead of the L2 there, and the
+        // sequencer would serve the stale view.  (run_w_q gates it: in
+        // modes 0/1 the store never leads DDR3, and the reset sequence's
+        // stack reads ride the bus by design with the run gates low.)
+        if (accel_cyc_en && drw_q && run_w_q && (da_q[15:9] == 7'd0) &&
+            maps_main && zvld[da_q[8:4]])
+            $fatal(1, "d_front: the sequencer served a read of an authoritative zp/stack line ($%04x)", da_q);
     end
 `endif
 
@@ -463,9 +498,10 @@ module d_front #(
     wire claim_kind = (!dis_i_q && (da_q[15:12] != 4'hC)) ||
                       (dis_i_q && (da_q[15:9] == 7'd0));
     wire claim_run  = drw_q ? run_rd_q : run_w_q;
-    // The window ends after the last verdict the op could have: try 1 for
-    // the one-clock zp/stack store, try 3 for the two-deep D$.
-    wire [2:0] claim_end = zs_region ? 3'd2 : 3'd4;
+    // The window ends after the last verdict the op could have: try 3 for
+    // the two-deep D$, and the zp/stack store now uses the same bound so a
+    // map change's re-prove clocks fit inside it.
+    wire [2:0] claim_end = 3'd4;
     assign d_claim = !dis_q && claim_run && claim_kind && (tries < claim_end) &&
                      !unserv;
 
@@ -475,8 +511,13 @@ module d_front #(
         dc_inst_en <= 1'b0;
         dc_wr_en   <= 1'b0;
         aw_en      <= 1'b0;
-        mm_asking  <= 1'b0;
         dc_flash   <= mem_invalidating;
+
+        // The zp/stack proof: dropped for the map change's edge clock (the
+        // switch register updates on that same edge), re-proven from the
+        // register every clock after.
+        if (map_changed) maps_main <= 1'b0;
+        else             maps_main <= !sw_altzp;
 
         // The float matches for the op stable next clock (cpu_addr is what
         // da_q is sampling this same edge); the reload and the flush below
@@ -504,11 +545,11 @@ module d_front #(
         end else if (tries == 3'd1) begin
             // Judge the row ARRIVING next clock: wrong guess, re-steer now.
             if (fm_any && !sr_next) resteered <= 1'b1;
-            if (!fm_any && !mm_asking && !dis_i_q) reloaded <= 1'b1;
+            if (!fm_any && !dis_i_q) reloaded <= 1'b1;
         end
 
         // ---- a cold page reloads the LRU floating entry from t3 -------------
-        if (!fresh && tries == 3'd1 && !fm_any && !mm_asking && !dis_i_q &&
+        if (!fresh && tries == 3'd1 && !fm_any && !dis_i_q &&
             (da_q[15:12] != 4'hC)) begin
             fl_page[!fl_mru] <= da_q[15:8];
             fl_v[!fl_mru]    <= 1'b1;
@@ -570,7 +611,11 @@ module d_front #(
         if (accel_cyc_en && sub_line_ok && drw_q) begin
             if (zs_region && !zvld[da_q[8:4]]) begin
                 zvld[da_q[8:4]]   <= 1'b1;
-            end else if (!zs_region && !dis_i_q && fm_any && fm_rok && !fm_rpp[16]) begin
+            end else if (!zs_region && !dis_i_q && fm_any && fm_rok && !fm_rpp[16] &&
+                         (fm_rpp[16:1] != 16'd0)) begin
+                // ...and never a physical main page 0/1 line (dc_zone's rule):
+                // installed during a map change's dead clock it would be the
+                // L2's stale view of the store's property.
                 dc_inst_en <= 1'b1;
                 dc_inst_pa <= {fm_rpp, da_q[7:0]};
             end
@@ -594,14 +639,6 @@ module d_front #(
             fl_v[1] <= 1'b0;
             m0q <= 1'b0;
             m1q <= 1'b0;
-            mm_pend <= 1'b1;
-        end else if (mm_pend && !mm_asking) begin
-            mm_asking <= 1'b1;
-        end else if (mm_asking) begin
-            // t3_page was 0 this clock: both views must land in main page 0.
-            maps_main <= t3_r_ok && t3_w_ok &&
-                         (t3_r_ppage == 17'd0) && (t3_w_ppage == 17'd0);
-            mm_pend   <= 1'b0;
         end
 
         if (rst) begin
@@ -610,7 +647,7 @@ module d_front #(
                 fl_page[k] <= 8'd0; fl_rok[k] <= 1'b0; fl_wok[k] <= 1'b0;
                 fl_rpp[k] <= 17'd0; fl_wpp[k] <= 17'd0;
             end
-            maps_main <= 1'b0; mm_pend <= 1'b1; mm_asking <= 1'b0;
+            maps_main <= 1'b0;
             unserv <= 1'b0; resteered <= 1'b0; reloaded <= 1'b0;
             d_ops <= 32'd0;
             dsn_en <= 1'b0; dsn_pa <= 24'd0; dsn_data <= 8'd0;
