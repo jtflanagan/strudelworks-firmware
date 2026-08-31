@@ -1019,6 +1019,10 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         integer k;
         reg [31:0] w;
         begin
+            // Whatever data rides this completion - a block, a status list -
+            // lands in the machine by DMA, so the reference follows it here,
+            // through the write view of the switches as they stand.
+            for (k = 0; k < ans_n; k = k + 1) ref_apply(16'(addr + k), ans[k]);
             if (ans_n == 0) push_word(hdr(T_HD_DONE, 8'd0, {8'd0, status}));
             else begin
                 push_word(hdr(T_HD_DONE, 8'(2 + (ans_n + 3) / 4), {8'd0, status}));
@@ -1131,10 +1135,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                                 ans_n = 512;
                                 hd_blocks_read = hd_blocks_read + 1;
                                 host_reads = host_reads + 1;
-                                // The reference follows the block, through
-                                // the write view of the switches as they
-                                // stand - the drain lands it the same way.
-                                for (k = 0; k < 512; k = k + 1) ref_apply(16'(memblock + k), himg[base + k]);
+                                // (push_done applies the block to the reference)
                             end
                             hm_uerr[r] = err;
                             push_done(status_byte(err), memblock, size16);

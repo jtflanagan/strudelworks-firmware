@@ -235,6 +235,18 @@ module mem_cache #(
     li_t li_st;
     logic [IW-1:0] li_set;
     logic [TW-1:0] li_tag;
+    // The resurrection guard.  An op in flight across the one-line
+    // invalidate captured the pre-clear tag word at its P4, and its later
+    // tag write-back - the LRU touch at P6, or the fill it raised - would
+    // write the cleared way's valid bit straight back over the clear (the
+    // boot bench caught ProDOS reading a pre-flush LC byte off exactly
+    // that).  LI_WR records the set and the ways it cleared; until the
+    // next invalidate moves the guard, a captured-word write-back to that
+    // set skips its touch (a PLRU hint costs nothing) or masks the cleared
+    // ways (the fill - minus its own victim, whose line is fresh).
+    logic          kill_v;
+    logic [IW-1:0] kill_set;
+    logic [3:0]    kill_mask;
     wire li_idle_ok = !cl_valid && !v1 && !v2 && !v3 && !v4 &&
                       !fill_pending && !invalidating;
     wire li_rd_en   = (li_st == LI_IDLE) && inv_line_en && li_idle_ok;
@@ -337,6 +349,7 @@ module mem_cache #(
             late_fills <= 8'd0; fifo_drops <= 8'd0;
             inv_idx <= '0;                 // a reset invalidates everything
             li_st <= LI_IDLE; li_set <= '0; li_tag <= '0;
+            kill_v <= 1'b0; kill_set <= '0; kill_mask <= 4'd0;
             way_waddr <= '0; way_wdata <= '0;
             tag_waddr <= '0; tag_wdata <= '0;
             for (w = 0; w < 4; w = w + 1) wbyte[w] <= 8'd0;
@@ -415,10 +428,13 @@ module mem_cache #(
                             // a debugging session)
                             cmp_valid <= !wbm_q && !zsm_q;
                             cmp_byte  <= rbyte;
-                            // Touch the LRU bits.
-                            tag_we    <= 1'b1;
-                            tag_waddr <= p_set;
-                            tag_wdata <= {plru_after_hit, tagword[4*EW-1:0]};
+                            // Touch the LRU bits - unless the guard says the
+                            // captured word may be pre-invalidate.
+                            if (!(kill_v && p_set == kill_set)) begin
+                                tag_we    <= 1'b1;
+                                tag_waddr <= p_set;
+                                tag_wdata <= {plru_after_hit, tagword[4*EW-1:0]};
+                            end
                         end else begin
                             misses <= misses + 32'd1;
                             if (may_touch && !wbm_q) begin
@@ -455,9 +471,13 @@ module mem_cache #(
                         way_wsel  <= hitv;
                         way_waddr <= p_set;
                         way_wdata <= {16{op_wdata}};
-                        tag_we    <= 1'b1;
-                        tag_waddr <= p_set;
-                        tag_wdata <= {plru_after_hit, tagword[4*EW-1:0]};
+                        // The byte lands either way; the touch obeys the
+                        // guard (a dead way taking a byte is harmless).
+                        if (!(kill_v && p_set == kill_set)) begin
+                            tag_we    <= 1'b1;
+                            tag_waddr <= p_set;
+                            tag_wdata <= {plru_after_hit, tagword[4*EW-1:0]};
+                        end
                     end
                 end
             end
@@ -475,6 +495,16 @@ module mem_cache #(
                     tag_wdata <= tagword;
                     tag_wdata[victim*EW +: EW] <= {1'b1, p_tag};
                     tag_wdata[4*EW +: 3]       <= plru_after_fill;
+                    // The guard: the captured word's other ways may predate
+                    // an invalidate - keep the cleared ones cleared.  The
+                    // victim's line is fresh from the ordered queue, so its
+                    // guard bit retires with this fill.
+                    if (kill_v && p_set == kill_set) begin
+                        for (w = 0; w < 4; w = w + 1)
+                            if (kill_mask[w] && 2'(w) != victim)
+                                tag_wdata[w*EW + TW] <= 1'b0;
+                        kill_mask[victim] <= 1'b0;
+                    end
                     if (fill_serve) begin
                         sub_en   <= 1'b1;
                         sub_data <= mr_data[8 * p_byte +: 8];
@@ -510,9 +540,14 @@ module mem_cache #(
                     tag_we    <= 1'b1;
                     tag_waddr <= li_set;
                     tag_wdata <= tag_rd;
-                    for (w = 0; w < 4; w = w + 1)
+                    kill_v    <= 1'b1;
+                    kill_set  <= li_set;
+                    for (w = 0; w < 4; w = w + 1) begin
+                        kill_mask[w] <= tag_rd[w*EW + TW] &&
+                                        (tag_rd[w*EW +: TW] == li_tag);
                         if (tag_rd[w*EW + TW] && (tag_rd[w*EW +: TW] == li_tag))
                             tag_wdata[w*EW + TW] <= 1'b0;
+                    end
                     li_st <= LI_IDLE;
                 end
                 default: li_st <= LI_IDLE;

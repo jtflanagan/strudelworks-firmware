@@ -242,11 +242,26 @@ module wb_lines #(
                     winv_en  <= 1'b1;
                     f_st     <= F_INV;
                 end
-                F_INV: if (winv_en && winv_rdy) begin
-                    winv_en <= 1'b0;
-                    l_dirty[f_sel] <= 1'b0;
-                    flushes <= flushes + 32'd1;
-                    f_st    <= F_IDLE;
+                // F_INV has two phases in one state: the request, then the
+                // WALK.  inv_line_rdy is an accept - the L2's tag clear
+                // lands two to three clocks later - and dirty must outlive
+                // the walk: cleared at the accept, a read entering the
+                // cache pipe one clock behind it read the still-valid tag,
+                // sampled the wb match after dirty fell, and served the
+                // way's PRE-WRITE line at P6 (found by the boot bench:
+                // ProDOS's LC vector copy read back stale bytes).  rdy
+                // re-asserting after the accept IS the walk-done signal -
+                // the walker only returns ready from idle with the pipe
+                // quiet - and any read that raced the walk still sees
+                // dirty at its own sample and is refused.
+                F_INV: begin
+                    if (winv_en) begin
+                        if (winv_rdy) winv_en <= 1'b0;
+                    end else if (winv_rdy) begin
+                        l_dirty[f_sel] <= 1'b0;
+                        flushes <= flushes + 32'd1;
+                        f_st    <= F_IDLE;
+                    end
                 end
                 default: f_st <= F_IDLE;
             endcase

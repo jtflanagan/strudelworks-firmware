@@ -61,7 +61,7 @@ size=$(stat -c%s "$hdv")
 blocks=$(( (size + 511) / 512 ))
 xxd -p -c1 "$rom" > "$work/rom.hex"
 xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
-{ xxd -p -c1 "$hdv"; head -c $((blocks * 512 - size)) /dev/zero | xxd -p -c1; } > "$work/hdv.hex"
+{ xxd -p -c1 "$hdv"; head -c $((blocks * 512 - size)) /dev/zero | xxd -p -c1; } > "$work/hdv_$tag.hex"
 
 srcs=(
     "$root/sim/boot_tb.sv"
@@ -85,7 +85,7 @@ if [ "$vl" = 1 ]; then
         -GUCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
         -GROMF="\"$work/rom.hex\"" \
         -GHDROMF="\"$work/hdrom.hex\"" \
-        -GHDVF="\"$work/hdv.hex\"" \
+        -GHDVF="\"$work/hdv_$tag.hex\"" \
         -GTRACEF="\"$trace\"" \
         -GHDV_BLOCKS="$blocks" \
         -GMODE="$mode" \
@@ -106,7 +106,7 @@ else
             -Pboot_tb.UCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
             -Pboot_tb.ROMF="\"$work/rom.hex\"" \
             -Pboot_tb.HDROMF="\"$work/hdrom.hex\"" \
-            -Pboot_tb.HDVF="\"$work/hdv.hex\"" \
+            -Pboot_tb.HDVF="\"$work/hdv_$tag.hex\"" \
             -Pboot_tb.TRACEF="\"$trace\"" \
             -Pboot_tb.HDV_BLOCKS="$blocks" \
             -Pboot_tb.MODE="$mode" \

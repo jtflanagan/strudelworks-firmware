@@ -472,8 +472,10 @@ module d_front #(
         // sequencer's path - the store is ahead of the L2 there, and the
         // sequencer would serve the stale view.  (run_w_q gates it: in
         // modes 0/1 the store never leads DDR3, and the reset sequence's
-        // stack reads ride the bus by design with the run gates low.)
-        if (accel_cyc_en && drw_q && run_w_q && (da_q[15:9] == 7'd0) &&
+        // stack reads ride the bus by design with the run gates low.
+        // !dis_q too: with the chicken bit set nothing serves, every write
+        // rides the bus, and the store only ever tracks - never leads.)
+        if (accel_cyc_en && drw_q && run_w_q && !dis_q && (da_q[15:9] == 7'd0) &&
             maps_main && zvld[da_q[8:4]])
             $fatal(1, "d_front: the sequencer served a read of an authoritative zp/stack line ($%04x)", da_q);
     end

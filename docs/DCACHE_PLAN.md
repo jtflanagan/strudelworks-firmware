@@ -406,6 +406,48 @@ byte and Nox's own stack-page-routine shape read right on a soft
 switch's heels (2c's immediate byte varies per pass so a stale fetch
 cannot be byte-identical).
 
+## THE SECOND BUG (2026-08-31, same session - the boot bench again)
+
+With the zp/stack fix in, a SECOND image - ProDOS 2.4.3's .po, Bitsy
+Bye - failed the bench where Nox had passed: a dozen stale reads in LC
+space at mode 2 unlimited ("Unable to load QUIT.SYSTEM" on the splash),
+absent pre-D$ and absent with `dcache off`.  The trail, followed twice:
+
+1. First theory: the wb flush cleared l_dirty at the invalidate's
+   ACCEPT while the L2's tag clear lands 2-3 clocks later, so a read
+   slipping between saw no open line and hit the stale way.  Real, and
+   fixed (wb_lines' F_INV now holds dirty until inv_line_rdy
+   re-asserts - the walker only returns ready from idle with the cache
+   pipe quiet, so rdy-again IS walk-done) - but the failure survived.
+2. The actual killer, watched line by line: THE RESURRECTION.  An op
+   already in mem_cache's pipe when the one-line invalidate lands has
+   captured the pre-clear tag word at its P4, and its own tag
+   write-back - the LRU touch at P6 (read- and write-hit paths), or
+   the fill it raises - writes the cleared way's valid bit straight
+   back over the clear.  The next read then hits the resurrected
+   stale line with every guard green.  This also applies to lines the
+   HD DRAIN invalidates: a core op racing a drain's inv_line could
+   resurrect a pre-drain line that persists after the drain ends.
+
+The fix (mem_cache): LI_WR records {set, cleared ways} in a
+resurrection guard; until the next invalidate moves it, a tag
+write-back to that set skips its LRU touch (a PLRU hint costs nothing)
+and a landing fill masks the cleared ways out of its captured word -
+minus its own victim, whose line is fresh from the ordered queue.  The
+guard window is provably sufficient: the next LI cannot be accepted
+until the pipe is empty and no fill is pending, so every op that could
+have captured a pre-clear word has written back first.
+
+Bench findings alongside: the host model now applies EVERY
+data-carrying completion to the reference in push_done (SP STATUS
+lists land by DMA too - Bitsy's controller-status list at $266F was
+the "pre-D$ artifact", a bench gap, not RTL); the hdv hex is per-tag
+so concurrent runs stop racing; the authority assertion is gated on
+!dis_q (with the chicken bit the store only tracks, never leads).
+After all of it: Nox and ProDOS both run 2M cycles at unlimited with
+zero bad reads, the battery passes both sweeps, and the 1x Nox trace
+is still byte-identical to the pre-D$ checkout's.
+
 ## HARDWARE: FIRST LOAD FAILED (2026-08-31 ~01:15, mark only)
 
 The first bit on hardware (fw 2e3ec60 built at WNS +0.021, host
@@ -448,6 +490,37 @@ Encode every behavior as an accel_tb phase BEFORE trusting it:
 - The whole battery: accel_tb both sweeps, predict, tlb_trace, mem
   trio, fb_sim, hd_card_tb, floppy, vbl_lock, peripherals, lint.
   Monitor long sims by progress counters, never timeout-and-retry.
+
+## The hardware session (written 2026-08-31, after the fix - fw b24fa34)
+
+Everything below step 4's rules still applies; this is the concrete
+run-sheet for the next time the Pi is up.
+
+1. `pgrep swhost` on the Pi; stop anything running.
+2. Load the FIXED bit: `build/load.sh build/results/master_top.bit`
+   (built from b24fa34 - check `git log -1` before trusting the file
+   date).  Host: `tools/pi.sh run` (cross-built already; a plain run
+   rebuilds and pushes anyway).
+3. The two failing workloads first, at mode 2 unlimited: Nox to its
+   boot cursor and into the intro; Total Replay through the slideshow.
+   Music on (Mockingboard IRQs were absent from the boot bench).
+4. Counters after each: aovf / mlate / mdrops / mmismatch / retries
+   clean, the corner HUD in ~40x territory.  Remember mmismatch CANNOT
+   see a zs staleness (the exemption) - the workloads surviving is the
+   evidence, the counters are the supporting cast.
+5. If anything still fails, the ladder now has a KNOWN extra rung:
+   fw 7106cbd (the reset replica) has never run on hardware by itself -
+   the failed bit was the replica's first outing too.  Order: `swctl
+   accel dcache off` -> `accel turbo off` -> `accel drain off` -> mode
+   1/0 -> load 7106cbd's build -> load 2f974ef's (pre-replica
+   known-good).
+6. A soak with music before calling it stable (the DIAG_ACCEL_HW.md
+   soak is still owed from the timing-relief session).
+7. Residual known gap the bench does not cover: the event stream
+   BEYOND the merge (sparse filter -> TX ring -> host decode) and the
+   host's live display path - unchanged by the D$ except merge DEPTH
+   8->16, but if the machine RUNS while the display misbehaves, look
+   there, not at the D front.
 
 ## Step 4 - build and hardware
 
