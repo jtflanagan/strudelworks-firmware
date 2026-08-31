@@ -1,7 +1,22 @@
 # Diagnosing the L1/drain build's hardware glitches
 
-Status: **open**. Written 2026-08-30 for a fresh session, by the session
-that built the thing. Fix nothing before reading "Triage first".
+Status: **apparently resolved by the timing relief, soak pending.**
+2026-08-30 evening, fw 2f974ef / host dc11c69 on hardware: Nox and Total
+Replay both stable at max accel, Mockingboard music playing (so
+IRQ-under-turbo has now run on hardware, though it remains unsimulated).
+The two bugs fixed alongside the relief were hazards of the NEW
+structure, not the old bit's, so the leading explanation for the old
+glitches is suspect 6 after all - the +0.089/+0.14 decision cones
+(drv_div, dq_cls) missing setup at silicon corners under
+switching-heavy workloads.  A wrong divert or class on one op matches
+the glitch-then-eventually-lock shape exactly.  Declare it closed only
+after the bar in "What proves the fix": a full slideshow walk, Nox with
+music, counters clean (aovf/mlate/mdrops/mmismatch = 0), a long soak.
+If it recurs, the chicken bits are in this bit - bisect at runtime,
+and the rest of this plan stands.
+
+Written 2026-08-30 for a fresh session, by the session that built the
+thing. If diagnosing again: fix nothing before reading "Triage first".
 
 ## The symptom
 
