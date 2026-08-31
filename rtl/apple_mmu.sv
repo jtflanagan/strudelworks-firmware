@@ -386,7 +386,15 @@ module apple_mmu (
         end
     endfunction
 
-    wire [2:0] q_class = classify(q_addr, q_rw);
+    // Classified from qd_addr - the one-clock-registered copy the divert
+    // answer and q_swi already use - never the live address: the live cone
+    // (a data address descends from din through the AGU) was the design's
+    // standing worst path, wobbling into violation on placement luck alone.
+    // The register is sufficient by the same argument as q_swi's: the
+    // sequencer cannot decide before `settled`, one clock behind, so
+    // qd_addr always describes the op being decided - and the sequencer
+    // consumes q_cls DIRECTLY, no re-registration, so no clock is added.
+    wire [2:0] q_class = classify(qd_addr, q_rw);
     assign q_cls = q_class[2:1];
 
     // ---- the internalized-switch question, beside q_cls ---------------------

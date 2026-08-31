@@ -292,11 +292,9 @@ module accel_seq (
     //
     // dq_* are the registered copies the decision is made from; `settled`
     // says they describe the op the core has up now (see the header).
-    logic [1:0] dq_cls;
     logic       swi_q;
     logic       dq_rw, dq_ovr, dq_rst, settled;
     always_ff @(posedge clk) begin
-        dq_cls <= q_cls;
         dq_rw  <= cpu_rw;
         dq_ovr <= ovr_en;
         // cpu_rst arrives through the link's command-reset counter and a
@@ -306,11 +304,11 @@ module accel_seq (
         // rst branch outranks cyc_en at that edge).
         dq_rst <= cpu_rst;
     end
-    // q_swi is ALREADY registered at its source (apple_mmu decodes it from
-    // qd_addr, the one-clock copy the divert answer uses) and aligned with
-    // dq_cls; registering it again here put it a clock behind the class and
-    // misdecided ops.
-    wire needs_bus = off || (dq_cls == CLS_BUS && !q_swi) ||
+    // q_cls and q_swi are ALREADY registered at their source (apple_mmu
+    // computes both from qd_addr, the one-clock copy the divert answer
+    // uses) and consumed directly: re-registering either put it a clock
+    // behind the op and misdecided.
+    wire needs_bus = off || (q_cls == CLS_BUS && !q_swi) ||
                      (!dq_rw && mode == MODE_READS) ||
                      !mem_serve || reset_seq;
     // The core's read of $FFFD, over: the machine's MMU has seen its reset.
