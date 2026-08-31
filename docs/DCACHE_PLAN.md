@@ -232,13 +232,26 @@ behind the core's back:
 The mid-DMA overlap corner (the machine touching an in-flight DMA
 target) is DOCUMENTED-UNDEFINED; do not chase it.
 
-## Step 1 - the reset audit (policy prerequisite)
+## Step 1 - the reset audit (DONE 2026-08-30)
 
-Regional pipelined reset trees per the adopted policy (UG949/WP272
-doctrine): audit u_regfile/rst's fo=2393 net, split card rst /
-cpu_rst / link domains formally, convert opportunistically. Scope it
-small - the point is that the D$'s new RTL is born reset-lean and the
-flat net stops growing, not a wholesale conversion mid-branch.
+The audit: one 100 MHz domain (clk_ctrl = apple_clk); the flat rst
+originates in card_link (~clk_locked | tickcount<1ms | cmd_reset,
+card_link.sv:409) and fans into ~27 modules plus card_link's
+internals; cpu_rst adds the live !apple_res_sync term.  Every
+assertion is held >=100,000 clocks, so a two-flop pipelined replica
+is the same reset two clocks later; the only skew windows are at a
+card reset's edges, a millisecond before anything moves, and the
+machine-RES' term is common and unpiped, so runtime reset behavior
+is bit-identical.
+
+The conversion (master_top): rst_core / cpu_rst_core, a two-flop
+replica feeding the accelerated neighborhood only - cpu65c02,
+accel_seq, l1_front (TLB + icache inside), apple_mmu, apple_rom,
+mem_cache.  Cards, injectors, capture and the link stay flat and
+convert opportunistically later.  The D$ takes rst_core, never
+apple_rst.  Build: WNS 0.000 / WHS +0.050, worst path still the
+dq_cls cone (identity unchanged, phys_opt closes it) - the reset
+change moved nothing.  On hardware only with the D$'s first bit.
 
 ## Step 2 - the RTL (shaped by step 0's outcomes)
 

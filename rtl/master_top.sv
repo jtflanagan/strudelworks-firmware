@@ -391,9 +391,30 @@ module master_top #(
         .phi0_active       (phi0_live)
     );
 
+    // ---- the core region's reset: the pipelined replica ---------------------
+    // apple_rst is held for the link's 1 ms window every time it asserts
+    // (card_link's RST_TICKS), so this two-flop copy is the same reset two
+    // clocks later - nothing a consumer can observe across a hundred
+    // thousand held clocks.  What it buys (the reset-discipline policy,
+    // 2026-08-30): the accelerated neighborhood's reset is a local register
+    // the tools may replicate near its loads, not the flat fanout-2393 net,
+    // and the flat net stops growing.  The cards and injectors stay on
+    // apple_rst - they are bus-paced, with no serve cones - and convert
+    // opportunistically later.  New accelerated RTL takes rst_core, never
+    // apple_rst.
+    logic rst_core_p = 1'b1, rst_core = 1'b1;
+    always_ff @(posedge apple_clk) begin
+        rst_core_p <= apple_rst;
+        rst_core   <= rst_core_p;
+    end
+
     // ---- the soft CPU -------------------------------------------------------
     // Held in reset while the machine is, so it starts where the machine does.
-    wire cpu_rst = apple_rst || !apple_res_sync;
+    // The cards' copy stays on the flat net; the two differ only inside the
+    // two-clock skew at a card reset's edges, a millisecond before anything
+    // moves - the live term, the machine's RES', is common and unpiped.
+    wire cpu_rst      = apple_rst || !apple_res_sync;
+    wire cpu_rst_core = rst_core  || !apple_res_sync;
 
     wire [15:0] cpu_addr;
     wire        cpu_rw;
@@ -438,7 +459,7 @@ module master_top #(
     // cache's for a fast one.
     cpu65c02 u_cpu (
         .clk    (apple_clk),
-        .rst    (cpu_rst),
+        .rst    (cpu_rst_core),
         .cyc_en (cpu_cyc_en),
         .addr   (cpu_addr),
         .rw     (cpu_rw),
@@ -551,8 +572,8 @@ module master_top #(
     // for a bus cycle.  See rtl/accel_seq.sv.
     accel_seq u_seq (
         .clk           (apple_clk),
-        .rst           (apple_rst),
-        .cpu_rst       (cpu_rst),
+        .rst           (rst_core),
+        .cpu_rst       (cpu_rst_core),
         .master_active (cpu_source_active),
         .mode          (accel_mode),
         .target        (accel_target),
@@ -629,7 +650,7 @@ module master_top #(
     // the sequencer exactly as before.  See rtl/l1_front.sv.
     l1_front u_l1 (
         .clk          (apple_clk),
-        .rst          (apple_rst),
+        .rst          (rst_core),
         .i_addr       (cpu_i_addr),
         .cpu_sync     (cpu_sync),
         .cyc_is_i     (cpu_cyc_is_i),
@@ -804,7 +825,7 @@ module master_top #(
     // class is this op?).
     apple_mmu u_mmu (
         .clk        (apple_clk),
-        .rst        (apple_rst),
+        .rst        (rst_core),
         .res_sync   (apple_res_sync),
         .op_addr    (u_addr),
         .op_rw      (u_rw),
@@ -841,7 +862,7 @@ module master_top #(
 
     apple_rom u_rom (
         .clk        (apple_clk),
-        .rst        (apple_rst),
+        .rst        (rst_core),
         .msg_valid  (app_msg_valid),
         .msg_type   (app_msg_type),
         .msg_len    (app_msg_len),
@@ -858,7 +879,7 @@ module master_top #(
 
     mem_cache u_cache (
         .clk         (apple_clk),
-        .rst         (apple_rst),
+        .rst         (rst_core),
         .cl_valid    (cl_valid),
         .cl_cls      (cl_cls),
         .cl_pa       (cl_pa),
