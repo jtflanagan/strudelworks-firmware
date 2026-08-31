@@ -361,6 +361,20 @@ out a different shape.  The chain, each step measured:
    real workloads.  Final build: WNS +0.021 / WHS +0.032, LUT 79.6%,
    BRAM 81% - both below where the phase started.
 
+## HARDWARE: FIRST LOAD FAILED (2026-08-31 ~01:15, mark only)
+
+The first bit on hardware (fw 2e3ec60 built at WNS +0.021, host
+0fcdacb, sims fully green at 40.0x): Nox did not reach its spinning
+boot cursor; Total Replay froze on its initial HGR screen.  Observed
+by the user, NOT diagnosed by the user's instruction - no counters
+read, no levers pulled, no theory recorded.  The bisection ladder is
+armed and untouched: `swctl accel dcache off` (the whole D side),
+`accel turbo off`, `accel drain off`, mode 1/0 - and the pre-D$
+firmware (fw 7106cbd's build) is one load.sh away as the known-good.
+Note for the session that picks this up: read aovf/mlate/mdrops/
+mmismatch/retries and ACCEL_STAT FIRST, before touching anything -
+the failure state on the machine may still be readable.
+
 ## Step 3 - sims (the fix-proving battery, extended)
 
 Encode every behavior as an accel_tb phase BEFORE trusting it:
