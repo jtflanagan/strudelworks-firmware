@@ -554,8 +554,27 @@ module floppy_card #(
         if (mag_up && !mag_down && phase[s] != 7'd79) phase_new = phase[s] + 7'd1;
         if (mag_down && !mag_up && phase[s] != 7'd0)  phase_new = phase[s] - 7'd1;
     end
-    wire        step_move = step_now && head_on && (phase_new != phase[s]);
-    wire        step_track = step_move && (phase_new[6:1] != buf_track[s]);
+    // The stepper's products, registered one clock.  Everything they read -
+    // phase, magnets, buf_track, tracks, drive_sel, motor - changes on
+    // bus-anchored pulses (page_commit, host messages) or an earlier tick,
+    // and step_now can never fire on consecutive clocks (step_timer needs a
+    // reload between), so the one-clock-stale copies are always the settled
+    // values.  Live, this cone - a drive_sel mux, the phase adder, three
+    // comparators - fanned out to every counter's CE/R pin and sat within
+    // 0.1 ns of failing; registered, it starts the clock at zero.
+    logic [6:0] phase_new_q;
+    logic       move_ok_q;      // head_on && the magnets move the cog
+    logic       trk_diff_q;     // ...onto another track than the buffer's
+    logic       trk_in_q [0:1]; // ...inside each drive's track count
+    always_ff @(posedge clk) begin
+        phase_new_q <= phase_new;
+        move_ok_q   <= head_on && (phase_new != phase[s]);
+        trk_diff_q  <= (phase_new[6:1] != buf_track[s]);
+        trk_in_q[0] <= (phase_new[6:1] < tracks[0]);
+        trk_in_q[1] <= (phase_new[6:1] < tracks[1]);
+    end
+    wire        step_move = step_now && move_ok_q;
+    wire        step_track = step_move && trk_diff_q;
 
     // ---- the drives, per tick -------------------------------------------------------
     // Two drives, one block each, so the per-drive state is written from
@@ -573,14 +592,14 @@ module floppy_card #(
             wire spin_end = tick && spin_d && !en_d && (spin[gv] == 20'd1);
             // The head moves to another track on this drive.
             wire moved    = step_track && sel_d;
-            wire [5:0] new_track = phase_new[6:1];
+            wire [5:0] new_track = phase_new_q[6:1];
             // The buffer's track is left behind, or is otherwise finished with.
             wire leave    = moved || ins_edge || ej_edge || drv_flush[gv] || spin_end;
             // ...and the host is owed the track it holds.
             wire flush    = leave && dirty[gv];
             // A new track is wanted from the host.
             wire want     = (moved || ins_edge) && drv_inserted[gv] &&
-                            (((moved) ? new_track : buf_track[gv]) < tracks[gv]);
+                            (moved ? trk_in_q[gv] : (buf_track[gv] < tracks[gv]));
             wire filled   = chunk_done && (fill_drive == gv[0]) &&
                             ((chunks[gv] | (7'd1 << fill_chunk)) == 7'h7F);
             wire read_now = page_commit && op_rw && (idx == 4'hC) && !q7 && sel_d;
@@ -624,7 +643,7 @@ module floppy_card #(
                     end
 
                     // The head.
-                    if (step_move && sel_d) phase[gv] <= phase_new;
+                    if (step_move && sel_d) phase[gv] <= phase_new_q;
 
                     // Leaving a track: the written one goes to the host first.
                     if (flush) begin

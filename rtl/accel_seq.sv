@@ -298,10 +298,16 @@ module accel_seq (
     wire pay       = (go_bus || go_fast || turbo_commit) && !unlimited;
 
     // ---- the core's side ----------------------------------------------------
+    // go_bus rides beside the registered levels: the driver freezes its take
+    // one clock before T_PRESENT (apple_bus_write's t_pre, where the op must
+    // agree with the MMU's registered divert answer), and a dispatch decided
+    // on that very clock would otherwise miss the cycle - the PHI0_HIGH=47
+    // sweep of accel_tb is the proof.  Every term of go_bus is a registered
+    // level, so nothing combinational from the core enters the driver's cone.
     assign cyc_en     = off ? cyc_done : (st == S_BUS) ? cyc_done : fast_hit;
     assign cpu_din    = (off || st == S_BUS) ? drv_din : mem_sub_data;
-    assign bus_owns   = off || bus_owns_q;
-    assign core_valid = off || core_valid_q;
+    assign bus_owns   = off || bus_owns_q   || go_bus;
+    assign core_valid = off || core_valid_q || go_bus;
 
     assign held_governor = (st == S_DECIDE) && settled && !can_pay;
 

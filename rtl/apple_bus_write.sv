@@ -138,10 +138,11 @@
 // does not advance past a cycle that was not its own.  An override may be a
 // WRITE: that is what a DMA into the Apple's memory is, and the write data is
 // driven in exactly the window the core's own would be.  Whether a cycle was
-// overridden is decided ONCE, at T_PRESENT, and remembered in drv_ovr until
-// the cycle ends: a decision that changed mid-cycle would let cyc_en fire for
-// an op the core never issued, and the core would swallow the keyboard's byte
-// as its opcode.
+// overridden is decided ONCE, one clock before T_PRESENT (t_pre, where the
+// op is frozen so the MMU's registered divert answer matches it), and
+// remembered in drv_ovr until the cycle ends: a decision that changed
+// mid-cycle would let cyc_en fire for an op the core never issued, and the
+// core would swallow the keyboard's byte as its opcode.
 //////////////////////////////////////////////////////////////////////////////////
 module apple_bus_write #(
     // Tap INDICES, matching apple_bus_read's convention: tap N pulses N+1
@@ -223,9 +224,11 @@ module apple_bus_write #(
     output logic       op_inflight,
 
     // The address about to be latched at T_PRESENT, for apple_mmu's query,
-    // and its answer: divert this op if it is a write.  Combinational both
-    // ways; sampled at T_PRESENT only.  op_divert then says the cycle on the
-    // pins is a read standing in for the write op_* describes.
+    // and its answer: divert this op if it is a write.  The MMU registers
+    // the address one clock (a timing cut - see apple_mmu.sv); the take and
+    // the address are frozen at t_pre so the answer sampled at T_PRESENT
+    // describes exactly the op being latched.  op_divert then says the
+    // cycle on the pins is a read standing in for the write op_* describes.
     output wire  [15:0] nxt_addr,
     input  wire         divert,
     output wire         op_divert,
@@ -312,9 +315,20 @@ module apple_bus_write #(
     assign nxt_addr  = ovr_en ? ovr_addr : cpu_addr;
     assign op_divert = drv_div;
 
-    // What the next T_PRESENT latches: the override's op, the core's, or nothing.
-    wire take_ovr  = bus_owns && ovr_en;
-    wire take_core = bus_owns && !ovr_en && core_valid;
+    // What the next T_PRESENT latches: the override's op, the core's, or
+    // nothing - decided ONE CLOCK EARLY, at t_pre, and frozen.  The MMU
+    // answers the divert query from a one-clock-registered copy of nxt_addr
+    // (apple_mmu.sv, "the driver's query" - a timing cut: live, the decode
+    // sat at the end of the turbo fetch cone and was the design's worst
+    // path), so the op the present latches must be the op that copy
+    // describes.  Freezing the take and the address at t_pre makes the two
+    // agree by construction: both are the t_pre clock's value.  An override
+    // raised inside the final clock waits one bus cycle - it was already
+    // racing the present, and its FSM waits for `ours` at op_present anyway.
+    wire t_pre = fall_pipe[T_PRESENT-1];
+    logic        pre_ovr, pre_core, pre_rw, pre_sync;
+    logic [15:0] pre_addr;
+    logic [7:0]  pre_dout;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -335,6 +349,12 @@ module apple_bus_write #(
             driving     <= 1'b0;
             op_present  <= 1'b0;
             op_commit   <= 1'b0;
+            pre_ovr     <= 1'b0;
+            pre_core    <= 1'b0;
+            pre_rw      <= 1'b1;
+            pre_sync    <= 1'b0;
+            pre_addr    <= PARK_ADDR;
+            pre_dout    <= 8'd0;
         end else begin
             prev_phi0 <= phi0_sync;
             fall_pipe <= {fall_pipe[T_PRESENT-1:0], fall};
@@ -363,6 +383,17 @@ module apple_bus_write #(
                 emit_window <= 1'b0;
                 driving     <= 1'b0;
             end else begin
+                // The op the next present will take, frozen one clock early -
+                // see t_pre above.
+                if (t_pre) begin
+                    pre_ovr  <= bus_owns && ovr_en;
+                    pre_core <= bus_owns && !ovr_en && core_valid;
+                    pre_addr <= nxt_addr;
+                    pre_rw   <= ovr_en ? ovr_rw    : cpu_rw;
+                    pre_dout <= ovr_en ? ovr_wdata : cpu_dout;
+                    pre_sync <= !ovr_en && cpu_sync;
+                end
+
                 // Present.  This is the only place drv_* changes, which is the
                 // whole point: one stable value per bus cycle, anchored to the
                 // cycle that samples it.
@@ -370,14 +401,14 @@ module apple_bus_write #(
                     // An override is never a SYNC: it is not an instruction,
                     // and the trace must not decode it as one.  Neither is a
                     // dummy, which is the parked read and nobody's op.
-                    drv_addr    <= take_ovr ? ovr_addr  : take_core ? cpu_addr : PARK_ADDR;
-                    drv_rw      <= take_ovr ? ovr_rw    : take_core ? cpu_rw   : 1'b1;
-                    drv_dout    <= take_ovr ? ovr_wdata : cpu_dout;
-                    drv_sync_q  <= take_core && cpu_sync;
-                    drv_ovr     <= take_ovr;
-                    drv_dummy   <= !take_ovr && !take_core;
-                    drv_div     <= divert && (take_ovr ? !ovr_rw : take_core && !cpu_rw);
-                    op_inflight <= take_ovr || take_core;
+                    drv_addr    <= (pre_ovr || pre_core) ? pre_addr : PARK_ADDR;
+                    drv_rw      <= (pre_ovr || pre_core) ? pre_rw   : 1'b1;
+                    drv_dout    <= pre_dout;
+                    drv_sync_q  <= pre_core && pre_sync;
+                    drv_ovr     <= pre_ovr;
+                    drv_dummy   <= !pre_ovr && !pre_core;
+                    drv_div     <= divert && (pre_ovr || pre_core) && !pre_rw;
+                    op_inflight <= pre_ovr || pre_core;
                     emit_window <= 1'b0;      // release the data bus
                     driving     <= 1'b1;
                 end
@@ -391,5 +422,28 @@ module apple_bus_write #(
             end
         end
     end
+
+`ifndef SYNTHESIS
+    // The present latches the t_pre snapshot, and the MMU's divert answer
+    // describes the same snapshot - sound as long as the snapshot's sources
+    // hold still across the one-clock window.  The core's op must (the core
+    // is stalled while core_valid); an override's fields must while ovr_en
+    // stays up (the FSMs step them only on op_present, a bus cycle away).
+    // An ovr_en that rises inside the window is fine - the op waits one
+    // cycle - and so is RES' scrambling the core under a frozen READ (the
+    // in-flight cycle completes, as on a real 6502; reads never consult
+    // divert).  Only a WRITE snapshot whose sources move is the corruption
+    // this guards - drv_div would describe an op the bus is not carrying.
+    always_ff @(posedge clk) begin
+        if (!rst && master_active && t_present && !pre_rw) begin
+            if (pre_core && (cpu_addr != pre_addr || cpu_rw != pre_rw))
+                $fatal(1, "apple_bus_write: the core's write moved between t_pre and t_present (%h -> %h/%b)",
+                       pre_addr, cpu_addr, cpu_rw);
+            if (pre_ovr && ovr_en && (ovr_addr != pre_addr || ovr_rw != pre_rw))
+                $fatal(1, "apple_bus_write: the override's write moved between t_pre and t_present (%h -> %h/%b)",
+                       pre_addr, ovr_addr, ovr_rw);
+        end
+    end
+`endif
 
 endmodule

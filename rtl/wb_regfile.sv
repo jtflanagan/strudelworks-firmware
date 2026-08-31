@@ -186,6 +186,8 @@ module wb_regfile #(
     // outputs unconnected.
     output logic [1:0]     accel_mode,
     output logic [15:0]    accel_target,
+    output logic           accel_turbo_dis, // [25]: no turbo serves (diagnosis)
+    output logic           accel_drain_dis, // [26]: no line drains (diagnosis)
     output logic           accel_cnt_clr,   // pulses
     input  wire [31:0]     accel_stat,
     input  wire [31:0]     accel_fast,
@@ -700,6 +702,10 @@ module wb_regfile #(
     //                           writes on the card
     //   [23:8]   target     RW   ops per bus cycle, 8.8 fixed point; 0 = as
     //                           fast as the card can
+    //   [25]     turbo_dis  RW   1 = the L1 front serves nothing; every op
+    //                           is the sequencer's (docs/DIAG_ACCEL_HW.md)
+    //   [26]     drain_dis  RW   1 = hd_card never drains a block through
+    //                           the image; every DMA goes to the bus
     //   [31]     cnt_clr    W1   clear the ACCEL_* counters
     //
     // Levels, like MEM_CTRL's: safe under a running machine, with the one
@@ -708,19 +714,24 @@ module wb_regfile #(
     // stale memory the machine holds; the host enforces it.
     always_ff @(posedge clk) begin
         if (rst) begin
-            accel_mode    <= 2'd0;
-            accel_target  <= 16'd0;
-            accel_cnt_clr <= 1'b0;
+            accel_mode      <= 2'd0;
+            accel_target    <= 16'd0;
+            accel_turbo_dis <= 1'b0;
+            accel_drain_dis <= 1'b0;
+            accel_cnt_clr   <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
-                accel_mode    <= wb_dat_w[1:0];
-                accel_target  <= wb_dat_w[23:8];
+                accel_mode      <= wb_dat_w[1:0];
+                accel_target    <= wb_dat_w[23:8];
+                accel_turbo_dis <= wb_dat_w[25];
+                accel_drain_dis <= wb_dat_w[26];
             end
             accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
         end
     end
 
-    wire [31:0] accel_ctrl_rd = {8'd0, accel_target, 6'd0, accel_mode};
+    wire [31:0] accel_ctrl_rd = {5'd0, accel_drain_dis, accel_turbo_dis, 1'b0,
+                                 accel_target, 6'd0, accel_mode};
 
     // ---- FB_CTRL ------------------------------------------------------------
     //

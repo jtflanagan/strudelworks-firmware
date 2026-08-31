@@ -354,6 +354,10 @@ stream.
 ACCEL_CTRL    0x8000_008C   [1:0] mode: 0 off, 1 reads on the card / writes on
                             the bus, 2 reads and writes on the card; [23:8]
                             target, ops per bus cycle, 8.8, 0 = unlimited;
+                            [25] turbo_dis - the L1 front serves nothing, every
+                            op is the sequencer's; [26] drain_dis - hd DMA
+                            rides the bus, never the image (both diagnosis
+                            levels, DIAG_ACCEL_HW.md; 0 in normal use);
                             [31] W1 clear counters
 ACCEL_STAT    0x8000_0090   [0] accelerating; [1] held by the governor;
                             [3] bus_owns; [7:4] state; [15:8] merge overflows

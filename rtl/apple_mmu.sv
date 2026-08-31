@@ -71,8 +71,10 @@
 // have, and the capture still records the write with the core's byte
 // (apple_bus_write.sv, apple_bus_read.sv).  The q_addr/q_divert port is the
 // driver's question, asked of the address it is about to present and answered
-// in the same clock from the switches as they stand: would a WRITE here reach
-// auxiliary memory in a bank other than 0?  The driver adds the one condition
+// one clock later (the address is registered here for timing; the driver
+// samples the answer at T_PRESENT, several clocks after the address settled,
+// and asserts the stale copy matched) from the switches as they stand:
+// would a WRITE here reach auxiliary memory in a bank other than 0?  The driver adds the one condition
 // this module cannot know - that the card is serving, since with serving off
 // the core reads the machine's memory and the write had better be in it.
 //
@@ -417,11 +419,23 @@ module apple_mmu (
                          (rom_ok != rom_ok_q);
 
     // ---- the driver's query ---------------------------------------------------------
-    wire q_zp    = (q_addr[15:9]  == 7'd0);
-    wire q_text  = (q_addr[15:10] == 6'b000001);
-    wire q_hires = (q_addr[15:13] == 3'b001);
-    wire q_io    = (q_addr[15:12] == 4'hC);
-    wire q_hi    = (q_addr[15:12] >= 4'hD);
+    // Answered from a one-clock-registered copy of q_addr, NOT the live
+    // value.  The driver samples q_divert once per bus cycle at T_PRESENT,
+    // ~5 clocks after cyc_en advanced the core, so the address has been
+    // stable for several clocks by then and the stale copy is always the
+    // settled one (apple_bus_write asserts exactly that, in sim, at every
+    // sample).  Live, this decode sat at the end of the turbo fetch cone -
+    // icache row -> AGU -> cpu_addr -> here - and was the design's worst
+    // setup path; the register cuts the cone at cpu_addr for free.  The
+    // switches stay live: they are registered locally and change at
+    // op_commit, never in the clock before a present.
+    logic [15:0] qd_addr;
+    always_ff @(posedge clk) qd_addr <= q_addr;
+    wire q_zp    = (qd_addr[15:9]  == 7'd0);
+    wire q_text  = (qd_addr[15:10] == 6'b000001);
+    wire q_hires = (qd_addr[15:13] == 3'b001);
+    wire q_io    = (qd_addr[15:12] == 4'hC);
+    wire q_hi    = (qd_addr[15:12] >= 4'hD);
     wire q_aux_mid = (store80 && q_text)           ? page2 :
                      (store80 && hires && q_hires) ? page2 : ramwrt;
     wire q_aux   = (q_hi || q_zp) ? altzp : q_aux_mid;

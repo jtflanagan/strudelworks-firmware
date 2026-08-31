@@ -216,6 +216,10 @@ module master_top #(
     wire [1:0]  accel_mode;
     wire [15:0] accel_target;
     wire        accel_cnt_clr, accel_on, accel_held;
+    // The diagnosis chicken bits (docs/DIAG_ACCEL_HW.md): levels off
+    // ACCEL_CTRL that switch the two never-simulated-together features off
+    // at runtime, so hardware can bisect a failure without a rebuild.
+    wire        accel_turbo_dis, accel_drain_dis;
     wire [3:0]  seq_state;
     wire [31:0] accel_fast, accel_bus, accel_cycles, accel_wait;
     wire [7:0]  accel_retries, merge_overflows;
@@ -244,7 +248,8 @@ module master_top #(
     wire        hd_fb2_we, hd_fb2_ready;
     wire [15:0] hd_fb2_addr;
     wire [7:0]  hd_fb2_data;
-    wire        hd_fast_dma = accel_on && (accel_mode == 2'd2) && mem_serve;
+    wire        hd_fast_dma = accel_on && (accel_mode == 2'd2) && mem_serve &&
+                              !accel_drain_dis;
     wire [15:0] fev_addr;
     wire [7:0]  fev_data;
     wire        bus_owns, core_valid, op_dummy, op_inflight, drv_cyc_done;
@@ -324,6 +329,7 @@ module master_top #(
         .mem_served (mem_served), .mem_last (mem_last), .mem_diverted (mem_diverted),
         .mem_intc8rom (mem_intc8rom),
         .accel_mode (accel_mode), .accel_target (accel_target),
+        .accel_turbo_dis (accel_turbo_dis), .accel_drain_dis (accel_drain_dis),
         .accel_cnt_clr (accel_cnt_clr),
         .accel_on (accel_on),
         .accel_stat ({7'd0, accel_reset_seq, accel_retries, merge_overflows, seq_state, bus_owns, 1'b0, accel_held, accel_on}),
@@ -402,7 +408,11 @@ module master_top #(
     wire [15:0] cpu_i_pred, cpu_i_addr, cpu_i_steer;
     wire        accel_cyc_en;
     wire [7:0]  accel_din;
-    wire        turbo_ok, l1_claim, turbo_commit, turbo_sync;
+    wire        turbo_ok_seq, l1_claim, turbo_commit, turbo_sync;
+    // turbo_dis simply withholds the sequencer's permission: the front then
+    // never serves, every op dispatches, and the claim window still lapses
+    // on its own clock.  A level off a register - nothing live in the cone.
+    wire        turbo_ok = turbo_ok_seq && !accel_turbo_dis;
     wire [15:0] turbo_addr;
     wire [7:0]  turbo_data;
     wire        accel_op_tick;
@@ -585,7 +595,7 @@ module master_top #(
         .turbo_addr    (turbo_addr),
         .turbo_data    (turbo_data),
         .turbo_sync    (turbo_sync),
-        .turbo_ok      (turbo_ok),
+        .turbo_ok      (turbo_ok_seq),
         .op_tick       (accel_op_tick),
         .fev_room      (fev_room),
         .u_present     (u_present),

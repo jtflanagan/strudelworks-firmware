@@ -172,6 +172,7 @@ module reg_map_tb;
     wire       mem_serve;
     wire       mem_cnt_clr, mem_inval;
     wire [1:0] accel_mode;
+    wire       accel_turbo_dis, accel_drain_dis;
     wire [15:0] accel_target;
     wire       accel_cnt_clr;
     integer    accel_cnt_clrs = 0;
@@ -221,6 +222,7 @@ module reg_map_tb;
         .mem_mismatch (32'h0000_0003), .mem_served (32'h0000_0444), .mem_diverted (32'h0000_0777),
         .mem_last (32'h1234_5C3A), .mem_intc8rom (1'b1),
         .accel_mode (accel_mode), .accel_target (accel_target),
+        .accel_turbo_dis (accel_turbo_dis), .accel_drain_dis (accel_drain_dis),
         .accel_cnt_clr (accel_cnt_clr),
         .accel_stat (32'h0000_0A11), .accel_fast (32'h0001_F00D), .accel_bus (32'h0000_0B05),
         .accel_cycles (32'h000C_0CE5), .accel_wait (32'h0000_0A17),
@@ -1294,6 +1296,19 @@ module reg_map_tb;
         if (out_mem[base+2] !== 32'h0000_0001 || accel_cnt_clrs != 1) begin
             $display("FAIL: ACCEL_CTRL second write reads %08x, clears %0d", out_mem[base+2], accel_cnt_clrs); errors = errors + 1;
         end else $display("  ok: ...and a write without the W1 bit does not pulse it");
+        do_write(32'h8000_008C, 32'h0600_0001);           // both chicken bits on
+        base = out_n;
+        do_read(32'h8000_008C);
+        if (out_mem[base+2] !== 32'h0600_0001 ||
+            accel_turbo_dis !== 1'b1 || accel_drain_dis !== 1'b1) begin
+            $display("FAIL: ACCEL_CTRL chicken bits read %08x (turbo_dis %b drain_dis %b)",
+                     out_mem[base+2], accel_turbo_dis, accel_drain_dis);
+            errors = errors + 1;
+        end else $display("  ok: ACCEL_CTRL's turbo_dis and drain_dis are levels and read back");
+        do_write(32'h8000_008C, 32'h0000_0001);           // ...and off again
+        if (accel_turbo_dis !== 1'b0 || accel_drain_dis !== 1'b0) begin
+            $display("FAIL: ACCEL_CTRL chicken bits stuck on"); errors = errors + 1;
+        end else $display("  ok: ...and clear again");
         base = out_n;
         do_read(32'h8000_0090);
         do_read(32'h8000_0094);

@@ -92,14 +92,62 @@ The goal is to split three very different failures apart:
    back clean and failures track temperature/speed scaling. (History:
    the proven pre-L1 builds closed at +0.009..+0.243.)
 
-## Strongly recommended first change: chicken bits
+## Strongly recommended first change: chicken bits - DONE 2026-08-30
 
-Before deep debugging, add two ACCEL_CTRL spare bits (word has room;
-[25] turbo_disable, [26] drain_disable), plumb to `turbo_ok` and
-`fast_dma`, rebuild once. That turns the hardware itself into the
-bisector: baseline-accel (proven 12.6x path) vs +turbo vs +drain vs
-both, switchable at runtime under the failing workload. An hour of work
-that likely localizes the bug in one evening of play.
+ACCEL_CTRL [25] turbo_dis (gates `turbo_ok` in master_top) and [26]
+drain_dis (gates `hd_fast_dma`), both 0 in normal use, readable back.
+Host side: config keys `turbo = on|off` / `drain = on|off`, and at
+runtime `swctl accel turbo on|off` / `swctl accel drain on|off`;
+`swctl accel status` shows ", turbo OFF" / ", drain OFF" when set.
+The hardware is now the bisector: baseline-accel (proven 12.6x path)
+vs +turbo vs +drain vs both, switchable under the failing workload.
+
+The same build carries the first timing relief (see "Timing relief"
+below): the worst setup path and the whole floppy stepper cluster were
+cut.  The reported WNS still hugs zero - Vivado stops at barely-met -
+but closure went from ~2 hours of iteration to a single ~7.5 minute
+pass, and an experiment with 0.2 ns of extra setup uncertainty on
+clk_ctrl_raw closed at +0.073 in the same wall time, proving ~0.27 ns
+of true headroom on the worst cone.  The uncertainty is NOT carried in
+the XDC (user decision); re-add it for a one-off if a corner-silicon
+question ever needs settling.
+
+## Timing relief (2026-08-30, with the chicken bits)
+
+The routed checkpoint's top-150 paths (build/results/timing_paths.rpt,
+extracted with build/../scratch extract_paths.tcl against
+master_top_postroute_physopt.dcp) were four clusters, and two were cut:
+
+1. **CUT: icache -> AGU -> cpu_addr -> MMU divert -> drv_div_reg**
+   (+0.089, the WNS). apple_mmu now answers q_divert from a one-clock
+   REGISTERED copy of q_addr. Sound because apple_bus_write samples the
+   answer once per bus cycle at T_PRESENT, ~5 clocks after cyc_en
+   advanced the core; a sim-only check in apple_bus_write $fatal's if
+   nxt_addr ever moves in the clock before a present that takes an op.
+2. **CUT: u_fd drive_sel -> stepper -> every counter's CE/R** (+0.097
+   and ~60 more endpoints to +0.9). floppy_card registers the stepper's
+   products (phase_new, the move/track compares) one clock; step_now
+   fires STEP_TICKS bus cycles after the last magnet change and can
+   never fire on consecutive clocks, so the stale copies are always the
+   settled values.
+3. **LEFT: icache -> AGU -> q_cls -> u_seq/dq_cls_reg** (+0.139). The
+   fast-op decision leg. The sample taken on a turbo-advance clock is
+   dead (settled is 0 the next cycle and dq_cls re-samples), so a
+   set_false_path from the icache row BRAMs to dq_cls_reg would be
+   functionally sound - but it is a timing exception on a glitching
+   design, so it waits. The alternative (decide from a registered
+   address) costs +1 clock per data op. Discuss before doing either.
+4. **LEFT: u_mmu/cl_valid -> icache row_hit_reg** (+0.154). The write
+   snoop into the row register's validity - delaying it one clock opens
+   a one-clock stale-fetch window against the drain (SMC). Not safely
+   cuttable; it sets the floor with (3).
+
+Everything else in the top 150 sits at +0.3 or better (CPU-internal
+din -> ALU -> registers, hd acc resets, vbl). Measured after the cuts:
+post-route WNS -0.297 / TNS -0.589, one 46 s phys_opt pass to +0.04,
+~7.5 minutes wall end to end - closure is a formality now, not a fight.
+The worst path is the dq_cls cone as predicted, and the uncertainty
+experiment above showed it still holds ~0.27 ns of real headroom.
 
 ## Code-review targets (fresh eyes, in this order)
 
