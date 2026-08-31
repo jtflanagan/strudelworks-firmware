@@ -68,8 +68,15 @@
 //     its mirror never seeing a reset.  Such a dummy is kept as the event
 //     it is: a read of $0000 is harmless to every consumer the host has.
 //   - a FAST op, tagged 0xC: an op the core took from the card, never a
-//     cycle.  Kept by the rule a cycle's event would be (every one in full,
-//     writes in sparse - a fast op is never in $Cxxx), NEVER counted, and
+//     cycle.  Kept by the rule a cycle's event would be: every one in full;
+//     in sparse the writes, and the $C0xx reads that CARRY STATE - the
+//     video toggles ($C050-$C057) and the language card ($C080-$C08F) flip
+//     switches on a READ, and the host's mirror follows those flips from
+//     the stream.  The internalized switches (docs/ACCELERATION.md) made
+//     fast $C0xx ops possible at all; the status and keyboard reads carry
+//     no state and are dropped like any RAM read - a keyboard poll loop at
+//     full acceleration is millions of reads a second, and the link owes
+//     the host none of them.  NEVER counted, and
 //     NEVER consulted for the edge rule: a fast op taken between one cycle's
 //     tick and the next carries the next cycle's level, and an edge seen on
 //     it would not be seen again on the cycle's own event - the one the
@@ -126,8 +133,11 @@ module bus_event_filter #(
     logic [15:0] hold_free  = '0;
 
     wire on_edge = first || in_mark || (in_vbl != prev_vbl) || (in_res != prev_res);
+    // A read the IIe flips a switch on: the toggles and the LC.
+    wire in_swtog = in_io && (in_data[11:8] == 4'd0) &&
+                    ((in_data[7:4] == 4'h5) || (in_data[7:4] == 4'h8));
     wire keep = in_dmal  ? 1'b1 :
-                in_fast  ? (!sparse || !in_rw) :
+                in_fast  ? (!sparse || !in_rw || in_swtog) :
                 in_dummy ? on_edge :
                            (!sparse || on_edge || in_io || !in_rw);
     // A fast op or a DMA-line word is not a cycle: it neither counts nor

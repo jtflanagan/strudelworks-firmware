@@ -12,4 +12,4 @@ iverilog -g2012 -o "$root/sim/bus_event_filter_tb.out" -s bus_event_filter_tb \
     "$root/rtl/bus_event_filter.sv" "$root/rtl/event_merge.sv" \
     "$root/rtl/bus_event_capture.sv" \
     "$root/rtl/sync_fifo.sv"
-exec vvp -n "$root/sim/bus_event_filter_tb.out"
+vvp -n "$root/sim/bus_event_filter_tb.out" | tee /dev/stderr | grep -q "^PASS$"

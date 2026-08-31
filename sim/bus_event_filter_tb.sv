@@ -46,7 +46,7 @@ module bus_event_filter_tb;
     reg  [31:0] got      [0:4095];
     reg         got_mark [0:4095];
     reg  [15:0] got_free [0:4095];
-    integer     got_n = 0;
+    integer     got_n = 0, k0 = 0;
     integer     last_out_clk = -10, consecutive = 0, consecutive_bad = 0;
     integer     clk_n = 0;
     always @(posedge clk) begin
@@ -338,6 +338,20 @@ module bus_event_filter_tb;
             if (got[4] !== {4'hD, 28'd1} || got[5] !== sent[9]) bad = bad + 1;
             if (bad != 0) fail("case 8: the words out are not the expected ones");
             else $display("  ok: a fast read vanishes uncounted, a fast write is kept, the edge stays with its cycle");
+        // ...and the $C0xx reads that flip switches are kept even in sparse:
+        // the toggles and the LC - the host's mirror follows those - while a
+        // status or keyboard read is dropped like any other.
+        k0 = got_n;
+        fast(16'hC083, 1'b1, 8'hA5);          // an LC read: a switch flip - kept
+        fast(16'hC055, 1'b1, 8'hA5);          // PAGE2 on by a read - kept
+        fast(16'hC000, 1'b1, 8'h00);          // a keyboard poll - dropped
+        fast(16'hC011, 1'b1, 8'h80);          // a status read - dropped
+        repeat (8) @(negedge clk);
+        if (got_n != k0 + 2 ||
+            got[k0][31:28] !== 4'hC || got[k0][15:0] !== 16'hC083 ||
+            got[k0+1][31:28] !== 4'hC || got[k0+1][15:0] !== 16'hC055)
+            fail($sformatf("case 8b: %0d words out, wanted the $C083 and $C055 fast reads alone", got_n - k0));
+        else $display("  ok: fast $C083 and $C055 reads kept in sparse, $C000 and $C011 dropped");
         end
         if (skipped_total() + kept_total() != cycles) fail("case 8: skipped + kept != cycles");
 
@@ -443,7 +457,8 @@ module bus_event_filter_tb;
         .fast_valid (m_fast_valid), .fast_addr (m_fast_addr), .fast_rw (m_fast_rw),
         .fast_data (m_fast_data), .fast_sync (1'b0), .vbl_level (m_vbl), .res_level (1'b1),
         .out_valid (m_valid), .out_data (m_data), .out_mark (m_mark), .out_mark_free (m_free),
-        .out_dummy (m_dummy), .overflows (m_overflows)
+        .out_dummy (m_dummy), .overflows (m_overflows),
+        .fev_room (), .dma_word (32'd0), .dma_valid (1'b0), .dma_take ()
     );
     bus_event_filter #(.CAP (CAP)) dut3 (
         .clk (clk), .rst (rst), .enable (m_enable), .sparse (1'b0),
