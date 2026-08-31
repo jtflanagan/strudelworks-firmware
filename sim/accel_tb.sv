@@ -652,6 +652,13 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     integer mix_max [0:4];
     integer gov_clocks = 0;
     integer pstalls = 0;
+    // Data-page locality, for the D$'s page-register question: of the fast
+    // data ops (reads and writes), how many land in page 0, page 1, the one
+    // page a single register would hold, or one of {zp, stack, a floating
+    // register or two}.
+    integer loc_total, loc_zp, loc_stk, loc_one, loc_f1, loc_f2;
+    logic [7:0] loc_one_pg, loc_f1_pg [0:1];
+    logic       loc_f1_mru;
     task clear_mix;
         integer k;
         begin
@@ -659,6 +666,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                 mix_cnt[k] = 0; mix_sum[k] = 0; mix_max[k] = 0;
             end
             gov_clocks = 0; mix_clk = 0; pstalls = 0;
+            loc_total = 0; loc_zp = 0; loc_stk = 0; loc_one = 0; loc_f1 = 0; loc_f2 = 0;
+            loc_one_pg = 8'hFF; loc_f1_pg[0] = 8'hFF; loc_f1_pg[1] = 8'hFE; loc_f1_mru = 0;
         end
     endtask
     initial clear_mix();
@@ -673,6 +682,14 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                      mix_cnt[4], mix_cnt[4] ? real'(mix_sum[4]) / mix_cnt[4] : 0.0, mix_max[4],
                      gov_clocks);
             $display("    ...page-register stalls: %0d clocks", pstalls);
+            if (loc_total != 0)
+                $display("    ...fastD locality (%0d ops): zp %.1f%% stk %.1f%% | one-reg %.1f%% | zp+stk+1float %.1f%% | zp+stk+2float %.1f%%",
+                         loc_total,
+                         100.0 * loc_zp  / loc_total,
+                         100.0 * loc_stk / loc_total,
+                         100.0 * loc_one / loc_total,
+                         100.0 * (loc_zp + loc_stk + loc_f1) / loc_total,
+                         100.0 * (loc_zp + loc_stk + loc_f2) / loc_total);
         end
     endtask
     integer mix_cat;
@@ -688,6 +705,24 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             mix_sum[mix_cat] = mix_sum[mix_cat] + mix_clk;
             if (mix_clk > mix_max[mix_cat]) mix_max[mix_cat] = mix_clk;
             mix_clk = 0;
+            if (mix_cat == 2 || mix_cat == 3) begin
+                loc_total = loc_total + 1;
+                if (cpu_addr[15:8] == loc_one_pg) loc_one = loc_one + 1;
+                loc_one_pg = cpu_addr[15:8];
+                if      (cpu_addr[15:8] == 8'h00) loc_zp  = loc_zp + 1;
+                else if (cpu_addr[15:8] == 8'h01) loc_stk = loc_stk + 1;
+                else begin
+                    if (cpu_addr[15:8] == loc_f1_pg[loc_f1_mru]) begin
+                        loc_f1 = loc_f1 + 1; loc_f2 = loc_f2 + 1;
+                    end else if (cpu_addr[15:8] == loc_f1_pg[!loc_f1_mru]) begin
+                        loc_f2 = loc_f2 + 1;
+                        loc_f1_mru = !loc_f1_mru;
+                    end else begin
+                        loc_f1_mru = !loc_f1_mru;
+                        loc_f1_pg[loc_f1_mru] = cpu_addr[15:8];
+                    end
+                end
+            end
         end
     end
 
