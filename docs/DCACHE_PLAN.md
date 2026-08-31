@@ -135,21 +135,36 @@ register can never hold that pair, two hold it almost perfectly.
   the D$ serves, only misses and slow classes reach the sequencer's
   decision, so the pressure drops naturally; revisit after, with the
   DIAG_ACCEL_HW.md false-path memo as the fallback.
-- **Write buffer: the MERGING line accumulator (user's call)**: one
-  open line {line, 16-bit be, 16 B}; a same-line write ORs in a
-  lane, a different line flushes the open one as a single line push.
-  mem_client's queue entries are ALREADY {fill, id, line, be, data}
-  (mem_client.sv:110-124 - a byte write is a line write with one
-  lane), so no format change. Land merged lines the DMA-drain way:
-  dq_* push + inv_line walk of the L2 + the in-order queue that
-  already forbids a fill passing a drained line. RAW rule: a read
-  matching the open line is D$-served or stalls for the flush -
-  never reads stale DDR3. Flush on line change, a read miss
-  descending, any override/hold/DMA boundary. Merging relieves the
-  DDR3/L2 side only - the event stream still caps sustained write
-  retirement (next section).
+- **Write buffer: MERGING write-back lines, a small set (user's
+  call, refined)**: FOUR open lines {line, 16-bit be, 16 B, dirty},
+  LRU - not one, because the write path is shared and zp/stack are
+  ~55% of write traffic: with a single line, every JSR/PHA/INC-ptr
+  between stores to a streaming line would force a flush.  Four let
+  the zp line, the stack line and the fill line coexist and all
+  merge.  A same-line write ORs in a lane; a fifth distinct line
+  evicts the LRU one as a single line push.  mem_client's queue
+  entries are ALREADY {fill, id, line, be, data} (mem_client.sv:
+  110-124 - a byte write is a line write with one lane), so no
+  format change.  Land merged lines the DMA-drain way: dq_* push +
+  inv_line walk of the L2 + the in-order queue that already forbids
+  a fill passing a drained line.  Coherence is structural: open
+  lines shadow ONLY DDR3, never the caches (a write updates the
+  D$/zp-store copy at retirement), so cache-served reads are
+  coherent by construction; only a read MISS descending to L2/DDR3
+  compares against the open lines - on the miss path, off the serve
+  clock - and stalls until the match flushes.  Other flushes: all
+  dirty lines at any override/DMA/hold boundary (bounded, 4 pushes),
+  opportunistic writeback when mem_client's queue is empty.  DMA
+  overlap with an open line falls under the documented-undefined
+  mid-DMA corner.  Line count is a parameter; tune later against
+  the counters.  Merging relieves the DDR3/L2 side only - the event
+  stream still caps sustained write retirement (next section).
 - **Write-event backpressure: stall in the serve verdict + DEPTH
-  back to 16** (see next section for the arithmetic).
+  back to 16** (see next section for the arithmetic).  The stall
+  machinery is settled as mandatory (user: it WILL happen at high
+  acceleration); both walls gate retirement - event-FIFO room
+  (law 5, correctness) and buffer-full-pending-eviction.  Sizes
+  (4 lines / 16 events / queue 4) are starting points to tune.
 - **Storage**: dedicated 4KB direct-mapped D$ BRAM, physically
   indexed/tagged in the 25-bit {rom, pa} space (data reads CAN be
   ROM), FF valid vector, flash-clear; map changes flush only the
