@@ -104,38 +104,56 @@ keep using it. The D$ goes IN FRONT, like the icache did.
    against it enumerates every near-critical endpoint (the 2026-08-30
    session's timing_paths.rpt pattern).
 
-## Step 0 - the design discussion (USER-GATED - do not skip)
+## Step 0 - the design discussion: OUTCOMES (held 2026-08-30)
 
-The user wants the D-fetch design conversation before RTL. Items on
-the table, with the analysis to bring:
+The measured locality (accel_tb, fw 4c3d78e, mode 2, 7284 fast data
+ops): zp 53.6%, stack 1.9%, one floating register 35.2%,
+zp+stk+one-float 57.0%, zp+stk+two-float LRU 99.3%. The workload
+alternates two data pages (a copy loop's src and dst) - one floating
+register can never hold that pair, two hold it almost perfectly.
 
-- **The page-compare classification idea** (the user's, parked from
-  the l1-front session). The I side's page register holds the last
-  used page's translation in FFs so the serve clock never reads the
-  TLB. The D side wants the analog: a D page register (or two - zero
-  page + stack are 6502-hot and distinct from the data page), with
-  `page_match` on registered address bits. Bring: the measured page
-  locality of data ops (instrument accel_tb - what fraction of fastD
-  hits the last data page / zp / stack), which decides one register
-  vs a few vs reading the TLB's LUTRAM in the first of the two
-  clocks (legal - clock 1 is not the serve clock).
-- **Possible fusion with the decision path**: dq_cls (the standing
-  WNS) exists to classify the op the sequencer decides on. A D-side
-  page register that already says "this page is image-servable both
-  ways" could subsume the class decode for the common case and
-  relieve that path; the false-path memo in DIAG_ACCEL_HW.md is the
-  alternative if not. Worth deciding together.
-- **Write buffer shape**: MEMORY.md places it in mem_client's queue;
-  the l1-front memory says "small". Depth, and the read-after-write
-  rule (forward vs stall-on-match - with a small buffer, compare and
-  stall is the simple sound choice).
-- **Write-event backpressure**: stall vs shed (see next section - the
-  answer must be stall; the question is where the stall bites).
-- **Storage**: a dedicated D$ BRAM (icache-style, 4KB direct-mapped,
-  physically indexed/tagged in the 25-bit {rom, pa} space - data
-  reads CAN be ROM) vs serving from a wider structure. The icache's
-  physical tagging means map changes flush only the TLB, never the
-  cache; keep that property.
+- **The zp/stack store (USER'S DESIGN, settled)**: a dedicated
+  512-byte BRAM (32 lines x 16 B, per-line valid FFs) caching
+  PHYSICAL MAIN pages 0 and 1 only - its identity is permanent, so
+  no tags, no flash on map change, no map_changed interaction. The
+  serve qualifier is registered addr[15:9]==0 AND a registered
+  "zp/stack maps to main" bit (ALTZP-effective state; changes only
+  via soft-switch bus ops, stable in the fast cone). ALTZP-on and
+  RamWorks-banked zp/stack fall to the ordinary D$ path, correct but
+  unprivileged. Fills by observation from sub_line; writes update in
+  place and still ride the write path (events, buffer, DDR3).
+  Snooped like everything else - DMA and host writes can land in
+  physical main 0/1 regardless of the core's map. Why dedicated: in
+  a 4KB direct-mapped D$, pa[11:4] puts zp/stack at indices 0-31,
+  the same rows as the first 512 B of every 4KB region (both HGR
+  page bases included) - drawing loops would evict them all day.
+- **The floating pages**: a 2-entry LRU of page registers
+  ({page, ok both views, ppage} in FFs), reloaded from the TLB off
+  the serve path on a mismatch, one-clock stall, the I-side pattern.
+  Covers the non-zp/stack remainder at 99%+ by the measurement.
+- **No fusion with the decision path**: dq_cls stays as it is. Once
+  the D$ serves, only misses and slow classes reach the sequencer's
+  decision, so the pressure drops naturally; revisit after, with the
+  DIAG_ACCEL_HW.md false-path memo as the fallback.
+- **Write buffer: the MERGING line accumulator (user's call)**: one
+  open line {line, 16-bit be, 16 B}; a same-line write ORs in a
+  lane, a different line flushes the open one as a single line push.
+  mem_client's queue entries are ALREADY {fill, id, line, be, data}
+  (mem_client.sv:110-124 - a byte write is a line write with one
+  lane), so no format change. Land merged lines the DMA-drain way:
+  dq_* push + inv_line walk of the L2 + the in-order queue that
+  already forbids a fill passing a drained line. RAW rule: a read
+  matching the open line is D$-served or stalls for the flush -
+  never reads stale DDR3. Flush on line change, a read miss
+  descending, any override/hold/DMA boundary. Merging relieves the
+  DDR3/L2 side only - the event stream still caps sustained write
+  retirement (next section).
+- **Write-event backpressure: stall in the serve verdict + DEPTH
+  back to 16** (see next section for the arithmetic).
+- **Storage**: dedicated 4KB direct-mapped D$ BRAM, physically
+  indexed/tagged in the 25-bit {rom, pa} space (data reads CAN be
+  ROM), FF valid vector, flash-clear; map changes flush only the
+  TLB, never the cache. Now free of zp/stack index pollution.
 
 ## The write-event budget - the one new wall
 
@@ -187,16 +205,17 @@ cpu_rst / link domains formally, convert opportunistically. Scope it
 small - the point is that the D$'s new RTL is born reset-lean and the
 flat net stops growing, not a wholesale conversion mid-branch.
 
-## Step 2 - the RTL (after step 0 settles the shape)
+## Step 2 - the RTL (shaped by step 0's outcomes)
 
-Sketch, to be revised by step 0: a `dcache_l1.sv` + D-side extension
-of l1_front (or a sibling `d_front`), fed by the existing TLB's write
-view; 2-clock hit (clock 1: registered address + steer; clock 2:
-registered verdict serves, cyc_en late-cancel style); fills by
-observation from sub_line like the icache; write-through with the
-small buffer in mem_client's queue; the merge-credit stall in the
-verdict; op_tick + pay per op; a d_claim window vs decide_go mirroring
-l1_claim's mutual exclusion.
+A `dcache_l1.sv` + D-side extension of l1_front (or a sibling
+`d_front`): the dedicated main-zp/stack BRAM, the 2-entry LRU page
+registers fed by the TLB's both-view classification, and the 4KB D$;
+2-clock hit (clock 1: registered address + steer; clock 2: registered
+verdict serves, cyc_en late-cancel style); fills by observation from
+sub_line like the icache; write-through via the merging line
+accumulator into mem_client's queue (dq-style landing + inv_line);
+the merge-credit stall in the verdict; op_tick + pay per op; a
+d_claim window vs decide_go mirroring l1_claim's mutual exclusion.
 
 **Add the chicken bit on day one**: ACCEL_CTRL [27] dcache_dis gating
 the D$ serve permission, host key + `swctl accel dcache on|off`,
