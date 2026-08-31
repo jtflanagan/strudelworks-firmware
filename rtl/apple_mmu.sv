@@ -195,6 +195,25 @@ module apple_mmu (
     input  wire        q_rw,
     output wire [1:0]  q_cls,
 
+    // ---- the internalized soft switches (docs/ACCELERATION.md) --------------
+    // In the closed regime - mode 2, serving, RAM never exported - the
+    // switches whose whole effect is this shadow stop riding the bus: the
+    // sequencer serves them fast, retires them with a synthetic commit
+    // (op_commit fires and the update block above runs as for a bus op),
+    // and the event stream still carries them to the host.  q_swi is the
+    // live-op question beside q_cls; swi_stat_byte is the status page's
+    // answer for the REGISTERED op (op_addr, stable through the fast
+    // sequence).  INTCXROM and SLOTC3ROM writes stay on the bus: four slot
+    // cards track them from the bus stream (rtl/slot_switches.sv).
+    input  wire        swi_on,       // the closed-regime level, chicken bit included
+    input  wire        swi_kbd_ok,   // the keyboard latch holds a byte (kbd_inject)
+    input  wire        swi_fb_ok,    // fb_sim can answer a floating-value read
+    input  wire        swi_vbl_ok,   // the VBL level is locked and known
+    input  wire        swi_vbl,      // ...and this is it (1 = in vertical blanking)
+    input  wire [6:0]  swi_kbd_low,  // the keyboard latch's low bits, for status reads
+    output wire        q_swi,
+    output wire [7:0]  swi_stat_byte,
+
     // ---- the TLB's question, combinational ---------------------------------
     // The two views of one 256-byte page, on the switches as they stand.  All
     // Apple II mapping is page-oriented, so within any page the class and
@@ -246,7 +265,7 @@ module apple_mmu (
     // ---- the switches ----------------------------------------------------------
     logic store80, ramrd, ramwrt, intcxrom, altzp, slotc3rom;
     logic page2, hires;
-    logic text, mixed, col80;
+    logic text, mixed, col80, altchar;
     logic lc_bank2, lc_ramrd, lc_wren, lc_prewrite;
 
     assign sw_state = {lc_prewrite, lc_wren, lc_ramrd, lc_bank2,
@@ -275,6 +294,7 @@ module apple_mmu (
             text        <= 1'b1;       // the IOU's reset state: 40-column text
             mixed       <= 1'b0;
             col80       <= 1'b0;
+            altchar     <= 1'b0;
             lc_bank2    <= 1'b1;
             lc_ramrd    <= 1'b0;
             lc_wren     <= 1'b1;
@@ -292,7 +312,7 @@ module apple_mmu (
                     3'd4: altzp     <= op_addr[0];
                     3'd5: slotc3rom <= op_addr[0];
                     3'd6: col80     <= op_addr[0];
-                    default: ;
+                    3'd7: altchar   <= op_addr[0];
                 endcase
             end
             // $C071/$C073: the RamWorks bank, if it exists.
@@ -368,6 +388,61 @@ module apple_mmu (
 
     wire [2:0] q_class = classify(q_addr, q_rw);
     assign q_cls = q_class[2:1];
+
+    // ---- the internalized-switch question, beside q_cls ---------------------
+    // A shallow decode of the live address - range matches ANDed with
+    // registered levels, nothing like the classifier's depth - registered
+    // into the sequencer's dq_* set exactly as q_cls is.
+    //
+    // Writes: the mapping and video switches whose whole effect is the
+    // shadow above ($C000-$C005, $C008/9, $C00C-$C00F - never INTCXROM or
+    // SLOTC3ROM, the slot cards' trackers ride the bus stream), the video
+    // toggles, the RamWorks bank, the language card.  Reads: the status
+    // page (bit 7 from the shadow), the keyboard (the parked-dummy latch),
+    // and the floating-value toggles/LC when fb_sim can answer; $C019 only
+    // with the VBL level locked.  $C010 and the $C01x writes are the real
+    // strobe's and always ride the bus.
+    wire [3:0] qi_hi = q_addr[7:4];
+    wire [3:0] qi_lo = q_addr[3:0];
+    wire qi_io      = (q_addr[15:8] == 8'hC0);
+    wire qi_c00x_wr = (qi_hi == 4'h0) &&
+                      (qi_lo[3:1] != 3'd3) && (qi_lo[3:1] != 3'd5);
+    wire qi_c05x    = (qi_hi == 4'h5) && !qi_lo[3];        // $C050-$C057
+    wire qi_c08x    = (qi_hi == 4'h8);
+    wire qi_rwbk    = (qi_hi == 4'h7) && (qi_lo == 4'h1 || qi_lo == 4'h3);
+    wire qi_wr = !q_rw && (qi_c00x_wr || qi_c05x || qi_c08x || qi_rwbk);
+    wire qi_rd =  q_rw && ((qi_hi == 4'h0) ? swi_kbd_ok
+                         : (qi_hi == 4'h1) ? ((qi_lo != 4'h0) &&
+                                              (qi_lo != 4'h9 || swi_vbl_ok))
+                         : (qi_c05x || qi_c08x) ? swi_fb_ok
+                         : 1'b0);
+    assign q_swi = swi_on && qi_io && (qi_wr || qi_rd);
+
+    // The status page's byte, for the REGISTERED op: the switch in bit 7 -
+    // $C019 is VBL', low while the beam is in blanking - over the keyboard
+    // latch's low bits, as the IOU serves them.
+    logic swi_stat_bit;
+    always_comb begin
+        case (op_addr[3:0])
+            4'h1: swi_stat_bit = lc_bank2;
+            4'h2: swi_stat_bit = lc_ramrd;
+            4'h3: swi_stat_bit = ramrd;
+            4'h4: swi_stat_bit = ramwrt;
+            4'h5: swi_stat_bit = intcxrom;
+            4'h6: swi_stat_bit = altzp;
+            4'h7: swi_stat_bit = slotc3rom;
+            4'h8: swi_stat_bit = store80;
+            4'h9: swi_stat_bit = !swi_vbl;
+            4'hA: swi_stat_bit = text;
+            4'hB: swi_stat_bit = mixed;
+            4'hC: swi_stat_bit = page2;
+            4'hD: swi_stat_bit = hires;
+            4'hE: swi_stat_bit = altchar;
+            4'hF: swi_stat_bit = col80;
+            default: swi_stat_bit = 1'b0;
+        endcase
+    end
+    assign swi_stat_byte = {swi_stat_bit, swi_kbd_low};
 
     // ---- the TLB's page views ----------------------------------------------
     // The physical page a 256-byte page maps to, as a function of the page and

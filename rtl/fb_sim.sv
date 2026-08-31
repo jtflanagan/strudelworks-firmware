@@ -152,6 +152,10 @@ module fb_sim (
     // To master_top's din_sub mux.
     output wire        sub_en,
     output wire [7:0]  sub_data,
+    // The internalized switches' question (docs/ACCELERATION.md): can this
+    // module answer a floating-value read right now?  The serve terms less
+    // the per-op ones; sub_data is the byte either way.
+    output wire        int_ok,
 
     // For the registers.
     output wire [6:0]  mode,         // {store80, col80, page2_disp, hires, mixed, text, locked}
@@ -293,6 +297,7 @@ module fb_sim (
     // ---- serve --------------------------------------------------------------------
     assign sub_en   = serve && locked && master_active && !op_ovr && !col80 && cand;
     assign sub_data = pred;
+    assign int_ok   = serve && locked && master_active && !col80;
 
     assign mode = {store80, col80, page2_disp, hires, mixed, text, locked};
 

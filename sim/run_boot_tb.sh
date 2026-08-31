@@ -12,6 +12,7 @@
 #     --dcache-off     dcache_dis chicken bit
 #     --drain-off      the line drain off (compat DMA)
 #     --turbo-off      the icache's 1-clock serves off
+#     --swint-off      the internalized soft switches off (bus as before)
 #     --cycles=N       run length in BUS CYCLES (default 2000000: ~2 s at 1x)
 #     --clks=N         hard ceiling in 100 MHz clocks (default 400000000)
 #     --verilator      build and run under Verilator --timing (much faster)
@@ -29,7 +30,7 @@ mkdir -p "$work"
 hdv="$1"; shift
 [ -f "$hdv" ] || { echo "no such image: $hdv" >&2; exit 2; }
 
-mode=2 target=0 dcache=0 drain=0 turbo=0 cyclim=2000000 clks=400000000 tag=run vl=0
+mode=2 target=0 dcache=0 drain=0 turbo=0 swint=0 cyclim=2000000 clks=400000000 tag=run vl=0
 rom="$root/../strudelworks-host/assets/Apple2e_Enhanced.rom"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport.bin"
 trace=""
@@ -40,6 +41,7 @@ for a in "$@"; do
         --dcache-off) dcache=1 ;;
         --drain-off) drain=1 ;;
         --turbo-off) turbo=1 ;;
+        --swint-off) swint=1 ;;
         --cycles=*) cyclim="${a#*=}" ;;
         --clks=*) clks="${a#*=}" ;;
         --verilator) vl=1 ;;
@@ -93,6 +95,7 @@ if [ "$vl" = 1 ]; then
         -GDCACHE_DIS="$dcache" \
         -GDRAIN_DIS="$drain" \
         -GTURBO_DIS="$turbo" \
+        -GSWINT_DIS="$swint" \
         -GMAX_CYCLES="$cyclim" \
         -GMAX_CLKS="$clks" \
         -Mdir "$obj" "${srcs[@]}" \
@@ -114,6 +117,7 @@ else
             -Pboot_tb.DCACHE_DIS="$dcache" \
             -Pboot_tb.DRAIN_DIS="$drain" \
             -Pboot_tb.TURBO_DIS="$turbo" \
+            -Pboot_tb.SWINT_DIS="$swint" \
             -Pboot_tb.MAX_CYCLES="$cyclim" \
             -Pboot_tb.MAX_CLKS="$clks" \
             "${srcs[@]}" \

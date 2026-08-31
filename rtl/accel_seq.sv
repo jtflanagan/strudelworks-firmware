@@ -112,6 +112,15 @@ module accel_seq (
     input  wire        mem_image_ready,
     input  wire        mem_invalidating,
     input  wire [1:0]  q_cls,           // apple_mmu's class of the core's live op
+    // The internalized soft switches (apple_mmu.q_swi): a BUS-class op the
+    // card serves itself in the closed regime.  It rides S_FAST like any
+    // fast op - mem_cache decides it with nothing served - and retires with
+    // a SYNTHETIC COMMIT on the unified stream, so the switch shadow, the
+    // TLB flush and every commit-gated consumer fire as for a bus op.  The
+    // one deliberate bend of "fast ops have a present and no commit".
+    input  wire        q_swi,
+    input  wire [7:0]  swi_byte,        // the serve byte (status/keyboard/floating)
+    output logic       swi_commit,      // one clock: an internalized op retired
 
     // The core.
     input  wire [15:0] cpu_addr,
@@ -284,9 +293,11 @@ module accel_seq (
     // dq_* are the registered copies the decision is made from; `settled`
     // says they describe the op the core has up now (see the header).
     logic [1:0] dq_cls;
+    logic       dq_swi, swi_q;
     logic       dq_rw, dq_ovr, dq_rst, settled;
     always_ff @(posedge clk) begin
         dq_cls <= q_cls;
+        dq_swi <= q_swi;
         dq_rw  <= cpu_rw;
         dq_ovr <= ovr_en;
         // cpu_rst arrives through the link's command-reset counter and a
@@ -296,16 +307,19 @@ module accel_seq (
         // rst branch outranks cyc_en at that edge).
         dq_rst <= cpu_rst;
     end
-    wire needs_bus = off || (dq_cls == CLS_BUS) || (!dq_rw && mode == MODE_READS) ||
+    wire needs_bus = off || (dq_cls == CLS_BUS && !dq_swi) ||
+                     (!dq_rw && mode == MODE_READS) ||
                      !mem_serve || reset_seq;
     // The core's read of $FFFD, over: the machine's MMU has seen its reset.
     wire vector_done = cyc_done && op_rw && !op_ovr && !op_dummy && (op_addr == 16'hFFFD);
     wire fast_ok   = mem_image_ready && !mem_invalidating &&
                      !op_inflight && !busy && !mq_valid;
 
-    // A fast op's decision: the byte is there, or it is not.
-    wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en);
-    wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en;
+    // A fast op's decision: the byte is there, or it is not.  An
+    // internalized switch op's byte is swi_byte, ready by construction -
+    // mem_cache's decided is only the pacing.
+    wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en || swi_q);
+    wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en && !swi_q;
 
     // ---- turbo permission and the dispatch ----------------------------------
     // turbo_ok requires the CLAIM as well as S_DECIDE, so a turbo op and a
@@ -341,7 +355,8 @@ module accel_seq (
     // sweep of accel_tb is the proof.  Every term of go_bus is a registered
     // level, so nothing combinational from the core enters the driver's cone.
     assign cyc_en     = off ? cyc_done : (st == S_BUS) ? cyc_done : fast_hit;
-    assign cpu_din    = (off || st == S_BUS) ? drv_din : mem_sub_data;
+    assign cpu_din    = (off || st == S_BUS) ? drv_din
+                      : swi_q ? swi_byte : mem_sub_data;
     assign bus_owns   = off || bus_owns_q   || go_bus;
     assign core_valid = off || core_valid_q || go_bus;
 
@@ -352,12 +367,16 @@ module accel_seq (
     // Bus ops and overrides come from the driver a clock after its present;
     // fast ops from the core on the clock they are dispatched.
     wire  bus_op_present = op_present && !op_dummy;
-    assign u_commit = op_commit && !op_dummy;
+    // The synthetic commit rides beside the driver's: u_addr/u_rw/u_wdata
+    // still hold the retired op (the next present is at least two clocks
+    // out), so every commit-gated consumer reads the right op.
+    assign u_commit = (op_commit && !op_dummy) || swi_commit;
 
 
     always_ff @(posedge clk) begin
         u_present <= 1'b0;
         fev_valid <= 1'b0;
+        swi_commit <= (st == S_FAST) && fast_hit && swi_q && !cpu_rst;
         // The op-time clocks' tick: one pulse per op served off the bus,
         // turbo or fast - bus ops tick at their own commit in the cards.
         op_tick   <= ((st == S_FAST) && fast_hit) || turbo_commit || d_commit;
@@ -377,7 +396,7 @@ module accel_seq (
             st <= S_RST;
             reset_seq <= 1'b1;
             settled <= 1'b0;
-            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1;
+            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0;
             credit <= 20'd0;
             u_addr <= 16'd0; u_rw <= 1'b1; u_wdata <= 8'd0;
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
@@ -468,6 +487,7 @@ module accel_seq (
                             bus_owns_q   <= 1'b0;
                             core_valid_q <= 1'b0;
                             fast_rw      <= cpu_rw;
+                            swi_q        <= dq_swi;
                             // The op, onto the stream.
                             u_present <= 1'b1;
                             u_addr    <= cpu_addr;
@@ -486,7 +506,8 @@ module accel_seq (
                             fev_valid <= 1'b1;
                             fev_addr  <= u_addr;
                             fev_rw    <= u_rw;
-                            fev_data  <= u_rw ? mem_sub_data : u_wdata;
+                            fev_data  <= u_rw ? (swi_q ? swi_byte : mem_sub_data)
+                                              : u_wdata;
                             fev_sync  <= u_sync;
                         end else if (fast_miss) begin
                             // Decide it again.

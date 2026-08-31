@@ -21,6 +21,18 @@ PTR     = $06
 :
 .endmacro
 
+.macro  jpl target
+        bmi :+
+        jmp target
+:
+.endmacro
+
+.macro  jmi target
+        bpl :+
+        jmp target
+:
+.endmacro
+
 .segment "CODE"
 
 main:
@@ -117,6 +129,46 @@ ver:    tya
         eor #$33
         cmp PASS
         jne fail
+
+        ; ---- 2d. the internalized switches: state, status, keyboard ----------
+        ; The LC dance, PAGE2 and 80STORE flips, ALTZP with nothing between
+        ; that touches page 0 or 1 - and every one read back through the
+        ; status page in the program's own hands.  In the closed regime
+        ; none of these ride a bus cycle; in every mode the answers are the
+        ; same, because the model's pins answer the status page too.
+        lda $C083
+        lda $C083               ; bank 2, read RAM, write enabled
+        bit $C011
+        jpl fail                ; RDLCBNK2 must be set
+        bit $C012
+        jpl fail                ; RDLCRAM must be set
+        lda $C08B
+        lda $C08B               ; bank 1
+        bit $C011
+        jmi fail
+        sta $C055               ; PAGE2 on (a write: internalized)
+        bit $C01C
+        jpl fail
+        sta $C054
+        bit $C01C
+        jmi fail
+        sta $C009               ; ALTZP on - hands off zp and the stack...
+        bit $C016
+        jpl fail                ; (bit and the branch touch neither)
+        sta $C008               ; ...and off again
+        bit $C016
+        jmi fail
+        sta $C001               ; 80STORE on
+        bit $C018
+        jpl fail
+        sta $C000               ; off
+        bit $C018
+        jmi fail
+        lda $C000               ; the keyboard, served from the parked latch
+        sta $0310               ; the tb watches this byte
+        bpl nokey
+        lda $C010               ; a key waited: take it, clear the strobe
+nokey:
 
         ; ---- 3. the language card --------------------------------------------
         lda $C083               ; bank 2, read RAM, two reads: write enabled

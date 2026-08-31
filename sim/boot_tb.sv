@@ -40,6 +40,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                  parameter integer DCACHE_DIS = 0,
                  parameter integer DRAIN_DIS = 0,
                  parameter integer TURBO_DIS = 0,
+                 parameter integer SWINT_DIS = 0,
                  parameter integer CAMD = 1,
                  parameter integer HOST_DELAY = 2000,   // clks, EXECUTE->answer
                  parameter integer MAX_CYCLES = 2_000_000,  // bus-cycle advances
@@ -94,8 +95,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [7:0]  data_sync;
     wire        mem_sub_en, bus_owns, core_valid;
     wire [7:0]  mem_sub_data;
-    wire        sub_en   = mem_sub_en && bus_owns;
-    wire [7:0]  sub_data = mem_sub_data;
+    wire        sub_en   = (mem_sub_en && bus_owns) || kbd_sub_en;
+    wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data : mem_sub_data;
     wire [15:0] op_addr, nxt_addr;
     wire        op_rw, op_present, op_commit, op_ovr, op_divert, op_dummy, op_inflight, q_divert;
     wire [7:0]  op_wdata;
@@ -177,11 +178,27 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        tlb_r_ok, tlb_w_ok, map_changed;
     wire [16:0] tlb_r_ppage, tlb_w_ppage;
 
+    // ---- the internalized soft switches, as master_top gates them ----------
+    reg  swint_dis = (SWINT_DIS != 0);
+    wire sw_int = accel_on && (mode == 2'd2) && serve && !swint_dis;
+    wire        q_swi, swi_commit;
+    wire [7:0]  mmu_swi_stat;
+    wire        kbd_int_ok;
+    wire [7:0]  kbd_int_byte;
+    wire [6:0]  kbd_int_low;
+    // No fb_sim or vbl_lock here: the floating byte is the model's constant
+    // and $C019 rides the bus.
+    wire [7:0]  swi_byte = (u_addr[7:4] == 4'h0) ? kbd_int_byte
+                         : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
+                         : FLOAT;
+    wire kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
-        .q_cls (q_cls),
+        .q_cls (q_cls), .q_swi (q_swi), .swi_byte (swi_byte),
+        .swi_commit (swi_commit),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
         .cyc_en (accel_cyc_en), .cpu_din (accel_din),
         .op_present (op_present), .op_commit (op_commit), .op_dummy (op_dummy), .op_ovr (op_ovr),
@@ -322,7 +339,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
-        .master_active (master_active),
+        .master_active (master_active), .park_kbd (sw_int),
         .bus_owns (bus_owns), .core_valid (core_valid),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
         .drv_sync (drv_sync), .cyc_en (drv_cyc_done), .cpu_din (drv_din),
@@ -346,6 +363,25 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .op_present (u_present), .op_commit (u_commit), .op_sync (u_sync), .op_ovr (u_ovr),
         .op_addr (u_addr), .op_rw (u_rw), .din (drv_din),
         .ovr_en (boot_ovr_en), .ovr_addr (boot_ovr_addr), .held (held), .runtime (hold_runtime)
+    );
+
+    // ---- the keyboard, internalized (no injection in this bench) ------------
+    wire       kbd_sub_en;
+    wire [7:0] kbd_sub_data;
+    kbd_inject u_kbdi (
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
+        .master_active (master_active),
+        .park_kbd (sw_int), .op_dummy (op_dummy),
+        .int_rd (kbd_int_rd), .int_ok (kbd_int_ok),
+        .int_byte (kbd_int_byte), .int_low (kbd_int_low),
+        .press (1'b0), .press_key (7'd0), .drop (1'b0), .lock (1'b0),
+        .hotkey_en (1'b0), .hotkey (7'd0), .held (held),
+        .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
+        .data_sync (data_sync),
+        .sub_en (kbd_sub_en), .sub_data (kbd_sub_data),
+        .strobe (), .seen (), .touched (), .pressed (), .taken (),
+        .flushed (), .replaced (), .resolved_key (), .changed (),
+        .hotkey_hit ()
     );
 
     // ---- the memory path, on the unified stream ---------------------------------------
@@ -385,6 +421,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .intc8rom (intc8rom),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
+        .swi_on (sw_int), .swi_kbd_ok (kbd_int_ok), .swi_fb_ok (1'b1),
+        .swi_vbl_ok (1'b0), .swi_vbl (1'b0), .swi_kbd_low (kbd_int_low),
+        .q_swi (q_swi), .swi_stat_byte (mmu_swi_stat),
         .t_page (tlb_t_page), .t_r_ok (tlb_r_ok), .t_r_ppage (tlb_r_ppage),
         .t_w_ok (tlb_w_ok), .t_w_ppage (tlb_w_ppage),
         .t2_page (hd_t2_page), .t2_w_ok (hd_t2_w_ok), .t2_w_ppage (hd_t2_w_ppage),
@@ -715,7 +754,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     endfunction
     function automatic [7:0] exp_read(input [15:0] a);
         begin
-            if (a[15:12] == 4'hC) exp_read = cx_byte(a);
+            if (a[15:8] == 8'hC0) exp_read = c0_read(a[7:0]);
+            else if (a[15:12] == 4'hC) exp_read = cx_byte(a);
             else if (a >= 16'hD000) begin
                 if (m_lcrd) exp_read = m_altzp ? ref_lcaux[m_bank * 16384 + m_lcidx(a)] : ref_lc[m_lcidx(a)];
                 else        exp_read = rom_img[a - 16'hC000];
@@ -805,6 +845,42 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     end
     always @(posedge clk) if (since_fall == BUS_AT + 1 && driving) mach_byte <= data_pin;
 
+    // An internalized switch op retires with a synthetic commit and never
+    // reaches the pins: the model's switches follow it here, exactly the
+    // updates the pins block makes for a bus op (one of the two fires per
+    // op, never both).
+    always @(posedge clk) if (swi_commit) begin
+        if (u_addr[7:4] == 4'h0 && !u_rw) begin
+            case (u_addr[3:1])
+                3'd0: m_store80 <= u_addr[0];
+                3'd1: m_ramrd   <= u_addr[0];
+                3'd2: m_ramwrt  <= u_addr[0];
+                3'd4: m_altzp   <= u_addr[0];
+                3'd6: m_80col   <= u_addr[0];
+                3'd7: m_altchar <= u_addr[0];
+                default: ;
+            endcase
+        end
+        if (u_addr[7:4] == 4'h5) begin
+            if (u_addr[3:1] == 3'd0) m_text  <= u_addr[0];
+            if (u_addr[3:1] == 3'd1) m_mixed <= u_addr[0];
+            if (u_addr[3:1] == 3'd2) m_page2 <= u_addr[0];
+            if (u_addr[3:1] == 3'd3) m_hires <= u_addr[0];
+        end
+        if ((u_addr[7:0] == 8'h71 || u_addr[7:0] == 8'h73) && !u_rw) begin
+            if (u_wdata < NRW) m_bank <= u_wdata;
+        end
+        if (u_addr[7:4] == 4'h8) begin
+            m_bank2 <= !u_addr[3];
+            m_lcrd  <= (u_addr[1] == u_addr[0]);
+            if (!u_addr[0]) begin m_wren <= 0; m_pre <= 0; end
+            else if (u_rw) begin
+                if (m_pre) m_wren <= 1;
+                m_pre <= 1;
+            end else m_pre <= 0;
+        end
+    end
+
     // The reference, from the unified stream, and from the D front's events.
     always @(posedge clk) if (u_present) begin
         if (u_addr[15:8] == 8'hC3 && !m_intcx && !m_slotc3) m_intc8 <= 1'b1;
@@ -831,7 +907,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     // ---- the running checks ---------------------------------------------------------
     integer reads = 0, reads_bad = 0, fast_reads = 0, bus_reads = 0;
-    always @(posedge clk) if (u_commit) begin
+    always @(posedge clk) if (u_commit && !swi_commit) begin
         if (u_rw) begin
             reads = reads + 1; bus_reads = bus_reads + 1;
             if (cl_cls == 2'd0 && u_addr[15:8] == 8'hC0) begin

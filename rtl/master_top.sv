@@ -219,7 +219,7 @@ module master_top #(
     // The diagnosis chicken bits (docs/DIAG_ACCEL_HW.md): levels off
     // ACCEL_CTRL that switch the two never-simulated-together features off
     // at runtime, so hardware can bisect a failure without a rebuild.
-    wire        accel_turbo_dis, accel_drain_dis, accel_dcache_dis;
+    wire        accel_turbo_dis, accel_drain_dis, accel_dcache_dis, accel_swint_dis;
     wire [3:0]  seq_state;
     wire [31:0] accel_fast, accel_bus, accel_cycles, accel_wait;
     wire [7:0]  accel_retries, merge_overflows;
@@ -337,6 +337,7 @@ module master_top #(
         .accel_mode (accel_mode), .accel_target (accel_target),
         .accel_turbo_dis (accel_turbo_dis), .accel_drain_dis (accel_drain_dis),
         .accel_dcache_dis (accel_dcache_dis),
+        .accel_swint_dis (accel_swint_dis),
         .accel_cnt_clr (accel_cnt_clr),
         .accel_on (accel_on),
         .accel_stat ({7'd0, accel_reset_seq, accel_retries, merge_overflows, seq_state, bus_owns, 1'b0, accel_held, accel_on}),
@@ -570,6 +571,7 @@ module master_top #(
                                 vidhd_rd_claim ? vidhd_rd_data : mb_rd_data;
 
     apple_bus_write u_write (
+        .park_kbd      (sw_int),
         .clk           (apple_clk),
         .rst           (apple_rst),
         .phi0_sync     (apple_phi0_sync),
@@ -615,6 +617,24 @@ module master_top #(
     // ---- the sequencer ------------------------------------------------------
     // The core's ops, decided: served from the card, or handed to the driver
     // for a bus cycle.  See rtl/accel_seq.sv.
+    // ---- the internalized soft switches (docs/ACCELERATION.md) ------------
+    // The closed regime: mode 2, serving, RAM never exported - the same
+    // level the drain uses, with its own chicken bit.  q_swi asks apple_mmu
+    // whether the live op internalizes; the serve byte comes from whichever
+    // authority owns the address - the keyboard latch, the status shadow,
+    // or the floating-bus simulator - selected on the registered op.
+    wire sw_int = accel_on && (accel_mode == 2'd2) && mem_serve &&
+                  !accel_swint_dis;
+    wire        q_swi, swi_commit;
+    wire [7:0]  mmu_swi_stat;
+    wire        kbd_int_ok, fb_int_ok;
+    wire [7:0]  kbd_int_byte;
+    wire [6:0]  kbd_int_low;
+    wire [7:0]  swi_byte = (u_addr[7:4] == 4'h0) ? kbd_int_byte
+                         : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
+                         : fb_sub_data;
+    wire kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+
     accel_seq u_seq (
         .clk           (apple_clk),
         .rst           (rst_core),
@@ -627,6 +647,9 @@ module master_top #(
         .mem_image_ready (mem_image_ready),
         .mem_invalidating (mem_invalidating),
         .q_cls         (q_cls),
+        .q_swi         (q_swi),
+        .swi_byte      (swi_byte),
+        .swi_commit    (swi_commit),
         .cpu_addr      (cpu_addr),
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
@@ -916,6 +939,12 @@ module master_top #(
         .rst           (apple_rst),
         .cpu_rst       (cpu_rst),
         .master_active (cpu_source_active),
+        .park_kbd      (sw_int),
+        .op_dummy      (op_dummy),
+        .int_rd        (kbd_int_rd),
+        .int_ok        (kbd_int_ok),
+        .int_byte      (kbd_int_byte),
+        .int_low       (kbd_int_low),
         .press         (kbd_press),
         .press_key     (kbd_press_key),
         .drop          (kbd_drop),
@@ -984,6 +1013,14 @@ module master_top #(
         .op_wdata   (u_wdata),
         .op_present (u_present),
         .op_commit  (u_commit),
+        .swi_on     (sw_int),
+        .swi_kbd_ok (kbd_int_ok),
+        .swi_fb_ok  (fb_int_ok),
+        .swi_vbl_ok (vbl_locked),
+        .swi_vbl    (vbl_level),
+        .swi_kbd_low (kbd_int_low),
+        .q_swi      (q_swi),
+        .swi_stat_byte (mmu_swi_stat),
         .rom_ok     (mem_rom_loaded),
         .cl_valid   (cl_valid),
         .cl_cls     (cl_cls),
@@ -1127,6 +1164,7 @@ module master_top #(
         .fb2_ready (hd_fb2_ready),
         .sub_en        (fb_sub_en),
         .sub_data      (fb_sub_data),
+        .int_ok        (fb_int_ok),
         .mode          (fb_mode),
         .compared      (fb_compared),
         .mismatches    (fb_mismatch),

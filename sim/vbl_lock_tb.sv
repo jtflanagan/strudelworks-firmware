@@ -177,6 +177,7 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .clk (clk), .rst (rst),
         .phi0_sync (phi0_sync), .data_sync (data_sync),
         .master_active (master_active),
+        .park_kbd (1'b0),
         // Without the sequencer: the bus owns every cycle, the core is always on offer.
         .bus_owns (1'b1), .core_valid (1'b1),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),

@@ -178,6 +178,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .clk (clk), .rst (rst),
         .phi0_sync (phi0_sync), .data_sync (data_sync),
         .master_active (master_active),
+        .park_kbd (1'b0),
         // Without the sequencer: the bus owns every cycle, the core is always on offer.
         .bus_owns (1'b1), .core_valid (1'b1),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),
@@ -248,6 +249,9 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
 
     apple_mmu u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
+        .swi_on (1'b0), .swi_kbd_ok (1'b0), .swi_fb_ok (1'b0),
+        .swi_vbl_ok (1'b0), .swi_vbl (1'b0), .swi_kbd_low (7'd0),
+        .q_swi (), .swi_stat_byte (),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
         .rom_ok (1'b1), .intc8rom (), .q_rw (1'b1), .q_cls (),

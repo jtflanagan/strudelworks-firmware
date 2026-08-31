@@ -54,6 +54,9 @@ module tlb_check_top (
 
     apple_mmu u_mmu (
         .clk         (clk),
+        .swi_on (1'b0), .swi_kbd_ok (1'b0), .swi_fb_ok (1'b0),
+        .swi_vbl_ok (1'b0), .swi_vbl (1'b0), .swi_kbd_low (7'd0),
+        .q_swi (), .swi_stat_byte (),
         .rst         (rst),
         .res_sync    (res_sync),
         .op_addr     (op_addr),

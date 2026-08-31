@@ -477,3 +477,61 @@ count flat in mode 1, no floating-bus trip in mode 2.
   an accelerated machine is not a cycle stream; the host flags it
   (`kFlagAccel`) and the replay tool refuses it, while the MMU check still
   follows the shadow through it.
+
+## The internalized soft switches (2026-08-31)
+
+In the closed regime - mode 2, serving, RAM never exported to the bus -
+the soft switches whose whole effect is the card's own shadow stop
+riding the bus.  `apple_mmu.q_swi` answers the sequencer's question
+beside `q_cls`; the op rides S_FAST as any fast op does (mem_cache
+decides it with nothing served), the byte comes from whichever
+authority owns the address, and the retirement raises a SYNTHETIC
+COMMIT on the unified stream - the one deliberate bend of "fast ops
+have a present and no commit" - so the switch shadow, `map_changed`,
+the TLB flush and every commit-gated consumer fire exactly as for a
+bus op, and the event stream still carries the access to the host.
+
+What internalizes, and what stays on the bus:
+
+- WRITES: 80STORE/RAMRD/RAMWRT/ALTZP/80COL/ALTCHAR ($C000-5/8/9/C-F),
+  the video toggles ($C050-$C057), the RamWorks bank ($C071/$C073),
+  the language card ($C080-$C08F).  NOT INTCXROM or SLOTC3ROM
+  ($C006/7, $C00A/B): four slot cards track those from the bus stream
+  (rtl/slot_switches.sv), and they are rare - internalizing them later
+  means feeding the unified stream to the trackers.
+- READS: the status page $C011-$C01F (bit 7 from the shadow, low bits
+  the keyboard latch's, $C019 only with the VBL lock up); the toggles
+  and the LC (their byte is the floating bus: fb_sim's prediction,
+  gated on `int_ok` - vapor lock keeps working); the keyboard
+  $C000-$C00F (below).  $C010 and the $C01x writes are the real
+  strobe's and always ride the bus.
+
+THE KEYBOARD.  The driver's dummy cycles park at $C000 instead of
+$0000 (`park_kbd` into apple_bus_write), so every idle bus cycle
+samples the real IOU - key and strobe - into a latch in
+rtl/kbd_inject.sv.  A program's $C00x read is then served on the card
+through the same substitution decision a bus read gets (injected key
+first, the latch's real byte, the hotkey eaten), with the read-side
+bookkeeping applied once at retirement (`int_rd`).  A strobe-clearing
+bus op clears the latch's bit 7 as it clears the IOU's, so
+$C010-then-$C000 cannot hand a key over twice.  A dummy is a sample,
+never a read: none of kbd_inject's read-side state moves on one, and
+the sparse filter drops dummy events as it always has, so the link
+sees nothing new.
+
+Measured in the boot bench (2M bus cycles, mode 2 unlimited): ProDOS
+2.4.3 to Bitsy Bye went from 14.2M to 57.6M retired ops - the idle
+keyboard poll runs at ~54 ops per bus cycle where each poll used to be
+a bus trip - and Nox's boot from 13.0M to 19.0M.  Bus reads over the
+whole ProDOS run fell from ~1.0M to 12.6k.
+
+The lever: ACCEL_CTRL[28] `swint_dis`, `swint = on|off` in the
+configuration, `swctl accel swint off` at runtime - dummies park at
+$0000 again and every $C0xx access rides the bus as before.
+
+Left for later, deliberately: INTCXROM/SLOTC3ROM writes (above); a
+menu hotkey found by the parked dummies themselves, which would let
+Ctrl-6 work even in a program that never polls the keyboard; $C019
+without the lock; and the machine's own switches go stale in the
+closed regime exactly as its RAM does - leaving mode 2 already means a
+reset, and this adds nothing to that rule.
