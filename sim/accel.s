@@ -170,6 +170,51 @@ ver:    tya
         lda $C010               ; a key waited: take it, clear the strobe
 nokey:
 
+        ; ---- 2e. the page-flip draw storm ------------------------------------
+        ; The game loop's shape: flip PAGE2, write on the flip's heels, read
+        ; it straight back - both directions, first with 80STORE off (the
+        ; flip is display-only but still flushes the map), then with 80STORE
+        ; on (a $2xxx write banks to aux under PAGE2, and the read must
+        ; follow it there).
+        sta $C057               ; HIRES on
+        sta $C000               ; 80STORE off
+        ldy #0
+flip1:  sta $C055               ; PAGE2 on
+        tya
+        eor #$C3
+        sta $2100,y             ; the write on the flip's heels
+        cmp $2100,y
+        jne fail
+        sta $C054               ; PAGE2 off
+        tya
+        eor #$3C
+        sta $4100,y
+        cmp $4100,y
+        jne fail
+        iny
+        cpy #16
+        bne flip1
+        sta $C001               ; 80STORE on: $2xxx banks by PAGE2
+        ldy #0
+flip2:  sta $C055               ; PAGE2 on: aux
+        tya
+        eor #$5A
+        sta $2200,y
+        cmp $2200,y
+        jne fail
+        sta $C054               ; PAGE2 off: main
+        tya
+        eor #$A5
+        sta $2200,y
+        cmp $2200,y
+        jne fail
+        iny
+        cpy #16
+        bne flip2
+        sta $C000               ; 80STORE off again
+        sta $C054               ; page 1
+        sta $C056               ; HIRES off, as the phases before knew it
+
         ; ---- 3. the language card --------------------------------------------
         lda $C083               ; bank 2, read RAM, two reads: write enabled
         lda $C083

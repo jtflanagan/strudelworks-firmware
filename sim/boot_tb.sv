@@ -109,7 +109,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .apple_phi0_pin (phi0), .apple_m2sel_pin (1'b0), .apple_m2b0_pin (1'b0),
         .apple_inh_pin (1'b1), .apple_res_pin (res_n), .apple_irq_pin (1'b1),
         .apple_rdy_pin (1'b1), .apple_dma_pin (!dma_assert),
-        .ev_data (), .ev_valid (), .data_tick (bus_tick),
+        .ev_data (rd_ev_data), .ev_valid (rd_ev_valid), .data_tick (bus_tick),
         .sync_override (drv_sync), .sync_override_en (1'b1),
         .data_override (sub_data), .data_override_en (sub_en),
         .rw_override_en (op_divert), .wdata_override (op_wdata), .vbl_level (1'b0),
@@ -324,17 +324,34 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // one-per-three-clock drain out, fev_room the write-stall's credit.
     wire fev_room;
     wire [7:0] merge_overflows;
+    wire [31:0] rd_ev_data;
+    wire        rd_ev_valid;
     event_merge #(.DEPTH (16)) u_merge (
         .clk (clk), .rst (rst), .enable (1'b1),
-        .bus_valid (1'b0), .bus_data (32'd0), .bus_mark (1'b0),
-        .bus_mark_free (16'd0), .bus_dummy (1'b0),
+        .bus_valid (rd_ev_valid), .bus_data (rd_ev_data), .bus_mark (1'b0),
+        .bus_mark_free (16'd0), .bus_dummy (op_dummy),
         .fast_valid (fev_valid), .fast_addr (fev_addr), .fast_rw (fev_rw),
         .fast_data (fev_data), .fast_sync (fev_sync),
         .vbl_level (1'b0), .res_level (1'b1),
-        .out_valid (), .out_data (), .out_mark (), .out_mark_free (),
-        .out_dummy (),
+        .out_valid (mg_valid), .out_data (mg_data), .out_mark (),
+        .out_mark_free (mg_free), .out_dummy (mg_dummy),
         .overflows (merge_overflows), .fev_room (fev_room),
         .dma_word (hd_dma_ev_word), .dma_valid (hd_dma_ev_valid), .dma_take (hd_dma_ev_take)
+    );
+
+    // ---- the host's view: the filtered stream, decoded as the host decodes --
+    // Everything the real host's mirror is built from - and nothing else.
+    wire        mg_valid, mg_dummy;
+    wire [31:0] mg_data;
+    wire [15:0] mg_free;
+    wire        hf_valid;
+    wire [31:0] hf_data;
+    bus_event_filter u_hostf (
+        .clk (clk), .rst (rst), .enable (1'b1), .sparse (1'b1),
+        .in_data (mg_data), .in_valid (mg_valid), .in_mark (1'b0),
+        .in_mark_free (mg_free), .in_dummy (mg_dummy),
+        .out_data (hf_data), .out_valid (hf_valid), .out_mark (),
+        .out_mark_free ()
     );
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
@@ -905,6 +922,198 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else                                ref_main[fev_addr] <= fev_data;
     end
 
+    // ---- the host mirror, built from the filtered stream alone ----------------
+    // The stream-side twin of ref_*: its own switch state tracked from the
+    // decoded words (writes, the read-toggles, resets), its own memory
+    // banked by that state, the drain's seven-word lines reassembled - the
+    // mirror the real host would hold.  Divergence from ref_* at the end
+    // is a byte the display would show wrong.
+    reg [7:0] hm2_main  [0:65535];
+    reg [7:0] hm2_aux   [0:NRW*65536-1];
+    reg [7:0] hm2_lc    [0:16383];
+    reg [7:0] hm2_lcaux [0:NRW*16384-1];
+    reg hm2_store80, hm2_ramwrt, hm2_altzp, hm2_page2, hm2_hires;
+    reg hm2_bank2, hm2_wren, hm2_pre;
+    reg [7:0] hm2_bank;
+    reg hm2_res_q = 1'b1;
+    function automatic bit hm2_aux_w(input [15:0] a);
+        if (a < 16'h0200) hm2_aux_w = hm2_altzp;
+        else if (hm2_store80 && a[15:10] == 6'b000001) hm2_aux_w = hm2_page2;
+        else if (hm2_store80 && hm2_hires && a[15:13] == 3'b001) hm2_aux_w = hm2_page2;
+        else hm2_aux_w = hm2_ramwrt;
+    endfunction
+    function automatic integer hm2_lcidx(input [15:0] a);
+        if (a[15:12] == 4'hD) hm2_lcidx = (hm2_bank2 ? 4096 : 0) + a[11:0];
+        else hm2_lcidx = 8192 + (a - 16'hE000);
+    endfunction
+    task automatic hm2_write(input [15:0] a, input [7:0] d);
+        begin
+            if (a[15:12] == 4'hC) ;
+            else if (a >= 16'hD000) begin
+                if (hm2_wren) begin
+                    if (hm2_altzp) hm2_lcaux[hm2_bank * 16384 + hm2_lcidx(a)] = d;
+                    else           hm2_lc[hm2_lcidx(a)] = d;
+                end
+            end else if (hm2_aux_w(a)) hm2_aux[hm2_bank * 65536 + a] = d;
+            else                       hm2_main[a] = d;
+        end
+    endtask
+    task hm2_reset;
+        begin
+            hm2_store80 = 0; hm2_ramwrt = 0; hm2_altzp = 0; hm2_page2 = 0;
+            hm2_hires = 0; hm2_bank2 = 1; hm2_wren = 1; hm2_pre = 0; hm2_bank = 0;
+        end
+    endtask
+    // The drain's line, reassembled from its seven words.
+    reg [15:0]  dml_addr;
+    reg [15:0]  dml_be;
+    reg [127:0] dml_d;
+    integer hm2_words = 0, hm2_lines = 0, hm2_writes = 0, k2;
+    always @(posedge clk) if (hf_valid) begin
+        hm2_words = hm2_words + 1;
+        case (hf_data[31:28])
+            4'hD: ;                                          // a SKIP: cycles only
+            4'hB: begin
+                case (hf_data[27:24])
+                    4'd0: begin dml_addr = hf_data[23:8]; dml_be[15:8] = hf_data[7:0]; end
+                    4'd1: begin dml_be[7:0] = hf_data[23:16]; dml_d[127:112] = hf_data[15:0]; end
+                    4'd2: dml_d[111:88] = hf_data[23:0];
+                    4'd3: dml_d[87:64]  = hf_data[23:0];
+                    4'd4: dml_d[63:40]  = hf_data[23:0];
+                    4'd5: dml_d[39:16]  = hf_data[23:0];
+                    4'd6: begin
+                        // Bytes 0 and 1 ride this very word; the rest are
+                        // registered from W1-W5.
+                        hm2_lines = hm2_lines + 1;
+                        if (dml_be[0]) hm2_write(dml_addr,          hf_data[15:8]);
+                        if (dml_be[1]) hm2_write(16'(dml_addr + 1), hf_data[23:16]);
+                        for (k2 = 2; k2 < 16; k2 = k2 + 1)
+                            if (dml_be[k2])
+                                hm2_write(16'(dml_addr + k2), dml_d[8*k2 +: 8]);
+                    end
+                    default: ;
+                endcase
+            end
+            4'hC, 4'hF: begin
+                // A reset seen on the stream puts the switches back.
+                if (!hf_data[17] && hm2_res_q) hm2_reset();
+                hm2_res_q = hf_data[17];
+                if (hf_data[17]) begin
+                    if (hf_data[15:8] == 8'hC0) begin
+                        if (hf_data[7:4] == 4'h0 && !hf_data[16]) begin
+                            case (hf_data[3:1])
+                                3'd0: hm2_store80 = hf_data[0];
+                                3'd2: hm2_ramwrt  = hf_data[0];
+                                3'd4: hm2_altzp   = hf_data[0];
+                                default: ;
+                            endcase
+                        end
+                        if (hf_data[7:4] == 4'h5) begin
+                            if (hf_data[3:1] == 3'd2) hm2_page2 = hf_data[0];
+                            if (hf_data[3:1] == 3'd3) hm2_hires = hf_data[0];
+                        end
+                        if ((hf_data[7:0] == 8'h71 || hf_data[7:0] == 8'h73) && !hf_data[16]) begin
+                            if (hf_data[27:20] < NRW) hm2_bank = hf_data[27:20];
+                        end
+                        if (hf_data[7:4] == 4'h8) begin
+                            hm2_bank2 = !hf_data[3];
+                            if (!hf_data[0]) begin hm2_wren = 0; hm2_pre = 0; end
+                            else if (hf_data[16]) begin
+                                if (hm2_pre) hm2_wren = 1;
+                                hm2_pre = 1;
+                            end else hm2_pre = 0;
+                        end
+                    end else if (!hf_data[16]) begin
+                        hm2_writes = hm2_writes + 1;
+                        hm2_write(hf_data[15:0], hf_data[27:20]);
+                    end
+                end
+            end
+            default: ;
+        endcase
+    end
+
+    // The card's IMAGE against the reference: the copy the core actually
+    // reads from.  Under the hold the wb lines drain by age; physical main
+    // pages 0/1 live in the zp/stack store when valid (DDR3 stale behind
+    // them by design).
+    function automatic [7:0] img_main(input [15:0] a);
+        if (a < 16'h0200 && u_d.zvld[a[8:4]])
+            img_main = u_d.zs_mem[a[8:4]][8 * a[3:0] +: 8];
+        else
+            img_main = smem[a];
+    endfunction
+    task img_compare;
+        integer a, b, bad, badh, c2;
+        begin
+            c2 = 0;
+            while ((|wb_dirty || u_wb.f_st != u_wb.F_IDLE) && c2 < 20000) begin
+                @(posedge clk); c2 = c2 + 1;
+            end
+            if (|wb_dirty) $display("    (wb lines did not drain under the hold)");
+            repeat (400) @(negedge clk);
+            bad = 0; badh = 0;
+            for (a = 0; a < 16'hC000; a = a + 1) begin
+                if (img_main(a[15:0]) !== ref_main[a]) begin
+                    if (a >= 16'h2000 && a < 16'h6000) begin
+                        badh = badh + 1;
+                        if (badh <= 8) $display("    IMAGE HGR diff $%04X: image %02x, reference %02x",
+                                                a, img_main(a[15:0]), ref_main[a]);
+                    end else begin
+                        bad = bad + 1;
+                        if (bad <= 8) $display("    IMAGE diff $%04X: image %02x, reference %02x",
+                                               a, img_main(a[15:0]), ref_main[a]);
+                    end
+                end
+                for (b = 0; b < NRW; b = b + 1)
+                    if (smem[(b+1)*65536 + a] !== ref_aux[b*65536 + a]) bad = bad + 1;
+            end
+            for (a = 0; a < 16384; a = a + 1) begin
+                if (smem[17'h0C000 + a] !== ref_lc[a]) bad = bad + 1;
+                for (b = 0; b < NRW; b = b + 1)
+                    if (smem[(b+1)*65536 + 16'hC000 + a] !== ref_lcaux[b*16384 + a]) bad = bad + 1;
+            end
+            if (bad + badh != 0)
+                fail($sformatf("the IMAGE differs from the reference: %0d bytes (%0d in HGR)", bad + badh, badh));
+            else ok("the image equals the reference, every bank");
+        end
+    endtask
+
+    task hm2_compare;
+        integer a, b, bad, badh;
+        begin
+            bad = 0; badh = 0;
+            for (a = 0; a < 16'hC000; a = a + 1) begin
+                if (hm2_main[a] !== ref_main[a]) begin
+                    if (a >= 16'h2000 && a < 16'h6000) begin
+                        badh = badh + 1;
+                        if (badh <= 8) $display("    HGR diff $%04X: host mirror %02x, reference %02x",
+                                                a, hm2_main[a], ref_main[a]);
+                    end else begin
+                        bad = bad + 1;
+                        if (bad <= 8) $display("    mirror diff $%04X: host %02x, reference %02x",
+                                               a, hm2_main[a], ref_main[a]);
+                    end
+                end
+                for (b = 0; b < NRW; b = b + 1)
+                    if (hm2_aux[b*65536+a] !== ref_aux[b*65536+a]) begin
+                        bad = bad + 1;
+                        if (bad <= 8) $display("    mirror aux%0d diff $%04X: host %02x, reference %02x",
+                                               b, a, hm2_aux[b*65536+a], ref_aux[b*65536+a]);
+                    end
+            end
+            for (a = 0; a < 16384; a = a + 1) begin
+                if (hm2_lc[a] !== ref_lc[a]) bad = bad + 1;
+                for (b = 0; b < NRW; b = b + 1)
+                    if (hm2_lcaux[b*16384+a] !== ref_lcaux[b*16384+a]) bad = bad + 1;
+            end
+            if (bad + badh != 0)
+                fail($sformatf("the host mirror differs from the reference: %0d bytes (%0d in HGR)", bad + badh, badh));
+            else ok($sformatf("the host mirror equals the reference (%0d stream words, %0d writes, %0d drain lines)",
+                              hm2_words, hm2_writes, hm2_lines));
+        end
+    endtask
+
     // ---- the running checks ---------------------------------------------------------
     integer reads = 0, reads_bad = 0, fast_reads = 0, bus_reads = 0;
     always @(posedge clk) if (u_commit && !swi_commit) begin
@@ -1351,6 +1560,11 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         for (a = 0; a < 16384; a = a + 1) begin lc_main[a] = 8'h00; phys_lcaux[a] = 8'h00; ref_lc[a] = 8'h00; end
         for (a = 0; a < NRW * 16384; a = a + 1) ref_lcaux[a] = 8'h00;
         for (a = 0; a < IMG; a = a + 1) smem[a] = 8'h00;
+        for (a = 0; a < 65536; a = a + 1) hm2_main[a] = 8'h00;
+        for (a = 0; a < NRW * 65536; a = a + 1) hm2_aux[a] = 8'h00;
+        for (a = 0; a < 16384; a = a + 1) hm2_lc[a] = 8'h00;
+        for (a = 0; a < NRW * 16384; a = a + 1) hm2_lcaux[a] = 8'h00;
+        hm2_reset();
         m_reset();
         hm_clear();
 
@@ -1394,6 +1608,15 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         $display("    late_fills %0d drops %0d merge_overflows %0d wb_flushes %0d d_ops %0d ddr_range_bad %0d",
                  late_fills, fifo_drops, merge_overflows, wb_flushes, d_ops, ddr_range_bad);
         dump_screen();
+        // Hold the core (the runtime knock) and let the stream drain, so
+        // the mirror compare is not racing writes still in the merge.
+        @(negedge clk); menu_trigger <= 1'b1; @(negedge clk); menu_trigger <= 1'b0;
+        c = 0;
+        while (!held && c < 40 * CYCLE) begin @(posedge clk); c = c + 1; end
+        if (!held) $display("    (the hold did not engage before the compare)");
+        repeat (4000) @(negedge clk);
+        hm2_compare();
+        img_compare();
         if (reads_bad != 0) fail("reads disagreed with the reference");
         if (merge_overflows != 0) fail("the event merge dropped words");
         if (hd_blocks_read == 0) fail("no block was ever read - the image did not boot");

@@ -321,7 +321,18 @@ module accel_seq (
     // A fast op's decision: the byte is there, or it is not.  An
     // internalized switch op's byte is swi_byte, ready by construction -
     // mem_cache's decided is only the pacing.
-    wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en || swi_q);
+    //
+    // A WRITE retires only with room for its event word (law 5: the host's
+    // mirror is built from writes, and a dropped word is a byte the display
+    // and the disk get wrong forever).  The D front and the zp/stack store
+    // already stall on fev_room; this closes the sequencer's path - the
+    // decision is remembered (wpend) and the op sits, core parked, until
+    // the merge drains.  Bounded: the merge empties a word every three
+    // clocks no matter what the core does.
+    logic wpend;
+    wire fast_hit  = (st == S_FAST) &&
+                     ((decided && (fast_rw ? (mem_sub_en || swi_q) : fev_room)) ||
+                      (wpend && fev_room));
     wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en && !swi_q;
 
     // ---- turbo permission and the dispatch ----------------------------------
@@ -400,6 +411,7 @@ module accel_seq (
             reset_seq <= 1'b1;
             settled <= 1'b0;
             bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0;
+            wpend <= 1'b0;
             credit <= 20'd0;
             u_addr <= 16'd0; u_rw <= 1'b1; u_wdata <= 8'd0;
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
@@ -516,7 +528,10 @@ module accel_seq (
                             // Decide it again.
                             st      <= S_DECIDE;
                             retries <= retries + 8'd1;
+                        end else if (decided && !fast_rw && !fev_room) begin
+                            wpend <= 1'b1;      // the write waits for its word's room
                         end
+                        if (fast_hit) wpend <= 1'b0;
                     end
 
                     S_BUS: begin

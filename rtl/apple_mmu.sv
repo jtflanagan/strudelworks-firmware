@@ -504,7 +504,15 @@ module apple_mmu (
     // split-screen code hammers $C050/$C052 every frame and none of them
     // enter the map.  PAGE2/HIRES do (80STORE), so $C054-$C057 flush.
     wire map_c00x = sw_c00x && !op_rw && (op_addr[3:1] <= 3'd5);
-    wire map_c05x = sw_c05x && (op_addr[3:1] == 3'd2 || op_addr[3:1] == 3'd3);
+    // PAGE2 and HIRES move the MEMORY map only under 80STORE (UTAIIe 5-7:
+    // without it they are display switches alone), so the flush is gated on
+    // it: a page-flipping game touches $C054/$C055 every frame, and an
+    // unconditional flush cold-started the TLB, the floating pages and the
+    // zp/stack proof twice a frame for nothing.  The registers above still
+    // update unconditionally, and the 80STORE access that would make them
+    // matter is itself a flush.
+    wire map_c05x = sw_c05x && (op_addr[3:1] == 3'd2 || op_addr[3:1] == 3'd3) &&
+                    store80;
     wire map_c8_set = op_present && acc_c3xx && !intcxrom && !slotc3rom &&
                       !intc8rom;
     wire map_c8_clr = op_commit && acc_cfff && intc8rom;
