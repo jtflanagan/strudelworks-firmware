@@ -237,8 +237,12 @@ int main(int argc, char** argv) {
         top.op_present = 0;
         unsigned sw = top.sw_state;
         int cls = top.cl_cls;
-        uint32_t pa = top.cl_pa;
-        uint32_t rom_addr = top.cl_rom_addr;
+        // The classifier speaks {aux, bank, folded offset} now; this
+        // checker's image keeps its old 16 MB shape, main at bank 0 and
+        // RamWorks bank k at k+1, so reconstruct that index.
+        uint32_t pa = (top.cl_aux ? (static_cast<uint32_t>(top.cl_bank) + 1u) << 16 : 0u)
+                      | top.cl_off;
+        uint32_t rom_addr = e.addr & 0x3FFFu;
         bool wr_image = top.cl_wr_image;
         if (!top.cl_valid) { std::fprintf(stderr, "cl_valid did not pulse\n"); return 3; }
 

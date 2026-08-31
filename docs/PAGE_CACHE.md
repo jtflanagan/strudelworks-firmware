@@ -1,8 +1,37 @@
 # The page cache: the image in BRAM, DDR3 demoted to RamWorks
 
-Status: **proposed, design only, 2026-08-31; branch `page_cache`, taken from
-master (`cdcfec3`) — before any of the acceleration branch's work. Nothing
-here is built.**
+Status: **built in RTL and proven in simulation, 2026-08-31; branch
+`page_cache`, taken from master (`cdcfec3`) — before any of the acceleration
+branch's work. Not yet on hardware.**
+
+The implementation: `rtl/page_cache.sv` (the banks, the tags, the serve
+pipeline, the page engine), `rtl/bank_ram.sv`, `rtl/page_client.sv`
+(replacing `mem_cache.sv`, `cache_way_ram.sv`, `mem_client.sv`), and
+`rtl/apple_mmu.sv` reshaped to `{cl_aux, cl_bank, cl_off}` + `pf_off`.  What
+proves it: `sim/run_page_cache_tb.sh` (19 checks — DDR3 silent under 128K
+traffic, the 3-clock serve, the RamWorks round trip, the busy-engine guards);
+`sim/run_mem_ddr3_tb.sh` on the real UberDDR3 + Micron model (critical line
+**mean 11 clocks, max 15**; whole fill+flush transaction **max 53 clocks**;
+refreshes all in the idle tail; ring word-exact beneath); and
+`sim/run_mem_integ_tb.sh` under the real 65C02 (20 checks, every read the
+machine's byte, image equal to the reference through serving and reset).
+Out-of-context synthesis: **32 RAMB36, WNS +3.41 ns at 100 MHz**, 1596 LUTs,
+963 flops.  One deliberate deviation from the design text below: the engine
+runs snapshot → fill → flush in SERIES (the snapshot's 17 clocks sit ahead of
+the critical read, serving it at ~30 clocks instead of ~12 against a
+~91-clock deadline) — the overlap remains an optimization for a faster
+regime.  §"The floating bus reads the main bank" is implemented too — the
+side copy deleted, `rtl/fb_sim.sv` on the main bank's port B alternating
+with the peek, 4.5 tiles returned.  **The full master build still misses the
+XC7A35T by two tiles**: 48 RAMB36 + 8 RAMB18 = 104 RAMB18-sites against the
+part's 100 (the banks 32 tiles, the Apple ROM 4, the link FIFOs 5, the
+ring's staging 4, the microcode 3, the floppy banks 4 — nothing left is
+padding).  The clean ways to close the gap are feature tradeoffs, not
+engineering: one floppy drive instead of two is exactly the two tiles
+(fitting 100 of 100); halving the FT601 TX FIFO would also do it but gambles
+with the link's stability.  Neither is taken here — the design targets the
+larger board on order, and the small-part question is left as the decision
+it is.
 
 The memory image as built (docs/MEMORY.md) keeps a 32 KB 4-way write-through
 cache in front of DDR3 bank 0. It works, and it is proven on hardware — but

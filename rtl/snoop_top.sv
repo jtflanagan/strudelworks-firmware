@@ -111,9 +111,9 @@ module snoop_top #(
         .vbl_state (4'd0), .vbl_locked (1'b0), .vbl_pal (1'b0), .vbl_busy (1'b0),
         .vbl_err (4'd0), .vbl_stat (32'd0), .vbl_pos (32'd0),   // nor find the beam
         .mem_op_present (1'b0),                          // nor keep a memory
-        .mq_valid (1'b0), .mq_kind (1'b0), .mq_id (2'd0), .mq_line (20'd0),
-        .mq_byte (4'd0), .mq_data (8'd0), .mq_ready (),
-        .mr_valid (), .mr_id (), .mr_data (), .mem_image_ready (),
+        .pq_busy (1'b0), .pq_valid (1'b0), .pq_we (1'b0), .pq_line (20'd0),
+        .pq_wdata (128'd0), .pq_ready (),
+        .pr_valid (), .pr_data (), .mem_image_ready (),
         .mem_serve (), .mem_cnt_clr (), .mem_inval (),
         .mem_sw (12'd0), .mem_rw_bank (8'd0), .mem_invalidating (1'b0), .mem_rom_loaded (1'b0),
         .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),

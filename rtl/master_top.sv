@@ -167,15 +167,12 @@ module master_top #(
     wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data :
                            pb_sub_en  ? pb_sub_data  :
                            mem_sub_en ? mem_sub_data : fb_sub_data;
-    // The memory image's seam through card_link (rtl/mem_client.sv is there,
-    // beside the DDR3; the MMU shadow, the ROM and the cache are here, beside
-    // the core).  See docs/MEMORY.md.
-    wire        mq_valid, mq_kind, mq_ready, mr_valid;
-    wire [1:0]  mq_id, mr_id;
-    wire [19:0] mq_line;
-    wire [3:0]  mq_byte;
-    wire [7:0]  mq_data;
-    wire [127:0] mr_data;
+    // The memory image's seam through card_link (rtl/page_client.sv is there,
+    // beside the DDR3; the MMU shadow, the ROM and the page cache are here,
+    // beside the core).  See docs/PAGE_CACHE.md.
+    wire        pq_busy, pq_valid, pq_we, pq_ready, pr_valid;
+    wire [19:0] pq_line;
+    wire [127:0] pq_wdata, pr_data;
     wire        mem_image_ready, mem_cnt_clr, mem_inval, mem_invalidating, mem_rom_loaded;
     wire        mem_serve;
     wire [11:0] mem_sw;
@@ -195,6 +192,8 @@ module master_top #(
     wire [2:0]  vid_sw;         // the MMU shadow's video switches, for the same
     wire        fb_serve, fb_cnt_clr;
     wire [14:0] fb_peek_addr;
+    wire [15:0] fb_mb_addr;         // the scanner's read of the main bank
+    wire [7:0]  fb_mb_byte;
     wire [6:0]  fb_mode;
     wire [31:0] fb_compared, fb_mismatch, fb_last, fb_last2, fb_other;
     wire [7:0]  fb_peek_data;
@@ -249,9 +248,9 @@ module master_top #(
         .vbl_busy (vbl_busy), .vbl_err (vbl_err),
         .vbl_stat (vbl_stat), .vbl_pos (vbl_pos),
         .mem_op_present (op_present),
-        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
-        .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
-        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
+        .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pr_valid (pr_valid), .pr_data (pr_data),
         .mem_image_ready (mem_image_ready),
         .mem_serve (mem_serve), .mem_cnt_clr (mem_cnt_clr), .mem_inval (mem_inval),
         .mem_sw (mem_sw), .mem_rw_bank (mem_rw_bank), .mem_invalidating (mem_invalidating),
@@ -545,16 +544,17 @@ module master_top #(
     );
 
     // ---- the memory image ---------------------------------------------------
-    // The IIe's memory map shadowed, the ROM on the card, and the cache in
-    // front of the image in the DDR3: every op the driver presents is
-    // classified, and a read of RAM or ROM can be answered from here instead
-    // of from the bus - through the same din substitution the keyboard uses,
-    // so the capture records what the core read.  Nothing on the bus changes.
-    // See docs/MEMORY.md.
-    wire        cl_valid, cl_rw, cl_wr_image;
+    // The IIe's memory map shadowed, the ROM on the card, and the machine's
+    // memory itself in two 64 KB banks of block RAM, the DDR3 backing only
+    // the RamWorks banks that are not resident: every op the driver presents
+    // is classified BESIDE the banks' fetch, and a read of RAM or ROM can be
+    // answered from here instead of from the bus - through the same din
+    // substitution the keyboard uses, so the capture records what the core
+    // read.  Nothing on the bus changes.  See docs/PAGE_CACHE.md.
+    wire        cl_valid, cl_rw, cl_wr_image, cl_aux;
     wire [1:0]  cl_cls;
-    wire [23:0] cl_pa;
-    wire [13:0] cl_rom_addr;
+    wire [7:0]  cl_bank;
+    wire [15:0] cl_off, pf_off;
     wire [7:0]  rom_byte;
 
     apple_mmu u_mmu (
@@ -568,10 +568,12 @@ module master_top #(
         .op_commit  (op_commit),
         .cl_valid   (cl_valid),
         .cl_cls     (cl_cls),
-        .cl_pa      (cl_pa),
-        .cl_rom_addr (cl_rom_addr),
+        .cl_aux     (cl_aux),
+        .cl_bank    (cl_bank),
+        .cl_off     (cl_off),
         .cl_rw      (cl_rw),
         .cl_wr_image (cl_wr_image),
+        .pf_off     (pf_off),
         .sw_state   (mem_sw),
         .vid_sw     (vid_sw),
         .rw_bank    (mem_rw_bank),
@@ -579,6 +581,9 @@ module master_top #(
         .q_divert   (mmu_q_divert)
     );
 
+    // Addressed at op_present, with the raw offset from $C000, so its byte
+    // stands at the page cache's decision (P2) - one clock earlier than the
+    // old pipeline asked for it.
     apple_rom u_rom (
         .clk        (apple_clk),
         .rst        (apple_rst),
@@ -587,20 +592,23 @@ module master_top #(
         .msg_len    (app_msg_len),
         .pay_data   (app_pay_data),
         .pay_valid  (app_pay_valid),
-        .rd_en      (cl_valid),
-        .rd_addr    (cl_rom_addr),
+        .rd_en      (op_present),
+        .rd_addr    (op_addr[13:0]),
         .rd_data    (rom_byte),
         .rom_loaded (mem_rom_loaded)
     );
 
-    mem_cache u_cache (
+    page_cache u_cache (
         .clk         (apple_clk),
         .rst         (apple_rst),
         .cl_valid    (cl_valid),
         .cl_cls      (cl_cls),
-        .cl_pa       (cl_pa),
+        .cl_aux      (cl_aux),
+        .cl_bank     (cl_bank),
+        .cl_off      (cl_off),
         .cl_rw       (cl_rw),
         .cl_wr_image (cl_wr_image),
+        .pf_off      (pf_off),
         .op_addr     (op_addr),
         .op_wdata    (op_wdata),
         .op_present  (op_present),
@@ -611,6 +619,8 @@ module master_top #(
         .rom_loaded  (mem_rom_loaded),
         .sub_en      (mem_sub_en),
         .sub_data    (mem_sub_data),
+        .fb_addr     (fb_mb_addr),
+        .fb_byte     (fb_mb_byte),
         .serve       (mem_serve),
         .inval       (mem_inval),
         .cnt_clr     (mem_cnt_clr),
@@ -624,29 +634,27 @@ module master_top #(
         .diverted    (mem_diverted),
         .late_fills  (mem_late_fills),
         .fifo_drops  (mem_fifo_drops),
-        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
-        .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
-        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)
+        .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pr_valid (pr_valid), .pr_data (pr_data)
     );
 
     // ---- the floating bus, simulated ----------------------------------------
-    // A side copy of main memory's text and hi-res pages, read at the video
-    // scanner's address for the cycle in flight: the byte a floating-bus
-    // read would return, without the bus.  Compared with the real byte on
-    // every such read; substituted for it when FB_CTRL says so.  See
-    // rtl/fb_sim.sv and docs/FLOATING_BUS.md.
+    // The page cache's main bank, read at the video scanner's address for
+    // the cycle in flight: the byte a floating-bus read would return,
+    // without the bus and without a side copy to keep in sync.  Compared
+    // with the real byte on every such read; substituted for it when
+    // FB_CTRL says so.  See rtl/fb_sim.sv and docs/FLOATING_BUS.md.
     fb_sim u_fb (
         .clk           (apple_clk),
         .rst           (apple_rst),
         .op_addr       (op_addr),
         .op_rw         (op_rw),
-        .op_wdata      (op_wdata),
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_ovr        (op_ovr),
-        .cl_valid      (cl_valid),
-        .cl_wr_image   (cl_wr_image),
-        .cl_pa         (cl_pa),
+        .mb_addr       (fb_mb_addr),
+        .mb_byte       (fb_mb_byte),
         .sw_state      (mem_sw),
         .vid_sw        (vid_sw),
         .locked        (vbl_locked),

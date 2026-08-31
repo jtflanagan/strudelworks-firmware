@@ -171,21 +171,20 @@ module card_link #(
     input  wire [31:0] vbl_stat,
     input  wire [31:0] vbl_pos,
 
-    // The memory image (rtl/mem_cache.sv in a mastering top, rtl/mem_client.sv
-    // here, docs/MEMORY.md): the cache's requests in and its fills out, the
-    // registers' levels and pulses out, the counters and state back.  A
-    // watching top ties the inputs to 0 and leaves the outputs unconnected.
+    // The memory image (rtl/page_cache.sv in a mastering top,
+    // rtl/page_client.sv here, docs/PAGE_CACHE.md): the page engine's
+    // pipelined line stream in, a read's lines out, the registers' levels
+    // and pulses out, the counters and state back.  A watching top ties the
+    // inputs to 0 and leaves the outputs unconnected.
     input  wire        mem_op_present,
-    input  wire        mq_valid,
-    input  wire        mq_kind,
-    input  wire [1:0]  mq_id,
-    input  wire [19:0] mq_line,
-    input  wire [3:0]  mq_byte,
-    input  wire [7:0]  mq_data,
-    output wire        mq_ready,
-    output wire        mr_valid,
-    output wire [1:0]  mr_id,
-    output wire [127:0] mr_data,
+    input  wire        pq_busy,
+    input  wire        pq_valid,
+    input  wire        pq_we,
+    input  wire [19:0] pq_line,
+    input  wire [127:0] pq_wdata,
+    output wire        pq_ready,
+    output wire        pr_valid,
+    output wire [127:0] pr_data,
     output wire        mem_image_ready,
     output wire         mem_serve,
     output wire        mem_cnt_clr,
@@ -1088,7 +1087,7 @@ module card_link #(
     // the rotation; the Apple's memory at 2, the strict-priority slot above
     // it.  The ring's batches are 32 lines so one begun inside the memory
     // client's window (rot_ok) is over before the next bus cycle; see
-    // rtl/mem_client.sv and wb_arb.
+    // rtl/page_client.sv and wb_arb.
     wire [2:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;
     wire [71:0]  c_addr;
     wire [383:0] c_data;
@@ -1111,16 +1110,15 @@ module card_link #(
     assign c_data[127:0] = 128'd0;          // the reader carries no data
     assign c_sel[31:0]   = {16'hFFFF, 16'hFFFF};
 
-    mem_client u_mem (
+    page_client u_mem (
         .clk            (clk_ctrl),
         .rst            (rst),
         .calib_complete (calib_complete),
         .master_active  (cpu_source_active),
         .op_present     (mem_op_present),
-        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id),
-        .mq_line (mq_line), .mq_byte (mq_byte), .mq_data (mq_data),
-        .mq_ready (mq_ready),
-        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
+        .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pr_valid (pr_valid), .pr_data (pr_data),
         .req   (c_req[2]),  .gnt (c_gnt[2]),  .cyc (c_cyc[2]),
         .stb   (c_stb[2]),  .we (c_we[2]),
         .addr  (c_addr[71:48]), .data (c_data[383:256]), .sel (c_sel[47:32]),

@@ -17,19 +17,19 @@
 // every floating read, every cycle, in every video mode.  docs/FLOATING_BUS.md
 // is the design.
 //
-// THE SIDE COPY.  Every write that lands in MAIN memory's text pages
-// ($0400-$0BFF) or hi-res pages ($2000-$5FFF) is copied into two block RAMs
-// here - 2 KB and 16 KB - on the same clock the cache takes it.  The tap is
-// apple_mmu's classified op, not the raw address: cl_pa is the write after
-// every soft switch that can redirect it (80STORE+PAGE2 steering a page-1
-// write to the auxiliary bank, RAMWRT sending everything there), and the
-// image bank in cl_pa[23:16] is the whole decision.  Bank 0 is main memory;
-// nothing else is copied.  Main memory is all the scanner's byte can come
-// from: the auxiliary bank's byte goes to the 80-column card's own latch and
-// never onto the main data bus (AppleWin's MemReadFloatingBus reads pMain[]).
-// Both pages of both regions, because a double-buffered game flips to page 2
-// and reads the floating bus there.  Overrides - a disk DMA, the VBL lock's
-// fill - are ops too and are copied like any other.
+// THE MAIN BANK IS THE COPY.  There is no side copy any more: main memory
+// lives, authoritative, in the page cache's main bank (rtl/page_cache.sv,
+// docs/PAGE_CACHE.md), and this module reads it through that bank's port B -
+// a port nothing else touches, since the page engine works the AUX bank's.
+// The scanner's address goes out on mb_addr, the byte comes back on mb_byte
+// two clocks later, and every write the machine makes - overrides, a disk
+// DMA, the VBL lock's fill - is in the bank by the clock the op's decision
+// lands, with no copy to keep in sync.  Main memory is all the scanner's
+// byte can come from: the auxiliary bank's byte goes to the 80-column card's
+// own latch and never onto the main data bus (AppleWin's MemReadFloatingBus
+// reads pMain[]).  The port alternates clocks between the scanner and the
+// host's peek, so the scanner's byte refreshes every other clock - dozens of
+// times before any data phase needs it.
 //
 // THE PREDICTION.  The scanner's position comes in as a line and a cycle
 // (rtl/vbl_lock.sv's counter today; an accelerated design's virtual counter
@@ -84,8 +84,10 @@
 // The bus is still driven; the monitor still compares.  This is the
 // accelerated core's byte, proven on the real machine before there is one.
 //
-// PEEK reads the copy back through the write port's idle cycles, for a host
-// test to check the copy against its own mirror of the machine's memory.
+// PEEK reads the main bank through the port's alternate clocks, for a host
+// test to check the card's memory against its own mirror of the machine's.
+// Its address keeps the old side copy's packing (the host speaks it): bit 14
+// picks text or hi-res, and the low bits are the page-folded index.
 //////////////////////////////////////////////////////////////////////////////////
 module fb_sim (
     input  wire        clk,
@@ -94,15 +96,14 @@ module fb_sim (
     // The presented op, from apple_bus_write.
     input  wire [15:0] op_addr,
     input  wire        op_rw,
-    input  wire [7:0]  op_wdata,
     input  wire        op_present,
     input  wire        op_commit,
     input  wire        op_ovr,
 
-    // The classified op, from apple_mmu, one clock after op_present.
-    input  wire        cl_valid,
-    input  wire        cl_wr_image,
-    input  wire [23:0] cl_pa,
+    // The main bank's port B (rtl/page_cache.sv): the byte at mb_addr,
+    // valid the clock after the address stands.
+    output logic [15:0] mb_addr,
+    input  wire  [7:0]  mb_byte,
 
     // The switches, from apple_mmu: sw_state's packing is MEM_STAT's,
     // vid_sw is {col80, mixed, text}.
@@ -119,7 +120,7 @@ module fb_sim (
     // 1 while the soft core owns the bus.
     input  wire        master_active,
     // The bus's byte, synchronised: the T_DIN sample is data_sync a clock
-    // before op_commit, as mem_cache takes it.
+    // before op_commit, as page_cache takes it.
     input  wire [7:0]  data_sync,
     // Reads that are somebody else's: a peripheral on the card, the
     // keyboard, the buttons.
@@ -156,91 +157,41 @@ module fb_sim (
     wire mixed   = vid_sw[1];
     wire col80   = vid_sw[2];
 
-    // ---- the side copy ---------------------------------------------------------
-    // Text: $0400-$0BFF -> {A11, A9:A0}; hi-res: $2000-$5FFF -> {A14, A12:A0}.
-    // Either page of either region is one contiguous block RAM index.
-    wire        wr_main  = cl_valid && cl_wr_image && (cl_pa[23:16] == 8'd0);
-    wire [15:0] pa       = cl_pa[15:0];
-    wire        wr_text  = wr_main && (pa[15:12] == 4'h0) && (pa[11] ^ pa[10]);
-    wire        wr_hgr   = wr_main && !pa[15] && (pa[14] ^ pa[13]);
-
-    logic        t_we, h_we;
-    logic [10:0] t_waddr;
-    logic [13:0] h_waddr;
-    logic [7:0]  wdata;
-
-    always_ff @(posedge clk) begin
-        t_we    <= wr_text;
-        h_we    <= wr_hgr;
-        t_waddr <= {pa[11], pa[9:0]};
-        h_waddr <= {pa[14], pa[12:0]};
-        wdata   <= op_wdata;
-    end
-
     // ---- the prediction ---------------------------------------------------------
     wire text_addr  = text || (mixed && scan_mixed_text(scan_v, pal));
     wire hires_addr = hires && !text_addr;
     wire page2_disp = page2 && !store80;
     wire [15:0] saddr = scan_addr(scan_v, scan_h, pal, hires_addr, page2_disp);
 
-    // Registered once before the RAMs' address pins; the read follows every
-    // clock and the byte lands two clocks after the address.
-    logic [15:0] s_addr_q;
-    logic        s_hires_q, s_hires_q2;
-    always_ff @(posedge clk) begin
-        s_addr_q   <= saddr;
-        s_hires_q  <= hires_addr;
-        s_hires_q2 <= s_hires_q;
-    end
+    // The peek's address, unpacked from the old side copy's index the host
+    // still speaks: text {A11, A9:A0} over $0400-$0BFF, hi-res {A14, A12:A0}
+    // over $2000-$5FFF.
+    wire [15:0] peek_pa = peek_addr[14]
+        ? {1'b0, peek_addr[13], ~peek_addr[13], peek_addr[12:0]}
+        : {4'd0, peek_addr[10], ~peek_addr[10], peek_addr[9:0]};
 
-    // Port A: the write, or the peek while there is none.  Port B: the scanner.
-    wire [7:0] t_a_rdata, h_a_rdata, t_b_rdata, h_b_rdata;
-
-    fd_bank #(.DEPTH (2048), .AW (11)) u_text (
-        .clk     (clk),
-        .a_we    (t_we),
-        .a_addr  (t_we ? t_waddr : peek_addr[10:0]),
-        .a_wdata (wdata),
-        .a_rdata (t_a_rdata),
-        .b_we    (1'b0),
-        .b_addr  ({s_addr_q[11], s_addr_q[9:0]}),
-        .b_wdata (8'd0),
-        .b_rdata (t_b_rdata)
-    );
-
-    fd_bank #(.DEPTH (16384), .AW (14)) u_hgr (
-        .clk     (clk),
-        .a_we    (h_we),
-        .a_addr  (h_we ? h_waddr : peek_addr[13:0]),
-        .a_wdata (wdata),
-        .a_rdata (h_a_rdata),
-        .b_we    (1'b0),
-        .b_addr  ({s_addr_q[14], s_addr_q[12:0]}),
-        .b_wdata (8'd0),
-        .b_rdata (h_b_rdata)
-    );
-
-    // The byte, and the address it came from, three clocks from the position.
+    // ---- the main bank's port, alternated -----------------------------------------
+    // Even clocks the scanner, odd clocks the peek; the byte returns the
+    // clock after its address stands and is captured on the edge behind it,
+    // so the slot tag rides a two-deep pipe and the scanner's byte is THREE
+    // CLOCKS from a new position, exactly the latency the side copy had.
+    logic        ph = 1'b0, ph_q = 1'b0, ph_q2 = 1'b0;
+    logic [15:0] a1;
     logic [7:0]  pred;
-    logic [15:0] pred_addr, pred_addr_q;
+    logic [15:0] pred_addr;
     always_ff @(posedge clk) begin
-        pred        <= s_hires_q2 ? h_b_rdata : t_b_rdata;
-        pred_addr_q <= s_addr_q;
-        pred_addr   <= pred_addr_q;
+        ph      <= ~ph;
+        ph_q    <= ph;
+        ph_q2   <= ph_q;
+        mb_addr <= ph ? peek_pa : saddr;
+        a1      <= mb_addr;
+        if (!ph_q2) begin
+            pred      <= mb_byte;
+            pred_addr <= a1;
+        end else begin
+            peek_data <= mb_byte;
+        end
     end
-
-    // The peek: port A's byte is the peek's whenever the previous clock did
-    // not write; a write is at most once per bus cycle, so it refreshes
-    // within a clock or two of any change.
-    logic t_we_q, h_we_q;
-    logic [7:0] peek_text, peek_hgr;
-    always_ff @(posedge clk) begin
-        t_we_q <= t_we;
-        h_we_q <= h_we;
-        if (!t_we_q) peek_text <= t_a_rdata;
-        if (!h_we_q) peek_hgr  <= h_a_rdata;
-    end
-    assign peek_data = peek_addr[14] ? peek_hgr : peek_text;
 
     // ---- what floats -------------------------------------------------------------
     function automatic floats(input [15:0] a);

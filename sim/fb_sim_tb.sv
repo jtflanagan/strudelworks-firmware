@@ -238,9 +238,10 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     );
 
     // ---- the MMU shadow --------------------------------------------------------
-    wire        cl_valid, cl_rw, cl_wr_image;
+    wire        cl_valid, cl_rw, cl_wr_image, cl_aux;
     wire [1:0]  cl_cls;
-    wire [23:0] cl_pa;
+    wire [7:0]  cl_bank;
+    wire [15:0] cl_off;
     wire [11:0] sw_state;
     wire [2:0]  vid_sw;
 
@@ -248,8 +249,8 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
-        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (),
-        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
+        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
+        .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (),
         .sw_state (sw_state), .vid_sw (vid_sw), .rw_bank (),
         .q_addr (16'd0), .q_divert ()
     );
@@ -261,11 +262,18 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire [31:0] compared, mismatches, last, last2, other;
     wire [7:0]  peek_data;
 
+    // The main bank's port B, stood in for: the card's main memory (cmem,
+    // written beside the machine's on every main write), one registered
+    // clock behind the address, as rtl/page_cache.sv serves it.
+    wire [15:0] mb_addr;
+    reg  [7:0]  mb_byte;
+    always @(posedge clk) mb_byte <= cmem[mb_addr];
+
     fb_sim dut (
         .clk (clk), .rst (rst),
-        .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
+        .op_addr (op_addr), .op_rw (op_rw),
         .op_present (op_present), .op_commit (op_commit), .op_ovr (op_ovr),
-        .cl_valid (cl_valid), .cl_wr_image (cl_wr_image), .cl_pa (cl_pa),
+        .mb_addr (mb_addr), .mb_byte (mb_byte),
         .sw_state (sw_state), .vid_sw (vid_sw),
         .locked (locked), .scan_v (scan_v), .scan_h (scan_h), .pal (dpal),
         .master_active (master_active),
@@ -280,7 +288,9 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     // ---- the machine: two banks, the switches, the floating bus ------------------
     localparam integer BUS_AT = 70;
 
-    reg [7:0] mem [0:65535];        // main
+    reg [7:0] mem  [0:65535];       // main, the machine's
+    reg [7:0] cmem [0:65535];       // main, the card's bank (diverges only
+                                    // when a test corrupts one of them)
     reg [7:0] aux [0:65535];        // auxiliary
     reg       sw_text, sw_mixed, sw_page2, sw_hires, sw_store80, sw_col80, sw_ramwrt;
     reg       bus_dead = 1'b0;      // a floating bus that shows nothing
@@ -354,7 +364,10 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
                 default: begin
                     if (addr_drive[15:12] != 4'hC) begin
                         if (wr_aux(addr_drive)) aux[addr_drive] <= data_drive;
-                        else                    mem[addr_drive] <= data_drive;
+                        else begin
+                            mem[addr_drive]  <= data_drive;
+                            cmem[addr_drive] <= data_drive;
+                        end
                     end
                 end
             endcase
@@ -514,7 +527,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     initial begin
         $display("fb_sim_tb: the floating bus simulated, against the machine's\n");
 
-        for (i = 0; i < 65536; i = i + 1) begin mem[i] = 8'hEA; aux[i] = 8'h00; end
+        for (i = 0; i < 65536; i = i + 1) begin mem[i] = 8'hEA; cmem[i] = 8'hEA; aux[i] = 8'h00; end
         // The program: two floating reads and a write, forever.
         mem[16'hF000] = 8'hAD; mem[16'hF001] = 8'h20; mem[16'hF002] = 8'hC0;   // LDA $C020
         mem[16'hF003] = 8'hAD; mem[16'hF004] = 8'h30; mem[16'hF005] = 8'hC0;   // LDA $C030

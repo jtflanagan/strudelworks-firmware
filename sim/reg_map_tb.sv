@@ -1219,14 +1219,14 @@ module reg_map_tb;
         // ---- MEM_CTRL / MEM_STAT and the counters -----------------------------
         base = out_n;
         do_read(32'h8000_004C);
-        if (out_mem[base+2] !== 32'h0907_0000) begin
-            $display("FAIL: MEM_CTRL reads %08x, expected sets=9, bank 7 and no serve bits", out_mem[base+2]);
+        if (out_mem[base+2] !== 32'h0807_0000) begin
+            $display("FAIL: MEM_CTRL reads %08x, expected pages=8, bank 7 and no serve bits", out_mem[base+2]);
             errors = errors + 1;
-        end else $display("  ok: MEM_CTRL reads log2(sets), the RamWorks bank and every serve bit clear");
+        end else $display("  ok: MEM_CTRL reads log2(pages), the RamWorks bank and every serve bit clear");
         do_write(32'h8000_004C, 32'h0000_0301);           // serve on, both W1s
         base = out_n;
         do_read(32'h8000_004C);
-        if (out_mem[base+2] !== 32'h0907_0001 || mem_serve !== 1'b1) begin
+        if (out_mem[base+2] !== 32'h0807_0001 || mem_serve !== 1'b1) begin
             $display("FAIL: MEM_CTRL after write reads %08x, serve %b", out_mem[base+2], mem_serve);
             errors = errors + 1;
         end else if (mem_cnt_clrs != 1 || mem_invals != 1) begin

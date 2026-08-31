@@ -20,6 +20,6 @@ iverilog -g2012 -I "$root/rtl" -o "$out" -s fb_sim_tb \
     "$root/rtl/boot_hold.sv" \
     "$root/rtl/vbl_lock.sv" \
     "$root/rtl/apple_mmu.sv" \
-    "$root/rtl/fd_bank.sv" \
+    \
     "$root/rtl/fb_sim.sv"
 exec vvp -n "$out"

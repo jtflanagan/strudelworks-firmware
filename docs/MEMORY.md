@@ -1,5 +1,12 @@
 # The machine's memory, on the card
 
+> **On branch `page_cache` the 4-way cache, its DDR3 client and the 24-bit
+> physical address described below are REPLACED** by the two-bank design of
+> docs/PAGE_CACHE.md (`rtl/page_cache.sv`, `rtl/page_client.sv`).  The MMU
+> shadow, the ROM, the RamWorks semantics, the divert, the monitor's rules
+> and the registers' meanings all carry over and this file remains their
+> reference; the cache-mechanics sections are historical here.
+
 Status: **✅ built and proven in simulation, 2026-08-28; master build of 20:21
 (WNS +0.212 ns, WHS +0.036 ns, 31 of 50 BRAM tiles); not yet run on hardware.**
 

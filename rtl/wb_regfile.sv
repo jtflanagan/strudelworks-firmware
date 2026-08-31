@@ -29,8 +29,9 @@
 // wait would be measuring nothing but itself.
 //////////////////////////////////////////////////////////////////////////////////
 module wb_regfile #(
-    // log2 of the cache's sets, for MEM_CTRL's readback.
-    parameter integer MEM_SETS_LOG2 = 9,
+    // log2 of the page cache's pages (256 x 256 bytes), for MEM_CTRL's
+    // readback.  Was log2 of the 4-way cache's sets before the page cache.
+    parameter integer MEM_SETS_LOG2 = 8,
     // Stamped by build/build.sh through build.tcl's -generic.  Zero means the
     // bitstream was built without a stamp - an interactive GUI build - and the
     // host is expected to say "unstamped" rather than render it as a date.
@@ -157,7 +158,7 @@ module wb_regfile #(
     input  wire [31:0]     vbl_stat,
     input  wire [31:0]     vbl_pos,
 
-    // The memory image and its cache (rtl/mem_cache.sv, rtl/mem_client.sv,
+    // The memory image and its page cache (rtl/page_cache.sv, rtl/page_client.sv,
     // docs/MEMORY.md): MEM_CTRL's serve bits out as levels and its W1 bits as
     // pulses; the shadow's switches, the counters and the state back for the
     // readback.  A watching top ties the inputs to 0 and leaves the outputs

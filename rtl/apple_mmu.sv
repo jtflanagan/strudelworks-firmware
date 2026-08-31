@@ -4,7 +4,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 // apple_mmu - the IIe's memory map, shadowed: which memory does this op touch?
 //
-// The card is about to keep its own copy of the Apple's memory (rtl/mem_cache.sv)
+// The card is about to keep its own copy of the Apple's memory (rtl/page_cache.sv)
 // and answer the core's reads from it.  That is only possible if the card knows,
 // for every bus cycle, WHICH byte the machine's MMU would have reached - and on a
 // IIe that depends on a dozen soft switches: main or auxiliary RAM (RAMRD, RAMWRT,
@@ -31,9 +31,16 @@
 // THE IMAGE'S LAYOUT is the one emulators use: 64 KB per bank, with the
 // language card's 16 KB folded into the $C000-$FFFF hole - bank 1 of $D000 at
 // $C000-$CFFF, bank 2 of $D000 and the shared $E000-$FFFF where they sit.
-// Image bank 0 is MAIN MEMORY, always: nothing banks it.  Image banks 1-255
-// are the AUXILIARY memory, one per RamWorks bank.  cl_pa is that 24-bit
-// physical address: 16 MB, the whole image.
+// The classified op is that fold (cl_off, the offset in a 64 KB bank), a
+// main-or-auxiliary bit (cl_aux), and the RamWorks bank register AS WRITTEN
+// (cl_bank).  MAIN memory lives in its own block RAM bank
+// (rtl/page_cache.sv) and nothing banks it; an auxiliary access reaches
+// RamWorks bank cl_bank, and the DDR3 backs the banks that are not resident.
+// There is no 24-bit physical address and no +1 anywhere: RamWorks bank k is
+// DDR3 aux bank k (docs/PAGE_CACHE.md).  pf_off is cl_off's combinational
+// preview, valid with op_present, so the banks' block RAMs can be addressed
+// the clock BEFORE the classification lands - the classifier runs beside the
+// fetch, not in front of it.
 //
 // THE RAMWORKS.  An Applied Engineering RamWorks III in the auxiliary slot
 // replaces the 64 KB auxiliary memory with up to 256 banks of it, each a
@@ -47,12 +54,11 @@
 // real card, and software finds the banks by writing a signature into each
 // and looking for it.
 //
-// Here the card IS the RamWorks, with RW_BANKS = 255 banks: RamWorks bank k
-// is image bank k+1, so the regular auxiliary memory (bank 0) is image bank 1
-// exactly as it was before the RamWorks existed, and the 255 banks plus main
-// memory fill the 16 MB.  A write of a bank number that does not exist (255)
-// is ignored and the register keeps its value, which is what AppleWin does
-// for a bank beyond the configured size.
+// Here the card IS the RamWorks, with RW_BANKS = 255 banks: bank k is DDR3
+// aux bank k, the regular auxiliary memory (bank 0) at the region's start.
+// A write of a bank number that does not exist (255) is ignored and the
+// register keeps its value, which is what AppleWin does for a bank beyond
+// the configured size.
 //
 // THE BANK REGISTER RESETS ON RES', by decision.  The real card's does not
 // (AppleWin resets it only on a power cycle, GH#1414), so a program that
@@ -133,10 +139,14 @@ module apple_mmu (
     // The classified op, one clock after op_present.
     output logic        cl_valid,
     output logic [1:0]  cl_cls,        // CLS_*
-    output logic [23:0] cl_pa,         // physical address in the image
-    output logic [13:0] cl_rom_addr,   // offset from $C000 in the ROM
+    output logic        cl_aux,        // reaches the auxiliary memory
+    output logic [7:0]  cl_bank,       // the RamWorks bank, as written
+    output logic [15:0] cl_off,        // offset in a 64 KB bank, LC folded
     output logic        cl_rw,
     output logic        cl_wr_image,   // a write that lands in the image
+    // cl_off's combinational preview, valid with op_present: the banks'
+    // block RAMs are addressed from this the clock before cl_* stands.
+    output wire  [15:0] pf_off,
 
     // The switches, for a status register:
     //   {prewrite, wren, lc_ramrd, bank2, slotc3rom, intcxrom, hires, page2,
@@ -271,25 +281,24 @@ module apple_mmu (
                    (op_rw ? ramrd : ramwrt);
     wire aux_sel = in_zp ? altzp : aux_mid;
 
-    // Which image bank: main is 0, and an auxiliary access reaches RamWorks
-    // bank rw_bank, which is image bank rw_bank + 1.
-    wire [7:0] aux_bank = rw_bank + 8'd1;
-
-    // The language card's RAM: bank 1 of $D000 lives in the image's $C000 hole.
-    wire [15:0] lc_off = (in_d && !lc_bank2) ? {4'hC, op_addr[11:0]} : op_addr;
+    // The language card's RAM: bank 1 of $D000 lives in the bank's $C000
+    // hole.  This is the whole of the offset's classification, so it is also
+    // the preview the banks' block RAMs are addressed from at op_present -
+    // one mux on a registered switch, beside the fetch, not in front of it.
+    assign pf_off = (in_d && !lc_bank2) ? {4'hC, op_addr[11:0]} : op_addr;
 
     logic [1:0]  n_cls;
-    logic [23:0] n_pa;
+    logic        n_aux;
     logic        n_wr_image;
 
     always_comb begin
         n_cls      = CLS_BUS;
-        n_pa       = {aux_sel ? aux_bank : 8'd0, op_addr};
+        n_aux      = aux_sel;
         n_wr_image = 1'b0;
         if (in_io) begin
             n_cls = CLS_BUS;
         end else if (in_hi) begin
-            n_pa = {altzp ? aux_bank : 8'd0, lc_off};
+            n_aux = altzp;
             if (op_rw) begin
                 n_cls = lc_ramrd ? CLS_LC : CLS_ROM;
             end else begin
@@ -306,16 +315,18 @@ module apple_mmu (
         if (rst) begin
             cl_valid    <= 1'b0;
             cl_cls      <= CLS_BUS;
-            cl_pa       <= 24'd0;
-            cl_rom_addr <= 14'd0;
+            cl_aux      <= 1'b0;
+            cl_bank     <= 8'd0;
+            cl_off      <= 16'd0;
             cl_rw       <= 1'b1;
             cl_wr_image <= 1'b0;
         end else begin
             cl_valid <= op_present;
             if (op_present) begin
                 cl_cls      <= n_cls;
-                cl_pa       <= n_pa;
-                cl_rom_addr <= op_addr[13:0];
+                cl_aux      <= n_aux;
+                cl_bank     <= rw_bank;
+                cl_off      <= pf_off;
                 cl_rw       <= op_rw;
                 cl_wr_image <= n_wr_image;
             end
