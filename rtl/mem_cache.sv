@@ -146,7 +146,23 @@ module mem_cache #(
     // From mem_client: a fill's line, tagged with the id it was asked with.
     input  wire         mr_valid,
     input  wire [1:0]   mr_id,
-    input  wire [127:0] mr_data
+    input  wire [127:0] mr_data,
+
+    // The write-back lines (rtl/wb_lines.sv): a dirty line there holds
+    // bytes this cache's ways and the DDR3 were never told about, so a READ
+    // of that line is refused - decided with nothing served, no fill raised
+    // - and the sequencer's retry finds it once the flush has landed.
+    // Writes pass: the wb line purges the byte the classified stream
+    // carries, and the in-order queue does the rest.
+    input  wire [3:0]   wb_dirty,
+    input  wire [79:0]  wb_lines_flat,
+
+    // The zp/stack store's valid lines (rtl/d_front.sv): the AUTHORITATIVE
+    // home of physical main 0/1.  A bus read of a valid line compares two
+    // legitimately stale copies - the machine's and this cache's - so the
+    // monitor skips it (the reset sequence's stack reads would otherwise
+    // count mismatches on every reset).
+    input  wire [31:0]  zs_vld
 );
 
     localparam integer IW = $clog2(SETS);      // set index
@@ -280,6 +296,14 @@ module mem_cache #(
     wire cacheable = (p_cls == CLS_RAM) || (p_cls == CLS_LC);
     wire may_touch = image_ready && !invalidating;
 
+    // The wb refusal: registered against the held op's line, ready by P6.
+    wire wbm_c = (wb_dirty[0] && (wb_lines_flat[19:0]  == p_pa[23:4])) ||
+                 (wb_dirty[1] && (wb_lines_flat[39:20] == p_pa[23:4])) ||
+                 (wb_dirty[2] && (wb_lines_flat[59:40] == p_pa[23:4])) ||
+                 (wb_dirty[3] && (wb_lines_flat[79:60] == p_pa[23:4]));
+    wire zsm_c = (p_pa[23:9] == 15'd0) && zs_vld[p_pa[8:4]];
+    logic wbm_q, zsm_q;
+
     assign busy = v1 || v2 || v3 || v4 || fill_pending;
 
     integer w;
@@ -290,7 +314,7 @@ module mem_cache #(
         tag_we    <= 1'b0;
         data_q    <= data_sync;
         // Decided on this edge: P6 unless a fill is being raised, or the fill.
-        decided   <= (v4 && !(p_rw && cacheable && !hit && may_touch)) ||
+        decided   <= (v4 && !(p_rw && cacheable && !hit && may_touch && !wbm_q)) ||
                      (mr_valid && fill_pending && mr_id == fill_id);
 
         if (rst) begin
@@ -305,7 +329,7 @@ module mem_cache #(
             fill_pending <= 1'b0; fill_id <= 2'd0; fill_serve <= 1'b0;
             fill_cmp <= 1'b0; fill_byte <= 8'd0;
             cmp_valid <= 1'b0; cmp_byte <= 8'd0;
-            decided <= 1'b0;
+            decided <= 1'b0; wbm_q <= 1'b0; zsm_q <= 1'b0;
             mq_valid <= 1'b0; mq_kind <= 1'b0; mq_id <= 2'd0;
             mq_line <= 20'd0; mq_byte <= 4'd0; mq_data <= 8'd0;
             hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
@@ -354,6 +378,7 @@ module mem_cache #(
 
             // ---- P5: one way, one byte, one victim ---------------------------
             v4 <= v3;
+            if (v3) begin wbm_q <= wbm_c; zsm_q <= zsm_c; end
             if (v3) begin
                 // The hit way's whole line, while way_rd still holds it (the
                 // way RAM's output registers only move on rd_en).
@@ -377,14 +402,18 @@ module mem_cache #(
                     if (cacheable) begin
                         if (hit) begin
                             hits <= hits + 32'd1;
-                            if (serve_cls && may_touch) begin
+                            if (serve_cls && may_touch && !wbm_q) begin
                                 sub_en   <= 1'b1;
                                 sub_data <= rbyte;
                                 sub_line <= hline;
                                 sub_line_ok <= 1'b1;
                                 served   <= served + 32'd1;
                             end
-                            cmp_valid <= 1'b1;
+                            // (never against a wb-dirty line or a zp/stack
+                            // line the store owns: the way is legitimately
+                            // behind them, and a false mismatch count costs
+                            // a debugging session)
+                            cmp_valid <= !wbm_q && !zsm_q;
                             cmp_byte  <= rbyte;
                             // Touch the LRU bits.
                             tag_we    <= 1'b1;
@@ -392,7 +421,7 @@ module mem_cache #(
                             tag_wdata <= {plru_after_hit, tagword[4*EW-1:0]};
                         end else begin
                             misses <= misses + 32'd1;
-                            if (may_touch) begin
+                            if (may_touch && !wbm_q) begin
                                 fill_pending <= 1'b1;
                                 fill_id      <= fill_id + 2'd1;
                                 fill_serve   <= serve_cls;

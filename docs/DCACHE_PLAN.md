@@ -272,6 +272,62 @@ master_top gate - remember the card_link port forwarding, it was
 missed once). The 2026-08-30 lesson: the hardware bisects itself in
 minutes when the lever already exists.
 
+## What the first cut's debugging established (2026-08-30, overnight)
+
+Seven rules the sim battery forced, each a real failure first.  They
+rank with the laws for anything that touches this design later:
+
+1. **A claim term may not descend from the live address.**  A data
+   address holds din through the AGU; the first cut's claim decoded
+   live cpu_addr and closed a combinational loop d_hit -> cpu_din ->
+   AGU -> claim -> d_ok -> d_hit (law 2's exact trap).  The claim is
+   registered (da_q) - sufficient, because the dispatcher cannot fire
+   before `settled`, which is one clock behind, the same clock da_q is.
+2. **The wb flush selects on one edge and captures on the next**
+   (F_CAP).  Capturing on the selection edge read the pre-merge word
+   for a byte merging that very edge, then cleared dirty: the byte was
+   lost to DDR3 forever.  Purges apply through F_CAP, and to the
+   captured word while the push waits; after acceptance the in-order
+   queue resolves against later writers.
+3. **Fill-by-observation never touches a VALID zp/stack line.**  Valid
+   means AHEAD of the L2; the passing sub_line is the L2's stale view.
+   (The icache never had this rule because its validity never outruns
+   its L2.)
+4. **Reads never wait for event room; their events shed like turbo's.**
+   A zp/stack-valid read that misses its window falls to the
+   sequencer's stale path - so nothing optional may hold a read in the
+   window.  Law 5 is about writes; the sparse filter discards RAM-read
+   events anyway.
+5. **The try window counts only clocks a serve was possible** (tries
+   advance gated on d_ok).  Under the governor's hold the op parks
+   with the window alive; the dispatcher is blocked by the same
+   can_pay, so nothing deadlocks.  Where d_ok stays low with the
+   dispatcher free - the reset sequence, mode off - run_rd/run_w
+   withhold the claim entirely (a claim there only split the reset
+   sequence's consecutive stack reads, which the machine's MMU counts
+   on the pins).
+6. **A D$ write serves only through a proven row** (steered_right AND
+   look_ok): the row then answers present (update in place) or PROVEN
+   absent (wb alone).  An unproven row left a present line stale
+   behind the wb byte.  A write that lapses to the sequencer instead
+   is safe - its classified pass snoop-invalidates the D$ line.
+7. **A bare invalidate is not a reload.**  The L2 walk under a running
+   machine must not discard the wb lines (they flush by age - they
+   are the only copy of recent writes) and must not flash the
+   zp/stack store (its bytes exist nowhere else).  The store flashes
+   only when the invalidate arrives UNDER A HOLD (hold_lvl) - an
+   image reload always holds the machine, and the override's flush
+   drained the wb lines before the hold ended.  The D$ still flashes
+   unconditionally: it is a true cache and DDR3 is its truth.
+
+And two monitor rules: mem_cache's mismatch counter skips wb-dirty
+lines and zp/stack-valid lines (both legitimately ahead of the way),
+or every reset sequence's stack reads would count false mismatches on
+hardware.  The testbench likewise exempts the reset sequence's bus
+reads from the reference compare - they read the stale machine by
+documented design - and holds the core (the settle override, which
+also exercises ovr_flush) around every image comparison.
+
 ## Step 3 - sims (the fix-proving battery, extended)
 
 Encode every behavior as an accel_tb phase BEFORE trusting it:

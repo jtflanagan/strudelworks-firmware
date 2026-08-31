@@ -188,6 +188,7 @@ module wb_regfile #(
     output logic [15:0]    accel_target,
     output logic           accel_turbo_dis, // [25]: no turbo serves (diagnosis)
     output logic           accel_drain_dis, // [26]: no line drains (diagnosis)
+    output logic           accel_dcache_dis,// [27]: no D-front serves (diagnosis)
     output logic           accel_cnt_clr,   // pulses
     input  wire [31:0]     accel_stat,
     input  wire [31:0]     accel_fast,
@@ -706,6 +707,9 @@ module wb_regfile #(
     //                           is the sequencer's (docs/DIAG_ACCEL_HW.md)
     //   [26]     drain_dis  RW   1 = hd_card never drains a block through
     //                           the image; every DMA goes to the bus
+    //   [27]     dcache_dis RW   1 = the D front serves nothing (no claims,
+    //                           no zp/stack store, no D$, no wb lines);
+    //                           every data op is the sequencer's
     //   [31]     cnt_clr    W1   clear the ACCEL_* counters
     //
     // Levels, like MEM_CTRL's: safe under a running machine, with the one
@@ -718,6 +722,7 @@ module wb_regfile #(
             accel_target    <= 16'd0;
             accel_turbo_dis <= 1'b0;
             accel_drain_dis <= 1'b0;
+            accel_dcache_dis <= 1'b0;
             accel_cnt_clr   <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
@@ -725,12 +730,14 @@ module wb_regfile #(
                 accel_target    <= wb_dat_w[23:8];
                 accel_turbo_dis <= wb_dat_w[25];
                 accel_drain_dis <= wb_dat_w[26];
+                accel_dcache_dis <= wb_dat_w[27];
             end
             accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
         end
     end
 
-    wire [31:0] accel_ctrl_rd = {5'd0, accel_drain_dis, accel_turbo_dis, 1'b0,
+    wire [31:0] accel_ctrl_rd = {4'd0, accel_dcache_dis, accel_drain_dis,
+                                 accel_turbo_dis, 1'b0,
                                  accel_target, 6'd0, accel_mode};
 
     // ---- FB_CTRL ------------------------------------------------------------

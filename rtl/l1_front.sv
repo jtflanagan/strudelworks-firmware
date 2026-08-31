@@ -96,8 +96,14 @@ module l1_front (
     input  wire        cl_rw,
     input  wire        cl_wr_image,
     input  wire [23:0] cl_pa,
-    // ...and the DMA drain's lines, second in line: the op's snoop wins a
-    // same-clock collision and the drain waits (snoop2_take says it went).
+    // ...the D front's served-write broadcast, second (a write the D side
+    // retired never rides the classified stream, so it snoops from here;
+    // d_front holds it up until no classified write competes)...
+    input  wire        dsn_en,
+    input  wire [23:0] dsn_pa,
+    // ...and the DMA drain's lines, last: the op's snoop wins a same-clock
+    // collision, the broadcast next, and the drain waits (snoop2_take says
+    // it went).
     input  wire        snoop2_en,
     input  wire [23:0] snoop2_pa,
     output wire        snoop2_take,
@@ -197,11 +203,11 @@ module l1_front (
         .inst_en   (inst_en),
         .inst_pa   (inst_pa),
         .inst_line (inst_line),
-        .snoop_en  (cl_snoop || snoop2_en),
-        .snoop_pa  (cl_snoop ? cl_pa : snoop2_pa)
+        .snoop_en  (cl_snoop || dsn_en || snoop2_en),
+        .snoop_pa  (cl_snoop ? cl_pa : dsn_en ? dsn_pa : snoop2_pa)
     );
     wire cl_snoop = cl_valid && !cl_rw && cl_wr_image;
-    assign snoop2_take = snoop2_en && !cl_snoop;
+    assign snoop2_take = snoop2_en && !cl_snoop && !dsn_en;
 
     // ---- the turbo op -------------------------------------------------------
     wire servable = cyc_is_i && page_match && lp_ok;
@@ -230,7 +236,12 @@ module l1_front (
     // The op that missed here completed on the sequencer's path; its line
     // flies past on sub_line.  Gated on the TLB entry still standing, so a
     // map change between look and completion kills it.
-    wire img_inst = accel_cyc_en && servable && !cur_pa[24] && sub_line_ok;
+    // ...and never physical main pages 0/1: the zp/stack store owns those
+    // (rtl/d_front.sv), its writes stay out of the image, and a line
+    // installed here would read DDR3's permanently stale copy.  I-fetches
+    // of those pages are the D front's to serve.
+    wire img_inst = accel_cyc_en && servable && !cur_pa[24] && sub_line_ok &&
+                    (cur_pa[23:9] != 15'd0);
 
     // ---- the ROM filler -----------------------------------------------------
     // Four words off apple_rom's second port, latency two, streamed.  Started

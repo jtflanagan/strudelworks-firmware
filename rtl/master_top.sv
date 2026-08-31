@@ -219,7 +219,7 @@ module master_top #(
     // The diagnosis chicken bits (docs/DIAG_ACCEL_HW.md): levels off
     // ACCEL_CTRL that switch the two never-simulated-together features off
     // at runtime, so hardware can bisect a failure without a rebuild.
-    wire        accel_turbo_dis, accel_drain_dis;
+    wire        accel_turbo_dis, accel_drain_dis, accel_dcache_dis;
     wire [3:0]  seq_state;
     wire [31:0] accel_fast, accel_bus, accel_cycles, accel_wait;
     wire [7:0]  accel_retries, merge_overflows;
@@ -234,10 +234,12 @@ module master_top #(
     // only, where writes are not exposed on the bus by design.
     wire [31:0] hd_dma_ev_word;
     wire        hd_dma_ev_valid, hd_dma_ev_take;
-    wire        hd_dq_valid, hd_dq_ready;
+    wire        hd_dq_valid, hd_dq_ready, dq_ready_w;
     wire [19:0] hd_dq_line;
     wire [15:0] hd_dq_be;
     wire [127:0] hd_dq_data;
+    wire        inv_rdy_mux;
+    assign hd_dq_ready = dq_ready_w;
     wire        hd_inv_en, hd_inv_rdy;
     wire [23:0] hd_inv_pa;
     wire        hd_snoop2_en, hd_snoop2_take;
@@ -278,9 +280,13 @@ module master_top #(
         .fev_room (fev_room),
         .dma_ev_word (hd_dma_ev_word), .dma_ev_valid (hd_dma_ev_valid),
         .dma_ev_take (hd_dma_ev_take),
-        .hd_dq_valid (hd_dq_valid), .hd_dq_line (hd_dq_line),
-        .hd_dq_be (hd_dq_be), .hd_dq_data (hd_dq_data),
-        .hd_dq_ready (hd_dq_ready),
+        // The drain port, shared: hd_card's lines first, the wb flush's
+        // behind them (mem_client's in-order queue keeps everyone honest).
+        .hd_dq_valid (hd_dq_valid || wq_valid),
+        .hd_dq_line (hd_dq_valid ? hd_dq_line : wq_line),
+        .hd_dq_be (hd_dq_valid ? hd_dq_be : wq_be),
+        .hd_dq_data (hd_dq_valid ? hd_dq_data : wq_data),
+        .hd_dq_ready (dq_ready_w),
         .fast_valid (fev_valid), .fast_addr (fev_addr), .fast_rw (fev_rw),
         .fast_data (fev_data), .fast_sync (fev_sync), .fast_vbl (vbl_level),
         .merge_overflows (merge_overflows),
@@ -330,6 +336,7 @@ module master_top #(
         .mem_intc8rom (mem_intc8rom),
         .accel_mode (accel_mode), .accel_target (accel_target),
         .accel_turbo_dis (accel_turbo_dis), .accel_drain_dis (accel_drain_dis),
+        .accel_dcache_dis (accel_dcache_dis),
         .accel_cnt_clr (accel_cnt_clr),
         .accel_on (accel_on),
         .accel_stat ({7'd0, accel_reset_seq, accel_retries, merge_overflows, seq_state, bus_owns, 1'b0, accel_held, accel_on}),
@@ -447,6 +454,35 @@ module master_top #(
     wire        rom_r2_en;
     wire [11:0] rom_r2_addr;
     wire [31:0] rom_r2_data;
+
+    // The D front's world (rtl/d_front.sv): its claim and permissions, its
+    // commit and event into the sequencer's books, the t3 TLB view, the
+    // served-write broadcast, and the write-back lines behind it.
+    wire        d_hit_w;
+    wire [7:0]  d_byte_w;
+    wire        d_claim, d_commit, d_ok, d_ok_w;
+    wire [15:0] dev_addr;
+    wire        dev_rw, dev_sync;
+    wire [7:0]  dev_data;
+    wire [7:0]  t3_page;
+    wire        t3_r_ok, t3_w_ok;
+    wire [16:0] t3_r_ppage, t3_w_ppage;
+    wire        dsn_en;
+    wire [23:0] dsn_pa;
+    wire [7:0]  dsn_data;
+    wire        aw_en, aw_ok;
+    wire [23:0] aw_pa;
+    wire [7:0]  aw_data;
+    wire        wq_valid, wq_ready, winv_en, winv_rdy;
+    wire [19:0] wq_line;
+    wire [15:0] wq_be;
+    wire [127:0] wq_data;
+    wire [23:0] winv_pa;
+    wire [3:0]  wb_dirty;
+    wire [79:0] wb_lines_flat;
+    wire [31:0] wb_flushes;
+    wire [31:0] accel_d_ops;
+    wire [31:0] zs_vld_w;
 
     // The Mockingboard's IRQ takes the short route into the core, the same
     // route drv_sync takes out of it: a real card would pull the slot's IRQ'
@@ -611,12 +647,20 @@ module master_top #(
         .mq_valid      (mq_valid),
         .bus_tick      (bus_tick),
         .l1_claim      (l1_claim),
-        .ext_cyc_en    (turbo_commit),
+        .ext_cyc_en    (turbo_commit || d_commit),
         .turbo_commit  (turbo_commit),
         .turbo_addr    (turbo_addr),
         .turbo_data    (turbo_data),
         .turbo_sync    (turbo_sync),
         .turbo_ok      (turbo_ok_seq),
+        .d_claim       (d_claim),
+        .d_commit      (d_commit),
+        .dev_addr      (dev_addr),
+        .dev_rw        (dev_rw),
+        .dev_data      (dev_data),
+        .dev_sync      (dev_sync),
+        .d_ok          (d_ok),
+        .d_ok_w        (d_ok_w),
         .op_tick       (accel_op_tick),
         .fev_room      (fev_room),
         .u_present     (u_present),
@@ -655,8 +699,8 @@ module master_top #(
         .cpu_sync     (cpu_sync),
         .cyc_is_i     (cpu_cyc_is_i),
         .i_steer      (cpu_i_steer),
-        .cyc_en       (cpu_cyc_en),
-        .cpu_din      (cpu_din),
+        .cyc_en       (l1_cyc_en),
+        .cpu_din      (l1_din),
         .accel_cyc_en (accel_cyc_en),
         .accel_din    (accel_din),
         .turbo_ok     (turbo_ok),
@@ -680,11 +724,109 @@ module master_top #(
         .cl_rw        (cl_rw),
         .cl_wr_image  (cl_wr_image),
         .cl_pa        (cl_pa),
+        .dsn_en       (dsn_en),
+        .dsn_pa       (dsn_pa),
         .snoop2_en    (hd_snoop2_en),
         .snoop2_pa    (hd_snoop2_pa),
         .snoop2_take  (hd_snoop2_take),
         .mem_invalidating (mem_invalidating),
         .rom_ok       (mem_rom_loaded)
+    );
+
+    // ---- the D front --------------------------------------------------------
+    // The zp/stack store, the floating page registers and the D$, between
+    // the core and the sequencer beside the L1: a data op both know retires
+    // in two clocks, and everything else falls through.  See rtl/d_front.sv.
+    wire l1_cyc_en;
+    wire [7:0] l1_din;
+    assign cpu_cyc_en = l1_cyc_en || d_hit_w;
+    assign cpu_din    = d_hit_w ? d_byte_w : l1_din;
+
+    d_front u_d (
+        .clk          (apple_clk),
+        .rst          (rst_core),
+        .cyc_is_i     (cpu_cyc_is_i),
+        .cpu_addr     (cpu_addr),
+        .cpu_rw       (cpu_rw),
+        .cpu_dout     (cpu_dout),
+        .cpu_sync     (cpu_sync),
+        .g_cyc_en     (cpu_cyc_en),
+        .d_hit        (d_hit_w),
+        .d_byte       (d_byte_w),
+        .d_ok         (d_ok),
+        .d_ok_w       (d_ok_w),
+        .run_rd       ((accel_mode != 2'd0) && cpu_source_active &&
+                       mem_serve && !accel_reset_seq),
+        .run_w        ((accel_mode == 2'd2) && cpu_source_active &&
+                       mem_serve && !accel_reset_seq),
+        .d_claim      (d_claim),
+        .d_commit     (d_commit),
+        .dev_addr     (dev_addr),
+        .dev_rw       (dev_rw),
+        .dev_data     (dev_data),
+        .dev_sync     (dev_sync),
+        .d_dis        (accel_dcache_dis),
+        .t3_page      (t3_page),
+        .t3_r_ok      (t3_r_ok),
+        .t3_r_ppage   (t3_r_ppage),
+        .t3_w_ok      (t3_w_ok),
+        .t3_w_ppage   (t3_w_ppage),
+        .map_changed  (map_changed),
+        .fev_room     (fev_room),
+        .accel_cyc_en (accel_cyc_en),
+        .sub_line     (mem_sub_line),
+        .sub_line_ok  (mem_sub_line_ok),
+        .cl_valid     (cl_valid),
+        .cl_rw        (cl_rw),
+        .cl_wr_image  (cl_wr_image),
+        .cl_pa        (cl_pa),
+        .cl_wdata     (u_wdata),
+        .snoop2_en    (hd_snoop2_en),
+        .snoop2_pa    (hd_snoop2_pa),
+        .dsn_en       (dsn_en),
+        .dsn_pa       (dsn_pa),
+        .dsn_data     (dsn_data),
+        .aw_en        (aw_en),
+        .aw_pa        (aw_pa),
+        .aw_data      (aw_data),
+        .aw_ok        (aw_ok),
+        .mem_invalidating (mem_invalidating),
+        .hold_lvl     (ovr_en),
+        .zs_vld_o     (zs_vld_w),
+        .cnt_clr      (accel_cnt_clr),
+        .d_ops        (accel_d_ops)
+    );
+
+    // ---- the write-back lines -----------------------------------------------
+    // Four merging lines between the D front and the image, flushing the
+    // DMA drain's way: a dq push behind hd_card's in the arb below, then
+    // the inv_line walk.  See rtl/wb_lines.sv.
+    wb_lines u_wb (
+        .clk          (apple_clk),
+        .rst          (rst_core),
+        .aw_en        (aw_en),
+        .aw_pa        (aw_pa),
+        .aw_data      (aw_data),
+        .aw_ok        (aw_ok),
+        .cl_valid     (cl_valid),
+        .cl_rw        (cl_rw),
+        .cl_wr_image  (cl_wr_image),
+        .cl_pa        (cl_pa),
+        .snoop2_en    (hd_snoop2_en),
+        .snoop2_pa    (hd_snoop2_pa),
+        .ovr_flush    (ovr_en),
+        .mem_invalidating (mem_invalidating),
+        .wq_valid     (wq_valid),
+        .wq_line      (wq_line),
+        .wq_be        (wq_be),
+        .wq_data      (wq_data),
+        .wq_ready     (wq_ready),
+        .winv_en      (winv_en),
+        .winv_pa      (winv_pa),
+        .winv_rdy     (winv_rdy),
+        .wb_dirty     (wb_dirty),
+        .wb_lines_flat (wb_lines_flat),
+        .flushes      (wb_flushes)
     );
 
     // ---- the hold: the boot menu's door and the runtime menu's -------------
@@ -700,7 +842,9 @@ module master_top #(
         .menu_trigger  (menu_trigger),
         .hotkey_hit    (hotkey_hit),
         .cpu_sync      (cpu_sync),
-        .aux_sync      (turbo_commit && turbo_sync),
+        // A SYNC the fronts served: the turbo's, or a stack-page fetch the
+        // D front answered from the zp/stack store.
+        .aux_sync      ((turbo_commit && turbo_sync) || (d_commit && dev_sync)),
         .op_present    (u_present),
         .op_commit     (u_commit),
         .op_sync       (u_sync),
@@ -855,6 +999,11 @@ module master_top #(
         .t2_page    (hd_t2_page),
         .t2_w_ok    (hd_t2_w_ok),
         .t2_w_ppage (hd_t2_w_ppage),
+        .t3_page    (t3_page),
+        .t3_r_ok    (t3_r_ok),
+        .t3_r_ppage (t3_r_ppage),
+        .t3_w_ok    (t3_w_ok),
+        .t3_w_ppage (t3_w_ppage),
         .map_changed (map_changed)
     );
 
@@ -901,8 +1050,14 @@ module master_top #(
         .busy        (mem_busy),
         .serve       (mem_serve),
         .inval       (mem_inval),
-        .inv_line_en (hd_inv_en), .inv_line_pa (hd_inv_pa),
-        .inv_line_rdy (hd_inv_rdy),
+        // The invalidate-one-line port, shared: the drain first, the wb
+        // flush behind it.
+        .inv_line_en (hd_inv_en || winv_en),
+        .inv_line_pa (hd_inv_en ? hd_inv_pa : winv_pa),
+        .inv_line_rdy (inv_rdy_mux),      // wire declared with the hd block
+        .wb_dirty    (wb_dirty),
+        .wb_lines_flat (wb_lines_flat),
+        .zs_vld      (zs_vld_w),
         .cnt_clr     (mem_cnt_clr),
         .image_ready (mem_image_ready),
         .invalidating (mem_invalidating),
@@ -918,6 +1073,12 @@ module master_top #(
         .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
         .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)
     );
+
+    // The shared ports' arbitration: hd_card's drain first on both, the wb
+    // flush behind it.
+    assign hd_inv_rdy = inv_rdy_mux;
+    assign winv_rdy   = inv_rdy_mux && !hd_inv_en;
+    assign wq_ready   = dq_ready_w && !hd_dq_valid;
 
     // ---- the floating bus, simulated ----------------------------------------
     // A side copy of main memory's text and hi-res pages, read at the video
@@ -937,6 +1098,9 @@ module master_top #(
         .cl_valid      (cl_valid),
         .cl_wr_image   (cl_wr_image),
         .cl_pa         (cl_pa),
+        .dwr_we        (dsn_en),
+        .dwr_pa        (dsn_pa),
+        .dwr_data      (dsn_data),
         .sw_state      (mem_sw),
         .vid_sw        (vid_sw),
         .locked        (vbl_locked),

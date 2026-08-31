@@ -100,7 +100,8 @@ module mem_cache_tb;
         .last_mismatch (last_mismatch), .diverted (), .late_fills (late_fills), .fifo_drops (fifo_drops),
         .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
         .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
-        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)
+        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
+        .wb_dirty (4'd0), .wb_lines_flat (80'd0), .zs_vld (32'd0)
     );
 
     // Two arbiter clients: 0 the streaming dummy, 1 the memory (priority).

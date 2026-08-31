@@ -132,9 +132,18 @@ module fb_sim (
     input  wire        cnt_clr,
     input  wire [14:0] peek_addr,    // [14] 0 = text page + [10:0], 1 = hi-res + [13:0]
 
+    // The D front's served-write broadcast (rtl/d_front.sv): a write the
+    // accelerated core retired without touching the classified stream.
+    // Second in priority; d_front holds it up while a classified write has
+    // the clock, so nothing here needs a ready.
+    input  wire        dwr_we,
+    input  wire [23:0] dwr_pa,
+    input  wire [7:0]  dwr_data,
+
     // The DMA line-drain's bytes, trickled during line assembly
-    // (docs/HARDDISK.md): a second writer into the side copy.  A classified
-    // op's write wins the clock; fb2_ready says the drain's byte went.
+    // (docs/HARDDISK.md): a third writer into the side copy.  A classified
+    // op's write or the broadcast wins the clock; fb2_ready says the
+    // drain's byte went.
     input  wire        fb2_we,
     input  wire [15:0] fb2_addr,     // main-image pa[15:0]
     input  wire [7:0]  fb2_data,
@@ -177,18 +186,31 @@ module fb_sim (
     logic [13:0] h_waddr;
     logic [7:0]  wdata;
 
-    // The drain's byte, when the op path is not writing this clock.
+    // The broadcast's byte, when the op path is not writing this clock.
+    wire        dwr_main = dwr_we && (dwr_pa[23:16] == 8'd0);
+    wire [15:0] dpa      = dwr_pa[15:0];
+    wire dwr_text = dwr_main && (dpa[15:12] == 4'h0) && (dpa[11] ^ dpa[10]);
+    wire dwr_hgr  = dwr_main && !dpa[15] && (dpa[14] ^ dpa[13]);
+
+    // The drain's byte, when neither of those is writing this clock.
     wire fb2_text = fb2_we && (fb2_addr[15:12] == 4'h0) &&
                     (fb2_addr[11] ^ fb2_addr[10]);
     wire fb2_hgr  = fb2_we && !fb2_addr[15] && (fb2_addr[14] ^ fb2_addr[13]);
-    assign fb2_ready = !wr_main;
+    assign fb2_ready = !wr_main && !dwr_main;
 
     always_ff @(posedge clk) begin
-        t_we    <= wr_text || (fb2_text && !wr_main);
-        h_we    <= wr_hgr  || (fb2_hgr  && !wr_main);
-        t_waddr <= wr_main ? {pa[11], pa[9:0]}   : {fb2_addr[11], fb2_addr[9:0]};
-        h_waddr <= wr_main ? {pa[14], pa[12:0]}  : {fb2_addr[14], fb2_addr[12:0]};
-        wdata   <= wr_main ? op_wdata : fb2_data;
+        t_we    <= wr_text || (dwr_text && !wr_main) ||
+                   (fb2_text && !wr_main && !dwr_main);
+        h_we    <= wr_hgr  || (dwr_hgr  && !wr_main) ||
+                   (fb2_hgr  && !wr_main && !dwr_main);
+        t_waddr <= wr_main  ? {pa[11], pa[9:0]}
+                 : dwr_main ? {dpa[11], dpa[9:0]}
+                            : {fb2_addr[11], fb2_addr[9:0]};
+        h_waddr <= wr_main  ? {pa[14], pa[12:0]}
+                 : dwr_main ? {dpa[14], dpa[12:0]}
+                            : {fb2_addr[14], fb2_addr[12:0]};
+        wdata   <= wr_main  ? op_wdata
+                 : dwr_main ? dwr_data : fb2_data;
     end
 
     // ---- the prediction ---------------------------------------------------------

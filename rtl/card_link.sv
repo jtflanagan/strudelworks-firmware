@@ -234,6 +234,7 @@ module card_link #(
     output wire [15:0]  accel_target,
     output wire         accel_turbo_dis,
     output wire         accel_drain_dis,
+    output wire         accel_dcache_dis,
     output wire         accel_cnt_clr,
     input  wire         accel_on,
     input  wire [31:0]  accel_stat,
@@ -770,7 +771,12 @@ module card_link #(
     wire        mg_valid, mg_mark, mg_dummy;
     wire [15:0] mg_mark_free;
 
-    event_merge #(.DEPTH (8)) u_merge (
+    // DEPTH 16: at two-clock data ops a sustained RMW or pointer run emits
+    // one word per ~2.7 clocks against the one-per-3 drain; the D front
+    // STALLS retirement on fev_room (never sheds - law 5), and sixteen
+    // entries of smoothing keep that stall statistically rare
+    // (docs/DCACHE_PLAN.md, the write-event budget).
+    event_merge #(.DEPTH (16)) u_merge (
         .clk           (clk_ctrl),
         .rst           (rst),
         .enable        (capture_enable),
@@ -956,6 +962,7 @@ module card_link #(
         .accel_target      (accel_target),
         .accel_turbo_dis   (accel_turbo_dis),
         .accel_drain_dis   (accel_drain_dis),
+        .accel_dcache_dis  (accel_dcache_dis),
         .accel_cnt_clr     (accel_cnt_clr),
         .accel_stat        (accel_stat),
         .accel_fast        (accel_fast),

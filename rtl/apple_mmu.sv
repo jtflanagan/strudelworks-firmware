@@ -219,6 +219,15 @@ module apple_mmu (
     input  wire [7:0]  t2_page,
     output wire        t2_w_ok,
     output wire [16:0] t2_w_ppage,
+    // A third: the D front's (rtl/d_front.sv), both views.  Reloads a
+    // floating page register during a claim-stall clock, and re-answers
+    // "do logical pages 0/1 still map to main" after a map change - always
+    // from a registered page, never on a serve path.
+    input  wire [7:0]  t3_page,
+    output wire        t3_r_ok,
+    output wire [16:0] t3_r_ppage,
+    output wire        t3_w_ok,
+    output wire [16:0] t3_w_ppage,
     // Any access that moves the map, the clock it takes effect: the TLBs
     // flush on it.  Combinational, so the flush lands at the same edge as the
     // change and no lookup can slip between them.
@@ -397,6 +406,16 @@ module apple_mmu (
     wire [2:0] t2_w_class = classify({t2_page, 8'h00}, 1'b0);
     assign t2_w_ok    = t2_w_class[0];
     assign t2_w_ppage = {1'b0, pa_page_of(t2_page, 1'b0)};
+
+    wire [2:0] t3_r_class = classify({t3_page, 8'h00}, 1'b1);
+    wire [2:0] t3_w_class = classify({t3_page, 8'h00}, 1'b0);
+    assign t3_r_ok    = (t3_r_class[2:1] != CLS_BUS) &&
+                        (t3_page != 8'hC3) && (t3_page != 8'hCF);
+    assign t3_r_ppage = (t3_r_class[2:1] == CLS_ROM)
+                        ? {1'b1, 10'd0, t3_page[5:0]}
+                        : {1'b0, pa_page_of(t3_page, 1'b1)};
+    assign t3_w_ok    = t3_w_class[0];
+    assign t3_w_ppage = {1'b0, pa_page_of(t3_page, 1'b0)};
 
     // ---- map changes, for the TLB flush ------------------------------------
     // Access-based, by decision: touching a mapping switch flushes whether or

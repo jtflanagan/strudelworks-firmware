@@ -161,12 +161,28 @@ module accel_seq (
     // a single clock: this module never sees it as an op, only as the books -
     // the governor's charge, the counter, the capture event, the tick.
     input  wire        l1_claim,      // an I-fetch the front may yet serve: hold dispatch
-    input  wire        ext_cyc_en,    // the front's turbo cyc_en, for settled's bookkeeping
+    input  wire        ext_cyc_en,    // the fronts' cyc_en (turbo OR d), for settled's bookkeeping
     input  wire        turbo_commit,  // one turbo op retired this clock
     input  wire [15:0] turbo_addr,
     input  wire [7:0]  turbo_data,
     input  wire        turbo_sync,
     output wire        turbo_ok,      // this module's permission: S_DECIDE, credit, no override
+
+    // The D front (rtl/d_front.sv): same contract as the L1's - a claim
+    // that holds the dispatcher, a permission, and a commit that is only
+    // books.  d_commit is COMBINATIONAL with the serve's cyc_en, so the
+    // governor's payment lands the same clock the credit was checked -
+    // a registered commit would let two ops ride one credit.  The event
+    // is emitted unconditionally: the front's verdict already required
+    // fev_room (law 5 - a d-served write leaves no other trace).
+    input  wire        d_claim,
+    input  wire        d_commit,      // one op the D front served this clock
+    input  wire [15:0] dev_addr,
+    input  wire        dev_rw,
+    input  wire [7:0]  dev_data,
+    input  wire        dev_sync,
+    output wire        d_ok,          // permission to serve a data read
+    output wire        d_ok_w,        // ...and a write (mode 2 only)
     output logic       op_tick,       // one pulse per op served off the bus, for the op-time clocks
     input  wire        fev_room,      // the event merge has headroom: a turbo
                                       // event may be emitted.  Turbo runs
@@ -292,10 +308,22 @@ module accel_seq (
                       can_pay && !ovr_hold && !dq_ovr && !reset_seq &&
                       mem_serve && !mem_invalidating && l1_claim;
 
-    wire decide_go = (st == S_DECIDE) && settled && !dq_ovr && can_pay && !l1_claim;
+    // The D front's permission: the same registered terms, WITHOUT the
+    // claim - the claim's address decode would close a combinational loop
+    // through cpu_din (a data address descends from din).  The mutual
+    // exclusion holds anyway: whenever a D verdict can fire, d_claim is up
+    // by construction (a servable op in its try window), so decide_go is
+    // blocked; and a turbo and a D serve are exclusive by op kind.
+    assign d_ok   = (st == S_DECIDE) && !off && master_active && !dq_rst &&
+                    can_pay && !ovr_hold && !dq_ovr && !reset_seq &&
+                    mem_serve && !mem_invalidating;
+    assign d_ok_w = d_ok && (mode == 2'd2);
+
+    wire decide_go = (st == S_DECIDE) && settled && !dq_ovr && can_pay &&
+                     !l1_claim && !d_claim;
     wire go_bus    = decide_go && needs_bus;
     wire go_fast   = decide_go && !needs_bus && fast_ok;
-    wire pay       = (go_bus || go_fast || turbo_commit) && !unlimited;
+    wire pay       = (go_bus || go_fast || turbo_commit || d_commit) && !unlimited;
 
     // ---- the core's side ----------------------------------------------------
     // go_bus rides beside the registered levels: the driver freezes its take
@@ -324,7 +352,7 @@ module accel_seq (
         fev_valid <= 1'b0;
         // The op-time clocks' tick: one pulse per op served off the bus,
         // turbo or fast - bus ops tick at their own commit in the cards.
-        op_tick   <= ((st == S_FAST) && fast_hit) || turbo_commit;
+        op_tick   <= ((st == S_FAST) && fast_hit) || turbo_commit || d_commit;
 
         // The registers above describe the op the core has up once the
         // core has sat still for a clock: never on the clock of arrival -
@@ -382,6 +410,22 @@ module accel_seq (
                     fev_rw    <= 1'b1;
                     fev_data  <= turbo_data;
                     fev_sync  <= turbo_sync;
+                end
+            end
+
+            // ---- a D-front op: same books.  A WRITE's event is NEVER shed
+            // (law 5: the front's verdict held it until the merge had room);
+            // a READ's is shed like a turbo fetch's when the merge is full -
+            // reads must not wait for room, or a read of an authoritative
+            // zp/stack line could fall to the sequencer's stale path.
+            if (d_commit && !cpu_rst) begin
+                fast_ops  <= fast_ops + 32'd1;
+                if (!dev_rw || fev_room) begin
+                    fev_valid <= 1'b1;
+                    fev_addr  <= dev_addr;
+                    fev_rw    <= dev_rw;
+                    fev_data  <= dev_data;
+                    fev_sync  <= dev_sync;
                 end
             end
 
