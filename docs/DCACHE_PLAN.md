@@ -112,21 +112,41 @@ zp+stk+one-float 57.0%, zp+stk+two-float LRU 99.3%. The workload
 alternates two data pages (a copy loop's src and dst) - one floating
 register can never hold that pair, two hold it almost perfectly.
 
-- **The zp/stack store (USER'S DESIGN, settled)**: a dedicated
-  512-byte BRAM (32 lines x 16 B, per-line valid FFs) caching
-  PHYSICAL MAIN pages 0 and 1 only - its identity is permanent, so
-  no tags, no flash on map change, no map_changed interaction. The
-  serve qualifier is registered addr[15:9]==0 AND a registered
-  "zp/stack maps to main" bit (ALTZP-effective state; changes only
-  via soft-switch bus ops, stable in the fast cone). ALTZP-on and
-  RamWorks-banked zp/stack fall to the ordinary D$ path, correct but
-  unprivileged. Fills by observation from sub_line; writes update in
-  place and still ride the write path (events, buffer, DDR3).
-  Snooped like everything else - DMA and host writes can land in
-  physical main 0/1 regardless of the core's map. Why dedicated: in
-  a 4KB direct-mapped D$, pa[11:4] puts zp/stack at indices 0-31,
-  the same rows as the first 512 B of every 4KB region (both HGR
-  page bases included) - drawing loops would evict them all day.
+- **The zp/stack store (USER'S DESIGN, settled - both rounds)**: a
+  dedicated 512-byte BRAM (32 lines x 16 B, per-line valid FFs),
+  the AUTHORITATIVE HOME of physical main pages 0 and 1 - not a
+  cache of them.  Identity is permanent: no tags, no map_changed
+  interaction.  The serve qualifier is registered addr[15:9]==0 AND
+  a registered "zp/stack maps to main" bit (ALTZP-effective state;
+  changes only via soft-switch bus ops, stable in the fast cone).
+  ALTZP-on and RamWorks-banked zp/stack fall to the ordinary D$
+  path, correct but unprivileged.  Writes update the BRAM and go NO
+  further: no write-back line, no queue entry, no DDR3 traffic -
+  DDR3's pages 0/1 go permanently stale - so a main-zp/stack write's
+  retirement depends only on event-FIFO room.  LAW 5 STANDS: the
+  event word is still emitted per write (the host mirror is built
+  from the stream; hd writes take blocks from the mirror).  The
+  corners the authority creates, each with its existing pattern:
+    1. a WRITE to a cold line is not fast-servable - it rides the
+       sequencer once and the passing sub_line installs the line
+       (DDR3 is still fresh for any line the BRAM never dirtied);
+       reads fill by observation as usual;
+    2. the icache must NEVER install physical main 0/1 (its fills
+       read now-stale DDR3), and I-fetches there - stack-page
+       loaders, rare - are served by the D-front from this BRAM at
+       2 clocks.  THE SMC TRAP: forget this and code run from the
+       stack page executes stale bytes;
+    3. a DMA drain landing in pages 0/1 snoops this store to COLD
+       (an invalidate would lose authoritative data, but the drain
+       just wrote that exact line to DDR3, so cold-then-refetch is
+       correct).  Host invalidate: flash to cold, same logic - the
+       host is replacing the image and DDR3 is the new truth.
+  NOTE for the next phase: the card-side image is now DDR3 plus
+  this overlay; soft-switch internalization inherits that.
+  Why dedicated at all: in a 4KB direct-mapped D$, pa[11:4] puts
+  zp/stack at indices 0-31, the same rows as the first 512 B of
+  every 4KB region (both HGR page bases included) - drawing loops
+  would evict them all day.
 - **The floating pages**: a 2-entry LRU of page registers
   ({page, ok both views, ppage} in FFs), reloaded from the TLB off
   the serve path on a mismatch, one-clock stall, the I-side pattern.
