@@ -390,9 +390,15 @@ module apple_mmu (
     assign q_cls = q_class[2:1];
 
     // ---- the internalized-switch question, beside q_cls ---------------------
-    // A shallow decode of the live address - range matches ANDed with
-    // registered levels, nothing like the classifier's depth - registered
-    // into the sequencer's dq_* set exactly as q_cls is.
+    // Decoded from qd_addr - the one-clock-registered copy the divert
+    // answer already uses - never the live address: a data address descends
+    // from din through the AGU, and a live decode here was the design's
+    // worst path by -0.74 ns the first time it was tried.  The register is
+    // sufficient for the same reason q_divert's is: the sequencer cannot
+    // decide before `settled`, one clock behind, so qd_addr always
+    // describes the op being decided.  q_swi is therefore shallow LUTs off
+    // registers, and the sequencer uses it DIRECTLY - re-registering it
+    // would put it a clock behind dq_cls and misclassify.
     //
     // Writes: the mapping and video switches whose whole effect is the
     // shadow above ($C000-$C005, $C008/9, $C00C-$C00F - never INTCXROM or
@@ -402,9 +408,9 @@ module apple_mmu (
     // and the floating-value toggles/LC when fb_sim can answer; $C019 only
     // with the VBL level locked.  $C010 and the $C01x writes are the real
     // strobe's and always ride the bus.
-    wire [3:0] qi_hi = q_addr[7:4];
-    wire [3:0] qi_lo = q_addr[3:0];
-    wire qi_io      = (q_addr[15:8] == 8'hC0);
+    wire [3:0] qi_hi = qd_addr[7:4];
+    wire [3:0] qi_lo = qd_addr[3:0];
+    wire qi_io      = (qd_addr[15:8] == 8'hC0);
     wire qi_c00x_wr = (qi_hi == 4'h0) &&
                       (qi_lo[3:1] != 3'd3) && (qi_lo[3:1] != 3'd5);
     wire qi_c05x    = (qi_hi == 4'h5) && !qi_lo[3];        // $C050-$C057
