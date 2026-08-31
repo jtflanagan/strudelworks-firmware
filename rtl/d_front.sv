@@ -53,7 +53,12 @@
 // and the floating-bus copy, holding it until no classified write competes.
 // The next write may not serve while the broadcast waits.
 //////////////////////////////////////////////////////////////////////////////////
-module d_front (
+module d_front #(
+    // 1 selects the small fully-associative line buffer (dcache_sa) in
+    // place of the 4KB direct-mapped D$ - the steer guess then means
+    // nothing (the CAM is the steering) and its verdict term is tied off.
+    parameter bit CAM_D = 1'b0
+) (
     input  wire        clk,
     input  wire        rst,           // rst_core
 
@@ -183,10 +188,10 @@ module d_front (
     // AUTHORITATIVE zp/stack line would fall to the sequencer's stale path.
     // The one place d_ok stays low with the dispatcher free is the reset
     // sequence, and run_rd withholds the claim entirely there.
-    logic [1:0] tries;
+    logic [2:0] tries;
     always_ff @(posedge clk) begin
-        if (rst || g_cyc_en) tries <= 2'd0;
-        else if (tries != 2'd3 && d_ok) tries <= tries + 2'd1;
+        if (rst || g_cyc_en) tries <= 3'd0;
+        else if (tries != 3'd7 && d_ok) tries <= tries + 3'd1;
     end
 
     // ---- the floating page registers ----------------------------------------
@@ -196,8 +201,12 @@ module d_front (
     logic [16:0] fl_rpp  [0:1], fl_wpp [0:1];
     logic        fl_mru;
 
-    wire m0 = fl_v[0] && (fl_page[0] == da_q[15:8]);
-    wire m1 = fl_v[1] && (fl_page[1] == da_q[15:8]);
+    // The matches, REGISTERED at the sampling edge (an 8-bit compare into a
+    // flop, the dq_* pattern) - every consumer then works from flip-flops.
+    // The reload and the flush keep them honest below.
+    logic m0q, m1q;
+    wire m0 = m0q;
+    wire m1 = m1q;
     wire        fm_any = m0 || m1;
     wire        fm_sel = m1;
     wire        fm_rok = fm_sel ? fl_rok[1] : fl_rok[0];
@@ -212,7 +221,15 @@ module d_front (
     assign t3_page = mm_asking ? 8'h00 : da_q[15:8];
 
     // ---- the zp/stack store --------------------------------------------------
-    (* ram_style = "block" *) logic [127:0] zs_mem [0:31];
+    // ONE write port with byte enables and ONE read port, in their own
+    // always blocks, or the RAM decomposes into four thousand registers
+    // (the first build's lesson: three write statements read as three write
+    // ports and no BRAM can have them).  The three writers - the install,
+    // the served write, the classified update - are mutually exclusive by
+    // the one-op-at-a-time argument, and the sim checks below enforce it.
+    // Distributed for the same reason as the D$'s data array: zrow must be
+    // a fabric register, not a block RAM's captive output flop.
+    (* ram_style = "distributed" *) logic [127:0] zs_mem [0:31];
     logic [31:0]  zvld;
     logic [127:0] zrow;
     logic [4:0]   zrow_idx;
@@ -230,9 +247,40 @@ module d_front (
     // The drain behind: the SAME priority every consumer in the design uses.
     wire sn2_here  = snoop2_en && !cl_snoop && !dsn_en;
 
+    // What the store's serve terms will be next clock: the region for the
+    // address being sampled, and the valid bit folded to its next value
+    // (an install or a clear landing this edge included).
+    wire zs_nx    = (cpu_addr[15:9] == 7'd0) && maps_main && !mm_pend;
+    wire zvld_set = zw_inst && (da_q[8:4] == cpu_addr[8:4]);
+    wire zvld_clr = (sn2_here && (snoop2_pa[23:9] == 15'd0) &&
+                     (snoop2_pa[8:4] == cpu_addr[8:4])) ||
+                    (mem_invalidating && hold_q);
+    wire zvld_nx  = (zvld[cpu_addr[8:4]] || zvld_set) && !zvld_clr;
+
+    // The store's one write port: the observed install (a whole line), a
+    // served write's byte, or a classified update's byte.
+    wire zw_inst = accel_cyc_en && sub_line_ok && drw_q && zs_region &&
+                   !zvld[da_q[8:4]];
+    wire        zw_en   = zw_inst || zs_wr_hit || zs_cl_upd;
+    wire [4:0]  zw_idx  = zs_cl_upd ? cl_pa[8:4] : da_q[8:4];
+    wire [15:0] zw_be   = zw_inst ? 16'hFFFF
+                        : 16'd1 << (zs_cl_upd ? cl_pa[3:0] : da_q[3:0]);
+    wire [127:0] zw_data = zw_inst ? sub_line
+                         : {16{zs_cl_upd ? cl_wdata : dd_q}};
+
+    always_ff @(posedge clk) begin
+        if (zw_en) begin
+            for (int b = 0; b < 16; b = b + 1)
+                if (zw_be[b]) zs_mem[zw_idx][8*b +: 8] <= zw_data[8*b +: 8];
+        end
+    end
+    always_ff @(posedge clk) zrow <= zs_mem[cpu_addr[8:4]];
+
     // ---- the D$ --------------------------------------------------------------
     logic        dc_flash;
-    logic [16:0] steer_pp_q;           // the ppage the row being loaded assumed
+    // The ppage each in-flight BRAM read assumed: spp1 for the row arriving
+    // next clock, spp2 for the row visible NOW (the read is two deep).
+    logic [16:0] spp1, spp2;
     logic        resteered, reloaded;
 
     // The steer, combinational into the BRAM's address register, exactly the
@@ -247,14 +295,18 @@ module d_front (
     wire [16:0] g_pp  = cpu_rw ? (g_sel ? fl_rpp[1] : fl_rpp[0])
                                 : (g_sel ? fl_wpp[1] : fl_wpp[0]);
     wire [16:0] t3_pp = drw_q ? t3_r_ppage : t3_w_ppage;
-    wire        fresh = g_cyc_en || (tries == 2'd0);
+    // tries==0 alone: g_cyc_en would drag the whole verdict cone into the
+    // steer select, and the serve-clock steer is harmlessly overwritten at
+    // the real try 0 anyway.
+    wire        fresh = (tries == 3'd0);
     wire [16:0] steer_pp  = fresh  ? g_pp
                           : fm_any ? fm_pp
                           : (!mm_asking && !dis_i_q) ? t3_pp
-                          : steer_pp_q;
+                          : spp1;
     wire [7:0]  steer_idx = {steer_pp[3:0], fresh ? cpu_addr[7:4] : da_q[7:4]};
 
     wire        dc_look_hit, dc_look_ok;
+    wire        dc_look_hit_next, dc_look_ok_next;
     wire  [7:0] dc_look_byte;
     logic       dc_inst_en;
     logic [24:0] dc_inst_pa;
@@ -266,13 +318,16 @@ module d_front (
     wire dc_snoop_en = cl_snoop || sn2_here;
     wire [23:0] dc_snoop_pa = cl_snoop ? cl_pa : snoop2_pa;
 
-    dcache_l1 u_dc (
+    generate if (CAM_D) begin : g_dc
+    dcache_sa u_dc (
         .clk       (clk),
         .rst       (rst),
         .flash     (dc_flash),
         .look_pa   ({fm_pp, da_q[7:0]}),
         .look_hit  (dc_look_hit),
         .look_ok   (dc_look_ok),
+        .look_hit_next (dc_look_hit_next),
+        .look_ok_next  (dc_look_ok_next),
         .look_byte (dc_look_byte),
         .steer_idx (steer_idx),
         .steer_tag (steer_pp[16:4]),
@@ -286,14 +341,52 @@ module d_front (
         .snoop_en  (dc_snoop_en),
         .snoop_pa  (dc_snoop_pa)
     );
+    end else begin : g_dc
+    dcache_l1 u_dc (
+        .clk       (clk),
+        .rst       (rst),
+        .flash     (dc_flash),
+        .look_pa   ({fm_pp, da_q[7:0]}),
+        .look_hit  (dc_look_hit),
+        .look_ok   (dc_look_ok),
+        .look_hit_next (dc_look_hit_next),
+        .look_ok_next  (dc_look_ok_next),
+        .look_byte (dc_look_byte),
+        .steer_idx (steer_idx),
+        .steer_tag (steer_pp[16:4]),
+        .inst_en   (dc_inst_en),
+        .inst_pa   (dc_inst_pa),
+        .inst_line (sub_line),
+        .wr_en     (dc_wr_en),
+        .wr_idx    (dc_wr_idx),
+        .wr_byte   (dc_wr_byte),
+        .wr_data   (dc_wr_data),
+        .snoop_en  (dc_snoop_en),
+        .snoop_pa  (dc_snoop_pa)
+    );
+    end endgenerate
 
     // ---- verdicts ------------------------------------------------------------
-    wire steered_right = (steer_pp_q == fm_pp);
-    // The verdict window.  !dis_q here as well as in the claim: with the
-    // claim withheld the dispatcher runs free, and a verdict firing beside
-    // a dispatch would serve one op twice.
-    wire vq = !dis_q &&
-              ((tries == 2'd1) || ((tries == 2'd2) && (resteered || reloaded)));
+    // The zp/stack store answers in one clock (LUTRAM row); the D$'s BRAM
+    // row is two deep, so its verdicts ride at tries 2 and - after a
+    // re-steer or a reload at try 1 - tries 3.  sr_next judges the row
+    // ARRIVING next clock (the try-1 re-steer decision, and the term the
+    // pre-verdicts fold in).  !dis_q in the windows as well as the claim:
+    // with the claim withheld the dispatcher runs free, and a verdict
+    // firing beside a dispatch would serve one op twice.
+    //
+    // EVERY VERDICT IS PRE-REGISTERED one edge early (the *_pre flops in
+    // the state block): from try 1 on, every term is a stable register, so
+    // the flop computed at edge V-1 equals the old combinational verdict
+    // at V - and d_hit collapses to a few flops ANDed with the permission
+    // levels, instead of the compare-and-mux cone that was the worst path
+    // into the steer, the din mux and the AGU.
+    wire sr_next = CAM_D ? 1'b1 : (spp1 == fm_pp);
+    wire vq_zs = !dis_q && (tries == 3'd1);
+    wire vq_dc = !dis_q &&
+                 ((tries == 3'd2) || ((tries == 3'd3) && (resteered || reloaded)));
+    logic zs_pre_rd, zs_pre_wr, zs_pre_cold;
+    logic dc_pre_rd, dc_pre_wr, dc_pre_present;
 
     wire dsn_free = !dsn_en;
 
@@ -309,26 +402,24 @@ module d_front (
     // room out of the verdict, a valid line's read always serves in the
     // window, and the d_ok lapses that remain are the ones where the
     // dispatcher parks the op instead of dispatching it.
-    wire zs_rd_hit  = vq && zs_region &&  drw_q && zs_line_ok && d_ok;
-    wire zs_wr_hit  = vq && zs_region && !drw_q && zs_line_ok &&
-                      d_ok_w && fev_room && dsn_free;
-    wire zs_wr_cold = vq && zs_region && !drw_q && !zvld[da_q[8:4]] &&
-                      d_ok_w && fev_room && dsn_free && aw_ok;
+    wire zs_rd_hit  = vq_zs && zs_pre_rd && d_ok;
+    wire zs_wr_hit  = vq_zs && zs_pre_wr && d_ok_w && fev_room && dsn_free;
+    wire zs_wr_cold = vq_zs && zs_pre_cold && d_ok_w && fev_room && dsn_free &&
+                      aw_ok;
 
     // The D$: data ops only, never the zp/stack region, never a ROM ppage
     // (no ROM fill path in this first cut - ROM data reads ride the
     // sequencer at the old cost).
     wire dc_zone   = !dis_i_q && !zs_region && fm_any && !fm_pp[16];
-    wire dc_rd_hit = vq && dc_zone &&  drw_q && fm_rok && steered_right &&
-                     dc_look_hit && d_ok;
+    wire dc_rd_hit = vq_dc && dc_pre_rd && d_ok;
     // A write serves only through a PROVEN row (steered_right AND look_ok):
     // the row then answers whether the line is present - updated in place -
     // or PROVEN absent - the wb line alone holds the byte.  Serving past an
     // unproven row could leave a present line stale behind the wb byte.
     // (A write that lapses to the sequencer instead is safe: its classified
     // pass snoop-invalidates any line here.)
-    wire dc_wr_hit = vq && dc_zone && !drw_q && fm_wok && steered_right &&
-                     dc_look_ok && d_ok_w && fev_room && dsn_free && aw_ok;
+    wire dc_wr_hit = vq_dc && dc_pre_wr && d_ok_w && fev_room && dsn_free &&
+                     aw_ok;
 
     wire serve_rd = zs_rd_hit || dc_rd_hit;
     wire serve_wr = zs_wr_hit || zs_wr_cold || dc_wr_hit;
@@ -372,7 +463,10 @@ module d_front (
     wire claim_kind = (!dis_i_q && (da_q[15:12] != 4'hC)) ||
                       (dis_i_q && (da_q[15:9] == 7'd0));
     wire claim_run  = drw_q ? run_rd_q : run_w_q;
-    assign d_claim = !dis_q && claim_run && claim_kind && (tries != 2'd3) &&
+    // The window ends after the last verdict the op could have: try 1 for
+    // the one-clock zp/stack store, try 3 for the two-deep D$.
+    wire [2:0] claim_end = zs_region ? 3'd2 : 3'd4;
+    assign d_claim = !dis_q && claim_run && claim_kind && (tries < claim_end) &&
                      !unserv;
 
     // ---- the state -----------------------------------------------------------
@@ -384,21 +478,41 @@ module d_front (
         mm_asking  <= 1'b0;
         dc_flash   <= mem_invalidating;
 
-        // The row the verdict clock will look at: steered from the wire.
-        steer_pp_q <= steer_pp;
+        // The float matches for the op stable next clock (cpu_addr is what
+        // da_q is sampling this same edge); the reload and the flush below
+        // override.
+        m0q <= fl_v[0] && (cpu_addr[15:8] == fl_page[0]);
+        m1q <= fl_v[1] && (cpu_addr[15:8] == fl_page[1]);
+
+        // The verdicts an edge early.  From try 1 on every term is a
+        // stable register, so these equal the old live verdicts; zvld is
+        // folded to its NEXT value, or a line installed this very edge
+        // would read as cold and a write would slip past it into the wb.
+        zs_pre_rd   <= zs_nx &&  cpu_rw && zvld_nx &&
+                       !(zw_en && zw_idx == cpu_addr[8:4]);
+        zs_pre_wr   <= zs_nx && !cpu_rw && zvld_nx;
+        zs_pre_cold <= zs_nx && !cpu_rw && !zvld_nx;
+        dc_pre_rd      <= dc_zone &&  drw_q && fm_rok && sr_next && dc_look_hit_next;
+        dc_pre_wr      <= dc_zone && !drw_q && fm_wok && sr_next && dc_look_ok_next;
+        dc_pre_present <= dc_look_hit_next;
+
+        // The rows in flight: what each assumed, steered from the wire.
+        spp1 <= steer_pp;
         if (fresh) begin
             resteered <= 1'b0;
             reloaded  <= 1'b0;
-        end else if (tries == 2'd1) begin
-            if (fm_any && !steered_right) resteered <= 1'b1;
+        end else if (tries == 3'd1) begin
+            // Judge the row ARRIVING next clock: wrong guess, re-steer now.
+            if (fm_any && !sr_next) resteered <= 1'b1;
             if (!fm_any && !mm_asking && !dis_i_q) reloaded <= 1'b1;
         end
 
         // ---- a cold page reloads the LRU floating entry from t3 -------------
-        if (!fresh && tries == 2'd1 && !fm_any && !mm_asking && !dis_i_q &&
+        if (!fresh && tries == 3'd1 && !fm_any && !mm_asking && !dis_i_q &&
             (da_q[15:12] != 4'hC)) begin
             fl_page[!fl_mru] <= da_q[15:8];
             fl_v[!fl_mru]    <= 1'b1;
+            if (fl_mru) m0q <= 1'b1; else m1q <= 1'b1;
             fl_rok[!fl_mru]  <= t3_r_ok;
             fl_wok[!fl_mru]  <= t3_w_ok;
             fl_rpp[!fl_mru]  <= t3_r_ppage;
@@ -408,9 +522,10 @@ module d_front (
 
         // ---- unserv: the claim's early out ----------------------------------
         // A matched page the view says no to, or a ROM ppage (no fill path
-        // here): the claim drops rather than burning the window.
+        // here): judged at try 1 - the page is known there, the row is not
+        // needed - so the claim drops without burning the D$'s window.
         if (g_cyc_en) unserv <= 1'b0;
-        else if (vq && !dis_i_q && !zs_region && fm_any &&
+        else if (tries == 3'd1 && d_ok && !dis_i_q && !zs_region && fm_any &&
                  (!fm_ok || fm_pp[16])) unserv <= 1'b1;
 
         // ---- LRU touch -------------------------------------------------------
@@ -423,8 +538,7 @@ module d_front (
         if (d_hit) d_ops <= d_ops + 32'd1;
 
         // ---- a served write lands --------------------------------------------
-        if (zs_wr_hit)
-            zs_mem[da_q[8:4]][8 * da_q[3:0] +: 8] <= dd_q;
+        // (zs_wr_hit's byte goes through the store's one write port, below)
         if (zs_wr_cold || dc_wr_hit) begin
             aw_en   <= 1'b1;
             aw_pa   <= zs_wr_cold ? {15'd0, da_q[8:0]}
@@ -437,7 +551,7 @@ module d_front (
                                                   : {fm_wpp[15:0], da_q[7:0]};
             dsn_data <= dd_q;
         end
-        if (dc_wr_hit && dc_look_hit) begin
+        if (dc_wr_hit && dc_pre_present) begin
             dc_wr_en   <= 1'b1;
             dc_wr_idx  <= {fm_wpp[3:0], da_q[7:4]};
             dc_wr_byte <= da_q[3:0];
@@ -455,7 +569,6 @@ module d_front (
         // the same invariant - may install.
         if (accel_cyc_en && sub_line_ok && drw_q) begin
             if (zs_region && !zvld[da_q[8:4]]) begin
-                zs_mem[da_q[8:4]] <= sub_line;
                 zvld[da_q[8:4]]   <= 1'b1;
             end else if (!zs_region && !dis_i_q && fm_any && fm_rok && !fm_rpp[16]) begin
                 dc_inst_en <= 1'b1;
@@ -463,19 +576,13 @@ module d_front (
             end
         end
 
-        // ---- the zp/stack row register ---------------------------------------
-        zrow     <= zs_mem[cpu_addr[8:4]];
+        // ---- the zp/stack row register's bookkeeping -------------------------
         zrow_idx <= cpu_addr[8:4];
         // A write into the steered row this edge leaves the register a clock
         // stale: one miss clock, the caches' row_ok argument.
-        zrow_ok  <= !(zs_wr_hit && da_q[8:4] == cpu_addr[8:4]) &&
-                    !(accel_cyc_en && sub_line_ok && drw_q && zs_region &&
-                      da_q[8:4] == cpu_addr[8:4]) &&
-                    !(zs_cl_upd && cl_pa[8:4] == cpu_addr[8:4]);
+        zrow_ok  <= !(zw_en && zw_idx == cpu_addr[8:4]);
 
         // ---- snoops into the store -------------------------------------------
-        if (zs_cl_upd)
-            zs_mem[cl_pa[8:4]][8 * cl_pa[3:0] +: 8] <= cl_wdata;
         if (sn2_here && (snoop2_pa[23:9] == 15'd0))
             zvld[snoop2_pa[8:4]] <= 1'b0;
 
@@ -485,6 +592,8 @@ module d_front (
         if (map_changed) begin
             fl_v[0] <= 1'b0;
             fl_v[1] <= 1'b0;
+            m0q <= 1'b0;
+            m1q <= 1'b0;
             mm_pend <= 1'b1;
         end else if (mm_pend && !mm_asking) begin
             mm_asking <= 1'b1;
@@ -507,7 +616,9 @@ module d_front (
             dsn_en <= 1'b0; dsn_pa <= 24'd0; dsn_data <= 8'd0;
             aw_en <= 1'b0; aw_pa <= 24'd0; aw_data <= 8'd0;
             dc_inst_en <= 1'b0; dc_wr_en <= 1'b0;
-            steer_pp_q <= 17'd0;
+            spp1 <= 17'd0; m0q <= 1'b0; m1q <= 1'b0;
+            zs_pre_rd <= 1'b0; zs_pre_wr <= 1'b0; zs_pre_cold <= 1'b0;
+            dc_pre_rd <= 1'b0; dc_pre_wr <= 1'b0; dc_pre_present <= 1'b0;
             zvld <= 32'd0; zrow_ok <= 1'b0;
         end
         if (cnt_clr) d_ops <= 32'd0;

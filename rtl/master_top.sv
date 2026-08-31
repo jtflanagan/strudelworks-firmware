@@ -483,6 +483,15 @@ module master_top #(
     wire [31:0] wb_flushes;
     wire [31:0] accel_d_ops;
     wire [31:0] zs_vld_w;
+    // The run gates, registered here as well as inside d_front: they are
+    // slow levels, and their raw nets crossed the die as near-worst paths.
+    logic run_rd_q, run_w_q;
+    always_ff @(posedge apple_clk) begin
+        run_rd_q <= (accel_mode != 2'd0) && cpu_source_active &&
+                    mem_serve && !accel_reset_seq;
+        run_w_q  <= (accel_mode == 2'd2) && cpu_source_active &&
+                    mem_serve && !accel_reset_seq;
+    end
 
     // The Mockingboard's IRQ takes the short route into the core, the same
     // route drv_sync takes out of it: a real card would pull the slot's IRQ'
@@ -742,7 +751,7 @@ module master_top #(
     assign cpu_cyc_en = l1_cyc_en || d_hit_w;
     assign cpu_din    = d_hit_w ? d_byte_w : l1_din;
 
-    d_front u_d (
+    d_front #(.CAM_D (1'b1)) u_d (
         .clk          (apple_clk),
         .rst          (rst_core),
         .cyc_is_i     (cpu_cyc_is_i),
@@ -755,10 +764,8 @@ module master_top #(
         .d_byte       (d_byte_w),
         .d_ok         (d_ok),
         .d_ok_w       (d_ok_w),
-        .run_rd       ((accel_mode != 2'd0) && cpu_source_active &&
-                       mem_serve && !accel_reset_seq),
-        .run_w        ((accel_mode == 2'd2) && cpu_source_active &&
-                       mem_serve && !accel_reset_seq),
+        .run_rd       (run_rd_q),
+        .run_w        (run_w_q),
         .d_claim      (d_claim),
         .d_commit     (d_commit),
         .dev_addr     (dev_addr),

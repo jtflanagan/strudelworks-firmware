@@ -33,7 +33,7 @@ for high in "${highs[@]}"; do
             -Paccel_tb.PROG="\"$work/accel.hex\"" \
             -Paccel_tb.PHI0_HIGH="$high" \
             "$root/sim/accel_tb.sv" "$root/rtl/cpu65c02.sv" "$root/rtl/accel_seq.sv" "$root/rtl/class_tlb.sv" "$root/rtl/icache_l1.sv" "$root/rtl/l1_front.sv" \
-            "$root/rtl/d_front.sv" "$root/rtl/dcache_l1.sv" "$root/rtl/wb_lines.sv" "$root/rtl/event_merge.sv" \
+            "$root/rtl/d_front.sv" "$root/rtl/dcache_l1.sv" "$root/rtl/dcache_sa.sv" "$root/rtl/wb_lines.sv" "$root/rtl/event_merge.sv" \
             "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv" \
             "$root/rtl/boot_hold.sv" \
             "$root/rtl/apple_mmu.sv" "$root/rtl/apple_rom.sv" "$root/rtl/mem_cache.sv" \

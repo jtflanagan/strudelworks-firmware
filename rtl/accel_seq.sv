@@ -248,8 +248,16 @@ module accel_seq (
     // ---- the governor -------------------------------------------------------
     // credit in 1/256 op; one op is 256.  Capped at four cycles' worth.
     logic [19:0] credit;
-    wire  [19:0] cap = {2'b00, target, 2'b00};          // 4 * target
-    wire  unlimited = (target == 16'd0);
+    // A local copy: ACCEL_CTRL's target crossed the die from the register
+    // file into this arithmetic as the build's residual worst path, and a
+    // config level one clock late is indistinguishable to anything.
+    logic [15:0] tgt_q;
+    logic        unlimited;
+    always_ff @(posedge clk) begin
+        tgt_q     <= target;
+        unlimited <= (target == 16'd0);
+    end
+    wire  [19:0] cap = {2'b00, tgt_q, 2'b00};           // 4 * target
     wire  can_pay   = unlimited || (credit >= 20'd256);
 
     // Next clock's credit: deposit, cap, then this clock's payment.  The one
@@ -259,8 +267,8 @@ module accel_seq (
     always_comb begin
         gov_next = credit;
         if (bus_tick) begin
-            gov_next = (credit + {4'd0, target} > cap) ? cap
-                                                       : credit + {4'd0, target};
+            gov_next = (credit + {4'd0, tgt_q} > cap) ? cap
+                                                      : credit + {4'd0, tgt_q};
         end
         if (pay) gov_next = gov_next - 20'd256;
     end

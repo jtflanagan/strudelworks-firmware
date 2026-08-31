@@ -29,7 +29,8 @@
 //////////////////////////////////////////////////////////////////////////////////
 module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                   parameter PROG = "accel.hex",
-                  parameter integer PHI0_HIGH = 49);
+                  parameter integer PHI0_HIGH = 49,
+                  parameter integer CAMD = 1);
 
     localparam integer T_PRESENT = 2, T_EMIT = 2, T_DIN = 44, T_CYCEN = 45;
     localparam integer PHI0_LOW = 98 - PHI0_HIGH, CYCLE = 98;
@@ -233,7 +234,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     assign cpu_cyc_en = l1_cyc_en || d_hit;
     assign cpu_din    = d_hit ? d_byte : l1_din;
 
-    d_front u_d (
+    d_front #(.CAM_D (CAMD != 0)) u_d (
         .clk (clk), .rst (rst),
         .cyc_is_i (cpu_cyc_is_i), .cpu_addr (cpu_addr), .cpu_rw (cpu_rw),
         .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .g_cyc_en (cpu_cyc_en),

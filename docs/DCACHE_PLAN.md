@@ -328,6 +328,39 @@ reads from the reference compare - they read the stale machine by
 documented design - and holds the core (the settle override, which
 also exercises ovr_flush) around every image comparison.
 
+## The storage rounds (2026-08-31, small hours - the user steering live)
+
+The first cut's 4KB direct-mapped D$ went through three builds and came
+out a different shape.  The chain, each step measured:
+
+1. The zp/stack store coded with three write statements decomposed into
+   4096 registers (three writers = no RAM inference): LUT 168%.  ONE
+   byte-enabled write port (the writers were already exclusive) fixed
+   the inference.
+2. As block RAM the D$'s row register was absorbed into the BRAM's
+   captive output latch: every serve byte started ~2ns late from a
+   fixed column, and the din-into-AGU cone missed by 1.5ns.  LUTRAM
+   data arrays closed that but cost ~600 LUTs the user wanted back.
+3. The user's trade: block RAM through BOTH read registers (the
+   cache_way_ram absorption), a D$ hit at THREE clocks (the +1 lands
+   on hits, not misses - a 2-clock hit needs the row before the op
+   exists).  The zp/stack store stays distributed (~64 LUTs for 55% of
+   data traffic at 2 clocks).  Then the verdict cones themselves were
+   the wall, and EVERY D-side verdict became a flop computed one edge
+   early (the *_pre registers; m0q/m1q; fresh = tries==0 so the steer
+   select carries no verdict cone) - from try 1 every term is a stable
+   register, so the pre-flop equals the old live verdict.
+4. The user then asked whether 4KB is simply too large a first level
+   here at all.  Measured A/B, same battery: the 4KB scored 40.6x, an
+   EIGHT-LINE fully-associative LUTRAM buffer (dcache_sa.sv, CAM match
+   in the pre cone, no steer guess, no re-steer, round-robin victim)
+   scored 40.0x - all of the 4KB's capacity is worth 0.6x on this
+   workload, and the small one writes better (fastW 4.2 vs 5.1).
+   d_front's CAM_D parameter selects either; the CAM SHIPS (N=8, a
+   parameter), dcache_l1 stays in-tree for a capacity experiment on
+   real workloads.  Final build: WNS +0.021 / WHS +0.032, LUT 79.6%,
+   BRAM 81% - both below where the phase started.
+
 ## Step 3 - sims (the fix-proving battery, extended)
 
 Encode every behavior as an accel_tb phase BEFORE trusting it:

@@ -111,7 +111,16 @@ module wb_lines #(
         end
     end
     wire aw_match = |aw_m;
-    assign aw_ok  = aw_match || (|free_m);
+    // aw_ok is a REGISTERED level: "a free line will exist next clock" -
+    // the front's serve verdict may carry one flip-flop of this module, not
+    // its comparator chains (the first build's worst path threaded aw_pa ->
+    // these compares -> the verdict -> the D$'s steer, three modules deep).
+    // Conservative on both sides: it ignores lines freed this edge, and it
+    // charges this edge's own allocation.  A merging streak whose line is
+    // dirty still merges - the gate only demands headroom beside it, and
+    // under all-dirty pressure the flush engine is already running.
+    logic aw_ok_q;
+    assign aw_ok = aw_ok_q;
 
     wire [1:0] aw_slot = aw_m[0] ? 2'd0 : aw_m[1] ? 2'd1 :
                          aw_m[2] ? 2'd2 : aw_m[3] ? 2'd3 :
@@ -151,9 +160,12 @@ module wb_lines #(
             end
             f_st <= F_IDLE; f_sel <= 2'd0;
             wq_valid <= 1'b0; wq_line <= 20'd0; wq_be <= 16'd0; wq_data <= 128'd0;
-            winv_en <= 1'b0;
+            winv_en <= 1'b0; aw_ok_q <= 1'b0;
             flushes <= 32'd0;
         end else begin
+            // (free lines now, less the one this edge's byte may claim)
+            aw_ok_q <= ($countones(free_m) >
+                        ((aw_en && aw_ok_q && !aw_match) ? 1 : 0));
             // ---- ages --------------------------------------------------------
             for (j = 0; j < 4; j = j + 1)
                 if (l_dirty[j] && l_age[j] != 8'hFF) l_age[j] <= l_age[j] + 8'd1;

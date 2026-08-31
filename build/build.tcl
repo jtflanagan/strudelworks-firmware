@@ -143,6 +143,10 @@ if {$snoop || $master} {
             [file join $root rtl class_tlb.sv] \
             [file join $root rtl icache_l1.sv] \
             [file join $root rtl l1_front.sv] \
+            [file join $root rtl d_front.sv] \
+            [file join $root rtl dcache_l1.sv] \
+            [file join $root rtl dcache_sa.sv] \
+            [file join $root rtl wb_lines.sv] \
             [file join $root rtl boot_hold.sv] \
             [file join $root rtl kbd_inject.sv] \
             [file join $root rtl kbd_notice.sv] \

@@ -77,8 +77,9 @@ run class_tlb     rtl/class_tlb.sv
 run icache_l1     rtl/icache_l1.sv
 run l1_front      rtl/l1_front.sv rtl/class_tlb.sv rtl/icache_l1.sv
 run dcache_l1     rtl/dcache_l1.sv
+run dcache_sa     rtl/dcache_sa.sv
 run wb_lines      rtl/wb_lines.sv
-run d_front       rtl/d_front.sv rtl/dcache_l1.sv
+run d_front       rtl/d_front.sv rtl/dcache_l1.sv rtl/dcache_sa.sv
 run boot_hold     rtl/boot_hold.sv
 run kbd_inject    rtl/kbd_inject.sv
 run kbd_notice    rtl/kbd_notice.sv

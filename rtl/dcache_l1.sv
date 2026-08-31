@@ -46,6 +46,11 @@ module dcache_l1 (
     input  wire [24:0]  look_pa,
     output wire         look_hit,
     output wire         look_ok,
+    // ...and what they WILL be next clock, for a front that registers its
+    // verdicts an edge early (look_pa held stable across the edge): the
+    // in-flight read's bookkeeping, kills at this edge included.
+    output wire         look_hit_next,
+    output wire         look_ok_next,
     output wire [7:0]   look_byte,
 
     // Steering: the row to have ready next clock, and the tag the steered
@@ -73,11 +78,22 @@ module dcache_l1 (
 );
 
     // index = pa[11:4], tag = pa[24:12]: 256 lines, 13-bit tags.
+    // Block RAM, read through TWO registers - cache_way_ram's arrangement:
+    // the second is the BRAM's own optional output register, and the serve
+    // byte then launches from that fast flop instead of the slow array
+    // read (a single-register read left the row absorbed as the array's
+    // output latch, and the din cone into the AGU missed by 1.5ns from its
+    // fixed column).  The price is the row arriving one clock later: a D$
+    // hit is THREE clocks, not two - the user's trade, ~550 LUTs returned
+    // to the budget for roughly two points of ratio.
     (* ram_style = "block" *)       logic [127:0] mem  [0:255];
     (* ram_style = "distributed" *) logic [12:0]  tags [0:255];
     logic [255:0] vld;
 
-    logic [127:0] row;
+    logic [127:0] row_q;               // the BRAM's read latch
+    logic [127:0] row;                 // ...and its output register, absorbed
+    logic [7:0]   idx1;                // the in-flight read's bookkeeping
+    logic         ok1, hit1;
     logic [7:0]   row_idx;
     logic         row_ok;
     logic         row_hit;
@@ -87,6 +103,10 @@ module dcache_l1 (
     assign look_ok   = (row_idx == l_idx) && row_ok;
     assign look_hit  = row_hit && look_ok;
     assign look_byte = row[8 * look_pa[3:0] +: 8];
+    wire kills_now   = (mw_en && mw_idx == idx1) ||
+                       (snoop_here && s_idx == idx1) || rst || flash;
+    assign look_ok_next  = ok1 && (idx1 == l_idx) && !kills_now;
+    assign look_hit_next = hit1 && (idx1 == l_idx) && !kills_now;
 
     wire [7:0] i_idx = inst_pa[11:4];
     wire [7:0] s_idx = snoop_pa[11:4];
@@ -118,13 +138,22 @@ module dcache_l1 (
     end
 
     always_ff @(posedge clk) begin
-        row     <= mem[steer_idx];
-        row_idx <= steer_idx;
-        row_ok  <= !(mw_en && mw_idx == steer_idx);
-        row_hit <= !(rst || flash) && vld[steer_idx] &&
-                   (tags[steer_idx] == steer_tag) &&
-                   !(mw_en && mw_idx == steer_idx) &&
-                   !(snoop_here && s_idx == steer_idx);
+        row_q <= mem[steer_idx];
+        row   <= row_q;
+        // The verdict rides two clocks behind the steer, so a writer or a
+        // snoop landing in EITHER intervening clock kills the row - it
+        // would describe the line as of before them.
+        idx1 <= steer_idx;
+        ok1  <= !(mw_en && mw_idx == steer_idx);
+        hit1 <= !(rst || flash) && vld[steer_idx] &&
+                (tags[steer_idx] == steer_tag) &&
+                !(mw_en && mw_idx == steer_idx) &&
+                !(snoop_here && s_idx == steer_idx);
+        row_idx <= idx1;
+        row_ok  <= ok1  && !(mw_en && mw_idx == idx1);
+        row_hit <= hit1 && !(rst || flash) &&
+                   !(mw_en && mw_idx == idx1) &&
+                   !(snoop_here && s_idx == idx1);
 
         if (rst || flash) begin
             vld <= 256'd0;
