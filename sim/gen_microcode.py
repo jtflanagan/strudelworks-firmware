@@ -38,10 +38,25 @@ So the rule every microinstruction below obeys:
 
 The AGU's low half is a real 8-bit adder.  Its high half is only ever an
 incrementer/decrementer - plus one, minus one, or nothing - driven by a carry
-that is either produced this cycle (a 16-bit increment, which is cheap) or was
-saved from a previous cycle (an index add, whose carry the ISA already paid a
-cycle for).  Two arbitrary operands never meet on the high byte, so the longest
+SAVED from a previous cycle (an add whose carry the ISA already paid a cycle
+for).  Two arbitrary operands never meet on the high byte, so the longest
 arithmetic path in the core is eight bits wide.
+
+And a second rule, one notch stronger, arrived when the logic-depth audit
+(build/depth.sh, results/logic_depth.rpt) showed the low adder's carry-out
+chaining straight into the high incrementer inside one cycle:
+
+    the high byte NEVER consumes a live carry.  agu_co lands in the agu_c
+    register before anything arithmetic reads it.
+
+The two instructions that used a live carry - JMP (abs) and JMP (abs,X), for
+their pointer increment - both have a dummy cycle immediately before that
+increment, granted by the CMOS part for exactly this work.  The dummy cycle
+now PROBES the carry (computes lo+1, loads nothing, lets agu_c catch the
+carry-out) and the increment cycle consumes it as SAVED.  Same addresses on
+the bus, same cycle counts; one fewer arithmetic event per cycle.  HI_C has
+no LIVE encoding left, and the RTL has no live-carry path into the high half
+at all.
 
 That is what the extra cycles are FOR.  A core that computes the full 16-bit
 effective address in one cycle is not being clever, it is declining a cycle the
@@ -77,12 +92,19 @@ ADDR = dict(PC=0, AGU=1, ZP=2, AD=3, SP=4, VEC=5, VEC1=6, LAST=7, FIXUP=8)
 
 # AGU low-half operands.  agu_lo = lo_a + lo_b + lo_ci, 8 bits, carry out.
 LO_A = dict(ADL=0, PCL=1, S=2, MD=3)
-LO_B = dict(ZERO=0, X=1, Y=2, ONE=3, FF=4, ADL=5, DIN=6, VEC=7)
+# DIN=6 is retired: no microinstruction ever fed the bus into the adder, but
+# the mux arm in the RTL put the instruction front's combinational serve path
+# in series with the AGU carry chain on every timing path through the adder -
+# the depth audit's whole 18-20-level tail.  The encoding is left unassigned so
+# a stale ROM that somehow contains it selects ZERO, not the bus.
+LO_B = dict(ZERO=0, X=1, Y=2, ONE=3, FF=4, ADL=5, VEC=7)
 
 # AGU high half.  agu_hi = hi_a + carry_term - dec_term.  NEVER a second
 # 8-bit operand - see the design rule above.
 HI_A = dict(ADH=0, PCH=1, ZERO=2, ONE=3, FF=4)
-HI_C = dict(NONE=0, LIVE=1, SAVED=2)      # carry_term
+# LIVE=1 is retired - the high byte never consumes a live carry (the rule in
+# the header).  The encoding stays unassigned; the RTL treats it as NONE.
+HI_C = dict(NONE=0, SAVED=2)              # carry_term
 HI_D = dict(NONE=0, ONE=1, SIGN=2)        # dec_term, SIGN = ADL[7] for branches
 
 # Register loads
@@ -494,17 +516,22 @@ put(0x6C, [
     read_operand(ld_adl=LD_ADL["DIN"]),
     read_operand(ld_adh=LD_ADH["DIN"]),
     # The CMOS extra cycle - the one that buys the page-wrap fix.  It re-reads
-    # the pointer's high byte, which is what the cycle before it drove.
-    u(addr_sel=ADDR["LAST"]),
-    # Read the target low byte and increment the POINTER, both halves, in this
-    # cycle.  The high half must land here and not in the next one: the next
-    # cycle is the one that reads the target high byte at {ADH, ADL}, and an ADH
-    # that updates on that cycle's own edge is still stale when the address is
-    # driven - which reproduces precisely the NMOS ($xxFF) page-wrap bug this
-    # instruction spends its sixth cycle to avoid.
+    # the pointer's high byte, which is what the cycle before it drove - and it
+    # PROBES the pointer increment: ADL+1 runs through the low adder with
+    # nothing loaded, purely so agu_c catches the carry-out.  This is the cycle
+    # the carry was granted; spending it here is what lets the next cycle take
+    # the carry SAVED instead of live off the adder.
+    u(addr_sel=ADDR["LAST"], lo_a=LO_A["ADL"], lo_b=LO_B["ONE"]),
+    # Read the target low byte and increment the POINTER: the low half re-runs
+    # the same ADL+1 (register-direct, cheap), the high half moves by the carry
+    # the probe cycle saved.  The high half must land here and not in the next
+    # one: the next cycle is the one that reads the target high byte at
+    # {ADH, ADL}, and an ADH that updates on that cycle's own edge is still
+    # stale when the address is driven - which reproduces precisely the NMOS
+    # ($xxFF) page-wrap bug this instruction spends its sixth cycle to avoid.
     u(addr_sel=ADDR["AD"], alu_op=OP["LD"], alu_a=ALU_A["DIN"], wb=WB["MD"],
       lo_a=LO_A["ADL"], lo_b=LO_B["ONE"], ld_adl=LD_ADL["AGU"],
-      hi_a=HI_A["ADH"], hi_c=HI_C["LIVE"], ld_adh=LD_ADH["AGU"]),
+      hi_a=HI_A["ADH"], hi_c=HI_C["SAVED"], ld_adh=LD_ADH["AGU"]),
     u(addr_sel=ADDR["AD"], ld_pc=LD_PC["JMP"]),
     u(**FETCH),
 ])
@@ -512,13 +539,20 @@ put(0x7C, [                                            # JMP (abs,X)
     read_operand(ld_adl=LD_ADL["DIN"]),
     read_operand(ld_adh=LD_ADH["DIN"], lo_a=LO_A["ADL"], lo_b=LO_B["X"],
                  ld_adl=LD_ADL["AGU"]),
+    # The X index carry lands here (SAVED, from the cycle above) - and the same
+    # cycle probes the POINTER increment's carry: ADL already holds the indexed
+    # low byte, so ADL+1 through the low adder is the increment the next cycle
+    # needs, and agu_c catches its carry-out at this cycle's edge, just after
+    # the high half here consumed the X carry.  One register, two carries, one
+    # cycle apart - which is exactly the spacing the instruction's six cycles
+    # grant.
     u(addr_sel=ADDR["LAST"], hi_a=HI_A["ADH"], hi_c=HI_C["SAVED"],
-      ld_adh=LD_ADH["AGU"]),
+      ld_adh=LD_ADH["AGU"], lo_a=LO_A["ADL"], lo_b=LO_B["ONE"]),
     # Same as JMP (abs): the pointer increment completes here, a cycle before the
-    # address it produces is driven.  The X index carry got its own cycle above.
+    # address it produces is driven, its carry taken SAVED from the probe above.
     u(addr_sel=ADDR["AD"], alu_op=OP["LD"], alu_a=ALU_A["DIN"], wb=WB["MD"],
       lo_a=LO_A["ADL"], lo_b=LO_B["ONE"], ld_adl=LD_ADL["AGU"],
-      hi_a=HI_A["ADH"], hi_c=HI_C["LIVE"], ld_adh=LD_ADH["AGU"]),
+      hi_a=HI_A["ADH"], hi_c=HI_C["SAVED"], ld_adh=LD_ADH["AGU"]),
     u(addr_sel=ADDR["AD"], ld_pc=LD_PC["JMP"]),
     u(**FETCH),
 ])

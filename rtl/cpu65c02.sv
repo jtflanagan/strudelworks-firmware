@@ -19,10 +19,13 @@
 // the CMOS page-wrap fix.  So the rule the microcode obeys is:
 //
 //   *** no microinstruction adds two arbitrary 8-bit operands into the high
-//       byte.  The AGU's high half is an incrementer, never an adder. ***
+//       byte.  The AGU's high half is an incrementer, never an adder - and it
+//       never consumes a live carry: agu_co lands in the agu_c register
+//       before anything arithmetic reads it. ***
 //
-// The longest arithmetic path in the core is therefore eight bits wide.  See
-// sim/gen_microcode.py, which is where that rule is enforced and explained.
+// The longest arithmetic path in the core is therefore eight bits wide, and
+// no cycle chains two arithmetic events.  See sim/gen_microcode.py, which is
+// where both rules are enforced and explained.
 //
 // THE OTHER HALF OF THE SPEED is that the ROM address is {opcode, ucycle} with
 // no mapping stage.  There is no instruction decoder: the opcode indexes the ROM
@@ -243,7 +246,12 @@ module cpu65c02 #(
             UC_LO_B_ONE: lo_b = 8'h01;
             UC_LO_B_FF:  lo_b = 8'hFF;
             UC_LO_B_ADL: lo_b = adl;
-            UC_LO_B_DIN: lo_b = din;
+            // There is deliberately no din arm here.  No microinstruction ever
+            // fed the bus into the adder, but the arm's mere existence put the
+            // instruction front's combinational serve path in series with this
+            // carry chain on every static timing path through the AGU - the
+            // depth audit's whole 18-20-level tail.  Every remaining operand
+            // is a register or a constant.
             UC_LO_B_VEC: lo_b = vec_lo;
             default:     lo_b = 8'h00;
         endcase
@@ -264,10 +272,13 @@ module cpu65c02 #(
         endcase
     end
 
-    // +1, -1 or nothing.  `SAVED` is the carry from an index add a cycle or more
-    // ago - the cycle the instruction set granted for exactly this.
-    wire hi_carry = (f_hi_c == UC_HI_C_LIVE)  ? agu_co :
-                    (f_hi_c == UC_HI_C_SAVED) ? agu_c  : 1'b0;
+    // +1, -1 or nothing.  `SAVED` is the carry from an add a cycle or more ago -
+    // the cycle the instruction set granted for exactly this.  There is no LIVE
+    // arm: the high byte never consumes agu_co in the cycle that computes it
+    // (the rule in sim/gen_microcode.py), so the low adder's carry chain and
+    // this incrementer are never in series.  agu_co's only arithmetic consumer
+    // is the agu_c register below.
+    wire hi_carry = (f_hi_c == UC_HI_C_SAVED) ? agu_c : 1'b0;
     wire hi_dec   = (f_hi_d == UC_HI_D_ONE)   ? 1'b1   :
                     (f_hi_d == UC_HI_D_SIGN)  ? adl[7] : 1'b0;
     wire [7:0] agu_hi = hi_a + {7'd0, hi_carry} - {7'd0, hi_dec};

@@ -70,7 +70,6 @@ localparam logic [2:0] UC_LO_B_Y = 3'd2;
 localparam logic [2:0] UC_LO_B_ONE = 3'd3;
 localparam logic [2:0] UC_LO_B_FF = 3'd4;
 localparam logic [2:0] UC_LO_B_ADL = 3'd5;
-localparam logic [2:0] UC_LO_B_DIN = 3'd6;
 localparam logic [2:0] UC_LO_B_VEC = 3'd7;
 
 localparam logic [2:0] UC_HI_A_ADH = 3'd0;
@@ -80,7 +79,6 @@ localparam logic [2:0] UC_HI_A_ONE = 3'd3;
 localparam logic [2:0] UC_HI_A_FF = 3'd4;
 
 localparam logic [1:0] UC_HI_C_NONE = 2'd0;
-localparam logic [1:0] UC_HI_C_LIVE = 2'd1;
 localparam logic [1:0] UC_HI_C_SAVED = 2'd2;
 
 localparam logic [1:0] UC_HI_D_NONE = 2'd0;
