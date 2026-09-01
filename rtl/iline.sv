@@ -306,21 +306,31 @@ module iline (
     wire [15:0] br_tgt = pc_addr + 16'd1 + {{8{i_din[7]}}, i_din};
 
     // The RESOLVE: a branch's at its operand; a JMP's or JSR's at its high
-    // byte - which for both is the very cycle before the target fetch, so
-    // the lookup runs live on the byte being served ({i_din, lo_q}: the
-    // registered candidate byte in the turbo case) and registers at this
-    // same edge.  A branch's dummy cycles just give it slack.  JSR's stack
-    // cycles between the operands are data, invisible to i_serve, so "the
-    // second operand serve" holds for both shapes.
+    // byte - which for both is the very cycle before the target fetch.
+    // JSR's stack cycles between the operands are data, invisible to
+    // i_serve, so "the second operand serve" holds for both shapes.
     wire resolving = i_serve && !cpu_sync &&
                      ((bk_q == BK_BR) || (bk_q == BK_ABS && bk_hi));
     wire [15:0] res_tgt   = (bk_q == BK_BR) ? br_tgt : {i_din, lo_q};
     wire        res_taken = (bk_q == BK_BR) ? br_taken : 1'b1;
 
-    // The target's own lookup - aimed at the resolving target the cycle it
-    // is born, at the pending one after - and its continuation at
-    // target+1, so the serve after a zero-stall transfer is at cadence.
-    wire [15:0] tgt_look = (resolving && res_taken) ? res_tgt : tgt_q;
+    // THE LOOKUP ADDRESS IS SPECULATIVE, REGISTERS ONLY - the house rule:
+    // late verdicts pick, they never compute.  The first build's only
+    // violations (-0.038) were this address qualified by `resolving`,
+    // which threads i_serve -> cyc_en -> retire -> kill_now -> the write
+    // snoop: half the period gone before the ten-line lookup even starts.
+    // So the address speculates from bk state, the registered flags
+    // verdict and the REGISTERED candidate byte (i_byte_q, standing for
+    // the operand about to be served), and the late truth gates only the
+    // one-bit valid below: if the operand actually arrived from the
+    // sequencer or the target path instead, the valid stays low and the
+    // lookup self-heals off tgt_q a cycle later - the one-beat fallback,
+    // paid only there.  A branch's dummy cycle absorbs even that.
+    wire [15:0] br_tgt_spec = pc_addr + 16'd1 + {{8{i_byte_q[7]}}, i_byte_q};
+    wire        spec_pending = (bk_q == BK_BR) ? br_taken
+                                               : (bk_q == BK_ABS && bk_hi);
+    wire [15:0] spec_tgt = (bk_q == BK_BR) ? br_tgt_spec : {i_byte_q, lo_q};
+    wire [15:0] tgt_look = spec_pending ? spec_tgt : tgt_q;
     wire [15:0] tgt_inc  = tgt_q + 16'd1;
     wire        ht0 = v[0] && (tgt_look[15:4] == vtag[0]);
     wire        ht1 = v[1] && (tgt_look[15:4] == vtag[1]);
@@ -389,7 +399,12 @@ module iline (
                                       (hh0 || hh1 || |cam_hh);
                 i_byte_q <= step ? b_inc : recover ? b_cur : b_hold;
             end
-            tgt_lhit_q <= (resolving ? res_taken : tgt_v) && (ht0 || ht1 || |cam_ht);
+            // The valid pairs the registered byte with the address it was
+            // looked up at: on a resolve it demands the speculation held
+            // (the served operand WAS i_byte_q - lhit_q, and not the
+            // target path's byte).
+            tgt_lhit_q <= (resolving ? (res_taken && lhit_q && !tgt_serve)
+                                     : tgt_v) && (ht0 || ht1 || |cam_ht);
             tgt_byte_q <= b_tgt;
             if (i_serve) begin
                 if (cpu_sync) begin
@@ -466,9 +481,11 @@ module iline (
     logic        want_v   [0:1];
     logic [11:0] want_tag [0:1];
 
-    localparam [2:0] F_IDLE = 3'd0, F_REQ = 3'd1, F_W1 = 3'd2, F_W2 = 3'd3,
-                     F_R0 = 3'd4, F_R1 = 3'd5, F_R2 = 3'd6, F_R3 = 3'd7;
-    logic [2:0]  fst;
+    localparam [3:0] F_IDLE = 4'd0, F_REQ = 4'd1, F_W1 = 4'd2, F_W2 = 4'd3,
+                     F_R0 = 4'd4, F_R1 = 4'd5, F_R2 = 4'd6, F_R3 = 4'd7,
+                     F_CAM = 4'd8;    // the promote's own beat
+    logic [3:0]  fst;
+    logic [2:0]  cam_pidx;            // the entry a promote is copying
     logic        f_slot, f_rom, f_aux;
     logic        f_cam;               // a CAM-only fill: the scanner's, no slot
     logic [7:0]  f_bank;
@@ -514,9 +531,6 @@ module iline (
         for (int k = CAMN - 1; k >= 0; k = k - 1)
             if (cam_m[k]) cam_idx = 3'(k);
     end
-    // A snoop or ROM traffic hitting the entry the very clock it would
-    // promote: abort, the entry dies, the retry takes the fill path.
-    wire cam_prom_abort = cam_snp_kill[cam_idx] || (cam_rom[cam_idx] && r2_busy);
 
     // The snoop against the fill in flight.
     wire snp_fill = snp && f_active && !f_rom && (f_aux == cl_aux) &&
@@ -589,8 +603,14 @@ module iline (
     // the counters see exactly what the engine does.
     wire stale_own   = v[pick]  && (vtag[pick]  == p_tag);
     wire stale_other = v[!pick] && (vtag[!pick] == p_tag);
+    // The promote LAUNCHES here and commits a beat later (F_CAM): the
+    // first build's second violation family was this cone driving the
+    // 128-bit slot register's enables live through the pick and the CAM
+    // compare.  Latching first keeps the heavy enables on a registered
+    // state bit; a kill racing the launch just clears cam_v, and F_CAM
+    // sees it and retries down the fill path.
     wire promote_go  = (fst == F_IDLE) && !f_restart && want_pending &&
-                       !stale_own && !stale_other && cam_hit && !cam_prom_abort;
+                       !stale_own && !stale_other && cam_hit;
     wire scan_go     = (fst == F_IDLE) && !f_restart && (pick_early || pick_scan);
     wire sw_taken    = (fst == F_IDLE) && !f_restart && pick_scan;
     assign ew_taken  = (fst == F_IDLE) && !f_restart && pick_early;
@@ -603,7 +623,7 @@ module iline (
     // The loop bits' keeper: set by the scanner, cleared the clock either
     // slot's content changes - conservative, and a live loop is re-found
     // within one iteration because the scan re-anchors every opcode fetch.
-    wire slots_disturbed = ((fst == F_W2) && !f_restart && !f_cam) || promote_go ||
+    wire slots_disturbed = ((fst == F_W2) && !f_restart && !f_cam) || (fst == F_CAM) ||
                            snp_kill0 || snp_kill1 || map_changed || inval || !serve ||
                            (r2_busy && (t_rom[0] || t_rom[1])) ||
                            (miss_q && !wanted_now) || rot0 || rot1;
@@ -723,18 +743,23 @@ module iline (
                     if (stale_own || stale_other) begin
                         want_v[pick] <= 1'b0;
                     end else if (promote_go) begin
-                        // THE PROMOTE: the CAM's copy into the slot, one
-                        // clock, no page-cache round trip and no
-                        // re-classification (the CAM's note above says why
-                        // the captured identity still stands).
-                        ldata[pick]  <= cam_data[cam_idx];
-                        v[pick]      <= 1'b1;
-                        vtag[pick]   <= p_tag;
-                        t_rom[pick]  <= cam_rom[cam_idx];
-                        t_aux[pick]  <= cam_aux[cam_idx];
-                        t_bank[pick] <= cam_bank[cam_idx];
-                        t_poff[pick] <= cam_poff[cam_idx];
+                        // THE PROMOTE, latched: the entry's index and
+                        // identity into the engine's registers, the copy
+                        // itself next beat (F_CAM).  No page-cache round
+                        // trip and no re-classification (the CAM's note
+                        // above says why the captured identity stands);
+                        // setting f_* here also puts the promote under the
+                        // fill's own snoop (f_restart) for its one beat.
+                        f_slot   <= pick;
+                        f_cam    <= 1'b0;
+                        f_vtag   <= p_tag;
+                        f_rom    <= cam_rom[cam_idx];
+                        f_aux    <= cam_aux[cam_idx];
+                        f_bank   <= cam_bank[cam_idx];
+                        f_poff   <= cam_poff[cam_idx];
+                        cam_pidx <= cam_idx;
                         want_v[pick] <= 1'b0;
+                        fst <= F_CAM;
                     end else if (p_bus || excl(p_tag)) begin
                         want_v[pick] <= 1'b0;      // never servable: leave empty
                     end else begin
@@ -764,6 +789,24 @@ module iline (
                         f_poff <= p_off[15:4];
                         fst    <= p_rom ? F_R0 : F_REQ;
                     end
+                end
+                F_CAM: begin
+                    // The copy - unless the entry died under the launch (a
+                    // same-clock kill cleared cam_v): then retry through
+                    // the want, which now misses the CAM and fills.
+                    if (cam_v[cam_pidx]) begin
+                        ldata[f_slot]  <= cam_data[cam_pidx];
+                        v[f_slot]      <= 1'b1;
+                        vtag[f_slot]   <= f_vtag;
+                        t_rom[f_slot]  <= f_rom;
+                        t_aux[f_slot]  <= f_aux;
+                        t_bank[f_slot] <= f_bank;
+                        t_poff[f_slot] <= f_poff;
+                    end else begin
+                        want_v[f_slot]   <= 1'b1;
+                        want_tag[f_slot] <= f_vtag;
+                    end
+                    fst <= F_IDLE;
                 end
                 F_REQ: begin
                     if (il_ack && il_ok)       fst <= F_W1;

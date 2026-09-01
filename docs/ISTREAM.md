@@ -13,10 +13,12 @@ the retention CAM - which SERVES, making the front a ten-line
 associative icache - the branch scanner, the pinned pair, and early
 branch resolution on the core's exported flags, below.  **99.3% of the
 mode-2 instruction stream at one clock per fetch**, taken branches and
-JMP/JSR to resident lines at ZERO stall.  Proven under Verilator only
-so far (53 checks, both sweep points, the self-modifying-code scenarios
-included; sim/run_accel_vl.sh), NOT yet run under iverilog, NOT built,
-NOT on hardware.
+JMP/JSR to resident lines at ZERO stall.  Proven under Verilator (53
+checks, both sweep points, the self-modifying-code scenarios included;
+sim/run_accel_vl.sh) and **TIMING CLOSED: setup WNS +0.058 ns, hold
++0.055, zero failing endpoints** - after two rounds against exactly the
+predicted families (below).  NOT yet run under iverilog, NOT on
+hardware.
 
 The idea is the user's design.  Instruction streams are very linear, so:
 
@@ -245,17 +247,33 @@ Cycles for the phase fell 1 427 -> 1 337 against the machinery-off
 baseline of the same program; the mix, not the bus-bound ratio, is the
 signal.
 
-**Timing watchpoints for the build** (not yet attempted): the retire's
-ihit is now a ten-way tag OR off the PC registers; kill_now gained two
-CAM snoop-cancel terms; the candidate byte muxes select among ten
-sources (registered destinations, but wide); the CAM data wants
-replication for its multiple concurrent read addresses (distributed
-RAM, ~32 LUTs a copy); the JMP/JSR resolve path runs i_din (late, when
-the sequencer serves the high byte) through a compare network into a
-registered candidate.  If closure objects: registered hit hints for
-ihit at one beat's cost, an F_CAM beat for the promote, and the
-JMP/JSR live lookup can fall back to registering the target first
-(one beat, branches unaffected).
+**How closure was won** (WNS +0.058 from -0.038, then -0.126, in two
+rounds - the failing families were exactly the flagged watchpoints, and
+each fix was the documented fallback):
+
+1. *The resolve lookup's address waited for the retire.*  The first
+   build's -0.038 threaded the write snoop -> kill_now -> retire ->
+   `resolving` -> the ten-line target lookup -> tgt_byte_q: half the
+   period gone before the lookup started.  Fix: the lookup address is
+   SPECULATIVE, registers only (bk state, the flags verdict, i_byte_q
+   standing for the operand about to be served), and the late serve
+   truth gates only the one-bit valid - the house rule (late verdicts
+   pick, never compute) applied to the one place it had been broken.
+   Cost: a slow-served JMP/JSR high byte falls back to the one-beat
+   re-aim; branches and turbo-served transfers keep zero.
+2. *The one-clock promote's enables.*  The second build's -0.126 (34
+   endpoints) was promote_go - the live pick, the CAM compare - driving
+   the 128-bit slot register's CE.  Fix: the promote latches at F_IDLE
+   (index and identity into the f_* registers, which also puts it under
+   the fill's own snoop) and commits a beat later in F_CAM, the heavy
+   enables on a registered state bit; the launch-clock kill race became
+   a registered cam_v check in F_CAM.  Cost: none observable - a
+   resident line SERVES from the CAM while its promote re-centers.
+
+Still-live widths that DID close and bear watching in future builds:
+the ten-way ihit OR in the retire, the two CAM snoop-cancel terms in
+kill_now, the replicated CAM read ports behind the candidate muxes.
+Registered-hint fallbacks remain available for each.
 
 ## Not here, deliberately
 
