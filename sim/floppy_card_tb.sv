@@ -29,8 +29,10 @@
 //     adjacent magnet, not at all when both adjacent magnets are on; a
 //     track change is one FD_SEEK, and the register serves no address field
 //     of the old track meanwhile.
-//   * the second drive is its own head and its own buffer; switching back
-//     asks the host for nothing.
+//   * the second drive is its own head through the ONE shared buffer:
+//     selecting it empty asks for nothing, inserting a disk fetches its
+//     track, and switching back flushes-and-refetches - both drives' tracks
+//     survive the round trip.
 //   * motor off coasts, then holds the register; $C0nD/$C0nE sense
 //     write-protect.
 //   * a sector written at the machine's own pace - self-sync bytes at 40
@@ -478,7 +480,7 @@ module floppy_card_tb;
         push_word({8'd7, 8'd0, 8'd0, 8'd0});   // seq 7: nobody asked for it
         for (i = 0; i < 252; i = i + 1) push_word(32'hDEADBEEF);
         idle(6);
-        if (dut.chunks[0] !== 7'd0) fail("a chunk with the wrong seq was accepted");
+        if (dut.chunks_r !== 7'd0) fail("a chunk with the wrong seq was accepted");
         else $display("  ok: a chunk answering a seek nobody made is dropped");
 
         // Now the real answer, late.
@@ -570,34 +572,42 @@ module floppy_card_tb;
         if (run_start(1, 16, NIB_DSK) < 0) fail("track 1's nibbles did not read back");
         else $display("  ok: track 1 reads back after its fill");
 
-        // --- case 6 / the second drive -------------------------------------------
+        // --- case 6 / the second drive, through the one shared buffer -------------
         m = nmsg;
         bus_read(DRIVE2);
         idle(4);
         if (dut.usable !== 1'b0) fail("drive 2, empty, is usable");
         idle(20);
         if (nmsg != m) fail("an empty drive 2 asked the host for a track");
-        else $display("  ok: selecting an empty drive 2 asks for nothing");
+        else $display("  ok: selecting an empty drive 2 takes the buffer but asks for nothing");
         drv_nibbles[25:13] = NIB_DSK[12:0];
         drv_tracks[11:6]   = 6'd35;
         drv_inserted[1]    = 1'b1;
         wait_msg(T_FD_SEEK, m, at, 50);
         if (at < 0) fail("no FD_SEEK for drive 2");
-        else if (out_mem[msg_at[at]+1] !== {8'd1, 8'd0, 8'd0, 8'd1})
-            fail("FD_SEEK should say drive 1, track 0, seq 1");
-        else $display("  ok: a disk in drive 2 is FD_SEEK {1, 0, seq 1}");
-        send_track(1, 0, 8'd1);
+        else if (out_mem[msg_at[at]+1] !== {8'd3, 8'd0, 8'd0, 8'd1})
+            fail("FD_SEEK should say drive 1, track 0, seq 3");
+        else $display("  ok: a disk in drive 2 is FD_SEEK {1, 0, seq 3}");
+        send_track(1, 0, 8'd3);
         idle(STABLE_TICKS + 60);
         poll_nibbles(16);
         if (run_start(0, 16, NIB_DSK) < 0) fail("drive 2's track 0 did not read back");
         else $display("  ok: drive 2 reads its own track 0");
+        // Switching back: the buffer is one, so drive 1's track is fetched
+        // again - flush first if it were dirty (it is not), then the seek.
         m = nmsg;
         bus_read(DRIVE1);
+        wait_msg(T_FD_SEEK, m, at2, 400);
+        if (at2 < 0) fail("no FD_SEEK when the select came back to drive 1");
+        else if (out_mem[msg_at[at2]+1] !== {8'd4, 8'd0, 8'd1, 8'd0})
+            fail("FD_SEEK should say drive 0, track 1, seq 4");
+        else $display("  ok: back to drive 1 - the shared buffer asks for its track 1 again");
+        if (dut.usable !== 1'b0) fail("usable while the refetch is owed");
+        send_track(0, 1, 8'd4);
         idle(STABLE_TICKS + 60);
-        if (nmsg != m) fail("switching back to drive 1 asked the host again");
         poll_nibbles(16);
-        if (run_start(1, 16, NIB_DSK) < 0) fail("drive 1's track 1 was lost");
-        else $display("  ok: back to drive 1 - its track 1 is still there, no new seek");
+        if (run_start(1, 16, NIB_DSK) < 0) fail("drive 1's track 1 did not come back");
+        else $display("  ok: ...and its track 1 reads back after the refetch");
 
         // --- case 7 / motor off: coast, then hold ---------------------------------
         bus_read(MOTOROFF);
@@ -648,15 +658,15 @@ module floppy_card_tb;
         bus_read(PH0OFF);
         wait_msg(T_FD_SEEK, m, first_seek, 400);
         if (first_seek < 0) fail("no FD_SEEK for track 2");
-        else if (out_mem[msg_at[first_seek]+1] !== {8'd3, 8'd0, 8'd2, 8'd0})
-            fail("FD_SEEK should say drive 0, track 2, seq 3");
+        else if (out_mem[msg_at[first_seek]+1] !== {8'd5, 8'd0, 8'd2, 8'd0})
+            fail("FD_SEEK should say drive 0, track 2, seq 5");
         gather_upload(m, n_up, first_up);
         if (n_up != 7) begin
             $display("FAIL: %0d FD_DIRTY chunks, expected 7", n_up); errors = errors + 1;
         end else if (first_up > first_seek) fail("the upload came after the seek");
         else $display("  ok: seven FD_DIRTY chunks went out, before the FD_SEEK");
-        if (out_mem[msg_at[first_up]+1] !== {8'd2, 8'd0, 8'd1, 8'd0})
-            fail("FD_DIRTY should say drive 0, track 1, seq 2");
+        if (out_mem[msg_at[first_up]+1] !== {8'd4, 8'd0, 8'd1, 8'd0})
+            fail("FD_DIRTY should say drive 0, track 1, seq 4");
         // The written run: $FF from t0 - five 40-cycle sync bytes and the
         // slot they skip, six or seven slots by where in a slot the burst
         // began - then the fifteen data bytes, contiguous.
@@ -688,8 +698,50 @@ module floppy_card_tb;
             $display("FAIL: %0d bytes outside the write differ from the fill", k); errors = errors + 1;
         end else $display("  ok: everything outside the write is the track as filled");
         if (dirty[0] !== 1'b0) fail("dirty did not clear after the upload");
-        send_track(0, 2, 8'd3);
+        send_track(0, 2, 8'd5);
         idle(40);
+
+        // --- case 9b / a dirty track survives a drive switch -----------------------
+        // One byte written on track 2, then the select moves to drive 2: the
+        // flush must carry the byte out before drive 2's seek, exactly as a
+        // head movement would have.
+        idle(40);
+        bus_read(Q6H); bus_read(Q7L);
+        bus_write(Q7H, 8'hDE);              // write mode, and the LD
+        bus_read(Q6L);                      // the shift: the byte lands
+        t0 = dut.wr_last;
+        bus_read(Q7L);                      // read mode
+        if (dirty[0] !== 1'b1) fail("the one-byte write did not mark dirty");
+        m = nmsg;
+        bus_read(DRIVE2);
+        wait_msg(T_FD_SEEK, m, at, 400);
+        if (at < 0) fail("no FD_SEEK for drive 2 after the switch");
+        else if (out_mem[msg_at[at]+1] !== {8'd6, 8'd0, 8'd0, 8'd1})
+            fail("FD_SEEK should say drive 1, track 0, seq 6");
+        gather_upload(m, n_up, first_up);
+        if (n_up != 7) begin
+            $display("FAIL: %0d FD_DIRTY chunks on the switch, expected 7", n_up); errors = errors + 1;
+        end else if (first_up > at) fail("the switch's upload came after the seek");
+        else if (out_mem[msg_at[first_up]+1] !== {8'd5, 8'd0, 8'd2, 8'd0})
+            fail("the switch's FD_DIRTY should say drive 0, track 2, seq 5");
+        else $display("  ok: switching drives flushed the dirty track first, seven chunks before the seek");
+        k = 0;
+        for (i = 0; i < NIB_DSK; i = i + 1)
+            if (up_img[i] !== ((i == t0) ? 8'hDE : nib(2, i))) k = k + 1;
+        if (k != 0) begin
+            $display("FAIL: %0d bytes of the switched-away track differ", k); errors = errors + 1;
+        end else $display("  ok: the flushed track carries the write, everything else as filled");
+        send_track(1, 0, 8'd6);
+        idle(40);
+        m = nmsg;
+        bus_read(DRIVE1);
+        wait_msg(T_FD_SEEK, m, at2, 400);
+        if (at2 < 0) fail("no FD_SEEK back to drive 1");
+        else if (out_mem[msg_at[at2]+1] !== {8'd7, 8'd0, 8'd2, 8'd0})
+            fail("FD_SEEK back should say drive 0, track 2, seq 7");
+        else $display("  ok: back on drive 1, track 2 is asked for again");
+        send_track(0, 2, 8'd7);
+        idle(STABLE_TICKS + 60);
 
         // --- case 10 / RES' clears the switches, nothing else ---------------------
         res_n = 1'b0;

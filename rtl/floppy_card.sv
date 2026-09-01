@@ -58,22 +58,30 @@
 // stays contiguous and needs no fixing up afterwards.  A write-protected
 // disk, or a stopped drive, takes nothing.
 //
-// THE TRACK IS ON THE CARD; THE DISK IS ON THE HOST.  Each drive has one
-// track of buffer (6656 bytes, the largest any image format makes, in
-// BRAM).  A head movement, a disk inserted, or a switch to a drive holding
-// another track marks the buffer STALE and sends the host an FD_SEEK
-// {drive, track, seq}; the host answers with seven FD_TRACK chunks that
-// are written straight into the buffer as they arrive, and the seventh
-// clears STALE.  While a buffer is stale the register serves noise, never
-// the old track - so a late host makes the RWTS keep looking for an
-// address field, which it retries, rather than find one with the wrong
-// track number in it, which it treats as a seek error.  `seq` is bumped
-// per seek and a chunk with the wrong one is dropped: a late answer to a
-// superseded seek changes nothing.  A buffer that was written to is DIRTY,
-// and before its track is left - or when the drive spins down, is ejected,
-// or the host asks - it goes back to the host as seven FD_DIRTY chunks,
-// before the FD_SEEK for the new track, so the host has the whole track
-// before it could be asked for it again.
+// THE TRACK IS ON THE CARD; THE DISK IS ON THE HOST.  There is ONE track
+// of buffer (6656 bytes, the largest any image format makes, in BRAM),
+// shared by the two drives and tagged with whose track it holds - because
+// only one drive is ever live: the phases and the enable reach the
+// selected drive alone, so the other cannot step, read or write, and its
+// buffered track could never be used.  A head movement, a disk inserted,
+// or the SELECT MOVING TO THE OTHER DRIVE marks the buffer STALE and sends
+// the host an FD_SEEK {drive, track, seq}; the host answers with seven
+// FD_TRACK chunks that are written straight into the buffer as they
+// arrive, and the seventh clears STALE.  While the buffer is stale the
+// register serves noise, never a wrong track - so a late host makes the
+// RWTS keep looking for an address field, which it retries, rather than
+// find one with the wrong track number in it, which it treats as a seek
+// error.  A drive switch costs one refetch (~0.5 ms measured), and no
+// correct software can notice: the newly selected platter's rotational
+// position is arbitrary, so everything resynchronises on an address field
+// after a switch anyway, and a REAL drive needs up to a second of motor
+// before its data is believable.  `seq` is bumped per seek and a chunk
+// with the wrong one is dropped: a late answer to a superseded seek
+// changes nothing.  A buffer that was written to is DIRTY, and before its
+// track is left - the head moving, the select switching, the drive
+// spinning down, an eject, or the host asking - it goes back to the host
+// as seven FD_DIRTY chunks, before the FD_SEEK for the new track, so the
+// host has the whole track before it could be asked for it again.
 //
 // THE CARD MEASURES ITS OWN LATENESS.  `fill_max` is the longest a fill has
 // taken, from the head movement to the seventh chunk, in bus cycles;
@@ -233,7 +241,8 @@ module floppy_card #(
     wire q7_after = (idx[3:1] == 3'd7) ? idx[0] : q7;
 
     // ---- the drives ----------------------------------------------------------------
-    // Everything per drive, indexed by drive number; the selected one is `s`.
+    // The PLATTERS are per drive, indexed by drive number; the selected one
+    // is `s`.  The BUFFER is one, tagged with whose track it holds.
     wire s = drive_sel;
 
     logic [6:0]  phase     [0:1];       // 0..79, two per track
@@ -241,18 +250,22 @@ module floppy_card #(
     logic [9:0]  stable    [0:1];       // ticks since the drive started, saturating
     logic [12:0] pos       [0:1];       // the slot under the head
     logic [4:0]  bit_ctr   [0:1];       // ticks into that slot's 32
-    logic        stale     [0:1];       // the buffer is not this track yet
-    logic        dirty     [0:1];       // the buffer was written to
-    logic [7:0]  seq       [0:1];       // the seek the host is answering
-    logic [5:0]  buf_track [0:1];       // the track the buffer is for
-    logic [6:0]  chunks    [0:1];       // FD_TRACK chunks landed for `seq`
-    logic [15:0] fill_ticks[0:1];       // ticks since the head moved, while stale
-    logic        read_stale[0:1];       // the machine read while stale
-    logic        seek_owed [0:1];       // an FD_SEEK is to be sent
-    logic        up_owed   [0:1];       // an FD_DIRTY upload is to be sent
-    logic [5:0]  up_track  [0:1];       // ...for this track
-    logic [7:0]  up_seq    [0:1];       // ...as filled by this seek
     logic        ins_prev  [0:1];       // for the insert / eject edges
+
+    // The one buffer's state.
+    logic        buf_drive;             // whose track the buffer holds
+    logic        stale;                 // the buffer is not that track yet
+    logic        dirty;                 // the buffer was written to
+    logic [7:0]  seq;                   // the seek the host is answering
+    logic [5:0]  buf_track;             // the track the buffer is for
+    logic [6:0]  chunks_r;              // FD_TRACK chunks landed for `seq`
+    logic [15:0] fill_ticks;            // ticks since the buffer went stale
+    logic        read_stale;            // the machine read while stale
+    logic        seek_owed;             // an FD_SEEK is to be sent
+    logic        up_owed;               // an FD_DIRTY upload is to be sent
+    logic        up_drive;              // ...for this drive
+    logic [5:0]  up_track;              // ...and this track
+    logic [7:0]  up_seq;                // ...as filled by this seek
 
     wire [12:0] nibbles [0:1];
     wire [5:0]  tracks  [0:1];
@@ -262,49 +275,48 @@ module floppy_card #(
     assign tracks[1]  = drv_tracks[11:6];
 
     assign phase_o = {phase[1], phase[0]};
-    assign stale_o = {stale[1], stale[0]};
-    assign dirty_o = {dirty[1], dirty[0]};
+    // The buffer's drive reports the buffer's state; the other drive is,
+    // truthfully, a drive whose track is not buffered.
+    assign stale_o = {buf_drive ? stale : 1'b1, buf_drive ? 1'b1 : stale};
+    assign dirty_o = {buf_drive && dirty, !buf_drive && dirty};
 
     // The selected drive is turning: enabled by the motor, or coasting.
     wire spinning = (spin[s] != 20'd0);
-    // Its buffer holds the track under its head.
-    wire usable   = drv_inserted[s] && !stale[s];
-    // A fill is expected: the host owes this drive a track.
-    wire filling0 = stale[0] && drv_inserted[0] && (buf_track[0] < tracks[0]);
-    wire filling1 = stale[1] && drv_inserted[1] && (buf_track[1] < tracks[1]);
+    // The buffer is the selected drive's and holds the track under its head.
+    wire usable   = drv_inserted[s] && !stale && (buf_drive == s);
+    // A fill is expected: the host owes the buffer a track.
+    wire filling  = stale && drv_inserted[buf_drive] && (buf_track < tracks[buf_drive]);
 
     // Noise for an empty drive: a 16-bit LFSR stepped per tick.
     logic [15:0] lfsr;
     wire         lfsr_fb = lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10];
 
-    // ---- the track buffers ----------------------------------------------------------
-    // Four byte lanes per drive (rtl/fd_bank.sv): byte i in bank i[1:0] at
-    // index i[12:2].  Port A is the bus side, a byte at a time; port B the
-    // link side, a word at a time.
-    wire         a_we    [0:7];
-    wire  [10:0] a_addr  [0:1];
+    // ---- the track buffer -----------------------------------------------------------
+    // Four byte lanes (rtl/fd_bank.sv): byte i in bank i[1:0] at index
+    // i[12:2].  Port A is the bus side, a byte at a time; port B the link
+    // side, a word at a time.  One buffer for both drives - see the header.
+    wire         a_we    [0:3];
+    wire  [10:0] a_addr;
     wire  [7:0]  a_wdata;
-    wire  [7:0]  a_rdata [0:7];
-    wire         b_we    [0:1];
-    wire  [10:0] b_addr  [0:1];
-    wire  [7:0]  b_rdata [0:7];
+    wire  [7:0]  a_rdata [0:3];
+    wire         b_we;
+    wire  [10:0] b_addr;
+    wire  [7:0]  b_rdata [0:3];
 
-    genvar gd, gk;
+    genvar gk;
     generate
-        for (gd = 0; gd < 2; gd = gd + 1) begin : g_drive
-            for (gk = 0; gk < 4; gk = gk + 1) begin : g_bank
-                fd_bank #(.DEPTH (TRACK_WORDS)) u_bank (
-                    .clk     (clk),
-                    .a_we    (a_we[gd*4 + gk]),
-                    .a_addr  (a_addr[gd]),
-                    .a_wdata (a_wdata),
-                    .a_rdata (a_rdata[gd*4 + gk]),
-                    .b_we    (b_we[gd]),
-                    .b_addr  (b_addr[gd]),
-                    .b_wdata (pay_data[8*gk +: 8]),
-                    .b_rdata (b_rdata[gd*4 + gk])
-                );
-            end
+        for (gk = 0; gk < 4; gk = gk + 1) begin : g_bank
+            fd_bank #(.DEPTH (TRACK_WORDS)) u_bank (
+                .clk     (clk),
+                .a_we    (a_we[gk]),
+                .a_addr  (a_addr),
+                .a_wdata (a_wdata),
+                .a_rdata (a_rdata[gk]),
+                .b_we    (b_we),
+                .b_addr  (b_addr),
+                .b_wdata (pay_data[8*gk +: 8]),
+                .b_rdata (b_rdata[gk])
+            );
         end
     endgenerate
 
@@ -317,7 +329,6 @@ module floppy_card #(
     // within the cycle.
     logic [7:0]  nxt;
     logic        a_rd_q;                // last clock read the head's slot
-    logic        a_sel_q;               // ...of this drive
     logic [1:0]  a_lane_q;              // ...in this lane
 
     // The write burst: where the last byte landed, so a skipped slot can be
@@ -343,14 +354,12 @@ module floppy_card #(
 
     wire         a_busy    = store || filler_run;
     wire [12:0]  a_byte    = store ? pos[s] : fill_ptr;
-    wire [2:0]   a_we_lane = {s, a_byte[1:0]};
-    assign a_addr[0] = (a_busy && !s) ? a_byte[12:2] : pos[0][12:2];
-    assign a_addr[1] = (a_busy &&  s) ? a_byte[12:2] : pos[1][12:2];
-    assign a_wdata   = store ? latch : 8'hFF;
+    assign a_addr  = a_busy ? a_byte[12:2] : pos[s][12:2];
+    assign a_wdata = store ? latch : 8'hFF;
     genvar gw;
     generate
-        for (gw = 0; gw < 8; gw = gw + 1) begin : g_awe
-            assign a_we[gw] = a_busy && (a_we_lane == gw[2:0]);
+        for (gw = 0; gw < 4; gw = gw + 1) begin : g_awe
+            assign a_we[gw] = a_busy && (a_byte[1:0] == gw[1:0]);
         end
     endgenerate
 
@@ -358,10 +367,9 @@ module floppy_card #(
 
     always_ff @(posedge clk) begin
         a_rd_q   <= a_rd_issue;
-        a_sel_q  <= s;
         a_lane_q <= pos[s][1:0];
         if (rst)         nxt <= 8'd0;
-        else if (a_rd_q) nxt <= a_rdata[{a_sel_q, a_lane_q}];
+        else if (a_rd_q) nxt <= a_rdata[a_lane_q];
         // A store is the byte the head is over: what a read of it would see.
         if (store) nxt <= latch;
     end
@@ -427,8 +435,13 @@ module floppy_card #(
                         fill_drive <= w0_drive;
                         fill_chunk <= w0_chunk[2:0];
                         fill_word  <= w0_base;
+                        // The chunk lands only if it answers the buffer's
+                        // OWN seek: right drive, right seq.  A drive switch
+                        // bumps seq, so a late answer for the other drive's
+                        // track changes nothing.
                         fill_ok    <= (w0_chunk < 8'd7) &&
-                                      (w0_seq == seq[w0_drive]) &&
+                                      (w0_drive == buf_drive) &&
+                                      (w0_seq == seq) &&
                                       drv_inserted[w0_drive];
                     end else if (fill_ok) begin
                         fill_word <= fill_word + 11'd1;
@@ -460,23 +473,21 @@ module floppy_card #(
     wire [7:0] chunk_len  = (x_chunk == 3'd6) ? LAST_CHUNK_WORDS[7:0] : CHUNK_WORDS[7:0];
     wire [7:0] x_msg_len  = chunk_len + 8'd1;
 
-    // Port B of the selected drive's buffer reads the word being offered,
-    // and the one after it on the clock it is taken, so the stream never
-    // stalls for the RAM's latency.  The fill's writes take the port when
-    // they come; by the protocol they cannot come for a drive mid-upload.
+    // Port B reads the word being offered, and the one after it on the
+    // clock it is taken, so the stream never stalls for the RAM's latency.
+    // The fill's writes take the port when they come; by the protocol they
+    // cannot come mid-upload - the seek that provokes them is sent only
+    // after the upload finishes.
     wire [10:0] x_word_next = ((xs == X_UP_DATA) && tx_take) ? x_word + 11'd1 : x_word;
 
-    assign b_we[0]   = fill_write && (fill_drive == 1'b0);
-    assign b_we[1]   = fill_write && (fill_drive == 1'b1);
-    assign b_addr[0] = b_we[0] ? fill_word : (x_drive ? 11'd0 : x_word_next);
-    assign b_addr[1] = b_we[1] ? fill_word : (x_drive ? x_word_next : 11'd0);
+    assign b_we   = fill_write;
+    assign b_addr = b_we ? fill_word : x_word_next;
 
-    wire [31:0] x_data = x_drive ? {b_rdata[7], b_rdata[6], b_rdata[5], b_rdata[4]}
-                                 : {b_rdata[3], b_rdata[2], b_rdata[1], b_rdata[0]};
+    wire [31:0] x_data = {b_rdata[3], b_rdata[2], b_rdata[1], b_rdata[0]};
 
-    wire [31:0] x_w0 = {(xs == X_SEEK_W0) ? seq[x_drive] : up_seq[x_drive],
+    wire [31:0] x_w0 = {(xs == X_SEEK_W0) ? seq : up_seq,
                         5'd0, x_chunk,
-                        2'd0, (xs == X_SEEK_W0) ? buf_track[x_drive] : up_track[x_drive],
+                        2'd0, (xs == X_SEEK_W0) ? buf_track : up_track,
                         7'd0, x_drive};
 
     assign tx_valid = (xs != X_IDLE);
@@ -500,10 +511,8 @@ module floppy_card #(
                 X_IDLE: begin
                     x_chunk <= 3'd0;
                     x_word  <= 11'd0;
-                    if (up_owed[0])        begin x_drive <= 1'b0; xs <= X_UP_HDR;   end
-                    else if (up_owed[1])   begin x_drive <= 1'b1; xs <= X_UP_HDR;   end
-                    else if (seek_owed[0]) begin x_drive <= 1'b0; xs <= X_SEEK_HDR; end
-                    else if (seek_owed[1]) begin x_drive <= 1'b1; xs <= X_SEEK_HDR; end
+                    if (up_owed)        begin x_drive <= up_drive;  xs <= X_UP_HDR;   end
+                    else if (seek_owed) begin x_drive <= buf_drive; xs <= X_SEEK_HDR; end
                 end
                 X_UP_HDR:  if (tx_take) begin xs <= X_UP_W0; x_left <= chunk_len; end
                 X_UP_W0:   if (tx_take) xs <= X_UP_DATA;
@@ -541,11 +550,12 @@ module floppy_card #(
         if (mag_down && !mag_up && phase[s] != 7'd0)  phase_new = phase[s] - 7'd1;
     end
     wire        step_move = step_now && head_on && (phase_new != phase[s]);
-    wire        step_track = step_move && (phase_new[6:1] != buf_track[s]);
+    wire        step_track = step_move && (phase_new[6:1] != buf_track);
 
-    // ---- the drives, per tick -------------------------------------------------------
+    // ---- the platters, per tick -------------------------------------------------------
     // Two drives, one block each, so the per-drive state is written from
-    // exactly one place.
+    // exactly one place.  Only the physics is per drive now; the buffer's
+    // state is below.
     genvar gv;
     generate
         for (gv = 0; gv < 2; gv = gv + 1) begin : g_drv
@@ -555,21 +565,7 @@ module floppy_card #(
             wire sel_d   = (drive_sel == gv[0]);
             wire ins_edge = drv_inserted[gv] && !ins_prev[gv];
             wire ej_edge  = !drv_inserted[gv] && ins_prev[gv];
-            wire filling  = (gv == 0) ? filling0 : filling1;
             wire spin_end = tick && spin_d && !en_d && (spin[gv] == 20'd1);
-            // The head moves to another track on this drive.
-            wire moved    = step_track && sel_d;
-            wire [5:0] new_track = phase_new[6:1];
-            // The buffer's track is left behind, or is otherwise finished with.
-            wire leave    = moved || ins_edge || ej_edge || drv_flush[gv] || spin_end;
-            // ...and the host is owed the track it holds.
-            wire flush    = leave && dirty[gv];
-            // A new track is wanted from the host.
-            wire want     = (moved || ins_edge) && drv_inserted[gv] &&
-                            (((moved) ? new_track : buf_track[gv]) < tracks[gv]);
-            wire filled   = chunk_done && (fill_drive == gv[0]) &&
-                            ((chunks[gv] | (7'd1 << fill_chunk)) == 7'h7F);
-            wire read_now = page_commit && op_rw && (idx == 4'hC) && !q7 && sel_d;
 
             always_ff @(posedge clk) begin
                 if (rst) begin
@@ -578,17 +574,6 @@ module floppy_card #(
                     stable[gv]     <= 10'd0;
                     pos[gv]        <= 13'd0;
                     bit_ctr[gv]    <= 5'd0;
-                    stale[gv]      <= 1'b1;
-                    dirty[gv]      <= 1'b0;
-                    seq[gv]        <= 8'd0;
-                    buf_track[gv]  <= 6'd0;
-                    chunks[gv]     <= 7'd0;
-                    fill_ticks[gv] <= 16'd0;
-                    read_stale[gv] <= 1'b0;
-                    seek_owed[gv]  <= 1'b0;
-                    up_owed[gv]    <= 1'b0;
-                    up_track[gv]   <= 6'd0;
-                    up_seq[gv]     <= 8'd0;
                     ins_prev[gv]   <= 1'b0;
                 end else begin
                     ins_prev[gv] <= drv_inserted[gv];
@@ -605,64 +590,110 @@ module floppy_card #(
                                 pos[gv] <= (pos[gv] + 13'd1 >= nibbles[gv]) ? 13'd0
                                                                             : pos[gv] + 13'd1;
                         end
-                        if (filling && fill_ticks[gv] != 16'hFFFF)
-                            fill_ticks[gv] <= fill_ticks[gv] + 16'd1;
                     end
 
                     // The head.
                     if (step_move && sel_d) phase[gv] <= phase_new;
-
-                    // Leaving a track: the written one goes to the host first.
-                    if (flush) begin
-                        up_owed[gv]  <= 1'b1;
-                        up_track[gv] <= buf_track[gv];
-                        up_seq[gv]   <= seq[gv];
-                    end
-                    if (leave) dirty[gv] <= 1'b0;
-                    if (moved) buf_track[gv] <= new_track;
-                    if (moved || ins_edge || ej_edge) stale[gv] <= 1'b1;
-                    if (want) begin
-                        seek_owed[gv]  <= 1'b1;
-                        seq[gv]        <= seq[gv] + 8'd1;
-                        chunks[gv]     <= 7'd0;
-                        fill_ticks[gv] <= 16'd0;
-                        read_stale[gv] <= 1'b0;
-                    end
-                    if (seek_sent && (x_drive == gv[0])) seek_owed[gv] <= 1'b0;
-                    if (up_sent && (x_drive == gv[0]))   up_owed[gv]   <= 1'b0;
-
-                    // The track arriving.
-                    if (chunk_done && (fill_drive == gv[0]))
-                        chunks[gv] <= chunks[gv] | (7'd1 << fill_chunk);
-                    if (filled) stale[gv] <= 1'b0;
-                    if (read_now && filling) read_stale[gv] <= 1'b1;
-
-                    // The machine wrote.
-                    if (store && sel_d) dirty[gv] <= 1'b1;
                 end
             end
         end
     endgenerate
 
-    // The two measurements, and the seek count.
-    wire filled0 = g_drv[0].filled;
-    wire filled1 = g_drv[1].filled;
-    wire late0   = filled0 && read_stale[0];
-    wire late1   = filled1 && read_stale[1];
-    wire [15:0] fill_done_ticks = filled0 ? fill_ticks[0] : fill_ticks[1];
+    // ---- the buffer, per tick ---------------------------------------------------------
+    // The events that end the buffer's claim to its track.  The select
+    // moving to the other drive is one of them, and is LEVEL-sensed - the
+    // clock buf_drive disagrees with the select, the buffer changes owner,
+    // flushing and refetching exactly as a head movement would.
+    wire sel_mismatch = (buf_drive != s);
+    wire moved        = step_track && !sel_mismatch;
+    wire [5:0] new_track = phase_new[6:1];
+    wire ins_edge_b   = g_drv[0].ins_edge && (buf_drive == 1'b0) ||
+                        g_drv[1].ins_edge && (buf_drive == 1'b1);
+    wire ej_edge_b    = g_drv[0].ej_edge && (buf_drive == 1'b0) ||
+                        g_drv[1].ej_edge && (buf_drive == 1'b1);
+    wire spin_end_b   = g_drv[0].spin_end && (buf_drive == 1'b0) ||
+                        g_drv[1].spin_end && (buf_drive == 1'b1);
+    wire flush_req    = drv_flush[buf_drive];
+    // The buffer's track is left behind, or is otherwise finished with.
+    wire leave        = sel_mismatch || moved || ins_edge_b || ej_edge_b ||
+                        flush_req || spin_end_b;
+    // ...and the host is owed the track it holds.
+    wire flush        = leave && dirty;
+    // The track the buffer should hold next: under the selected head.
+    wire [5:0] tgt    = moved ? new_track : phase[s][6:1];
+    // A new track is wanted from the host.
+    wire want         = (sel_mismatch || moved ||
+                         (g_drv[0].ins_edge && !s && !buf_drive) ||
+                         (g_drv[1].ins_edge &&  s &&  buf_drive)) &&
+                        drv_inserted[s] && (tgt < tracks[s]);
+    wire filled       = chunk_done && (fill_drive == buf_drive) &&
+                        ((chunks_r | (7'd1 << fill_chunk)) == 7'h7F);
+    wire read_now     = page_commit && op_rw && (idx == 4'hC) && !q7;
 
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            buf_drive  <= 1'b0;
+            stale      <= 1'b1;
+            dirty      <= 1'b0;
+            seq        <= 8'd0;
+            buf_track  <= 6'd0;
+            chunks_r   <= 7'd0;
+            fill_ticks <= 16'd0;
+            read_stale <= 1'b0;
+            seek_owed  <= 1'b0;
+            up_owed    <= 1'b0;
+            up_drive   <= 1'b0;
+            up_track   <= 6'd0;
+            up_seq     <= 8'd0;
+        end else begin
+            if (tick && filling && fill_ticks != 16'hFFFF)
+                fill_ticks <= fill_ticks + 16'd1;
+
+            // Leaving a track: the written one goes to the host first.
+            if (flush) begin
+                up_owed  <= 1'b1;
+                up_drive <= buf_drive;
+                up_track <= buf_track;
+                up_seq   <= seq;
+            end
+            if (leave) dirty <= 1'b0;
+            if (sel_mismatch) buf_drive <= s;
+            if (sel_mismatch || moved) buf_track <= tgt;
+            if (sel_mismatch || moved || ins_edge_b || ej_edge_b) stale <= 1'b1;
+            if (want) begin
+                seek_owed  <= 1'b1;
+                seq        <= seq + 8'd1;
+                chunks_r   <= 7'd0;
+                fill_ticks <= 16'd0;
+                read_stale <= 1'b0;
+            end
+            if (seek_sent) seek_owed <= 1'b0;
+            if (up_sent)   up_owed   <= 1'b0;
+
+            // The track arriving.
+            if (chunk_done && (fill_drive == buf_drive))
+                chunks_r <= chunks_r | (7'd1 << fill_chunk);
+            if (filled) stale <= 1'b0;
+            if (read_now && filling) read_stale <= 1'b1;
+
+            // The machine wrote.
+            if (store) dirty <= 1'b1;
+        end
+    end
+
+    // The two measurements, and the seek count.
     always_ff @(posedge clk) begin
         if (rst) begin
             seeks    <= 8'd0;
             late     <= 8'd0;
             fill_max <= 16'd0;
         end else begin
-            if (g_drv[0].want || g_drv[1].want) seeks <= seeks + 8'd1;
+            if (want) seeks <= seeks + 8'd1;
             if (late_clr) late <= 8'd0;
-            else if ((late0 || late1) && late != 8'hFF) late <= late + 8'd1;
+            else if (filled && read_stale && late != 8'hFF) late <= late + 8'd1;
             if (fill_clr) fill_max <= 16'd0;
-            else if ((filled0 || filled1) && fill_done_ticks > fill_max)
-                fill_max <= fill_done_ticks;
+            else if (filled && fill_ticks > fill_max)
+                fill_max <= fill_ticks;
         end
     end
 

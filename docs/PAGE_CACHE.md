@@ -35,6 +35,16 @@ treatment of the host-loaded Apple ROM would have cost 3,564).  The routed
 master build: **45 RAMB36 + 8 RAMB18, 49 of 50 tiles; setup WNS +0.741 ns,
 hold WHS +0.009 ns; bitstream written** — a hardware-testable bit on the
 current part, with the larger board on order still the comfortable home.
+A second reclaim followed on the same reasoning as the banks themselves:
+the floppy's two per-drive track buffers became ONE shared buffer (only one
+drive is ever live; a drive switch flushes-and-refetches like a head
+movement — docs/FLOPPY.md), returning 4 RAMB18.  Synthesis spent the slack
+at once and well: the capture FIFO, which had been silently spilled to
+1.4K LUTs of distributed RAM when block RAM was oversubscribed, went back
+into the 2 RAMB36 it belongs in.  The build after both reclaims:
+**47 RAMB36 + 4 RAMB18 (49 of 50 tiles), 10,263 LUTs (49%), setup WNS
++0.525 ns, hold WHS +0.058 ns** — the same one-tile margin, ~1.9K LUTs
+returned, and a healthier hold than the microcode-only build's +0.009.
 
 The memory image as built (docs/MEMORY.md) keeps a 32 KB 4-way write-through
 cache in front of DDR3 bank 0. It works, and it is proven on hardware — but
