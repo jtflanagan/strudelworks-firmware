@@ -322,6 +322,14 @@ puts "=========================================================="
 report_timing_summary -file [file join $outdir timing_summary.rpt]
 report_utilization    -file [file join $outdir utilization.rpt]
 
+# Logic-depth audit: the deep-but-currently-comfortable paths that the timing
+# summary hides until placement gets unlucky.  ~11 s on the 35T, measured -
+# cheap enough to keep current on every build.  Same procs as the standalone
+# build/depth.sh, from depth_report.tcl.
+source [file join $root build depth_report.tcl]
+write_depth_report    [file join $outdir logic_depth.rpt]
+write_depth_histogram [file join $outdir design_analysis.rpt]
+
 # Copy the artefacts back into the repo, since $outdir is normally a scratch
 # directory on the Windows side that nothing else will look in.
 set results [file join $root build results]
@@ -331,7 +339,7 @@ if {[file exists $bit]} {
     file copy -force $bit [file join $results $topname.bit]
     puts "bitstream: [file join $results $topname.bit]"
 }
-foreach r {timing_summary.rpt utilization.rpt} {
+foreach r {timing_summary.rpt utilization.rpt logic_depth.rpt design_analysis.rpt} {
     if {[file exists [file join $outdir $r]]} {
         file copy -force [file join $outdir $r] [file join $results $r]
     }
