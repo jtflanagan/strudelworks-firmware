@@ -389,7 +389,7 @@ module master_top #(
 
     wire [15:0] cpu_addr;
     wire        cpu_rw;
-    wire [7:0]  cpu_dout, cpu_din;
+    wire [7:0]  cpu_dout, cpu_din, cpu_p_flags;
     wire        cpu_cyc_en, cpu_sync;
 
     // The Mockingboard's IRQ takes the short route into the core, the same
@@ -415,6 +415,7 @@ module master_top #(
         .d_addr (),
         .d_rw   (),
         .d_dout (),
+        .p_flags (cpu_p_flags),     // the front resolves branches on them
         .irq_n  (apple_irq_sync && !mb_irq),
         .nmi_n  (1'b1),             // the slot brings out no NMI
         .sync   (cpu_sync),
@@ -593,6 +594,7 @@ module master_top #(
         .cpu_rw        (cpu_rw),
         .cpu_sync      (cpu_sync),
         .cyc_is_i      (cpu_cyc_is_i),
+        .p_flags       (cpu_p_flags),
         .cyc_en        (cpu_cyc_en),
         .i_din         (i_din_w),
         .accel_cyc_en  (seq_cyc_en),

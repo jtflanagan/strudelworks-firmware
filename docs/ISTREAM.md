@@ -9,10 +9,14 @@ page cache and taken the full way through by decision: the icache first,
 the data side later, and no chicken bit.
 
 **The branch-prefetch extension (branch `branch_prefetch`, 2026-09-01)**:
-the retention CAM, the branch scanner and the pinned pair, below - proven
-under Verilator only so far (51 checks, both sweep points, the new
-self-modifying-code scenarios included; sim/run_accel_vl.sh), NOT yet
-run under iverilog, NOT built, NOT on hardware.
+the retention CAM - which SERVES, making the front a ten-line
+associative icache - the branch scanner, the pinned pair, and early
+branch resolution on the core's exported flags, below.  **99.3% of the
+mode-2 instruction stream at one clock per fetch**, taken branches and
+JMP/JSR to resident lines at ZERO stall.  Proven under Verilator only
+so far (53 checks, both sweep points, the self-modifying-code scenarios
+included; sim/run_accel_vl.sh), NOT yet run under iverilog, NOT built,
+NOT on hardware.
 
 The idea is the user's design.  Instruction streams are very linear, so:
 
@@ -166,19 +170,40 @@ so the branch back to A misses, and the train then kills B too).  Three
 pieces close it, none of them touching the serve path - the CAM is
 behind the fill engine, never in the retire cones:
 
-- **The retention CAM** (rtl/iline.sv): eight entries, tags and folded
-  identities in flip-flops (the snoop and the want compares read them
-  all at once), the 8 x 128-bit line data in DISTRIBUTED RAM - one write
-  port, one asynchronous read, no block RAM anywhere.  Every line the
-  engine commits is recorded (deduplicated round-robin), so the CAM
-  holds the last eight distinct lines plus the scanner's prefetches.  A
-  want whose tag the CAM holds is **PROMOTED**: one clock into the slot,
-  no page-cache round trip, and no re-classification - the CAM is
+- **The retention CAM SERVES** (rtl/iline.sv): eight entries, tags and
+  folded identities in flip-flops (every compare network reads them all
+  at once), the 8 x 128-bit line data in DISTRIBUTED RAM - one write
+  port, no block RAM anywhere.  Every line the engine commits is
+  recorded (deduplicated round-robin).  Every predictor candidate looks
+  up ALL TEN lines - the slots and the entries - so a fetch into any
+  resident line runs at the cadence of one: the front is a ten-line
+  fully-associative icache, and the promote survives only to re-center
+  the pair behind an executing CAM line (the ordinary miss train does
+  it unprompted).  The lookups are REGISTERED - a full clock, outside
+  the late cones.  Promotion needs no re-classification: the CAM is
   flash-cleared on any map change, so a surviving entry's captured
-  identity is still the map's truth for its tag.  And a FETCH whose line
-  the CAM holds claims the dispatcher (`cam_pc_hit`): the miss trains,
-  the want promotes, the serve costs a handful of stall clocks instead
-  of a sequencer ride.
+  identity is still the map's truth for its tag.  Dedupe - one live
+  entry per tag, every copy snooped identically - is what makes any
+  matching source's byte THE byte.
+- **Early branch resolution** (the user's design): at a branch's operand
+  cycle everything needed is registered truth - the opcode (latched at
+  its fetch), the offset (the byte being served, so a slow serve at a
+  line boundary still delivers it), and the flags (`p_flags`, exported
+  register-direct from the core like pc_addr before it; the previous
+  instruction's writeback landed entering T0 and a branch writes none).
+  The front computes taken-and-where right there, by the core's own
+  rule, and the target becomes a FOURTH registered candidate - so the
+  target fetch, however many dummy cycles later, page cross included,
+  serves with ZERO stall.  JMP abs and JSR resolve the same way at
+  their high operand byte, whose serve is the cycle before the target
+  fetch - the lookup runs live on the byte being served and registers
+  at that edge, just in time.  A conclusion cannot be wrong, only
+  useless: the candidate serves only when the core's real fetch address
+  equals it, revalidated by the live tags like every serve.  A taken
+  transfer to a NON-resident line fires an early want instead, ahead of
+  the demand miss.  RTS is not resolved (its target is on the stack -
+  the data side), but its return line is almost always retained, so it
+  pays one re-aim beat.
 - **The branch scanner** (rtl/iscan.sv): walks instruction boundaries
   forward from the last opcode fetch through the held pair with the
   65C02's length table - one instruction per clock, two for a branch,
@@ -211,18 +236,26 @@ slots no longer do, then jumped back into.  The bench asserts the
 promotes, the pins and the scanner prefetches all fired, and checks
 every byte against the reference as always.
 
-Measured (Verilator, mode 2 unlimited, the bptest-heavy program): the
-machinery converts 1134 sequencer rides into one-clock fetches
-(35 352 turbo / 8 344 fast vs 34 217 / 9 478 with it off) - 31.4x vs
-30.7x on a bus-op-bound bench; the mix, not the ratio, is the signal.
+Measured (Verilator, mode 2 unlimited, the bptest-heavy program):
+**99.3% of the instruction stream at one clock** - 35 361 turbo
+ifetches against 238 sequencer-served (cold first touches, the excluded
+pages, the post-reset stream), 2 730 taken transfers at ZERO stall,
+4 428 fetches served straight from the CAM, 192 pinned crossings.
+Cycles for the phase fell 1 427 -> 1 337 against the machinery-off
+baseline of the same program; the mix, not the bus-bound ratio, is the
+signal.
 
-**Timing watchpoints for the build** (not yet attempted): `cam_pc_hit`
-adds an 8-wide 12-bit compare-and-OR on the PC registers into the claim
-cone; the promote reads the CAM's asynchronous port into the ldata
-mux (a fourth source).  Both live outside the retire cones, but the
-claim feeds the dispatcher.  If closure objects, the promote can take a
-registered-index beat (F_CAM state) and the claim term can drop to a
-registered hint at one clock's cost.
+**Timing watchpoints for the build** (not yet attempted): the retire's
+ihit is now a ten-way tag OR off the PC registers; kill_now gained two
+CAM snoop-cancel terms; the candidate byte muxes select among ten
+sources (registered destinations, but wide); the CAM data wants
+replication for its multiple concurrent read addresses (distributed
+RAM, ~32 LUTs a copy); the JMP/JSR resolve path runs i_din (late, when
+the sequencer serves the high byte) through a compare network into a
+registered candidate.  If closure objects: registered hit hints for
+ihit at one beat's cost, an F_CAM beat for the promote, and the
+JMP/JSR live lookup can fall back to registering the target first
+(one beat, branches unaffected).
 
 ## Not here, deliberately
 

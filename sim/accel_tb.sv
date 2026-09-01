@@ -100,11 +100,12 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [15:0] cpu_addr;
     wire        cpu_rw, cpu_sync, cpu_cyc_en, cpu_cyc_is_i;
     wire [15:0] cpu_pc_addr;
-    wire [7:0]  cpu_dout, cpu_din, i_din_w;
+    wire [7:0]  cpu_dout, cpu_din, i_din_w, cpu_p_flags;
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (cpu_din),
         .cyc_is_i (cpu_cyc_is_i), .i_addr (), .pc_addr (cpu_pc_addr), .i_pred (), .d_addr (), .d_rw (), .d_dout (),
+        .p_flags (cpu_p_flags),
         .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
     );
 
@@ -186,7 +187,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     iline u_iline (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .pc_addr (cpu_pc_addr), .cpu_rw (cpu_rw), .cpu_sync (cpu_sync),
-        .cyc_is_i (cpu_cyc_is_i),
+        .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
         .cyc_en (cpu_cyc_en), .i_din (i_din_w),
         .accel_cyc_en (seq_cyc_en), .accel_din (cpu_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok), .claim (turbo_claim),
@@ -832,7 +833,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // ---- the run -------------------------------------------------------------------------
     reg [7:0] prog [0:4095];
     integer a, c, n0, n1, r0, resets, gaps0, fast0;
-    integer bp_prom0, bp_pin0, bp_scan0, bp_fill0, bp_serv0;
+    integer bp_prom0, bp_pin0, bp_scan0, bp_fill0, bp_serv0, bp_tgt0, bp_slow0;
     initial begin
         $readmemh(PROG, prog);
         for (a = 0; a < 65536; a = a + 1) begin main_ram[a] = 8'h00; phys_aux[a] = 8'h00; ref_main[a] = 8'h00; end
@@ -908,7 +909,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         n0 = pass_count; check_gaps = 1; merge_gaps = 0;
         bp_prom0 = u_iline.cnt_promotes;   bp_pin0  = u_iline.cnt_loop_hold;
         bp_scan0 = u_iline.cnt_scan_fills; bp_fill0 = u_iline.cnt_cam_fills;
-        bp_serv0 = u_iline.cnt_cam_serves;
+        bp_serv0 = u_iline.cnt_cam_serves; bp_tgt0 = u_iline.cnt_tgt_serves;
+        bp_slow0 = u_iline.cnt_slow_i;
         @(negedge clk); mode <= 2'd2;
         wait_passes(n0 + 3, "mode 2, unlimited");
         repeat (3 * CYCLE) @(negedge clk);
@@ -920,9 +922,10 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("mode 2: %.1fx (%0d turbo, %0d fast, %0d bus over %0d cycles)", real'(fast_ops + bus_ops + turbo_ops) / real'(cycles), turbo_ops, fast_ops, bus_ops, cycles));
         if (turbo_ops == 0) fail("mode 2: no fetch was served in one clock");
         else ok($sformatf("mode 2: %0d fetches served in one clock by the line front", turbo_ops));
-        $display("    front: %0d promotes, %0d fill retains, %0d scan prefetches, %0d pinned crossings, %0d want-behind-scan clocks, %0d CAM serves",
+        $display("    front: %0d promotes, %0d fill retains, %0d scan prefetches, %0d pinned crossings, %0d want-behind-scan clocks, %0d CAM serves, %0d zero-stall branches, %0d slow ifetches",
                  u_iline.cnt_promotes, u_iline.cnt_cam_fills, u_iline.cnt_scan_fills,
-                 u_iline.cnt_loop_hold, u_iline.cnt_scan_block, u_iline.cnt_cam_serves);
+                 u_iline.cnt_loop_hold, u_iline.cnt_scan_block, u_iline.cnt_cam_serves,
+                 u_iline.cnt_tgt_serves, u_iline.cnt_slow_i);
         // The branch-prefetch machinery must have actually fired in this
         // phase - sim/accel.s's bptest is built to make each mechanism
         // unavoidable.
@@ -934,6 +937,11 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("mode 2: %0d branch targets prefetched by the scanner", u_iline.cnt_scan_fills - bp_scan0));
         if (u_iline.cnt_cam_serves == bp_serv0) fail("mode 2: no fetch was ever served from the CAM");
         else ok($sformatf("mode 2: %0d fetches served straight from the CAM", u_iline.cnt_cam_serves - bp_serv0));
+        if (u_iline.cnt_tgt_serves == bp_tgt0) fail("mode 2: no taken branch ever served with zero stall");
+        else ok($sformatf("mode 2: %0d taken branches served with ZERO stall (resolved at the operand)", u_iline.cnt_tgt_serves - bp_tgt0));
+        $display("    mode 2 ifetch: %0d turbo, %0d slow - %.1f%% of the instruction stream at one clock",
+                 turbo_ops, u_iline.cnt_slow_i - bp_slow0,
+                 100.0 * real'(turbo_ops) / real'(turbo_ops + (u_iline.cnt_slow_i - bp_slow0)));
         if (merge_gaps != 0) fail($sformatf("mode 2: %0d consecutive bus ops did not ride consecutive cycles", merge_gaps));
         else ok("mode 2: consecutive bus ops rode consecutive cycles");
         if (phys_diff(0) == 0) fail("mode 2: the machine's memory still equals the reference - writes went out");

@@ -101,6 +101,8 @@ module iline (
     input  wire        cpu_rw,
     input  wire        cpu_sync,
     input  wire        cyc_is_i,
+    input  wire [7:0]  p_flags,      // {N,V,1,0,D,I,Z,C} register-direct: what
+                                     // a branch will test (rtl/cpu65c02.sv)
     output wire        cyc_en,        // to the core: the sequencer's, or a turbo retire
     output wire [7:0]  i_din,         // the core's I-stream byte
 
@@ -268,6 +270,99 @@ module iline (
                          hh1 ? ldata[1][8 * exp_q[3:0]    +: 8] :
                                cam_byte(cam_hh, exp_q[3:0]);
 
+    // ---- early branch resolution (the user's design) ------------------------
+    // At a branch's operand cycle everything needed is already registered
+    // truth: the OPCODE (latched at its own fetch), the OFFSET (the byte
+    // being served this very cycle - a slow serve delivers it too, so the
+    // line-boundary case guards itself), and the FLAGS (the previous
+    // instruction's writeback landed entering T0, and a branch writes
+    // none; p_flags is the same register the core's own condition reads).
+    // So the front decides taken-and-where right there, looks the target
+    // up as a FOURTH candidate, and the target fetch - however many dummy
+    // cycles later, page cross included - serves with ZERO stall.  The
+    // conclusion cannot be wrong, only useless: the candidate serves only
+    // when the core's real fetch address equals it, and the byte is
+    // revalidated by the live tags like every serve.  A lingering target
+    // (an interrupt hijacked the boundary) is therefore still a CORRECT
+    // serve if it ever matches, and is cleared at the next opcode fetch.
+    localparam [1:0] BK_NONE = 2'd0, BK_BR = 2'd1, BK_ABS = 2'd2;
+    logic [1:0]  bk_q;                // what the last opcode fetched was
+    logic        bk_hi;               // ABS: low byte captured, the high is next
+    logic [7:0]  br_op, lo_q;
+    logic        tgt_v;
+    logic [15:0] tgt_q;
+    logic        tgt_lhit_q;          // the target lookup, registered like lhit_q
+    logic [7:0]  tgt_byte_q;
+
+    wire i_serve = cyc_en && cyc_is_i && cpu_rw;   // an I-byte consumed this edge
+    wire op_is_branch = (i_din[4:0] == 5'b10000) || (i_din == 8'h80);
+    wire op_is_abs    = (i_din == 8'h4C) || (i_din == 8'h20);   // JMP abs, JSR
+    // The core's own rule (rtl/cpu65c02.sv "Branch condition"): op[7:6]
+    // picks the flag, op[5] the sense; BRA is always.
+    wire br_flag  = (br_op[7:6] == 2'b00) ? p_flags[7] :
+                    (br_op[7:6] == 2'b01) ? p_flags[6] :
+                    (br_op[7:6] == 2'b10) ? p_flags[0] : p_flags[1];
+    wire br_taken = (br_op == 8'h80) || (br_flag == br_op[5]);
+    wire [15:0] br_tgt = pc_addr + 16'd1 + {{8{i_din[7]}}, i_din};
+
+    // The RESOLVE: a branch's at its operand; a JMP's or JSR's at its high
+    // byte - which for both is the very cycle before the target fetch, so
+    // the lookup runs live on the byte being served ({i_din, lo_q}: the
+    // registered candidate byte in the turbo case) and registers at this
+    // same edge.  A branch's dummy cycles just give it slack.  JSR's stack
+    // cycles between the operands are data, invisible to i_serve, so "the
+    // second operand serve" holds for both shapes.
+    wire resolving = i_serve && !cpu_sync &&
+                     ((bk_q == BK_BR) || (bk_q == BK_ABS && bk_hi));
+    wire [15:0] res_tgt   = (bk_q == BK_BR) ? br_tgt : {i_din, lo_q};
+    wire        res_taken = (bk_q == BK_BR) ? br_taken : 1'b1;
+
+    // The target's own lookup - aimed at the resolving target the cycle it
+    // is born, at the pending one after - and its continuation at
+    // target+1, so the serve after a zero-stall transfer is at cadence.
+    wire [15:0] tgt_look = (resolving && res_taken) ? res_tgt : tgt_q;
+    wire [15:0] tgt_inc  = tgt_q + 16'd1;
+    wire        ht0 = v[0] && (tgt_look[15:4] == vtag[0]);
+    wire        ht1 = v[1] && (tgt_look[15:4] == vtag[1]);
+    wire        hg0 = v[0] && (tgt_inc[15:4]  == vtag[0]);
+    wire        hg1 = v[1] && (tgt_inc[15:4]  == vtag[1]);
+    wire [CAMN-1:0] cam_ht, cam_hg;
+    generate for (gs = 0; gs < CAMN; gs = gs + 1) begin : g_camtgt
+        assign cam_ht[gs] = cam_v[gs] && (cam_vtag[gs] == tgt_look[15:4]);
+        assign cam_hg[gs] = cam_v[gs] && (cam_vtag[gs] == tgt_inc[15:4]);
+    end endgenerate
+    wire [7:0] b_tgt    = ht0 ? ldata[0][8 * tgt_look[3:0] +: 8] :
+                          ht1 ? ldata[1][8 * tgt_look[3:0] +: 8] :
+                                cam_byte(cam_ht, tgt_look[3:0]);
+    wire [7:0] b_tgtinc = hg0 ? ldata[0][8 * tgt_inc[3:0]  +: 8] :
+                          hg1 ? ldata[1][8 * tgt_inc[3:0]  +: 8] :
+                                cam_byte(cam_hg, tgt_inc[3:0]);
+
+    // The fourth candidate's serve: exp-independent, so the branch's dummy
+    // cycles (and a page cross's second dummy) never disturb it.
+    wire tgt_here  = tgt_v && cyc_is_i && cpu_rw && (pc_addr == tgt_q);
+    wire tgt_serve = tgt_here && tgt_lhit_q && !(lhit_q && (exp_q == pc_addr));
+
+    // A taken branch to a non-resident line asks the engine early (the
+    // want travels while the branch's own dummies run); the engine filters
+    // residency and class exactly as it does the scanner's wants.
+    logic        ew_v;
+    logic [11:0] ew_tag;
+    wire         ew_taken;            // the engine took (or dropped) it
+    always_ff @(posedge clk) begin
+        if (rst || cpu_rst || !turbo_en) begin
+            ew_v <= 1'b0; ew_tag <= 12'd0;
+        end else begin
+            if (ew_taken) ew_v <= 1'b0;
+            if (resolving && res_taken &&
+                !(res_tgt[15:8] == 8'hC0) && !(res_tgt[15:8] == 8'hC3) &&
+                !(res_tgt[15:4] == 12'hCFF)) begin
+                ew_v   <= 1'b1;
+                ew_tag <= res_tgt[15:4];
+            end
+        end
+    end
+
     // A program-stream fetch the prediction missed re-aims the predictor;
     // one the sequencer served slow still steps it, so the fetch AFTER a
     // miss is back at cadence.
@@ -277,12 +372,45 @@ module iline (
     always_ff @(posedge clk) begin
         if (rst || cpu_rst) begin
             exp_q <= 16'd0; lhit_q <= 1'b0; i_byte_q <= 8'd0;
+            bk_q <= BK_NONE; bk_hi <= 1'b0; br_op <= 8'd0; lo_q <= 8'd0;
+            tgt_v <= 1'b0; tgt_q <= 16'd0;
+            tgt_lhit_q <= 1'b0; tgt_byte_q <= 8'd0;
         end else begin
-            exp_q    <= step ? exp_inc : recover ? pc_addr : exp_q;
-            lhit_q   <= step    ? (hi0 || hi1 || |cam_hi) :
-                        recover ? (hc0 || hc1 || |cam_mpc) :
-                                  (hh0 || hh1 || |cam_hh);
-            i_byte_q <= step ? b_inc : recover ? b_cur : b_hold;
+            if (retire && tgt_serve) begin
+                // The branch lands: continue at the cadence of one from
+                // target+1, exactly as a step continues from exp+1.
+                exp_q    <= tgt_inc;
+                lhit_q   <= (hg0 || hg1 || |cam_hg);
+                i_byte_q <= b_tgtinc;
+            end else begin
+                exp_q    <= step ? exp_inc : recover ? pc_addr : exp_q;
+                lhit_q   <= step    ? (hi0 || hi1 || |cam_hi) :
+                            recover ? (hc0 || hc1 || |cam_mpc) :
+                                      (hh0 || hh1 || |cam_hh);
+                i_byte_q <= step ? b_inc : recover ? b_cur : b_hold;
+            end
+            tgt_lhit_q <= (resolving ? res_taken : tgt_v) && (ht0 || ht1 || |cam_ht);
+            tgt_byte_q <= b_tgt;
+            if (i_serve) begin
+                if (cpu_sync) begin
+                    bk_q  <= (turbo_en && op_is_branch) ? BK_BR :
+                             (turbo_en && op_is_abs)    ? BK_ABS : BK_NONE;
+                    bk_hi <= 1'b0;
+                    br_op <= i_din;
+                    tgt_v <= 1'b0;         // a new instruction: the old target is spent
+                end else if (bk_q == BK_BR) begin
+                    bk_q  <= BK_NONE;
+                    tgt_v <= br_taken;
+                    tgt_q <= br_tgt;
+                end else if (bk_q == BK_ABS && !bk_hi) begin
+                    lo_q  <= i_din;
+                    bk_hi <= 1'b1;
+                end else if (bk_q == BK_ABS && bk_hi) begin
+                    bk_q  <= BK_NONE;
+                    tgt_v <= 1'b1;
+                    tgt_q <= {i_din, lo_q};
+                end
+            end
         end
     end
 
@@ -321,15 +449,17 @@ module iline (
                     (|(cam_mpc & cam_snp_kill)) ||
                     ((|(cam_mpc & cam_romv)) && r2_busy);
 
-    // Retire only when the prediction matches the fetch on offer AND the
+    // Retire only when a prediction matches the fetch on offer AND the
     // live tags still agree - every term register-vs-register now that the
-    // compares run on pc_addr.
-    wire retire = !cpu_rst && ihit && lhit_q && (exp_q == pc_addr) &&
-                  turbo_ok && !kill_now;
+    // compares run on pc_addr.  The resolved branch target is the second
+    // way in: its own registered lookup, its own address equality.
+    wire retire = !cpu_rst && ihit && turbo_ok && !kill_now &&
+                  ((lhit_q && (exp_q == pc_addr)) || tgt_serve);
     assign turbo_commit = retire;
     assign turbo_sync   = retire && cpu_sync;
     assign cyc_en       = accel_cyc_en || retire;
-    assign i_din        = lhit_q ? i_byte_q : accel_din;
+    assign i_din        = tgt_serve ? tgt_byte_q :
+                          lhit_q    ? i_byte_q  : accel_din;
 
     // ---- the wants and the fill engine --------------------------------------
     // A want is a line a slot should hold; the engine serves one at a time.
@@ -358,10 +488,12 @@ module iline (
                          (want_v[1] && want_v[0] &&
                           (want_tag[1] == miss_tag_q)) ? 1'b1 : 1'b0;
     wire        want_pending = want_v[0] || want_v[1];
-    // The scanner's want takes the classifier only when no slot wants it -
-    // lowest priority, always.
-    wire        pick_scan = !want_pending && sw_v;
-    wire [11:0] p_tag  = pick_scan ? sw_tag : want_tag[pick];
+    // The speculative wants take the classifier only when no slot wants
+    // it - the resolved branch's early want first, the scanner's last.
+    wire        pick_early = !want_pending && ew_v;
+    wire        pick_scan  = !want_pending && !ew_v && sw_v;
+    wire [11:0] p_tag  = want_pending ? want_tag[pick] :
+                         pick_early   ? ew_tag : sw_tag;
     assign p_addr = {p_tag, 4'h0};
     wire p_bus = (p_cls == CLS_BUS);
     localparam [1:0] CLS_ROM = 2'd3;
@@ -459,8 +591,9 @@ module iline (
     wire stale_other = v[!pick] && (vtag[!pick] == p_tag);
     wire promote_go  = (fst == F_IDLE) && !f_restart && want_pending &&
                        !stale_own && !stale_other && cam_hit && !cam_prom_abort;
-    wire scan_go     = (fst == F_IDLE) && !f_restart && pick_scan;
-    wire sw_taken    = scan_go;
+    wire scan_go     = (fst == F_IDLE) && !f_restart && (pick_early || pick_scan);
+    wire sw_taken    = (fst == F_IDLE) && !f_restart && pick_scan;
+    assign ew_taken  = (fst == F_IDLE) && !f_restart && pick_early;
     // The rotation, unless the pair is a pinned loop (the scanner's bit) or
     // the other slot ALREADY HOLDS the next line - a jump back into the held
     // pair: killing it to refetch the same line was the hot loop's thrash.
@@ -486,16 +619,23 @@ module iline (
     logic [31:0] cnt_promotes, cnt_cam_fills, cnt_scan_fills, cnt_loop_hold;
     logic [31:0] cnt_scan_block;      // clocks a slot want waited on a scan fill
     logic [31:0] cnt_cam_serves;      // retires whose byte came from the CAM
+    logic [31:0] cnt_tgt_serves;      // zero-stall branch-target serves
+    logic [31:0] cnt_slow_i;          // I-stream cycles the sequencer still serves
     always_ff @(posedge clk) begin
         if (rst) begin
             cnt_promotes <= 32'd0; cnt_cam_fills <= 32'd0;
             cnt_scan_fills <= 32'd0; cnt_loop_hold <= 32'd0;
             cnt_scan_block <= 32'd0; cnt_cam_serves <= 32'd0;
+            cnt_tgt_serves <= 32'd0; cnt_slow_i <= 32'd0;
         end else begin
+            if (accel_cyc_en && cyc_is_i && cpu_rw)
+                cnt_slow_i <= cnt_slow_i + 32'd1;
             if (want_pending && f_active && f_cam)
                 cnt_scan_block <= cnt_scan_block + 32'd1;
             if (retire && !hit0 && !hit1)
                 cnt_cam_serves <= cnt_cam_serves + 32'd1;
+            if (retire && tgt_serve)
+                cnt_tgt_serves <= cnt_tgt_serves + 32'd1;
             if (promote_go) cnt_promotes <= cnt_promotes + 32'd1;
             if ((fst == F_W2) && !f_restart && !cam_dup) begin
                 if (f_cam) cnt_scan_fills <= cnt_scan_fills + 32'd1;
@@ -609,10 +749,11 @@ module iline (
                         fst <= p_rom ? F_R0 : F_REQ;
                     end
                 end else if (scan_go) begin
-                    // The scanner's want: lowest priority, and only ever a
-                    // CAM fill.  A target already held, already retained or
-                    // never servable is dropped; sw_taken retires the want
-                    // either way.
+                    // The speculative wants - the resolved branch's early
+                    // want, then the scanner's: lowest priority, and only
+                    // ever a CAM fill.  A target already held, already
+                    // retained or never servable is dropped; the want
+                    // retires either way.
                     if (!stale_own && !stale_other && !cam_hit &&
                         !p_bus && !excl(p_tag)) begin
                         f_cam  <= 1'b1;

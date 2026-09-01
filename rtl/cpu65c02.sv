@@ -141,7 +141,14 @@ module cpu65c02 #(
     output wire  [15:0] i_pred,     // next program-stream address (see next_pc)
     output wire  [15:0] d_addr,     // = addr; the D view, meaningful when !cyc_is_i
     output wire         d_rw,       // = rw
-    output wire  [7:0]  d_dout      // = dout
+    output wire  [7:0]  d_dout,     // = dout
+    output wire  [7:0]  p_flags     // {N,V,1,0,D,I,Z,C} REGISTER-DIRECT: the
+                                    // flags a branch will test, final from the
+                                    // edge that begins its opcode fetch (the
+                                    // previous instruction's writeback landed
+                                    // there, and a branch writes none) - the
+                                    // instruction front resolves branches early
+                                    // on them (rtl/iline.sv)
 );
 
 `include "cpu65c02_ucode.vh"
@@ -209,6 +216,7 @@ module cpu65c02 #(
     logic [15:0] last_addr;
 
     wire [7:0] p_bits = {f_n, f_v, 1'b1, 1'b0, f_d, f_i, f_z, f_c};
+    assign p_flags = p_bits;
 
     // ---- AGU ----------------------------------------------------------------
     // Low half: a real 8-bit adder.  High half: an incrementer/decrementer only.
