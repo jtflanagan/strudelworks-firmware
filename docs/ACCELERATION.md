@@ -1,8 +1,11 @@
 # The core faster than the bus
 
-Status: **rebuilt on the page cache, 2026-08-31; branch `page_cache`, both
-repositories - in simulation (accel_tb 14.2x mode 2 unlimited, 46 checks,
-both sweep points), not yet on hardware.**  This is the acceleration
+Status: **rebuilt on the page cache and ✅ on hardware, 2026-08-31; branch
+`page_cache`, both repositories** - accel_tb 14.2x mode 2 unlimited (46
+checks, both sweep points), and on the machine the same day: Nox at ~7.9x
+effective (its `$C0xx` polling is the cap) with the Mockingboard detected
+and playing, a wave.dsk floppy boot at ~16x net, the HUD reading in the
+gutter, and `aovf`/`aretry`/`mlate`/`mdrops`/`vslips` all zero.**  This is the acceleration
 branch's core feature ported onto the page-cache memory architecture
 (docs/PAGE_CACHE.md) as a clean restart: the sequencer, the dummies, the
 merge, the governor, the class-only slot rule, the reset sequence on the
