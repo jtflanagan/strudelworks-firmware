@@ -8,6 +8,12 @@ first step of what the acceleration branch called "turbo", redone on the
 page cache and taken the full way through by decision: the icache first,
 the data side later, and no chicken bit.
 
+**The branch-prefetch extension (branch `branch_prefetch`, 2026-09-01)**:
+the retention CAM, the branch scanner and the pinned pair, below - proven
+under Verilator only so far (51 checks, both sweep points, the new
+self-modifying-code scenarios included; sim/run_accel_vl.sh), NOT yet
+run under iverilog, NOT built, NOT on hardware.
+
 The idea is the user's design.  Instruction streams are very linear, so:
 
 - **The core says what a fetch is.**  `cpu65c02.cyc_is_i` classifies every
@@ -151,12 +157,82 @@ the same bench gave 14.2x without the front, and the OLD branch's full
 64-line icache + TLB gave 26.4x - two lines beat it here because the
 data side behind them is the page cache's three-clock serve.
 
+## The branch-prefetch extension: the retention CAM, the scanner, the pinned pair
+
+The two-line front's blind spot is control flow: a taken branch out of
+the pair misses, and - worse - the crossing's rotation refetches a hot
+loop's own lines every iteration (entering line B prefetches C OVER A,
+so the branch back to A misses, and the train then kills B too).  Three
+pieces close it, none of them touching the serve path - the CAM is
+behind the fill engine, never in the retire cones:
+
+- **The retention CAM** (rtl/iline.sv): eight entries, tags and folded
+  identities in flip-flops (the snoop and the want compares read them
+  all at once), the 8 x 128-bit line data in DISTRIBUTED RAM - one write
+  port, one asynchronous read, no block RAM anywhere.  Every line the
+  engine commits is recorded (deduplicated round-robin), so the CAM
+  holds the last eight distinct lines plus the scanner's prefetches.  A
+  want whose tag the CAM holds is **PROMOTED**: one clock into the slot,
+  no page-cache round trip, and no re-classification - the CAM is
+  flash-cleared on any map change, so a surviving entry's captured
+  identity is still the map's truth for its tag.  And a FETCH whose line
+  the CAM holds claims the dispatcher (`cam_pc_hit`): the miss trains,
+  the want promotes, the serve costs a handful of stall clocks instead
+  of a sequencer ride.
+- **The branch scanner** (rtl/iscan.sv): walks instruction boundaries
+  forward from the last opcode fetch through the held pair with the
+  65C02's length table - one instruction per clock, two for a branch,
+  three for a JMP/JSR - follows unconditional flow (JMP abs, BRA, JSR),
+  falls through conditional branches, and issues a CAM prefetch for
+  every transfer target's line not already held.  Its wants are the
+  engine's LOWEST priority and only ever CAM fills; a ROM target stages
+  in f_cbuf so the slots' bytes are never its.  The scanner cannot be
+  wrong, only wasteful: a misdecoded stream (mid-instruction entry, SMC
+  under the scan) at worst prefetches a line nobody needs, whose bytes
+  are still fetched fresh and snooped from then on.
+- **The pinned pair**: a transfer the scanner finds from one held line
+  into the other sets a loop bit, and the crossing's rotation stands
+  down while it holds (`loop_sup`, cleared the clock either slot's
+  content changes); independently, a crossing whose next line the other
+  slot ALREADY holds no longer kills and refetches it.  Together a loop
+  held whole in two lines runs at the within-pair branch's price with no
+  refetch at all.
+
+**Coherence is the slots' rules, applied to every copy**: each CAM entry
+snoops every classified image write by folded identity (a promote
+launching the very clock its entry dies aborts and retries down the fill
+path); the map-change flash clear; ROM entries die on ROM load traffic;
+inval and serving-off empty it.  sim/accel.s's `bptest` makes each
+mechanism unavoidable and each hazard real: a clean two-line hot loop, a
+loop REWRITING ITS OWN OPERAND inside the pinned pair, a four-line loop
+only the CAM can hold, calls the scanner follows, and the retained
+line's own hazard - an opcode rewritten in a line the CAM holds but the
+slots no longer do, then jumped back into.  The bench asserts the
+promotes, the pins and the scanner prefetches all fired, and checks
+every byte against the reference as always.
+
+Measured (Verilator, mode 2 unlimited, the bptest-heavy program): the
+machinery converts 1134 sequencer rides into one-clock fetches
+(35 352 turbo / 8 344 fast vs 34 217 / 9 478 with it off) - 31.4x vs
+30.7x on a bus-op-bound bench; the mix, not the ratio, is the signal.
+
+**Timing watchpoints for the build** (not yet attempted): `cam_pc_hit`
+adds an 8-wide 12-bit compare-and-OR on the PC registers into the claim
+cone; the promote reads the CAM's asynchronous port into the ldata
+mux (a fourth source).  Both live outside the retire cones, but the
+claim feeds the dispatcher.  If closure objects, the promote can take a
+registered-index beat (F_CAM state) and the claim term can drop to a
+registered hint at one clock's cost.
+
 ## Not here, deliberately
 
-- **Branch/jump prediction** (a target buffer, or consuming the core's
-  exported i_pred through a pipeline stage that pays for its carry
-  chains, is the natural next step - it would buy back the one-beat
-  branch stall).
+- **A branch target buffer proper**: the scanner + CAM buys the line,
+  not the predicted next PC; the one-beat within-pair branch stall
+  stands (consuming the core's exported i_pred still costs its carry
+  chains - see the governor's history).
 - **Data-side prediction**: d_din exists for it; nothing drives it yet.
 - **A turbo chicken bit**: none, by the user's decision - this restart
   stands or falls whole.
+- **Scan-fill yield**: a slot want arriving mid-scan-fill waits for it
+  (~228 clocks total in the whole bench run); if a real workload shows
+  worse, the CAM fill can learn to yield at F_REQ.

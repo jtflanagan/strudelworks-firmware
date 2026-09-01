@@ -137,6 +137,11 @@ norw:
         jsr smctest
         bcs fail
 
+        ; ---- 7. the branch-prefetch front: hot loops, calls, and writes
+        ; into retained lines (rtl/iline.sv's CAM, rtl/iscan.sv's scanner)
+        jsr bptest
+        bcs fail
+
         inc PASS
         jmp loop
 
@@ -204,6 +209,117 @@ smrun:
 smop:   nop                     ; becomes INX, then DEX
         rts
 smfail: sec
+        rts
+
+; The branch-prefetch front's food (rtl/iline.sv, rtl/iscan.sv).  Carry set
+; on failure.  Every loop is wider than one 16-byte line, so the two-slot
+; front cannot hold it by linearity alone: the loop bit pins a two-line
+; pair, the retention CAM promotes the rest, and every refetched byte is
+; checked against the reference by the testbench as always.
+bptest:
+        ; A. a clean hot loop wider than one line: pinned, or promoted -
+        ; and correct either way.
+        ldy #16
+        ldx #0
+bpa:    inx
+        .repeat 16
+        nop
+        .endrep
+        dey
+        bne bpa
+        cpx #16
+        jne bpfail
+
+        ; B. the same shape rewriting its own immediate every iteration:
+        ; the write lands inside the pinned pair, the pinned line must die
+        ; and refetch, and the sum proves every patched operand was seen.
+        ldy #16
+        ldx #0
+        stz $40
+bpb:    inx
+        txa
+        sta bpb1+1
+        clc
+bpb1:   lda #$00
+        adc $40
+        sta $40
+        .repeat 6
+        nop
+        .endrep
+        dey
+        bne bpb
+        lda $40
+        cmp #136                ; 1 + 2 + ... + 16
+        jne bpfail
+
+        ; C. a loop no pair can hold - three to four lines: after the
+        ; first iteration every line is retained, and the crossings
+        ; promote instead of refetching.
+        ldy #16
+        ldx #0
+bpc:    inx
+        .repeat 40
+        nop
+        .endrep
+        dey
+        bne bpc
+        cpx #16
+        jne bpfail
+
+        ; D. calls the scanner follows, each far enough to be its own
+        ; line: the target lines are prefetched and then retained.
+        ldy #16
+        ldx #0
+bpd:    nop
+        nop
+        nop
+        nop
+        jsr bpf1
+        jsr bpf2
+        dey
+        bne bpd
+        cpx #32
+        jne bpfail
+
+        ; E. the retained line's own hazard: run a routine, roll the slots
+        ; well past its lines (the CAM still holds them), rewrite its
+        ; opcode, run back into it.  The write must kill the RETAINED
+        ; copy, or the promote serves the stale instruction and x comes
+        ; back +1 instead of -1.
+        ldx #0
+        jsr bpcx                ; x = 1, the line fetched and retained
+        .repeat 32
+        nop                     ; the slots roll two lines past bpcx's
+        .endrep
+        lda #$CA                ; DEX
+        sta bpcx1
+        ldx #5
+        jsr bpcx                ; must run the DEX: x = 4
+        cpx #4
+        jne bpfail
+        lda #$E8                ; INX back, for the next pass
+        sta bpcx1
+        clc
+        rts
+bpfail: sec
+        rts
+
+; D's callees, padded apart so each is its own line.
+bpf1:   inx
+        rts
+        .repeat 12
+        nop
+        .endrep
+bpf2:   inx
+        rts
+        .repeat 12
+        nop
+        .endrep
+; E's routine, padded so its patched byte sits clear of the call site.
+bpcx:   .repeat 6
+        nop
+        .endrep
+bpcx1:  inx
         rts
 
 .import __CODE_LOAD__, __CODE_RUN__, __CODE_SIZE__

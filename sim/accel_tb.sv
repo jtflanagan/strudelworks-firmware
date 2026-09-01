@@ -832,6 +832,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // ---- the run -------------------------------------------------------------------------
     reg [7:0] prog [0:4095];
     integer a, c, n0, n1, r0, resets, gaps0, fast0;
+    integer bp_prom0, bp_pin0, bp_scan0, bp_fill0;
     initial begin
         $readmemh(PROG, prog);
         for (a = 0; a < 65536; a = a + 1) begin main_ram[a] = 8'h00; phys_aux[a] = 8'h00; ref_main[a] = 8'h00; end
@@ -905,6 +906,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         // ---- 3. mode 2: reads and writes on the card ------------------------------------
         clear_counters(); pin_ram_writes = 0; dummies = 0; cx_fast = 0;
         n0 = pass_count; check_gaps = 1; merge_gaps = 0;
+        bp_prom0 = u_iline.cnt_promotes;   bp_pin0  = u_iline.cnt_loop_hold;
+        bp_scan0 = u_iline.cnt_scan_fills; bp_fill0 = u_iline.cnt_cam_fills;
         @(negedge clk); mode <= 2'd2;
         wait_passes(n0 + 3, "mode 2, unlimited");
         repeat (3 * CYCLE) @(negedge clk);
@@ -916,6 +919,18 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("mode 2: %.1fx (%0d turbo, %0d fast, %0d bus over %0d cycles)", real'(fast_ops + bus_ops + turbo_ops) / real'(cycles), turbo_ops, fast_ops, bus_ops, cycles));
         if (turbo_ops == 0) fail("mode 2: no fetch was served in one clock");
         else ok($sformatf("mode 2: %0d fetches served in one clock by the line front", turbo_ops));
+        $display("    front: %0d promotes, %0d fill retains, %0d scan prefetches, %0d pinned crossings, %0d want-behind-scan clocks",
+                 u_iline.cnt_promotes, u_iline.cnt_cam_fills, u_iline.cnt_scan_fills,
+                 u_iline.cnt_loop_hold, u_iline.cnt_scan_block);
+        // The branch-prefetch machinery must have actually fired in this
+        // phase - sim/accel.s's bptest is built to make each mechanism
+        // unavoidable.
+        if (u_iline.cnt_promotes == bp_prom0) fail("mode 2: the retention CAM never promoted a line");
+        else ok($sformatf("mode 2: %0d promotes from the retention CAM", u_iline.cnt_promotes - bp_prom0));
+        if (u_iline.cnt_loop_hold == bp_pin0) fail("mode 2: no crossing was ever pinned");
+        else ok($sformatf("mode 2: %0d crossings pinned - a held loop refetched nothing", u_iline.cnt_loop_hold - bp_pin0));
+        if (u_iline.cnt_scan_fills == bp_scan0) fail("mode 2: the scanner never prefetched a branch target");
+        else ok($sformatf("mode 2: %0d branch targets prefetched by the scanner", u_iline.cnt_scan_fills - bp_scan0));
         if (merge_gaps != 0) fail($sformatf("mode 2: %0d consecutive bus ops did not ride consecutive cycles", merge_gaps));
         else ok("mode 2: consecutive bus ops rode consecutive cycles");
         if (phys_diff(0) == 0) fail("mode 2: the machine's memory still equals the reference - writes went out");
