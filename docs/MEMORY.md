@@ -232,16 +232,16 @@ does, and the check needs no hardware but the capture.
 
 ## Not here, deliberately
 
-- **`$C100-$CFFF`** stays the bus - the internal ROM, INTCXROM/SLOTC3ROM, the
-  `$C800` expansion-ROM select and `$CFFF`. The two switches are tracked and the
-  ROM holds all 16 KB, so a CX class is a classifier change when something
-  needs it.
-- **The accelerated mode.** One op at a time is what makes this simple; a core
-  running a cycle per clock needs a write-then-read bypass on the ways and the
-  tag word, a write buffer, and a rendezvous with the bus for BUS-class reads.
-  The cache's hit path is registered at every stage so that work starts from
-  here rather than from a rewrite. One family of BUS-class reads no longer
-  needs the rendezvous: the floating bus is simulated from a side copy of
-  the display pages (FLOATING_BUS.md), fed from the same classified op.
+- **Every slot's page in `$C100-$CFFF`, every expansion ROM, and `$CFFF`**
+  stay the bus. The motherboard's own `$Cxxx` ROM - under INTCXROM, SLOTC3ROM
+  and the INTC8ROM latch - is served (the CX class, ACCELERATION.md).
+- **The accelerated mode** - now ACCELERATION.md, and built on exactly the
+  "one op at a time" this keeps: the sequencer presents the next op only when
+  the last is decided (`decided`, `busy`), so the cache needed no bypass and
+  no write buffer, and a BUS-class read's rendezvous with the bus is the
+  sequencer's merge. Pipelining the cache past ~11x is the follow-on, behind
+  the same interface. The motherboard's own `$C100-$CFFF` reads the
+  classifier used to leave to the bus are ROM class now - the CX class,
+  ACCELERATION.md; every slot's page stays the bus's.
 - **INH'.** A card asserting INH' or DMA' is out of scope (DERISK.md, "Two
   memory modes"); serving trusts the image.

@@ -131,6 +131,7 @@ if {$snoop || $master} {
         [file join $root rtl apple_rom.sv] \
         [file join $root rtl bank_ram.sv] \
         [file join $root rtl page_cache.sv] \
+        [file join $root rtl event_merge.sv] \
         [file join $root rtl uart_tx.v] \
         [file join $root rtl uart_rx.v] \
         [file join $root rtl card_link.sv] \
@@ -138,6 +139,7 @@ if {$snoop || $master} {
     if {$master} {
         add_files -norecurse [list \
             [file join $root rtl apple_bus_write.sv] \
+            [file join $root rtl accel_seq.sv] \
             [file join $root rtl boot_hold.sv] \
             [file join $root rtl kbd_inject.sv] \
             [file join $root rtl kbd_notice.sv] \

@@ -55,6 +55,12 @@ constexpr uint32_t kGapTag = 0xEu;
 constexpr uint32_t kSkipTag = 0xDu;   // sparse capture: N cycles passed unsent (docs/SPARSE.md)
 struct Event { uint16_t addr; uint8_t data; bool rw; bool res; bool sync; };
 inline bool is_event(uint32_t w) { return (w >> 28) == kEventTag; }
+// An accelerated core's fast op (docs/ACCELERATION.md, tag 0xC): an op the
+// bus never carried, in the event's layout.  To the shadow it is an op like
+// any other - in mode 2 the fast writes ARE the RAM the shadow follows - and
+// to the cycle count it is nothing.
+constexpr uint32_t kFastTag = 0xCu;
+inline bool is_fast(uint32_t w) { return (w >> 28) == kFastTag; }
 inline bool is_gap(uint32_t w)   { return (w >> 28) == kGapTag; }
 inline bool is_skip(uint32_t w)  { return (w >> 28) == kSkipTag; }
 inline uint32_t skip_count(uint32_t w) { return w & 0x0FFFFFFFu; }
@@ -192,7 +198,10 @@ int main(int argc, char** argv) {
     auto tick = [&]() { top.clk = 0; top.eval(); top.clk = 1; top.eval(); };
 
     top.rst = 1; top.res_sync = 1; top.op_present = 0; top.op_commit = 0;
-    top.op_addr = 0; top.op_rw = 1; top.op_wdata = 0; top.q_addr = 0;
+    top.op_addr = 0; top.op_rw = 1; top.op_wdata = 0; top.q_addr = 0; top.q_rw = 1;
+    // The internal ROM is loaded, so $C100-$CFFF reads the internal ROM
+    // answers are ROM class and compared against the file like $D000-$FFFF.
+    top.rom_ok = 1;
     for (int i = 0; i < 4; ++i) tick();
     top.rst = 0;
     tick();
@@ -205,6 +214,7 @@ int main(int argc, char** argv) {
     uint64_t sw_accesses[12] = {0};
     uint64_t lc_accesses = 0, writes_recorded = 0, writes_dropped = 0;
     uint64_t bad_bank = 0;
+    uint64_t fast_ops = 0;      // an accelerated capture's fast-op words: ops, not cycles
     bool armed = false;         // a reset has been seen: the shadow is known
     bool prev_res = true;
     unsigned shown = 0;
@@ -220,10 +230,11 @@ int main(int argc, char** argv) {
         // which change the shadow, so the check goes on - with fewer reads
         // to compare.
         if (trace::is_skip(w)) { ++skips; cycles += trace::skip_count(w); continue; }
-        if (!trace::is_event(w)) continue;
+        const bool fast = trace::is_fast(w);
+        if (!trace::is_event(w) && !fast) continue;
         trace::Event e = trace::decode(w);
         if (opt.max_cycles && cycles >= opt.max_cycles) break;
-        ++cycles;
+        if (fast) ++fast_ops; else ++cycles;
 
         if (!e.res && prev_res) { ++resets; armed = true; }
         prev_res = e.res;
@@ -317,6 +328,7 @@ int main(int argc, char** argv) {
     std::printf("cycles %llu  resets %llu  gaps %llu  skips %llu  armed %s\n",
                 static_cast<unsigned long long>(cycles), static_cast<unsigned long long>(resets),
                 static_cast<unsigned long long>(gaps), static_cast<unsigned long long>(skips), armed ? "yes" : "NO - no reset in the trace");
+    if (fast_ops) std::printf("fast ops %llu (an accelerated capture: ops the bus never carried, not cycles)\n", static_cast<unsigned long long>(fast_ops));
     std::printf("classes: BUS %llu  RAM %llu  LC %llu  ROM %llu   (bad bank %llu)\n",
                 static_cast<unsigned long long>(cls_count[BUS]), static_cast<unsigned long long>(cls_count[RAM]),
                 static_cast<unsigned long long>(cls_count[LC]), static_cast<unsigned long long>(cls_count[ROM]),

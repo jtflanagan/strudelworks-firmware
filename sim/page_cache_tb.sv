@@ -135,6 +135,7 @@ module page_cache_tb;
     page_client u_client (
         .clk (clk), .rst (rst), .calib_complete (calib_complete),
         .master_active (master_active), .op_present (op_present),
+        .accel (1'b0),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data),

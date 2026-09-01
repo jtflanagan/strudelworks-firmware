@@ -52,7 +52,7 @@ host reads; the receiver carries parser state across all of them.
 | `0x01`–`0x0F` | — | Reserved for link-layer types: ones the FT601 layer may generate or consume on its own, parseable without application state. |
 | `0x10` | SEQ | Card→host. The verified counter stream from `ft601_top`, the link regression vehicle. |
 | `0x11` | BUS_ENABLE | Host→card. `free[0]` capture enable, `free[1]` source select (0 synthetic, 1 real bus), `free[2]` sparse (send only `$Cxxx` accesses, writes, the blanking and RES′ edges, with SKIP words counting the rest - see SPARSE.md; real bus only), `free[7:4]` heartbeat period select. All latched at enable. `enable = 0` is the clean stop. |
-| `0x12` | BUS_EVENTS | Card→host. Payload is N words: Apple bus events (`rtl/apple_bus_read.sv`: `{0xF, data[7:0], vbl, sync, res, rw, addr[15:0]}`; bit 19 is the video scanner's vertical blanking level once locked - see VBL.md, "The bit") and, in sparse mode, SKIP words `{0xD, count[27:0]}`: that many cycles passed unsent before the next word (SPARSE.md). |
+| `0x12` | BUS_EVENTS | Card→host. Payload is N words: Apple bus events (`rtl/apple_bus_read.sv`: `{0xF, data[7:0], vbl, sync, res, rw, addr[15:0]}`; bit 19 is the video scanner's vertical blanking level once locked - see VBL.md, "The bit"); in sparse mode SKIP words `{0xD, count[27:0]}`: that many cycles passed unsent before the next word (SPARSE.md); and while the core is accelerated (ACCELERATION.md) fast-op words `{0xC, …}` in the event's layout - an op the core took from the card that rode no bus cycle, an op and not a cycle - with SKIPs standing for the dummy cycles in full mode too. |
 | `0x13` | BUS_STATUS | Card→host. Overflow flag, enable state, captured count - of WORDS into the capture FIFO (events and SKIPs alike). |
 | `0x14` | REG_READ | Host→card. Payload `[addr]`. Answered with REG_VALUE. |
 | `0x15` | REG_WRITE | Host→card. Payload `[addr][data]`. Also answered with REG_VALUE. |
@@ -103,7 +103,7 @@ protocol.
 | `0x8000_0014` | HD_SLOT | RW bits 2:0 | the hard disk's slot, 0 = off; latched at RES', never MB_SLOT's; `rom`, `busy`, `execs` — see HARDDISK.md |
 | `0x8000_0018` | RESET | W1 bit 0, W bits 31:16 | pulse the Apple's RES' low, for a programmatic Ctrl-Reset; `pulsing`, `pulses` — see BUS_MASTER.md |
 | `0x8000_001C` | KBD_INJECT | W bits 6:0, W1 bits 7-8 | a key on the keyboard the soft core reads: `key`, `press`, `drop`; `strobe`, `seen`, `pressed` — see KEYBOARD.md |
-| `0x8000_0020` | BUTTONS | RW bits 5:0 | Open-Apple, Closed-Apple and PB2 as the host holds them, two bits each (hardware / up / down); `hw` — see KEYBOARD.md |
+| `0x8000_0020` | BUTTONS | RW bits 5:0 | Open-Apple, Closed-Apple and PB2 as the host holds them, two bits each (hardware / up / down); `hw` — see KEYBOARD.md|
 | `0x8000_0024` | RING_STATUS | RO | the DDR3 TX ring: `[21:0]` occupancy in lines, `[24]` full, `[25]` DDR3 calibrated, `[26]` a message was torn on the bus (sticky) — see TX_RING.md |
 | `0x8000_0028` | KBD_CTRL | RW bits 1:0 | `lock` the machine's own keyboard out, `notify` ask for KBD_EVENT; `touched`, `taken`, `flushed`, `replaced` — see KEYBOARD.md |
 | `0x8000_002C` | MENU_HOLD | RW bits 7:0, W1 bit 8 | the runtime menu's door into the same hold: `enable`, `hotkey`, `trigger`, `menus` — see RUNTIME_MENU.md |
@@ -130,6 +130,12 @@ protocol.
 | `0x8000_0080` | FB_LAST2 | RO | `{addr[7:0] of $C0xx, scanner address[15:0], mode[7:0]}` of the last mismatch |
 | `0x8000_0084` | FB_OTHER | RO | `[15:0]` mismatches on screen-hole cycles, `[31:16]` on 80-column cycles — counted apart, see FLOATING_BUS.md |
 | `0x8000_0088` | FB_PEEK | RW bits 14:0 | a byte of the side copy: `[14]` 0 = text (`[10:0]` from $0400), 1 = hi-res (`[13:0]` from $2000); `[23:16]` the byte |
+| `0x8000_008C` | ACCEL_CTRL | RW bits 1:0, 23:8, 24; W1 bit 31 | the accelerated core (ACCELERATION.md): `[1:0]` mode - 0 off (the core locked to the bus, the old machine to the clock), 1 reads served on the card and every write on the bus, 2 reads and writes on the card; `[23:8]` the target, ops per bus cycle, 8.8 fixed point, 0 = unlimited; W1 clear the ACCEL_* counters. What is slow is a matter of class alone: every `$Cxxx` access a slot answers rides the bus in every mode. Levels, safe under a running machine - except that leaving mode 2 for mode 0 or serving off runs the machine's stale RAM; the host refuses it |
+| `0x8000_0090` | ACCEL_STAT | RO | `[0]` accelerating; `[1]` the core held by the governor; `[3]` the bus owns the op stream; `[7:4]` the sequencer's state; `[15:8]` event-merge overflows (must be 0); `[23:16]` fast ops decided twice; `[24]` the core's reset sequence has not yet reached `$FFFD` on the bus (every op rides the bus until it has - the IIe's MMU infers a reset from that sequence, not from RES′) |
+| `0x8000_0094` | ACCEL_FAST | RO | ops served on the card |
+| `0x8000_0098` | ACCEL_BUS | RO | the core's ops that rode a bus cycle; (FAST + BUS) / CYCLES is the ratio achieved |
+| `0x8000_009C` | ACCEL_CYCLES | RO | bus cycles while accelerating |
+| `0x8000_00A0` | ACCEL_WAIT | RO | clocks the core spent waiting to merge |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

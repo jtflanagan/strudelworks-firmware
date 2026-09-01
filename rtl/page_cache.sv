@@ -103,6 +103,18 @@ module page_cache (
     // To the din mux: hold from the decision until the next op_present.
     output logic       sub_en,
     output logic [7:0] sub_data,
+    // For rtl/accel_seq.sv, which presents the next op only when this one is
+    // over: `decided` pulses on the clock the op's outcome is known - P3 for
+    // a hit, a claim, a ROM read, a write (a write MISS included: the engine
+    // finishes it unconditionally, and `busy` holds the next op off until it
+    // has) or an op nothing here answers; the clock the critical beat's serve
+    // lands for a read miss - with sub_en/sub_data valid on the same edge.
+    // `busy` is high from the op's arrival until the engine is idle again,
+    // and is what a fresh start (after reset, after a hold) waits on.  The
+    // sequencer never presents an op while `busy`, which is what keeps
+    // dec_aux_blocked (late_fills) impossible under acceleration.
+    output logic       decided,
+    output wire        busy,
 
     // The floating-bus simulator's read of main memory (rtl/fb_sim.sv): the
     // main bank's port B is its alone - the page engine works the aux
@@ -241,6 +253,17 @@ module page_cache (
     wire       d_rom   = (s_cls == CLS_ROM) && rom_loaded;
     wire       serve_this = serve && (d_cache || d_rom);
 
+    // The op is in flight from its present to its decision, and the engine's
+    // transaction extends that; rtl/accel_seq.sv starts a fast op only when
+    // this is low.
+    assign busy = op_present || cl_valid || g2 || !eng_idle;
+
+    // A read miss that starts the engine is the one decision that defers: its
+    // outcome is the critical beat's serve.  Everything else - hit, claim,
+    // ROM, any write, a drop, an op nothing here answers - is known at P2.
+    wire eng_read_start = dec_read && !dec_aux_blocked && !d_hit && !d_claim &&
+                          image_ready;
+
     // ---- the page engine -------------------------------------------------------
     localparam [2:0] E_IDLE  = 3'd0;
     localparam [2:0] E_SNAP  = 3'd1;
@@ -318,9 +341,14 @@ module page_cache (
         mw_en  <= 1'b0;
         aw_en  <= 1'b0;
         data_q <= data_sync;
+        // Decided on this edge: P2 unless a read miss is raising the engine,
+        // or the miss's critical beat.
+        decided <= (g2 && !eng_read_start) ||
+                   (state == E_FILL && pr_valid && resp_n == 5'd0 && e_rw);
 
         if (rst) begin
             sub_en <= 1'b0; sub_data <= 8'd0;
+            decided <= 1'b0;
             cmp_valid <= 1'b0; cmp_byte <= 8'd0;
             vld <= 256'd0; dty <= 256'd0;
             state <= E_IDLE;

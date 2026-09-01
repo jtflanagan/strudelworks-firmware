@@ -34,7 +34,7 @@ module reg_map_tb;
     reg [7:0] latches_before;
 
     // ---- host -> card: a little FIFO the parser reads from --------------------
-    reg  [31:0] rx_mem [0:255];
+    reg  [31:0] rx_mem [0:1023];     // every message the run pushes; it never wraps
     integer     rx_wr = 0, rx_rd = 0;
     wire        rx_empty = (rx_rd >= rx_wr);
     wire [31:0] rx_dout  = rx_empty ? 32'd0 : rx_mem[rx_rd];
@@ -171,6 +171,11 @@ module reg_map_tb;
 
     wire       mem_serve;
     wire       mem_cnt_clr, mem_inval;
+    wire [1:0] accel_mode;
+    wire [15:0] accel_target;
+    wire       accel_cnt_clr;
+    integer    accel_cnt_clrs = 0;
+    always @(posedge clk) if (accel_cnt_clr) accel_cnt_clrs = accel_cnt_clrs + 1;
     wire        fb_serve, fb_cnt_clr;
     wire [14:0] fb_peek_addr;
     integer     fb_cnt_clrs = 0;
@@ -214,7 +219,11 @@ module reg_map_tb;
         .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),
         .mem_hits (32'h0000_1111), .mem_misses (32'h0000_0022),
         .mem_mismatch (32'h0000_0003), .mem_served (32'h0000_0444), .mem_diverted (32'h0000_0777),
-        .mem_last (32'h1234_5C3A),
+        .mem_last (32'h1234_5C3A), .mem_intc8rom (1'b1),
+        .accel_mode (accel_mode), .accel_target (accel_target),
+        .accel_cnt_clr (accel_cnt_clr),
+        .accel_stat (32'h0000_0A11), .accel_fast (32'h0001_F00D), .accel_bus (32'h0000_0B05),
+        .accel_cycles (32'h000C_0CE5), .accel_wait (32'h0000_0A17),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (7'b1010101), .fb_compared (32'h0004_2870), .fb_mismatch (32'h0000_0005),
         .fb_last (32'hA55A_C0A3), .fb_last2 (32'h5427_D8C2), .fb_other (32'h0002_0001),
@@ -336,7 +345,7 @@ module reg_map_tb;
     assign out_valid = sb_cyc && sb_stb;
     always @(posedge clk) sb_ack <= !rst && sb_cyc && sb_stb && !tx_full;
 
-    reg [31:0] out_mem [0:4095];
+    reg [31:0] out_mem [0:8191];
     integer    out_n = 0;
     always @(posedge clk) if (tx_push && !tx_full) begin
         out_mem[out_n] = tx_data;
@@ -1239,10 +1248,10 @@ module reg_map_tb;
         end
         base = out_n;
         do_read(32'h8000_0050);
-        if (out_mem[base+2] !== 32'h0000_9A5C) begin
-            $display("FAIL: MEM_STAT reads %08x, expected rom_loaded image_ready and the switches", out_mem[base+2]);
+        if (out_mem[base+2] !== 32'h0000_BA5C) begin
+            $display("FAIL: MEM_STAT reads %08x, expected rom_loaded image_ready intc8rom and the switches", out_mem[base+2]);
             errors = errors + 1;
-        end else $display("  ok: MEM_STAT reads the shadow's switches and the image's state");
+        end else $display("  ok: MEM_STAT reads the shadow's switches, the INTC8ROM latch and the image's state");
         base = out_n;
         do_read(32'h8000_0054);
         do_read(32'h8000_0058);
@@ -1262,6 +1271,44 @@ module reg_map_tb;
             $display("FAIL: MEM_DIVERTED reads %08x", out_mem[base+2]);
             errors = errors + 1;
         end else $display("  ok: MEM_DIVERTED reads straight through");
+
+        // ---- ACCEL_CTRL and the sequencer's counters -----------------------------
+        base = out_n;
+        do_read(32'h8000_008C);
+        if (out_mem[base+2] !== 32'h0000_0000 || accel_mode !== 2'd0) begin
+            $display("FAIL: ACCEL_CTRL reads %08x at reset, expected mode 0, target 0", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: ACCEL_CTRL resets to mode 0, unlimited");
+        do_write(32'h8000_008C, 32'h8004_0002);           // clear, 4.0, mode 2
+        base = out_n;
+        do_read(32'h8000_008C);
+        if (out_mem[base+2] !== 32'h0004_0002 || accel_mode !== 2'd2 || accel_target !== 16'h0400) begin
+            $display("FAIL: ACCEL_CTRL after write reads %08x (mode %0d target %04x)", out_mem[base+2], accel_mode, accel_target);
+            errors = errors + 1;
+        end else if (accel_cnt_clrs != 1) begin
+            $display("FAIL: ACCEL_CTRL's clear pulsed %0d times", accel_cnt_clrs); errors = errors + 1;
+        end else $display("  ok: ACCEL_CTRL's mode and target are levels; its clear pulses once");
+        do_write(32'h8000_008C, 32'h0000_0001);           // mode 1, unlimited, no clear
+        base = out_n;
+        do_read(32'h8000_008C);
+        if (out_mem[base+2] !== 32'h0000_0001 || accel_cnt_clrs != 1) begin
+            $display("FAIL: ACCEL_CTRL second write reads %08x, clears %0d", out_mem[base+2], accel_cnt_clrs); errors = errors + 1;
+        end else $display("  ok: ...and a write without the W1 bit does not pulse it");
+        base = out_n;
+        do_read(32'h8000_0090);
+        do_read(32'h8000_0094);
+        do_read(32'h8000_0098);
+        do_read(32'h8000_009C);
+        do_read(32'h8000_00A0);
+        if (out_mem[base+2] !== 32'h0000_0A11 || out_mem[base+5] !== 32'h0001_F00D ||
+            out_mem[base+8] !== 32'h0000_0B05 || out_mem[base+11] !== 32'h000C_0CE5 ||
+            out_mem[base+14] !== 32'h0000_0A17) begin
+            $display("FAIL: ACCEL registers read %08x %08x %08x %08x %08x", out_mem[base+2],
+                     out_mem[base+5], out_mem[base+8], out_mem[base+11], out_mem[base+14]);
+            errors = errors + 1;
+        end else $display("  ok: ACCEL_STAT, FAST, BUS, CYCLES and WAIT read straight through");
+        do_write(32'h8000_008C, 32'h0000_0000);
+
 
         $display("");
         // ---- FB_CTRL, FB_PEEK and the floating-bus counters ---------------------

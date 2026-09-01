@@ -56,6 +56,7 @@ run sync_fifo     rtl/sync_fifo.sv
 run synth_bus_events rtl/synth_bus_events.sv
 run bus_event_capture rtl/bus_event_capture.sv rtl/sync_fifo.sv
 run bus_event_filter rtl/bus_event_filter.sv
+run event_merge   rtl/event_merge.sv
 run synchronizer  rtl/synchronizer.sv
 run wb_regfile    rtl/wb_regfile.sv
 run reg_bridge    rtl/reg_bridge.sv
@@ -72,6 +73,7 @@ run page_client   rtl/page_client.sv
 run tx_ring       rtl/tx_ring.sv rtl/sync_fifo.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 run apple_bus_write rtl/apple_bus_write.sv
+run accel_seq     rtl/accel_seq.sv
 run boot_hold     rtl/boot_hold.sv
 run kbd_inject    rtl/kbd_inject.sv
 run kbd_notice    rtl/kbd_notice.sv

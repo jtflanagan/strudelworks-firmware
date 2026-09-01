@@ -179,6 +179,20 @@ module wb_regfile #(
     input  wire [31:0]     mem_served,
     input  wire [31:0]     mem_last,
     input  wire [31:0]     mem_diverted,
+    input  wire            mem_intc8rom,    // the MMU shadow's INTC8ROM latch
+
+    // The accelerated core (rtl/accel_seq.sv, docs/ACCELERATION.md):
+    // ACCEL_CTRL's levels and its pulse out, the sequencer's status and
+    // counters back.  A watching top ties the inputs to 0 and leaves the
+    // outputs unconnected.
+    output logic [1:0]     accel_mode,
+    output logic [15:0]    accel_target,
+    output logic           accel_cnt_clr,   // pulses
+    input  wire [31:0]     accel_stat,
+    input  wire [31:0]     accel_fast,
+    input  wire [31:0]     accel_bus,
+    input  wire [31:0]     accel_cycles,
+    input  wire [31:0]     accel_wait,
 
     // The floating-bus simulator (rtl/fb_sim.sv, docs/FLOATING_BUS.md):
     // FB_CTRL's serve level and its clear pulse, FB_PEEK's address; the mode
@@ -262,6 +276,12 @@ module wb_regfile #(
     localparam [13:0] R_FB_LAST2   = 'd32;  // 0x8000_0080, RO
     localparam [13:0] R_FB_OTHER   = 'd33;  // 0x8000_0084, RO
     localparam [13:0] R_FB_PEEK    = 'd34;  // 0x8000_0088, RW bits 14:0
+    localparam [13:0] R_ACCEL_CTRL = 'd35;  // 0x8000_008C, RW bits 1:0, 23:8, 24; W1 bit 31
+    localparam [13:0] R_ACCEL_STAT = 'd36;  // 0x8000_0090, RO
+    localparam [13:0] R_ACCEL_FAST = 'd37;  // 0x8000_0094, RO
+    localparam [13:0] R_ACCEL_BUS  = 'd38;  // 0x8000_0098, RO
+    localparam [13:0] R_ACCEL_CYCLES = 'd39; // 0x8000_009C, RO
+    localparam [13:0] R_ACCEL_WAIT = 'd40;  // 0x8000_00A0, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -660,13 +680,46 @@ module wb_regfile #(
     //                           bank2, slotc3rom, intcxrom, hires, page2,
     //                           altzp, ramwrt, ramrd, store80}
     //   [12]     image_ready RO  the DDR3 is calibrated
-    //   [13]     0
+    //   [13]     intc8rom   RO   the shadow's INTC8ROM latch (the CX class)
     //   [14]     invalidating RO
     //   [15]     rom_loaded RO   every MEM_ROM chunk has landed
     //   [23:16]  late_fills RO   fills that landed after their cycle: must be 0
     //   [31:24]  fifo_drops RO   requests the DDR3 client could not take: must be 0
     wire [31:0] mem_stat_rd = {mem_fifo_drops, mem_late_fills, mem_rom_loaded,
-                               mem_invalidating, 1'b0, mem_image_ready, mem_sw};
+                               mem_invalidating, mem_intc8rom, mem_image_ready, mem_sw};
+
+    // ---- ACCEL_CTRL ---------------------------------------------------------
+    // (ACCEL_STAT, read straight through from the sequencer: [0] accelerating,
+    // [1] held by the governor, [3] bus_owns, [7:4] state, [15:8] merge
+    // overflows, [23:16] retries, [24] the reset sequence still on the bus.)
+    //
+    //   [1:0]    mode       RW   0 off - the core locked to the bus, the old
+    //                           machine to the clock; 1 reads served on the
+    //                           card, every write on the bus; 2 reads and
+    //                           writes on the card
+    //   [23:8]   target     RW   ops per bus cycle, 8.8 fixed point; 0 = as
+    //                           fast as the card can
+    //   [31]     cnt_clr    W1   clear the ACCEL_* counters
+    //
+    // Levels, like MEM_CTRL's: safe under a running machine, with the one
+    // rule docs/ACCELERATION.md states - leaving mode 2 for a state where
+    // the core reads the machine's RAM (mode 0, serving off) executes the
+    // stale memory the machine holds; the host enforces it.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            accel_mode    <= 2'd0;
+            accel_target  <= 16'd0;
+            accel_cnt_clr <= 1'b0;
+        end else begin
+            if (wr_accel_ctrl) begin
+                accel_mode    <= wb_dat_w[1:0];
+                accel_target  <= wb_dat_w[23:8];
+            end
+            accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
+        end
+    end
+
+    wire [31:0] accel_ctrl_rd = {8'd0, accel_target, 6'd0, accel_mode};
 
     // ---- FB_CTRL ------------------------------------------------------------
     //
@@ -938,6 +991,12 @@ module wb_regfile #(
                         R_FB_LAST2:   wb_dat_r <= fb_last2;
                         R_FB_OTHER:   wb_dat_r <= fb_other;
                         R_FB_PEEK:    wb_dat_r <= fb_peek_rd;
+                        R_ACCEL_CTRL: wb_dat_r <= accel_ctrl_rd;
+                        R_ACCEL_STAT: wb_dat_r <= accel_stat;
+                        R_ACCEL_FAST: wb_dat_r <= accel_fast;
+                        R_ACCEL_BUS:  wb_dat_r <= accel_bus;
+                        R_ACCEL_CYCLES: wb_dat_r <= accel_cycles;
+                        R_ACCEL_WAIT: wb_dat_r <= accel_wait;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -989,6 +1048,8 @@ module wb_regfile #(
                          (word == R_FB_CTRL);
     wire wr_fb_peek    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FB_PEEK);
+    wire wr_accel_ctrl = access && !wb_ack && in_region && wb_we &&
+                         (word == R_ACCEL_CTRL);
 
     // A boot-hold RELEASE re-latches MB_SLOT, HD_SLOT, FD_SLOT and VIDHD_SLOT above, so the menu's
     // choices reach the boot it releases into.  Same qualification as the

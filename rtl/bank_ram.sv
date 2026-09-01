@@ -20,7 +20,12 @@
 // from (UG901), read-first on both ports, a byte enable per lane on both.  A
 // same-clock same-row collision between the ports returns stale read data;
 // the op path and the engine are scheduled so it cannot happen (the engine
-// runs only while the op path is parked on a miss).  4096 x 128 is sixteen
+// runs only while the op path is parked on a miss).  The one collision the
+// accelerated core adds - a main-bank write on port A landing on the clock
+// the floating-bus simulator reads the same row on port B - is SAFE because
+// the writing port is read-first: the opposite port's read returns the OLD
+// data, valid on hardware (UG473), and a one-clock-stale byte is immaterial
+// to a scanner whose whole question is "what does the video see this cycle".  4096 x 128 is sixteen
 // RAMB36 in 4096 x 9 pairs' worth of fabric - the price docs/PAGE_CACHE.md
 // budgets.
 //////////////////////////////////////////////////////////////////////////////////
