@@ -174,6 +174,7 @@ module master_top #(
     // The cache's answer reaches this mux only while the bus owns the op
     // stream: a fast op's byte goes to the core through the sequencer, and
     // must not linger into a dummy cycle's event.
+    wire        bus_owns;
     wire        mem_sub_en, fb_sub_en;
     wire [7:0]  mem_sub_data, fb_sub_data;
     wire        mem_sub_bus = mem_sub_en && bus_owns;
@@ -225,10 +226,28 @@ module master_top #(
     wire        fev_valid, fev_rw, fev_sync;
     wire [15:0] fev_addr;
     wire [7:0]  fev_data;
-    wire        bus_owns, core_valid, op_dummy, op_inflight, drv_cyc_done;
+    wire        core_valid, op_dummy, op_inflight, drv_cyc_done;
     wire [7:0]  drv_din;
     wire        mem_decided, mem_busy, mem_intc8rom;
     wire [1:0]  q_cls;
+    // The instruction front (rtl/iline.sv) and its seams.
+    wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim;
+    wire        turbo_tick, tev_valid, tev_sync, ev_fast_room;
+    wire [15:0] tev_addr;
+    wire [7:0]  tev_data, i_din_w;
+    wire [31:0] accel_turbo;
+    wire [1:0]  p_cls;
+    wire        p_aux_w, map_changed;
+    wire [15:0] p_addr_w, p_off_w;
+    wire        il_req, il_aux_w, il_ack, il_ok;
+    wire [7:0]  il_bank_w;
+    wire [11:0] il_line_w;
+    wire [127:0] il_row;
+    wire        rom_r2_en, rom_r2_busy;
+    wire [11:0] rom_r2_addr;
+    wire [31:0] rom_r2_data;
+    wire        cpu_cyc_is_i;
+    wire [15:0] cpu_pc_addr;
     wire        app_msg_valid, app_pay_valid;
     wire [7:0]  app_msg_type, app_msg_len;
     wire [15:0] app_msg_free;
@@ -248,9 +267,16 @@ module master_top #(
         .real_data (real_data), .real_valid (real_valid),
         .real_mark (vbl_mark), .real_mark_free (vbl_mark_free),
         .real_dummy (op_dummy),
-        .fast_valid (fev_valid), .fast_addr (fev_addr), .fast_rw (fev_rw),
-        .fast_data (fev_data), .fast_sync (fev_sync), .fast_vbl (vbl_level),
+        // The front's event shares the fast port: turbo_ok excludes fev's
+        // clock, so the two never collide.
+        .fast_valid (fev_valid || tev_valid),
+        .fast_addr (fev_valid ? fev_addr : tev_addr),
+        .fast_rw (fev_valid ? fev_rw : 1'b1),
+        .fast_data (fev_valid ? fev_data : tev_data),
+        .fast_sync (fev_valid ? fev_sync : tev_sync),
+        .fast_vbl (vbl_level),
         .merge_overflows (merge_overflows),
+        .ev_fast_room (ev_fast_room),
         .phi0_live (phi0_live),
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (cpu_source_active),
@@ -301,6 +327,7 @@ module master_top #(
         .accel_stat ({7'd0, accel_reset_seq, accel_retries, merge_overflows, seq_state, bus_owns, 1'b0, accel_held, accel_on}),
         .accel_fast (accel_fast), .accel_bus (accel_bus),
         .accel_cycles (accel_cycles), .accel_wait (accel_wait),
+        .accel_turbo (accel_turbo),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (fb_mode), .fb_compared (fb_compared), .fb_mismatch (fb_mismatch),
         .fb_last (fb_last), .fb_last2 (fb_last2), .fb_other (fb_other),
@@ -379,7 +406,15 @@ module master_top #(
         .addr   (cpu_addr),
         .rw     (cpu_rw),
         .dout   (cpu_dout),
-        .din    (cpu_din),
+        .i_din  (i_din_w),          // the instruction front's byte
+        .d_din  (cpu_din),          // the sequencer's
+        .cyc_is_i (cpu_cyc_is_i),
+        .i_addr (),
+        .i_pred (),                 // the front predicts for itself (rtl/iline.sv)
+        .pc_addr (cpu_pc_addr),
+        .d_addr (),
+        .d_rw   (),
+        .d_dout (),
         .irq_n  (apple_irq_sync && !mb_irq),
         .nmi_n  (1'b1),             // the slot brings out no NMI
         .sync   (cpu_sync),
@@ -494,8 +529,12 @@ module master_top #(
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
         .cpu_sync      (cpu_sync),
-        .cyc_en        (cpu_cyc_en),
+        .cyc_en        (seq_cyc_en),
         .cpu_din       (cpu_din),
+        .turbo_en      (turbo_en),
+        .turbo_ok      (turbo_ok),
+        .turbo_commit  (turbo_commit),
+        .turbo_claim   (turbo_claim),
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
@@ -535,10 +574,65 @@ module master_top #(
         .state_o       (seq_state),
         .reset_seq_o   (accel_reset_seq),
         .fast_ops      (accel_fast),
+        .turbo_ops     (accel_turbo),
         .bus_ops       (accel_bus),
         .cycles        (accel_cycles),
         .wait_clocks   (accel_wait),
         .retries       (accel_retries)
+    );
+
+    // ---- the instruction front ----------------------------------------------
+    // Two lines of the program stream ahead of the sequencer: a fetch that
+    // lands in them retires in one clock.  See rtl/iline.sv and
+    // docs/ISTREAM.md.
+    iline u_iline (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .cpu_rst       (cpu_rst),
+        .pc_addr       (cpu_pc_addr),
+        .cpu_rw        (cpu_rw),
+        .cpu_sync      (cpu_sync),
+        .cyc_is_i      (cpu_cyc_is_i),
+        .cyc_en        (cpu_cyc_en),
+        .i_din         (i_din_w),
+        .accel_cyc_en  (seq_cyc_en),
+        .accel_din     (cpu_din),
+        .turbo_en      (turbo_en),
+        .turbo_ok      (turbo_ok),
+        .claim         (turbo_claim),
+        .turbo_commit  (turbo_commit),
+        .turbo_sync    (turbo_sync),
+        .tick_q        (turbo_tick),
+        .tev_valid     (tev_valid),
+        .tev_addr      (tev_addr),
+        .tev_data      (tev_data),
+        .tev_sync      (tev_sync),
+        .ev_room       (ev_fast_room),
+        .p_addr        (p_addr_w),
+        .p_cls         (p_cls),
+        .p_aux         (p_aux_w),
+        .p_off         (p_off_w),
+        .rw_bank       (mem_rw_bank),
+        .map_changed   (map_changed),
+        .il_req        (il_req),
+        .il_aux        (il_aux_w),
+        .il_bank       (il_bank_w),
+        .il_line       (il_line_w),
+        .il_ack        (il_ack),
+        .il_ok         (il_ok),
+        .il_row        (il_row),
+        .r2_en         (rom_r2_en),
+        .r2_addr       (rom_r2_addr),
+        .r2_data       (rom_r2_data),
+        .r2_busy       (rom_r2_busy),
+        .cl_valid      (cl_valid),
+        .cl_rw         (cl_rw),
+        .cl_wr_image   (cl_wr_image),
+        .cl_aux        (cl_aux),
+        .cl_bank       (cl_bank),
+        .cl_off        (cl_off),
+        .serve         (mem_serve),
+        .inval         (mem_inval)
     );
 
     // ---- the hold: the boot menu's door and the runtime menu's -------------
@@ -554,6 +648,7 @@ module master_top #(
         .menu_trigger  (menu_trigger),
         .hotkey_hit    (hotkey_hit),
         .cpu_sync      (cpu_sync),
+        .turbo_sync    (turbo_sync),
         .op_present    (u_present),
         .op_commit     (u_commit),
         .op_sync       (u_sync),
@@ -702,7 +797,12 @@ module master_top #(
         .q_addr     (nxt_addr),
         .q_divert   (mmu_q_divert),
         .q_rw       (cpu_rw),
-        .q_cls      (q_cls)
+        .q_cls      (q_cls),
+        .p_addr     (p_addr_w),
+        .p_cls      (p_cls),
+        .p_aux      (p_aux_w),
+        .p_off      (p_off_w),
+        .map_changed (map_changed)
     );
 
     // Addressed at op_present, with the raw offset from $C000, so its byte
@@ -719,6 +819,10 @@ module master_top #(
         .rd_en      (u_present),
         .rd_addr    (u_addr[13:0]),
         .rd_data    (rom_byte),
+        .r2_en      (rom_r2_en),
+        .r2_addr    (rom_r2_addr),
+        .r2_data    (rom_r2_data),
+        .r2_busy    (rom_r2_busy),
         .rom_loaded (mem_rom_loaded)
     );
 
@@ -747,6 +851,13 @@ module master_top #(
         .busy        (mem_busy),
         .fb_addr     (fb_mb_addr),
         .fb_byte     (fb_mb_byte),
+        .il_req      (il_req),
+        .il_aux      (il_aux_w),
+        .il_bank     (il_bank_w),
+        .il_line     (il_line_w),
+        .il_ack      (il_ack),
+        .il_ok       (il_ok),
+        .il_row      (il_row),
         .serve       (mem_serve),
         .inval       (mem_inval),
         .cnt_clr     (mem_cnt_clr),
@@ -859,7 +970,7 @@ module master_top #(
         .op_commit     (op_commit),
         .op_ovr        (op_ovr),
         .op_dummy      (op_dummy),
-        .fast_tick     (fev_valid),
+        .fast_tick     (fev_valid || turbo_tick),
         .rd_claim      (fd_rd_claim),
         .rd_data       (fd_rd_data),
         .msg_valid     (app_msg_valid),
@@ -933,7 +1044,7 @@ module master_top #(
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
-        .fast_tick     (fev_valid),
+        .fast_tick     (fev_valid || turbo_tick),
         .rd_claim      (mb_rd_claim),
         .rd_data       (mb_rd_data),
         .irq           (mb_irq)

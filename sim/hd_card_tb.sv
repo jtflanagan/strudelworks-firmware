@@ -96,7 +96,7 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
 
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
-        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
+        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .i_din (cpu_din), .d_din (cpu_din),
         .irq_n (1'b1), .nmi_n (1'b1),
         .sync (cpu_sync), .halted ()
     );

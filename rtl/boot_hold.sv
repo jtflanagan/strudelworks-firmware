@@ -132,6 +132,11 @@ module boot_hold (
 
     // The core's live SYNC.
     input  wire        cpu_sync,
+    // A SYNC the instruction front retired without a stream event
+    // (rtl/iline.sv): it still counts for seen_sync, or an arm given after
+    // it would take the boot door at a random fetch.  Tie low without the
+    // front.
+    input  wire        turbo_sync,
 
     // From apple_bus_write.  op_present pulses once a cycle's op has been
     // latched, op_commit once its data phase is done; op_sync and op_ovr say
@@ -232,7 +237,7 @@ module boot_hold (
             rel_seen     <= 1'b0;
             cur_mine     <= 1'b0;
         end else begin
-            if (op_present && op_sync) seen_sync <= 1'b1;
+            if ((op_present && op_sync) || turbo_sync) seen_sync <= 1'b1;
             if (op_present)            cur_mine  <= mine;
             if (mine)                  rel_seen  <= release_pend;
 

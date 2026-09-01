@@ -370,6 +370,15 @@ no floating-bus trip.
 | the host's `tests/accel_test.cpp` | the word and the registers; the filter's rules; a scripted machine's full stream and its mode-1 and mode-2 forms, full and sparse, reconstructing the same memory, switches and display through the host's own consumers; edges on dummies not lost; the mock card accelerating under the pipeline; a disk write's block out of the mirror |
 | the host's `tools/accel_test.sh` | on the real machine: a BASIC loop timed at each mode, the card's own ratio against the target, and the ways out |
 
+## The instruction stream front
+
+The first "turbo" step, redone on this branch the full way through: the
+core names each cycle's stream on split data ports, and two 16-byte lines
+ahead of the sequencer retire program-stream fetches in ONE clock, with
+next-line prefetch riding the code's linearity and cyc_en as the late
+cancel - 29.5x in the testbench that gave 14.2x without it.  The whole
+design, its rules and its books: docs/ISTREAM.md.
+
 ## Not here, deliberately
 
 - **Posted writes** for mode 1 (above).

@@ -62,7 +62,12 @@ module event_merge #(
     output logic [15:0] out_mark_free,
     output logic        out_dummy,
 
-    output logic [7:0]  overflows
+    output logic [7:0]  overflows,
+
+    // For a producer that sheds at the source (rtl/iline.sv): comfortably
+    // more free slots than one clock can consume, so a word offered under
+    // this level can never be the one that overflows.
+    output wire         fast_room
 );
 
     localparam [3:0] T_FAST = 4'hC;
@@ -82,6 +87,7 @@ module event_merge #(
     wire push_fast = enable && fast_valid;
     wire [AW:0] need = push_bus ? (AW+1)'(2) : (AW+1)'(1);
     wire fast_fits = room >= need;
+    assign fast_room = room >= (AW+1)'(3);
     wire take_fast = push_fast && fast_fits;
     wire [AW-1:0] wp_fast = wp[AW-1:0] + (push_bus ? (AW)'(1) : (AW)'(0));
     wire [AW:0]   pushed  = (push_bus ? (AW+1)'(1) : (AW+1)'(0)) + (take_fast ? (AW+1)'(1) : (AW+1)'(0));

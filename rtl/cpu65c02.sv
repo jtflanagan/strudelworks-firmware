@@ -100,16 +100,57 @@ module cpu65c02 #(
     output wire  [15:0] addr,
     output wire         rw,         // 1 = read, 0 = write
     output wire  [7:0]  dout,
-    input  wire  [7:0]  din,
+    // The data return, SPLIT BY STREAM (the user's design): the byte for a
+    // program-stream cycle arrives on i_din, everything else on d_din, and
+    // the core muxes by its own cyc_is_i - so an instruction front can hold
+    // its predicted byte on i_din every clock, and a data front its own on
+    // d_din, neither ever caring what the other is speculating.  A consumer
+    // with one data source ties them together and nothing changes.
+    input  wire  [7:0]  i_din,
+    input  wire  [7:0]  d_din,
 
     input  wire         irq_n,      // level sensitive, active low
     input  wire         nmi_n,      // edge sensitive, active low
 
     output wire         sync,       // high during an opcode fetch
-    output wire         halted      // STP executed; only rst clears it
+    output wire         halted,     // STP executed; only rst clears it
+
+    // ---- the split I/D front (acceleration) ---------------------------------
+    // Classified views of the one bus above, plus the one piece of genuinely
+    // new information a predictive icache needs.  The 6502 cannot fetch
+    // instructions and data at once, so these are not a second bus: cyc_is_i
+    // says which stream THIS cycle belongs to, i_addr/d_addr are addr seen
+    // through that classification, and i_pred is the address of the NEXT
+    // program-stream fetch - driven a cycle ahead of it, which is what lets an
+    // icache have the line already read when the fetch begins.  The data
+    // return is split above (i_din/d_din), muxed by cyc_is_i inside.  A
+    // consumer that does not care (the bus-locked driver, every existing
+    // testbench) ties the two din ports together, ignores the rest, and
+    // nothing changes.
+    output wire         cyc_is_i,   // 1: program stream (opcode fetch or any
+                                    //    cycle addressed from PC, dummies
+                                    //    included); 0: data, stack, vectors,
+                                    //    and the LAST/FIXUP dummy re-reads
+    output wire  [15:0] i_addr,     // = addr; the I view, meaningful when cyc_is_i
+    output wire  [15:0] pc_addr,    // {pch, pcl}, REGISTER-DIRECT: equals addr on
+                                    //    every PC-sourced cycle by construction
+                                    //    (the mux's default case IS these
+                                    //    registers), and free of the AGU and din
+                                    //    on every other - the compare source an
+                                    //    instruction front wants
+    output wire  [15:0] i_pred,     // next program-stream address (see next_pc)
+    output wire  [15:0] d_addr,     // = addr; the D view, meaningful when !cyc_is_i
+    output wire         d_rw,       // = rw
+    output wire  [7:0]  d_dout      // = dout
 );
 
 `include "cpu65c02_ucode.vh"
+
+    // The one data return the architecture sees, muxed from the split ports
+    // by this cycle's own stream classification (cyc_is_i, below).  One 2:1
+    // level on a path whose sources - the fronts' registered bytes - are
+    // register-direct.
+    wire [7:0] din = cyc_is_i ? i_din : d_din;
 
     // ---- microcode ROM ------------------------------------------------------
     // {opcode, ucycle} addressing, so there is no decode between the opcode
@@ -235,7 +276,13 @@ module cpu65c02 #(
     // Every source but AGU is a plain concatenation of registers, so this mux
     // costs one level and no arithmetic.
     logic [15:0] addr_mux;
+    logic        asel_is_pc;        // this cycle's address comes from PC: the
+                                    // program stream, for cyc_is_i.  Set in the
+                                    // one place that knows, so the
+                                    // classification can never drift from the
+                                    // mux it describes.
     always_comb begin
+        asel_is_pc = 1'b0;
         case (f_asel)
             UC_ADDR_AGU:  addr_mux = {agu_hi, agu_lo};
             // The address driven during the PREVIOUS bus cycle.  This is the
@@ -260,11 +307,23 @@ module cpu65c02 #(
             UC_ADDR_SP:   addr_mux = {8'h01, s};
             UC_ADDR_VEC:  addr_mux = {8'hFF, vec_lo};
             UC_ADDR_VEC1: addr_mux = {8'hFF, vec_lo + 8'd1};
-            default:      addr_mux = {pch, pcl};
+            default: begin
+                addr_mux   = {pch, pcl};
+                asel_is_pc = 1'b1;
+            end
         endcase
     end
 
     assign addr   = addr_mux;
+
+    // The classified views.  Same wires, two names: which one is meaningful
+    // this cycle is exactly what cyc_is_i says.
+    assign cyc_is_i = asel_is_pc;
+    assign i_addr   = addr_mux;
+    assign pc_addr  = {pch, pcl};
+    assign d_addr   = addr_mux;
+    assign d_rw     = rw;
+    assign d_dout   = dout;
 
     // One cycle of history, for UC_ADDR_LAST above.  Advanced on cyc_en so it
     // tracks BUS cycles rather than clocks, which is what the rule is about.
@@ -466,6 +525,35 @@ module cpu65c02 #(
     // without changing its cycle count.
     wire ld_en = ~f_ld_if | cond_met;
 
+    // ---- next PC ------------------------------------------------------------
+    // The value the PC registers take at this cycle's edge - equivalently, the
+    // address of the NEXT program-stream fetch, whenever it comes.  Exported
+    // as i_pred so a predictive icache can have the line read BEFORE the fetch
+    // cycle begins: sequential flow, taken branches, jumps and returns all
+    // predict exactly, because this is not a guess - it is the same mux that
+    // loads the registers, and the registers load FROM it below, so predictor
+    // and architecture cannot disagree.  It inherits din's timing
+    // (UC_LD_PC_JMP takes the high byte from the bus), so it settles when din
+    // does and no earlier.
+    //
+    // Held on an interrupt entry - see int_pc_hold above.  BRK and every
+    // ordinary fetch still advance.
+    logic [15:0] next_pc;
+    always_comb begin
+        next_pc = {pch, pcl};
+        if (ld_en) begin
+            case (f_ld_pc)
+                UC_LD_PC_INC:    if (!int_pc_hold) next_pc = {pch_inc, pcl_inc};
+                UC_LD_PC_AGU:    next_pc = {agu_hi, agu_lo};
+                UC_LD_PC_AGU_LO: next_pc = {pch, agu_lo};
+                UC_LD_PC_AGU_HI: next_pc = {agu_hi, pcl};
+                UC_LD_PC_JMP:    next_pc = {din, md};
+                default: ;
+            endcase
+        end
+    end
+    assign i_pred = next_pc;
+
     always_ff @(posedge clk) begin
         if (rst) begin
             a <= 8'h00; x <= 8'h00; y <= 8'h00; s <= 8'h00;
@@ -499,6 +587,13 @@ module cpu65c02 #(
             uc   <= ucode[uaddr];
             ucyc <= f_sync ? 3'd0 : (wai_wake ? 3'd2 : ucyc_next);
 
+            // The PC loads FROM next_pc - the same mux i_pred exports - so a
+            // predictive icache follows the architecture by construction.
+            // next_pc already folds in ld_en, int_pc_hold and the hold default,
+            // hence no gate here.
+            pcl <= next_pc[7:0];
+            pch <= next_pc[15:8];
+
             nmi_prev <= nmi_n;
             if (nmi_prev & ~nmi_n) nmi_pend <= 1'b1;
 
@@ -527,18 +622,6 @@ module cpu65c02 #(
                 case (f_ld_adh)
                     UC_LD_ADH_AGU: adh <= agu_hi;
                     UC_LD_ADH_DIN: adh <= din;
-                    default: ;
-                endcase
-                case (f_ld_pc)
-                    // Held on an interrupt entry - see int_pc_hold.  BRK and
-                    // every ordinary fetch still advance.
-                    UC_LD_PC_INC: if (!int_pc_hold) begin
-                                     pcl <= pcl_inc; pch <= pch_inc;
-                                  end
-                    UC_LD_PC_AGU:    begin pcl <= agu_lo;  pch <= agu_hi;  end
-                    UC_LD_PC_AGU_LO:       pcl <= agu_lo;
-                    UC_LD_PC_AGU_HI:       pch <= agu_hi;
-                    UC_LD_PC_JMP:    begin pcl <= md;      pch <= din;     end
                     default: ;
                 endcase
                 case (f_ld_s)

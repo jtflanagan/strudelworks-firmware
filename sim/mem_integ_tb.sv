@@ -93,7 +93,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [7:0]  cpu_dout, cpu_din;
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
-        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
+        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .i_din (cpu_din), .d_din (cpu_din),
         .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
     );
 
@@ -150,13 +150,15 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (pf_off),
         .sw_state (sw_state), .rw_bank (rw_bank),
-        .q_addr (nxt_addr), .q_divert (q_divert)
+        .q_addr (nxt_addr), .q_divert (q_divert),
+        .p_addr (16'd0), .p_cls (), .p_aux (), .p_off (), .map_changed ()
     );
     apple_rom u_rom (
         .clk (clk), .rst (rst),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
-        .rd_en (op_present), .rd_addr (op_addr[13:0]), .rd_data (rom_byte), .rom_loaded (rom_loaded)
+        .rd_en (op_present), .rd_addr (op_addr[13:0]), .rd_data (rom_byte),
+        .r2_en (1'b0), .r2_addr (12'd0), .r2_data (), .r2_busy (), .rom_loaded (rom_loaded)
     );
     page_cache u_cache (
         .clk (clk), .rst (rst),
@@ -167,6 +169,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .rom_byte (rom_byte), .rom_loaded (rom_loaded),
         .sub_en (sub_en), .sub_data (sub_data),
         .fb_addr (16'd0), .fb_byte (),
+        .il_req (1'b0), .il_aux (1'b0), .il_bank (8'd0), .il_line (12'd0),
+        .il_ack (), .il_ok (), .il_row (),
         .serve (serve[0]), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
         .hits (hits), .misses (misses), .served (served), .mismatches (mismatches),

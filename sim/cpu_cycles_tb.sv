@@ -41,7 +41,7 @@ module cpu_cycles_tb #(parameter UCODE = "cpu65c02_ucode.hex");
 
     cpu65c02 #(.UCODE_FILE (UCODE)) dut (
         .clk (clk), .rst (rst), .cyc_en (1'b1),
-        .addr (addr), .rw (rw), .dout (dout), .din (din),
+        .addr (addr), .rw (rw), .dout (dout), .i_din (din), .d_din (din),
         .irq_n (1'b1), .nmi_n (1'b1),
         .sync (sync), .halted (halted)
     );

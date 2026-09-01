@@ -84,6 +84,7 @@ module page_cache_tb;
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
         .rd_en (op_present), .rd_addr (op_addr[13:0]), .rd_data (rom_byte),
+        .r2_en (1'b0), .r2_addr (12'd0), .r2_data (), .r2_busy (),
         .rom_loaded (rom_loaded)
     );
 
@@ -98,6 +99,8 @@ module page_cache_tb;
         .rom_byte (rom_byte), .rom_loaded (rom_loaded),
         .sub_en (sub_en), .sub_data (sub_data),
         .fb_addr (16'd0), .fb_byte (),
+        .il_req (1'b0), .il_aux (1'b0), .il_bank (8'd0), .il_line (12'd0),
+        .il_ack (), .il_ok (), .il_row (),
         .serve (serve), .inval (inval), .cnt_clr (cnt_clr), .image_ready (image_ready),
         .invalidating (invalidating),
         .hits (hits), .misses (misses), .served (served), .mismatches (mismatches),

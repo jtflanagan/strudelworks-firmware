@@ -145,6 +145,12 @@ module accel_seq (
     input  wire        busy,
     input  wire        mq_valid,
 
+    // The instruction front (rtl/iline.sv): its permission out, its books in.
+    output wire        turbo_en,       // steady: accelerating, serving, past the reset sequence
+    output wire        turbo_ok,       // this clock: a turbo retire may happen
+    input  wire        turbo_commit,   // one op retired on this edge (charge and count)
+    input  wire        turbo_claim,    // the front is clocks from answering: hold the dispatcher
+
     // Time.
     input  wire        bus_tick,
 
@@ -172,6 +178,7 @@ module accel_seq (
     output wire [3:0]   state_o,
     output wire         reset_seq_o,    // the reset sequence is still on the bus
     output logic [31:0] fast_ops,
+    output logic [31:0] turbo_ops,
     output logic [31:0] bus_ops,
     output logic [31:0] cycles,
     output logic [31:0] wait_clocks,
@@ -198,13 +205,39 @@ module accel_seq (
 
     wire off = (mode == MODE_OFF);
     assign accel_on = !off && master_active;
+    // The OUTPUT muxes take a registered copy: combinational, the mode bits
+    // rode out of the regfile through cpu_din into the core's AGU carries and
+    // back into the front's enables - the top of round 5's failing paths.  A
+    // mode switch reaching din/cyc_en one clock late is invisible: the state
+    // machine (which keeps the live decode) has not moved yet either.
+    logic off_q;
+    always_ff @(posedge clk) begin
+        if (rst) off_q <= 1'b1;
+        else     off_q <= off;
+    end
 
-    // ---- the governor -------------------------------------------------------
-    // credit in 1/256 op; one op is 256.  Capped at four cycles' worth.
+    // ---- the governor: a registered permission token ------------------------
+    // The user's design.  The governor GRANTS one op's permission up front,
+    // registered (grant_q); once up it cannot go away until an op completes
+    // and consumes it.  Only the consumption verdict touches it - one bit's
+    // D input - and the POOL below is the governor's own bookkeeping, pure
+    // register arithmetic: deposits on bus ticks, a debit the clock AFTER a
+    // consumption (spent_q), the cap, the re-arm.  Nothing in the pool's
+    // cone is the consumer's data, so the credit carries live nowhere near
+    // the retire/dispatch verdict - the path that missed closure by 45 ps
+    // with the old same-clock debit.  Unlimited (target 0) holds the grant
+    // high and debits nothing; under a finite target the one-clock re-arm
+    // lag is invisible against a 98-clock deposit period, and grants pair
+    // one-to-one with debits, so the long-run ratio is exact as before.
     logic [19:0] credit;
+    logic        grant_q, spent_q, unl_q;
     wire  [19:0] cap = {2'b00, target, 2'b00};          // 4 * target
-    wire  unlimited = (target == 16'd0);
-    wire  can_pay   = unlimited || (credit >= 20'd256);
+    // Registered: target lives in the regfile a clock region away, and a
+    // live ==0 compare in can_pay would put it right back in the verdict
+    // cone.  A target change taking effect a clock late is invisible.
+    always_ff @(posedge clk) unl_q <= (target == 16'd0);
+    wire  unlimited = unl_q;
+    wire  can_pay   = unl_q || grant_q;
 
     // ---- the decision -------------------------------------------------------
     // What goes to the bus is a matter of class, mode and policy - never of
@@ -230,15 +263,40 @@ module accel_seq (
     wire fast_ok   = mem_image_ready && !mem_invalidating &&
                      !op_inflight && !busy && !mq_valid;
 
+    // The instruction front's leash.  turbo_en is the steady half - the mode,
+    // the serve, the reset sequence - and it is a REGISTER: its sources live
+    // in the regfile a clock region away, and combinational they topped every
+    // failing path into the front's enables (-1.1 ns).  One clock of lag on a
+    // host-written mode, or on the reset sequence's first clock (the core is
+    // held in reset there anyway), changes nothing observable.  turbo_ok adds
+    // this clock's hazards: the dispatcher idle, nothing on the bus or in the
+    // cache pipeline, no override engaging (the boot hold catching a SYNC
+    // cancels the retire through exactly this term), credit to pay, and never
+    // on a fast op's event clock, so the two never collide at the merge.
+    logic turbo_en_q;
+    always_ff @(posedge clk) begin
+        if (rst) turbo_en_q <= 1'b0;
+        else     turbo_en_q <= accel_on && mem_serve && !reset_seq;
+    end
+    assign turbo_en = turbo_en_q;
+    assign turbo_ok = turbo_en_q && (st == S_DECIDE) && !ovr_en && !op_inflight &&
+                      !busy && mem_image_ready && can_pay && !fev_valid;
+
+    // What the dispatcher will charge for on this edge, for the governor's
+    // one writer: exactly the two dispatching branches below.
+    wire disp_pay = (st == S_DECIDE) && settled && !dq_ovr && !turbo_claim &&
+                    can_pay && (needs_bus || fast_ok) && !off &&
+                    !cpu_rst && master_active;
+
     // A fast op's decision: the byte is there, or it is not.
     wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en);
     wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en;
 
     // ---- the core's side ----------------------------------------------------
-    assign cyc_en     = off ? cyc_done : (st == S_BUS) ? cyc_done : fast_hit;
-    assign cpu_din    = (off || st == S_BUS) ? drv_din : mem_sub_data;
-    assign bus_owns   = off || bus_owns_q;
-    assign core_valid = off || core_valid_q;
+    assign cyc_en     = off_q ? cyc_done : (st == S_BUS) ? cyc_done : fast_hit;
+    assign cpu_din    = (off_q || st == S_BUS) ? drv_din : mem_sub_data;
+    assign bus_owns   = off_q || bus_owns_q;
+    assign core_valid = off_q || core_valid_q;
 
     assign held_governor = (st == S_DECIDE) && settled && !can_pay;
 
@@ -255,8 +313,10 @@ module accel_seq (
         fev_valid <= 1'b0;
 
         // The registers above describe the op the core has up once the
-        // core has sat still for a clock: never on the clock of arrival.
-        settled <= (st == S_DECIDE) && !cyc_en;
+        // core has sat still for a clock: never on the clock of arrival -
+        // and a turbo retire moves the core without this module's cyc_en,
+        // so it resets the settling the same way.
+        settled <= (st == S_DECIDE) && !cyc_en && !turbo_commit;
 
         // From reset until $FFFD has ridden the bus (see the header).  Cleared
         // in mode 0 too, where it could not be observed but must not stick.
@@ -268,11 +328,11 @@ module accel_seq (
             reset_seq <= 1'b1;
             settled <= 1'b0;
             bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1;
-            credit <= 20'd0;
+            credit <= 20'd0; grant_q <= 1'b0; spent_q <= 1'b0;
             u_addr <= 16'd0; u_rw <= 1'b1; u_wdata <= 8'd0;
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
             fev_addr <= 16'd0; fev_rw <= 1'b1; fev_data <= 8'd0; fev_sync <= 1'b0;
-            fast_ops <= 32'd0; bus_ops <= 32'd0; cycles <= 32'd0;
+            fast_ops <= 32'd0; turbo_ops <= 32'd0; bus_ops <= 32'd0; cycles <= 32'd0;
             wait_clocks <= 32'd0; retries <= 8'd0;
         end else begin
             // ---- the stream: what the bus carried ---------------------------
@@ -286,19 +346,38 @@ module accel_seq (
                 u_divert  <= op_divert;
             end
 
-            // ---- the governor ------------------------------------------------
-            if (bus_tick && !off) begin
-                if (credit + {4'd0, target} > cap) credit <= cap;
-                else                               credit <= credit + {4'd0, target};
+            // ---- the governor: the pool, register-in register-out -----------
+            begin : credit_upd
+                logic [20:0] c;
+                c = {1'b0, credit};
+                if (bus_tick && !off) begin
+                    c = c + {5'd0, target};
+                    if (c > {1'b0, cap}) c = {1'b0, cap};
+                end
+                if (spent_q) c = c - 21'd256;
+                if (cpu_rst || !master_active) c = 21'd0;
+                credit <= c[19:0];
+            end
+            // The token: consumption (and only consumption) takes it away;
+            // the pool re-arms it when it covers a credit net of the debit
+            // still in flight.  The verdict lands on two one-bit D inputs.
+            spent_q <= (disp_pay || turbo_commit) && !unlimited;
+            if (cpu_rst || !master_active || off || unlimited) begin
+                grant_q <= 1'b0;
+                spent_q <= 1'b0;
+            end else if (disp_pay || turbo_commit) begin
+                grant_q <= 1'b0;
+            end else if (!grant_q && credit >= (spent_q ? 20'd512 : 20'd256)) begin
+                grant_q <= 1'b1;
             end
             if (bus_tick && accel_on) cycles <= cycles + 32'd1;
+            if (turbo_commit) turbo_ops <= turbo_ops + 32'd1;
 
             // ---- the state machine --------------------------------------------
             if (cpu_rst || !master_active) begin
                 st <= S_RST;
                 bus_owns_q   <= 1'b0;
                 core_valid_q <= 1'b0;
-                credit       <= 20'd0;
             end else if (off) begin
                 // Following along: every op is the driver's.
                 st <= S_BUS;
@@ -315,19 +394,20 @@ module accel_seq (
                             st <= S_HELD;
                             bus_owns_q   <= 1'b1;
                             core_valid_q <= 1'b0;
+                        end else if (turbo_claim) begin
+                            // The front is about to answer this fetch itself:
+                            // hold, bounded by its fill.
                         end else if (!can_pay) begin
                             // Wait for credit.
                         end else if (needs_bus) begin
                             st <= S_BUS;
                             bus_owns_q   <= 1'b1;
                             core_valid_q <= 1'b1;
-                            credit       <= unlimited ? credit : credit - 20'd256;
                         end else if (fast_ok) begin
                             st <= S_FAST;
                             bus_owns_q   <= 1'b0;
                             core_valid_q <= 1'b0;
                             fast_rw      <= cpu_rw;
-                            credit       <= unlimited ? credit : credit - 20'd256;
                             // The op, onto the stream.
                             u_present <= 1'b1;
                             u_addr    <= cpu_addr;
@@ -379,7 +459,7 @@ module accel_seq (
             end
 
             if (cnt_clr) begin
-                fast_ops <= 32'd0; bus_ops <= 32'd0; cycles <= 32'd0;
+                fast_ops <= 32'd0; turbo_ops <= 32'd0; bus_ops <= 32'd0; cycles <= 32'd0;
                 wait_clocks <= 32'd0; retries <= 8'd0;
             end
         end

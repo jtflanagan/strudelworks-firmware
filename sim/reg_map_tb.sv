@@ -223,7 +223,7 @@ module reg_map_tb;
         .accel_mode (accel_mode), .accel_target (accel_target),
         .accel_cnt_clr (accel_cnt_clr),
         .accel_stat (32'h0000_0A11), .accel_fast (32'h0001_F00D), .accel_bus (32'h0000_0B05),
-        .accel_cycles (32'h000C_0CE5), .accel_wait (32'h0000_0A17),
+        .accel_cycles (32'h000C_0CE5), .accel_turbo (32'hCAFE0011), .accel_wait (32'h0000_0A17),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (7'b1010101), .fb_compared (32'h0004_2870), .fb_mismatch (32'h0000_0005),
         .fb_last (32'hA55A_C0A3), .fb_last2 (32'h5427_D8C2), .fb_other (32'h0002_0001),

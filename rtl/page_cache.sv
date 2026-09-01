@@ -123,6 +123,21 @@ module page_cache (
     input  wire [15:0] fb_addr,
     output wire [7:0]  fb_byte,
 
+    // The instruction front's line reads (rtl/iline.sv): granted onto the
+    // banks' port A on any clock the op path is not using it - not an op's
+    // fetch (P0), not a decision's write (P3) - and, on the aux side, only
+    // while the engine is idle and the wanted RamWorks bank is the resident
+    // one.  The row stands on il_row exactly TWO clocks after il_ack (the
+    // banks' two read registers); an op landing in between does not disturb
+    // it (the pipelines interleave - see the grant's exclusions).
+    input  wire        il_req,
+    input  wire        il_aux,
+    input  wire [7:0]  il_bank,
+    input  wire [11:0] il_line,       // folded off[15:4]
+    output wire        il_ack,        // granted this clock
+    output wire        il_ok,         // with ack: the bank holds this line
+    output wire [127:0] il_row,       // valid two clocks after an ok'd ack
+
     // Control and status, from MEM_CTRL / to MEM_STAT.
     input  wire        serve,
     input  wire        inval,
@@ -174,11 +189,27 @@ module page_cache (
     logic [127:0] fb_row;
     logic [3:0]   fb_lo_q;
 
+    // The front's grant: port A free of the op path this clock.  Aux asks
+    // one more thing - the engine idle (the tags are its while it runs) and
+    // the wanted bank resident.
+    assign il_ack = il_req && !op_present && !mw_en && !aw_en;
+    assign il_ok  = il_ack && (!il_aux ||
+                    ((state == E_IDLE) && vld[il_line[11:4]] &&
+                     tag_bank[il_line[11:4]] == il_bank));
+    wire il_main = il_ack && !il_aux;
+    wire il_auxg = il_ok  &&  il_aux;
+    logic il_aux_q, il_aux_qq;
+    always_ff @(posedge clk) begin
+        il_aux_q  <= il_auxg;          // which bank's a_rdata to hand back...
+        il_aux_qq <= il_aux_q;         // ...aligned to the row's two clocks
+    end
+    assign il_row = il_aux_qq ? aux_row : main_row;
+
     bank_ram u_main (
         .clk     (clk),
-        .a_en    (op_present || mw_en),
+        .a_en    (op_present || mw_en || il_main),
         .a_we    (mw_en ? w_be : 16'd0),
-        .a_addr  (mw_en ? w_row : pf_off[15:4]),
+        .a_addr  (mw_en ? w_row : il_main ? il_line : pf_off[15:4]),
         .a_wdata (w_data),
         .a_rdata (main_row),
         // Port B is the floating-bus simulator's, every clock.
@@ -194,9 +225,9 @@ module page_cache (
 
     bank_ram u_aux (
         .clk     (clk),
-        .a_en    (op_present || aw_en),
+        .a_en    (op_present || aw_en || il_auxg),
         .a_we    (aw_en ? w_be : 16'd0),
-        .a_addr  (aw_en ? w_row : pf_off[15:4]),
+        .a_addr  (aw_en ? w_row : il_auxg ? il_line : pf_off[15:4]),
         .a_wdata (w_data),
         .a_rdata (aux_row),
         .b_en    (b_en),

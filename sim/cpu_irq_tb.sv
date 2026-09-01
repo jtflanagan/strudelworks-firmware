@@ -47,7 +47,7 @@ module cpu_irq_tb #(parameter UCODE = "cpu65c02_ucode.hex");
 
     cpu65c02 #(.UCODE_FILE (UCODE)) dut (
         .clk (clk), .rst (rst), .cyc_en (1'b1),
-        .addr (addr), .rw (rw), .dout (dout), .din (din),
+        .addr (addr), .rw (rw), .dout (dout), .i_din (din), .d_din (din),
         .irq_n (irq_n), .nmi_n (nmi_n),
         .sync (sync), .halted (halted)
     );

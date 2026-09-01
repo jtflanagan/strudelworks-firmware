@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
     dut->irq_n = 1;
     dut->nmi_n = 1;
     dut->rst = 1;
-    dut->din = 0;
+    dut->i_din = dut->d_din = 0;
 
     unsigned long long cycles = 0, instrs = 0;
     unsigned last_fetch = 0xFFFFFFFF;
@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
     // and din is sampled by the edge that ends it.
     auto step = [&]() {
         if (!dut->rw) mem[dut->addr] = dut->dout;
-        dut->din = mem[dut->addr];
+        dut->i_din = dut->d_din = mem[dut->addr];
         dut->clk = 0; dut->eval();
         dut->clk = 1; dut->eval();
     };

@@ -81,10 +81,10 @@ int main(int argc, char** argv) {
     mem[kBrkStub + 2] = 0x03;
 
     Vcpu65c02 dut;
-    dut.cyc_en = 1; dut.irq_n = 1; dut.nmi_n = 1; dut.rst = 1; dut.din = 0; dut.clk = 0;
+    dut.cyc_en = 1; dut.irq_n = 1; dut.nmi_n = 1; dut.rst = 1; dut.i_din = dut.d_din = 0; dut.clk = 0;
     auto tick = [&] {
         if (!dut.rw) mem[dut.addr] = dut.dout;
-        dut.din = mem[dut.addr];
+        dut.i_din = dut.d_din = mem[dut.addr];
         dut.clk = 0; dut.eval();
         dut.clk = 1; dut.eval();
     };

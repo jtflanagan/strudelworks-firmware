@@ -37,6 +37,16 @@ module apple_rom #(
     input  wire [13:0] rd_addr,
     output wire [7:0]  rd_data,
 
+    // The instruction front's line filler (rtl/iline.sv): a whole word, one
+    // clock after r2_en, on the loader's port - which is idle from the moment
+    // the ROM has landed.  A load in progress wins the port; the front
+    // invalidates its ROM lines on any load traffic, so losing a beat to one
+    // costs nothing but the retry.
+    input  wire        r2_en,
+    input  wire [11:0] r2_addr,       // word address: offset from $C000 >> 2
+    output logic [31:0] r2_data,
+    output wire        r2_busy,       // a load word is landing: this clock's read is lost
+
     output wire        rom_loaded
 );
 
@@ -75,9 +85,13 @@ module apple_rom #(
     assign rom_loaded = &seen;
 
     // The ROM is written on its own so nothing with a reset shares its block.
+    // The same port reads for the line filler when no load word is landing -
+    // one port, two rare-to-collide users, the loader first.
     always_ff @(posedge clk) begin
-        if (rom_write) rom[{chunk, rx_idx[6:0] - 7'd1}] <= pay_data;
+        if (rom_write)   rom[{chunk, rx_idx[6:0] - 7'd1}] <= pay_data;
+        else if (r2_en)  r2_data <= rom[r2_addr];
     end
+    assign r2_busy = rom_write;
 
     always_ff @(posedge clk) begin
         if (rst) begin

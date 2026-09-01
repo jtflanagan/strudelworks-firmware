@@ -202,7 +202,21 @@ module apple_mmu (
     // write, be if presented now?  Same switches, same function as the
     // classifier below, combinational.  rtl/accel_seq.sv decides on it.
     input  wire        q_rw,
-    output wire [1:0]  q_cls
+    output wire [1:0]  q_cls,
+
+    // ...and the instruction front's (rtl/iline.sv): classify a READ of
+    // p_addr - a line about to be prefetched - into its class, its bank side
+    // and its folded offset, on the switches as they stand.  Combinational,
+    // same functions again; the wanted RamWorks bank is rw_bank above.
+    input  wire [15:0] p_addr,
+    output wire [1:0]  p_cls,
+    output wire        p_aux,
+    output wire [15:0] p_off,
+    // One pulse whenever anything that feeds classification moved - a soft
+    // switch, the language card, the bank register, INTC8ROM, a reset.  The
+    // front's held lines die on it: their classification was captured when
+    // they were fetched.
+    output logic       map_changed
 );
 
     // RamWorks banks: 0..RW_BANKS-1 exist; a write of any other number is
@@ -339,6 +353,30 @@ module apple_mmu (
 
     wire [2:0] q_class = classify(q_addr, q_rw);
     assign q_cls = q_class[2:1];
+
+    // ---- the instruction front's query ------------------------------------------
+    // A read's classification and steering for a line address: the same
+    // functions the presented op goes through, asked out of band.
+    wire p_zp    = (p_addr[15:9]  == 7'd0);
+    wire p_text  = (p_addr[15:10] == 6'b000001);
+    wire p_hires = (p_addr[15:13] == 3'b001);
+    wire p_d     = (p_addr[15:12] == 4'hD);
+    wire p_hi    = (p_addr[15:12] >= 4'hD);
+    wire p_mid   = (store80 && p_text)           ? page2 :
+                   (store80 && hires && p_hires) ? page2 : ramrd;
+    wire [2:0] p_class = classify(p_addr, 1'b1);
+    assign p_cls = p_class[2:1];
+    assign p_aux = (p_hi || p_zp) ? altzp : p_mid;
+    assign p_off = (p_d && !lc_bank2) ? {4'hC, p_addr[11:0]} : p_addr;
+
+    // ---- the map's edge -----------------------------------------------------------
+    // Everything classification reads, watched as one word; sw_state carries
+    // the LC and every switch, and the bank register and INTC8ROM ride along.
+    logic [20:0] map_q;
+    always_ff @(posedge clk) begin
+        map_q       <= {sw_state, intc8rom, rw_bank};
+        map_changed <= rst || !res_sync || (map_q != {sw_state, intc8rom, rw_bank});
+    end
 
     // ---- the driver's query ---------------------------------------------------------
     wire q_zp    = (q_addr[15:9]  == 7'd0);

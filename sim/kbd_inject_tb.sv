@@ -132,7 +132,7 @@ module kbd_inject_tb;
 
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
-        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
+        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .i_din (cpu_din), .d_din (cpu_din),
         .irq_n (1'b1), .nmi_n (1'b1),
         .sync (cpu_sync), .halted ()
     );
@@ -180,7 +180,7 @@ module kbd_inject_tb;
         .master_active (master_active),
         .arm (arm), .release_req (release_req),
         .menu_trigger (1'b0), .hotkey_hit (hotkey_hit),
-        .cpu_sync (cpu_sync),
+        .turbo_sync (1'b0), .cpu_sync (cpu_sync),
         .op_present (op_present), .op_commit (op_commit),
         .op_sync (drv_sync), .op_ovr (op_ovr),
         .op_addr (op_addr), .op_rw (op_rw), .din (cpu_din),
