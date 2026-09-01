@@ -216,24 +216,57 @@ module iline (
     // commit.
     wire hit0 = v[0] && (pc_addr[15:4] == vtag[0]);
     wire hit1 = v[1] && (pc_addr[15:4] == vtag[1]);
-    wire ihit = cyc_is_i && cpu_rw && (hit0 || hit1);
-    wire hslot = !hit0;               // slot 0 wins a (never-built) double hit
 
     logic [15:0] exp_q;              // the predicted next program-stream fetch
     logic        lhit_q;             // the lookup found a held line...
     logic [7:0]  i_byte_q;           // ...and this is its byte
-
-    // The three candidates, register-sourced, in parallel; slot 0 wins.
     wire [15:0] exp_inc = exp_q + 16'd1;
+
+    // THE CAM SERVES TOO (the branch_prefetch work): every candidate looks
+    // up all ten lines - the slots and every retained entry - so a fetch
+    // into ANY resident line runs at the cadence of one; the retained line
+    // needs no promote first, the promote only re-centers the pair behind
+    // it.  The lookups have a full clock into a register, so their width is
+    // not in the late cones.  Dedupe (one live entry per tag, every copy
+    // snooped identically) is what makes any matching source's byte THE
+    // byte.  The live widths that DO grow - eight more register-to-register
+    // compares in the retire's ihit, two snoop terms in kill_now - are the
+    // build's watchpoints, each with a registered-hint fallback.
+    genvar gs;
+    wire [CAMN-1:0] cam_mpc, cam_hi, cam_hh, cam_romv;
+    generate for (gs = 0; gs < CAMN; gs = gs + 1) begin : g_camserve
+        assign cam_mpc[gs]  = cam_v[gs] && (cam_vtag[gs] == pc_addr[15:4]);
+        assign cam_hi[gs]   = cam_v[gs] && (cam_vtag[gs] == exp_inc[15:4]);
+        assign cam_hh[gs]   = cam_v[gs] && (cam_vtag[gs] == exp_q[15:4]);
+        assign cam_romv[gs] = cam_v[gs] && cam_rom[gs];
+    end endgenerate
+    wire cam_pc_hit = |cam_mpc;       // the fetch's line is retained
+    function automatic [7:0] cam_byte(input [CAMN-1:0] m, input [3:0] off);
+        cam_byte = 8'h00;             // at most one m bit set, by dedupe
+        for (int k = 0; k < CAMN; k = k + 1)
+            if (m[k]) cam_byte = cam_data[k][8 * off +: 8];
+    endfunction
+
+    wire ihit = cyc_is_i && cpu_rw && (hit0 || hit1 || cam_pc_hit);
+    wire hslot = !hit0;               // slot 0 wins a (never-built) double hit
+
+    // The three candidates, register-sourced, in parallel; slots win a
+    // double residency (their byte is identical by the snoop).
     wire        hi0 = v[0] && (exp_inc[15:4]  == vtag[0]);
     wire        hi1 = v[1] && (exp_inc[15:4]  == vtag[1]);
     wire        hc0 = v[0] && (pc_addr[15:4] == vtag[0]);
     wire        hc1 = v[1] && (pc_addr[15:4] == vtag[1]);
     wire        hh0 = v[0] && (exp_q[15:4]    == vtag[0]);
     wire        hh1 = v[1] && (exp_q[15:4]    == vtag[1]);
-    wire [7:0]  b_inc  = hi0 ? ldata[0][8 * exp_inc[3:0]  +: 8] : ldata[1][8 * exp_inc[3:0]  +: 8];
-    wire [7:0]  b_cur  = hc0 ? ldata[0][8 * pc_addr[3:0] +: 8] : ldata[1][8 * pc_addr[3:0] +: 8];
-    wire [7:0]  b_hold = hh0 ? ldata[0][8 * exp_q[3:0]    +: 8] : ldata[1][8 * exp_q[3:0]    +: 8];
+    wire [7:0]  b_inc  = hi0 ? ldata[0][8 * exp_inc[3:0]  +: 8] :
+                         hi1 ? ldata[1][8 * exp_inc[3:0]  +: 8] :
+                               cam_byte(cam_hi, exp_inc[3:0]);
+    wire [7:0]  b_cur  = hc0 ? ldata[0][8 * pc_addr[3:0] +: 8] :
+                         hc1 ? ldata[1][8 * pc_addr[3:0] +: 8] :
+                               cam_byte(cam_mpc, pc_addr[3:0]);
+    wire [7:0]  b_hold = hh0 ? ldata[0][8 * exp_q[3:0]    +: 8] :
+                         hh1 ? ldata[1][8 * exp_q[3:0]    +: 8] :
+                               cam_byte(cam_hh, exp_q[3:0]);
 
     // A program-stream fetch the prediction missed re-aims the predictor;
     // one the sequencer served slow still steps it, so the fetch AFTER a
@@ -246,7 +279,9 @@ module iline (
             exp_q <= 16'd0; lhit_q <= 1'b0; i_byte_q <= 8'd0;
         end else begin
             exp_q    <= step ? exp_inc : recover ? pc_addr : exp_q;
-            lhit_q   <= step ? (hi0 || hi1) : recover ? (hc0 || hc1) : (hh0 || hh1);
+            lhit_q   <= step    ? (hi0 || hi1 || |cam_hi) :
+                        recover ? (hc0 || hc1 || |cam_mpc) :
+                                  (hh0 || hh1 || |cam_hh);
             i_byte_q <= step ? b_inc : recover ? b_cur : b_hold;
         end
     end
@@ -278,7 +313,13 @@ module iline (
 
     wire kill_now = map_changed || inval || !serve ||
                     (hslot ? snp_kill1 : snp_kill0) ||
-                    ((hslot ? t_rom[1] : t_rom[0]) && r2_busy);
+                    ((hslot ? t_rom[1] : t_rom[0]) && r2_busy) ||
+                    // ...and a retained copy of THIS fetch's line dying on
+                    // this very clock - a snoop, or ROM traffic - cancels a
+                    // serve sourced from it, the slots' race handled the
+                    // slots' way.
+                    (|(cam_mpc & cam_snp_kill)) ||
+                    ((|(cam_mpc & cam_romv)) && r2_busy);
 
     // Retire only when the prediction matches the fetch on offer AND the
     // live tags still agree - every term register-vs-register now that the
@@ -328,15 +369,13 @@ module iline (
 
     // The CAM against the picked tag (a hit is a promote or a drop), and
     // against the fill in flight (the allocation's dedupe).
-    wire [CAMN-1:0] cam_m, cam_mf, cam_mpc;
+    wire [CAMN-1:0] cam_m, cam_mf;
     generate for (gk = 0; gk < CAMN; gk = gk + 1) begin : g_cammatch
-        assign cam_m[gk]   = cam_v[gk] && (cam_vtag[gk] == p_tag);
-        assign cam_mf[gk]  = cam_v[gk] && (cam_vtag[gk] == f_vtag);
-        assign cam_mpc[gk] = cam_v[gk] && (cam_vtag[gk] == pc_addr[15:4]);
+        assign cam_m[gk]  = cam_v[gk] && (cam_vtag[gk] == p_tag);
+        assign cam_mf[gk] = cam_v[gk] && (cam_vtag[gk] == f_vtag);
     end endgenerate
-    wire cam_hit    = |cam_m;
-    wire cam_dup    = |cam_mf;
-    wire cam_pc_hit = |cam_mpc;       // the fetch's line is retained: claim it
+    wire cam_hit = |cam_m;
+    wire cam_dup = |cam_mf;
     logic [2:0] cam_idx;
     always_comb begin
         cam_idx = 3'd0;
@@ -373,13 +412,12 @@ module iline (
     wire wanted_now = (want_v[0] && want_tag[0] == pc_addr[15:4]) ||
                       (want_v[1] && want_tag[1] == pc_addr[15:4]) ||
                       (f_active  && f_vtag      == pc_addr[15:4]);
-    // A retained line claims too: the miss trains, the want promotes, the
-    // serve is a handful of stall clocks instead of a sequencer ride.  Still
-    // bounded: if the entry dies under the claim (a snoop), the claim falls
-    // with it and the op rides the sequencer as before; a promote-then-
-    // decline chain always ends in a commit or a dropped want.
-    assign claim = turbo_en && cyc_is_i && cpu_rw &&
-                   (ihit || wanted_now || cam_pc_hit);
+    // ihit already covers a retained line - the CAM serves directly - so a
+    // fetch anywhere in the ten lines claims and retires; the wants cover
+    // the fills and promotes still in flight.  Bounded as ever: an entry
+    // dying under the claim (a snoop) drops the claim with it and the op
+    // rides the sequencer.
+    assign claim = turbo_en && cyc_is_i && cpu_rw && (ihit || wanted_now);
 
     // ---- the misses that train, the crossings that rotate -------------------
     // The train trigger is REGISTERED: the miss's compare-and-increment cone
@@ -447,14 +485,17 @@ module iline (
     // The books, for the bench and the bring-up (hierarchy-visible).
     logic [31:0] cnt_promotes, cnt_cam_fills, cnt_scan_fills, cnt_loop_hold;
     logic [31:0] cnt_scan_block;      // clocks a slot want waited on a scan fill
+    logic [31:0] cnt_cam_serves;      // retires whose byte came from the CAM
     always_ff @(posedge clk) begin
         if (rst) begin
             cnt_promotes <= 32'd0; cnt_cam_fills <= 32'd0;
             cnt_scan_fills <= 32'd0; cnt_loop_hold <= 32'd0;
-            cnt_scan_block <= 32'd0;
+            cnt_scan_block <= 32'd0; cnt_cam_serves <= 32'd0;
         end else begin
             if (want_pending && f_active && f_cam)
                 cnt_scan_block <= cnt_scan_block + 32'd1;
+            if (retire && !hit0 && !hit1)
+                cnt_cam_serves <= cnt_cam_serves + 32'd1;
             if (promote_go) cnt_promotes <= cnt_promotes + 32'd1;
             if ((fst == F_W2) && !f_restart && !cam_dup) begin
                 if (f_cam) cnt_scan_fills <= cnt_scan_fills + 32'd1;
