@@ -22,16 +22,19 @@ the critical read, serving it at ~30 clocks instead of ~12 against a
 ~91-clock deadline) — the overlap remains an optimization for a faster
 regime.  §"The floating bus reads the main bank" is implemented too — the
 side copy deleted, `rtl/fb_sim.sv` on the main bank's port B alternating
-with the peek, 4.5 tiles returned.  **The full master build still misses the
-XC7A35T by two tiles**: 48 RAMB36 + 8 RAMB18 = 104 RAMB18-sites against the
-part's 100 (the banks 32 tiles, the Apple ROM 4, the link FIFOs 5, the
-ring's staging 4, the microcode 3, the floppy banks 4 — nothing left is
-padding).  The clean ways to close the gap are feature tradeoffs, not
-engineering: one floppy drive instead of two is exactly the two tiles
-(fitting 100 of 100); halving the FT601 TX FIFO would also do it but gambles
-with the link's stability.  Neither is taken here — the design targets the
-larger board on order, and the small-part question is left as the decision
-it is.
+with the peek, 4.5 tiles returned.
+
+**The full build FITS the XC7A35T**, by one last move: the banks put the
+design two tiles over (48 RAMB36 + 8 RAMB18 = 104 RAMB18-sites against the
+part's 100 — the banks 32 tiles, the Apple ROM 4, the link FIFOs 5, the
+ring's staging 4, the microcode 3, the floppy banks 4, nothing padding), and
+the 65C02's microcode closed the gap: it is a CONSTANT, so
+`rom_style = "distributed"` lets Vivado logic-optimize its 104 Kbits into
+**+257 LUTs against 3 RAMB36 freed** (measured out of context; the same
+treatment of the host-loaded Apple ROM would have cost 3,564).  The routed
+master build: **45 RAMB36 + 8 RAMB18, 49 of 50 tiles; setup WNS +0.741 ns,
+hold WHS +0.009 ns; bitstream written** — a hardware-testable bit on the
+current part, with the larger board on order still the comfortable home.
 
 The memory image as built (docs/MEMORY.md) keeps a 32 KB 4-way write-through
 cache in front of DDR3 bank 0. It works, and it is proven on hardware — but

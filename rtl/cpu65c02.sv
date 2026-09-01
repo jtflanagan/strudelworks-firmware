@@ -118,7 +118,13 @@ module cpu65c02 #(
     // out of the datapath's critical path.
     localparam int UA_W = 8 + UC_SLOTS_LOG2;
 
-    (* rom_style = "block" *) logic [UC_W-1:0] ucode [0:(1 << UA_W) - 1];
+    // Distributed, not block: the microcode is a CONSTANT ($readmemh at
+    // synthesis, never written), so Vivado logic-optimizes the contents
+    // rather than storing them - measured +257 LUTs against the block
+    // version's 3 RAMB36, the two tiles the page cache's banks needed back
+    // on the XC7A35T (docs/PAGE_CACHE.md), and no SLICEM spent.  The fetch
+    // stays a registered read; the one-clock contract is unchanged.
+    (* rom_style = "distributed" *) logic [UC_W-1:0] ucode [0:(1 << UA_W) - 1];
     initial $readmemh(UCODE_FILE, ucode);
 
     logic [UC_W-1:0] uc;            // the microinstruction driving THIS cycle
