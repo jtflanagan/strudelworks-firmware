@@ -557,7 +557,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     reg [7:0] pass_count = 8'd0;
     reg       failed = 1'b0;
     reg       u_bus_q = 1'b0, u_bus_q2 = 1'b0;   // this unified op came off the bus
-    reg       dma_last_ok = 1'b0;
+    integer   dma_last_hits = 0;
 
     always @(posedge clk) begin
         u_bus_q  <= op_present && !op_dummy;
@@ -567,7 +567,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // Bus ops: at the data phase, against the machine ($C0xx) or the reference.
     always @(posedge clk) if (u_commit) begin
         if (u_ovr) ovr_cycles = ovr_cycles + 1;
-        if (u_ovr && u_addr == 16'h210F) dma_last_ok = 1'b1;
+        if (u_ovr && u_addr == 16'h210F) dma_last_hits = dma_last_hits + 1;
         if (u_rw) begin
             reads = reads + 1; bus_reads = bus_reads + 1;
             // ...except the reset sequence's, which ride the bus by rule, and
@@ -711,11 +711,13 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             idx = 0;
             @(negedge clk);
             tb_ovr_en <= 1'b1; tb_ovr_rw <= 1'b0; tb_ovr_addr <= 16'h2100; tb_ovr_wdata <= 8'h80;
+            // Sampled at negedge, where the posedge's updates have settled:
+            // a posedge sample here races the design's non-blocking updates,
+            // and the two simulators order that race differently.
             while (idx < n) begin
-                @(posedge clk);
+                @(negedge clk);
                 if (op_present && op_ovr && op_addr == tb_ovr_addr && !op_rw) begin
                     idx = idx + 1;
-                    @(negedge clk);
                     if (idx < n) begin tb_ovr_addr <= 16'h2100 + idx; tb_ovr_wdata <= 8'h80 + idx; end
                     else tb_ovr_en <= 1'b0;
                 end
@@ -727,9 +729,9 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         begin
             @(negedge clk);
             tb_ovr_en <= 1'b1; tb_ovr_rw <= 1'b0; tb_ovr_addr <= 16'h03FE; tb_ovr_wdata <= 8'h01;
-            @(posedge clk);
-            while (!(op_present && op_ovr && op_addr == 16'h03FE)) @(posedge clk);
-            @(negedge clk); tb_ovr_en <= 1'b0;
+            @(negedge clk);
+            while (!(op_present && op_ovr && op_addr == 16'h03FE)) @(negedge clk);
+            tb_ovr_en <= 1'b0;
         end
     endtask
 
@@ -935,13 +937,13 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         common_checks("the governor");
 
         // ---- 5. a DMA, in mode 2 ---------------------------------------------------------
-        ovr_cycles = 0; dma_last_ok = 1'b0;
+        ovr_cycles = 0; dma_last_hits = 0;
         dma(16);
         repeat (4 * CYCLE) @(negedge clk);
         if (ovr_cycles != 16) fail($sformatf("%0d override cycles, expected 16", ovr_cycles));
         else if (card_main(16'h2100) !== 8'h80 || card_main(16'h210F) !== 8'h8F || main_ram[16'h2100] !== 8'h80 || ref_main[16'h210F] !== 8'h8F)
             fail("the DMA's writes did not reach the image, the machine and the reference alike");
-        else if (!dma_last_ok) fail("the DMA's last byte did not commit under its own address");
+        else if (dma_last_hits == 0) fail("the DMA's last byte did not commit under its own address");
         else ok("a DMA through the override path, under acceleration: 16 cycles, every byte landed, the last one's commit its own");
         n0 = pass_count;
         wait_passes(n0 + 2, "mode 2 after the DMA");
@@ -991,9 +993,9 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         // where the model expects the slot's - the failure seen on hardware.
         @(negedge clk);
         tb_ovr_en <= 1'b1; tb_ovr_rw <= 1'b0; tb_ovr_addr <= 16'hC007; tb_ovr_wdata <= 8'h00;
-        @(posedge clk);
-        while (!(op_present && op_ovr && op_addr == 16'hC007)) @(posedge clk);
-        @(negedge clk); tb_ovr_en <= 1'b0;
+        @(negedge clk);
+        while (!(op_present && op_ovr && op_addr == 16'hC007)) @(negedge clk);
+        tb_ovr_en <= 1'b0;
         repeat (2 * CYCLE) @(negedge clk);
         if (!m_intcx) fail("INTCXROM was not set on the machine before the reset");
         n1 = m_mmu_resets;
