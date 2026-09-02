@@ -1,6 +1,8 @@
 # The dline: 1-clock data
 
-Status: **design agreed; rung 1 is the next work**. Branch `dcache`, both repos,
+Status: **rung 1 DONE and on hardware** (fw e9170ab: 39.5x, sim and the
+user's hardware observation agreeing). **Next: the boot bench
+(docs/BOOT_BENCH.md), then rung 2.** Branch `dcache`, both repos,
 cut from the merged master (page cache + istream front + carry gift, all
 hardware-proven). The old acceleration-branch D$ plan (its DCACHE_PLAN.md)
 is explicitly NOT the basis for this work: it solved a cache-hierarchy
@@ -129,19 +131,99 @@ writes, which do not fill) is a bench question.
 
 ## Phasing and proof
 
-- **Rung 1**: retire plumbing (d_ok/d_commit beside turbo_ok/
-  turbo_commit) + the shadow. Smallest surface that proves the whole
-  1-clock contract end to end. Measured on the accel bench; expect a
-  large bite out of the 59%.
-- **Rung 2**: the 4-line CAM.
-- **Rung 3**: the write path.
-- **Rung 4**: stream buffers, tuned by measurement.
-- **In parallel with rung 1: the boot bench for THIS lineage** - a real
-  .hdv booted from reset in simulation. The old boot_tb found both
-  D$-era bugs and nothing else did; it is written against dead
-  interfaces and gets rebuilt, not ported.
-
 Each rung lands only with: the accel battery green under Verilator AND
-iverilog, the predict/cancel contract green, a build whose depth report
-shows no new deep tail, and the bench's measured x reported against the
-32.8x baseline.
+iverilog, the boot bench green on both images (from rung 2 on), the
+predict/cancel contract green, a build whose depth report shows no new
+deep tail, and the bench's measured x reported against the 32.8x
+baseline.
+
+### Rung 1 - the retire plumbing + the shadow: DONE (fw e9170ab)
+
+39.5x from 32.8x; 4,461 of 8,342 dispatcher data ops at one clock (53% -
+the old zp+stack locality number, found again). Three lessons paid for,
+each a comment in rtl/dline.sv where it bit: ONE explicit write port per
+LUTRAM or the array flop-izes; nothing reads or decides on d_pred's late
+cone - register the address and the prediction's validity only, evaluate
+everything else THROUGH the serve cycle from registers; and a registered
+claim's one-clock lag must be fenced (the fc_q||claim_q retire gate)
+against serve_hit rising mid-stall, or a settled dispatcher and a fresh
+retire double-serve one cycle. Every rung below inherits all three.
+
+### The boot bench, before rung 2
+
+docs/BOOT_BENCH.md. Rung 1's nastiest bug was caught by review, not by a
+bench; rungs 2-4 are snoop/kill/ordering machinery, exactly the species
+only a real boot has historically caught.
+
+### Rung 2 - the 4-line CAM
+
+RAM-class reads outside the shadow's pages. The shape:
+
+- 4 entries (user's number; grow only on measured evidence): FF tags
+  carrying PHYSICAL identity - {aux, bank, folded off[15:4]} - one
+  LUTRAM for data with the one-write-port discipline, round-robin
+  replacement until rung 4 refines insertion.
+- **The MMU grows a d-side query port** - the mirror of iline's
+  p_addr/p_cls/p_aux/p_off - classifying d_pred combinationally so the
+  physical tag registers beside dq_addr at the edge. This is the rung's
+  one genuinely new surface, and it is also what rung 3 needs to stamp
+  posted writes, so it is built here.
+- The lookup joins serve_hit: shadow range serves the shadow, else the
+  4-way tag compare. Watch the depth report - the compare adds ~2-3
+  levels to serve_hit's cycle-rooted cone, and if it pushes the din-mux
+  or retire cones out of the bulk, the rung-1 split applies again
+  (register the compare verdict per entry, not the composite).
+- Fills ride the rung-1 claim engine, extended with a target select
+  (shadow row or CAM entry); arbitration order stays iline > dline.
+- Coherence: per-entry snoop of classified writes (splice when the write
+  port is free, else kill - a kill is always safe); flash-clear on
+  map_changed exactly as iline does (tags are physical, but a fill's
+  folding was captured under the map of its day - iline's rule, kept);
+  inval clears everything.
+- Aux and LC reads come along for free if the classification says RAM -
+  measure before special-casing anything (aux zp/stack explicitly get
+  nothing, the user's decision).
+
+Expect most of the remaining ~3,900 dispatcher data reads to move;
+bench somewhere near 50x.
+
+### Rung 3 - writes: splice + post
+
+A mode-2 data write retires in one clock: splice into whatever holds the
+address (shadow, CAM, stream buffer - the write-port arbitration again),
+push {physical stamp from the rung-2 query port, data} onto a small
+posted FIFO, emit the event AT RETIRE. The laws, now enforced in RTL
+rather than prose:
+
+- A write retires ONLY when the event merge has room - write events are
+  never dropped, never reordered, so ev_room gates the retire itself
+  (reads stay best-effort).
+- The retire qualifier excludes anything the classifier diverts
+  (RamWorks divert writes are bus reads, never fast) and every $C0xx by
+  class; mode 1 keeps writes on the bus by mode.
+- The FIFO drains on port-A idle grants in order, dirtying pages through
+  the existing write path; classification travels IN the FIFO entry
+  (stamped at retire, under the map of that instant), never re-derived
+  at drain.
+- FIFO-empty terms: the dispatcher's fallback dispatch, every
+  map-changing bus op, and the override release (S_HELD's exit) all
+  wait for it - the read-after-write, TLB-flush and DMA orderings from
+  the design section, each one term.
+- Snoops check the FIFO too (or ride the FIFO-empty waits; whichever
+  the boot bench proves simpler-correct).
+
+Expect the write population (~10% of ops) to move; the dispatcher is
+then bus-ops-only. Bench toward ~60x.
+
+### Rung 4 - streams
+
+One or two line buffers BESIDE the CAM; a same-line-and-advancing
+comparator on the d_pred stream detects; prefetch of line+1 rides the
+claim engine at lowest priority; a buffer's line enters the CAM only on
+SECOND touch, which is what makes poisoning structurally impossible.
+Buffers are snooped and killed like every other holder. This rung is
+tuned by measurement: counters first (stream hits, prefetches,
+promotes), a streaming section added to sim/accel.s, the boot bench as
+regression, and one-versus-two buffers decided by the numbers, not by
+argument. This is the tail toward the ~70x ceiling, past which the bus
+ops are the wall and out of scope.
