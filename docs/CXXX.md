@@ -127,6 +127,37 @@ scanner's want filter (it uses the same function).  Expected effect:
 AUXMOVE and every 80-column-firmware loop at one clock; the demo's end
 loop from 22x toward the fast section's figure.
 
+## The second finding (2026-09-02, on hardware): Nox at the overworld map, 20x
+
+A 5 s FULL capture (26.2M words, 2.54M bus cycles = 2.49 s of machine
+time, 1.005M real bus events, 23.6M fast words) of Nox sitting at the
+overworld map on the step-1 bit, showing 20x on the HUD:
+
+- **92.2% of all bus events are reads of $C000** (926k): the keyboard poll
+  at $D56C - `LDA $C000 / BPL $D57C / INX / ...` back to $D56C.  Every
+  poll costs TWO bus cycles, not one: after the read's data phase the
+  core's next $C000 read has missed the current cycle's present point and
+  waits for the next (898k of the 926k gaps between consecutive $C000
+  reads are exactly 2 cycles, 28k are 1).  **1.82M of the 2.54M cycles -
+  72% of the machine's time - is the poll loop**, at ~6x.
+- The rest: AUXMOVE's setup - $C004/$C003/$C002 writes (RAMRD/RAMWRT),
+  $C013/$C014 reads - 77k bus events, 7.7%, 12.9k AUXMOVE calls; the
+  copy loop itself is now all fast words ($C393-$C3AD, step 1).  The map
+  redraw loop at $D4FD-$D531 (206k iterations, ~40 ops each, all fast).
+  $C083/$C08B 464, $C011/12/16 348, $C054/55 116: noise.
+- No phases: every 100k-cycle window looks the same (~39k bus events,
+  ~36k of them $C000).  The redraws appear as ~50 gaps of ~6.5k cycles
+  between polls.
+
+So at this screen the 20x is the idle poll's figure.  Serving the
+keyboard read on the card (question 4 below: sample the keyboard in the
+parked dummy instead of the $0000 read, cache the sample, answer program
+$C000 reads from it - the user's design; the kbd_inject latch semantics
+for injected keys unchanged) removes 72% of the cycles at once; the
+AUXMOVE switch traffic (questions 1/3: RAMRD/RAMWRT writes internalized,
+$C013/$C014 answered from the shadow) is the next 7.7% of bus ops.
+Evidence trace: nox_map.swbt (session scratchpad, 105 MB, not kept).
+
 ## Open questions for the next steps
 
 1. (Latch pages: DONE, step 1.)  Whether the dline's data-side $Cxxx
