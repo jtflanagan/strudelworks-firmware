@@ -2,23 +2,26 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
-// mem_ddr3_tb - the memory client in wb_arb's priority slot against the real
+// mem_ddr3_tb - the page client in wb_arb's priority slot against the real
 // UberDDR3 and the Micron model, with the TX ring streaming beside it.
 //
-// mem_cache_tb proves the cache against a memory that keeps the controller's
+// page_cache_tb proves the cache against a memory that keeps the controller's
 // rules; this proves the rules hold on the controller itself, for the three
 // things only it can show:
 //
-//   - a byte written and the line fetched right behind it come back written,
-//     because accepted requests are performed in order;
-//   - a fill's answer arrives inside the bus cycle even when it pre-empts a
-//     ring batch mid-flight - the number the whole realtime budget rests on;
+//   - a page written and fetched right behind it comes back written, because
+//     accepted requests are performed in order - the fill-behind-flush order
+//     the write-back design rests on;
+//   - a sixteen-beat fill streams PIPELINED, critical line first, and the
+//     whole fill-plus-flush transaction is over inside the bus cycle even
+//     when it pre-empts a ring batch mid-flight - the numbers the realtime
+//     budget rests on (docs/PAGE_CACHE.md);
 //   - refreshes land only where refresh_ok put them: in the idle tail of a
 //     bus cycle, never in front of a fill.
 //
-// Ops arrive as the cache would send them, one per 98-clock bus cycle,
-// scored against a software image; the ring runs tx_ring_ddr3_tb's stream
-// underneath, word-exact.  The model's own density (8 Gb) so it raises no
+// Transactions arrive as the page engine sends them, one per 98-clock bus
+// cycle, scored against a software image; the ring runs tx_ring_ddr3_tb's
+// stream underneath, word-exact.  The model's own density (8 Gb) so it raises no
 // tRFC complaints; a refresh is then ~42 clocks rather than the Au's 23, which
 // only makes the window check stricter.
 //////////////////////////////////////////////////////////////////////////////////
@@ -272,23 +275,24 @@ module mem_ddr3_tb;
     end
     always @(posedge clk) if (in_valid && in_take) si <= si + 1;
 
-    // ---- the memory client, driven as the cache would ------------------------------
+    // ---- the page client, driven as the page engine drives it ------------------
+    // Two banks of eight pages: the whole space this run touches, written
+    // before it is read (nothing clears the DDR3; an unwritten line is X in
+    // the model).
+    localparam integer NPG = 8;
     reg         op_present = 1'b0, master_active = 1'b0;
-    reg         mq_valid = 1'b0, mq_kind = 1'b0;
-    reg  [1:0]  mq_id = 2'd0;
-    reg  [19:0] mq_line = 20'd0;
-    reg  [3:0]  mq_byte = 4'd0;
-    reg  [7:0]  mq_data = 8'd0;
-    wire        mq_ready, mr_valid;
-    wire [1:0]  mr_id;
-    wire [127:0] mr_data;
+    reg         pq_busy_r = 1'b0, pq_valid_r = 1'b0, pq_we_r = 1'b0;
+    reg  [19:0] pq_line_r = 20'd0;
+    reg  [127:0] pq_wdata_r = 128'd0;
+    wire        pq_ready, pr_valid;
+    wire [127:0] pr_data;
 
-    mem_client #(.PH_REF_LO (PH_REF_LO), .PH_REF_HI (PH_REF_HI)) u_mem (
+    page_client #(.PH_REF_LO (PH_REF_LO), .PH_REF_HI (PH_REF_HI)) u_mem (
         .clk (clk), .rst (rst), .calib_complete (o_calib_complete),
         .master_active (master_active), .op_present (op_present),
-        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
-        .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
-        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
+        .pq_busy (pq_busy_r), .pq_valid (pq_valid_r), .pq_we (pq_we_r),
+        .pq_line (pq_line_r), .pq_wdata (pq_wdata_r), .pq_ready (pq_ready),
+        .pr_valid (pr_valid), .pr_data (pr_data),
         .req (c_req[2]), .gnt (c_gnt[2]), .cyc (c_cyc[2]), .stb (c_stb[2]),
         .we (c_we[2]), .addr (c_addr[3*WB_ADDR_BITS-1:2*WB_ADDR_BITS]),
         .data (c_data[383:256]), .sel (c_sel[47:32]),
@@ -297,31 +301,98 @@ module mem_ddr3_tb;
         .image_ready (image_ready)
     );
 
-    // The software image: the first 256 lines, written before they are read.
-    localparam integer NL = 256;
-    reg [7:0]  img [0:NL*16-1];
-    integer    fills = 0, fill_bad = 0, fill_max = 0, fill_late = 0, fill_sum = 0;
-    integer    fill_t0 = 0, fill_pending = 0;
-    reg  [1:0] fill_id_exp = 2'd0;
-    integer    fill_line = 0;
+    // A beat is accepted at the posedge where pq_valid met pq_ready; the
+    // driver advances at the negedge after, exactly as the engine's registered
+    // stream does.
+    reg acc_q = 1'b0;
+    always @(posedge clk) acc_q <= pq_valid_r && pq_ready;
+
+    // The software image: 2 banks x NPG pages.
+    reg [7:0]  img [0:2*NPG*256-1];
+    function automatic integer img_ix(input [7:0] bank, input [7:0] page,
+                                      input [3:0] line, input integer b);
+        img_ix = {bank[0], page[2:0], line, 4'(b)};
+    endfunction
+
+    // Read-burst scoring: responses arrive in request order, critical-first.
+    integer    fill_bad = 0, resp_n = 0;
+    reg  [7:0] r_bank = 0, r_page = 0;
+    reg  [3:0] r_crit = 0;
+    reg        r_score = 1'b0;
     integer    phase = 0;
+    integer    t_start = 0, lat_first = 0, lat1_sum = 0, lat1_max = 0, xacts = 0;
     integer    k;
+    reg [3:0]  r_idx;
     always @(posedge clk) begin
         if (op_present) phase <= 0; else phase <= phase + 1;
-        if (mr_valid) begin
-            if (!fill_pending || mr_id !== fill_id_exp) begin
-                $display("FAIL: an unexpected fill (id %0d)", mr_id); errors = errors + 1;
-            end else begin
-                fills = fills + 1;
-                fill_pending = 0;
-                if (phase - fill_t0 > fill_max) fill_max = phase - fill_t0;
-                fill_sum = fill_sum + (phase - fill_t0);
-                if (phase > 90) fill_late = fill_late + 1;
-                for (k = 0; k < 16; k = k + 1)
-                    if (mr_data[8*k +: 8] !== img[fill_line*16 + k]) fill_bad = fill_bad + 1;
+        if (pr_valid && r_score) begin
+            r_idx = r_crit + 4'(resp_n);
+            for (k = 0; k < 16; k = k + 1)
+                if (pr_data[8*k +: 8] !== img[img_ix(r_bank, r_page, r_idx, k)])
+                    fill_bad = fill_bad + 1;
+            if (resp_n == 0) begin
+                lat_first = phase - t_start;
+                lat1_sum  = lat1_sum + lat_first;
+                if (lat_first > lat1_max) lat1_max = lat_first;
+                xacts = xacts + 1;
             end
+            resp_n = resp_n + 1;
         end
     end
+
+    // Sixteen pipelined beats: reads of {bank,page} critical-first, or writes
+    // of fresh random data (the image updated as each beat is issued - the
+    // controller performs accepted requests in order, so a read behind them
+    // sees them).
+    task beats(input we, input [7:0] bank, input [7:0] page, input [3:0] first);
+        integer n, b;
+        reg [3:0] idx;
+        reg [127:0] w;
+        begin
+            n = 0; idx = first;
+            if (!we) begin
+                r_bank = bank; r_page = page; r_crit = first;
+                resp_n = 0; r_score = 1'b1; t_start = phase;
+            end
+            pq_we_r <= we;
+            pq_line_r <= {bank, page, idx};
+            if (we) begin
+                for (b = 0; b < 16; b = b + 1) begin
+                    w[8*b +: 8] = 8'($urandom);
+                    img[img_ix(bank, page, idx, b)] = w[8*b +: 8];
+                end
+                pq_wdata_r <= w;
+            end
+            pq_valid_r <= 1'b1;
+            while (n < 16) begin
+                @(negedge clk);
+                if (acc_q) begin
+                    n = n + 1;
+                    idx = first + 4'(n);
+                    if (n < 16) begin
+                        pq_line_r <= {bank, page, idx};
+                        if (we) begin
+                            for (b = 0; b < 16; b = b + 1) begin
+                                w[8*b +: 8] = 8'($urandom);
+                                img[img_ix(bank, page, idx, b)] = w[8*b +: 8];
+                            end
+                            pq_wdata_r <= w;
+                        end
+                    end else begin
+                        pq_valid_r <= 1'b0;
+                    end
+                end
+            end
+        end
+    endtask
+
+    // Wait for a read burst's sixteen responses.
+    task drain_reads;
+        begin
+            while (resp_n < 16) @(negedge clk);
+            r_score = 1'b0;
+        end
+    endtask
 
     // Refreshes on the DDR3 command bus, and where in the bus cycle they fell.
     integer refs = 0, refs_outside = 0, refs_timed = 0;
@@ -338,28 +409,11 @@ module mem_ddr3_tb;
         end
     end
 
-    task push(input kind, input [19:0] line, input [3:0] b, input [7:0] d);
-        begin
-            @(negedge clk);
-            while (!mq_ready) @(negedge clk);
-            mq_valid <= 1'b1; mq_kind <= kind; mq_line <= line; mq_byte <= b; mq_data <= d;
-            if (kind) begin
-                mq_id <= fill_id_exp + 2'd1; fill_id_exp = fill_id_exp + 2'd1;
-                fill_pending = 1; fill_t0 = phase + 1; fill_line = line;
-            end else begin
-                img[line*16 + b] = d;
-            end
-            @(negedge clk);
-            mq_valid <= 1'b0;
-        end
-    endtask
-
     // ---- stimulus ---------------------------------------------------------------
-    integer c, n, r, line, b;
+    integer c, n, r, pg, bk, tot_max = 0, tot_t = 0;
     initial begin
-        $display("mem_ddr3_tb: the memory client on UberDDR3, the ring streaming beside it");
+        $display("mem_ddr3_tb: the page client on UberDDR3, the ring streaming beside it");
         gen_stream;
-        for (n = 0; n < NL*16; n = n + 1) img[n] = 8'h00;
 
         i_rst_n = 0;
         repeat (10) @(posedge clk);
@@ -369,46 +423,64 @@ module mem_ddr3_tb;
         wait (o_calib_complete === 1'b1);
         $display("  calibrated at %0t", $time);
         if (!image_ready) begin $display("FAIL: image_ready did not follow calibration"); errors = errors + 1; end
-        // Nothing clears the DDR3, so write every line the run will read before
-        // reading any: a fill of an unwritten line is X in the model.
+        // Nothing clears the DDR3, so write every page the run will read
+        // before reading any: a fill of an unwritten line is X in the model.
         master_active = 1'b1;
-        for (n = 0; n < NL; n = n + 1) begin
+        for (n = 0; n < 2 * NPG; n = n + 1) begin
             @(negedge clk); op_present <= 1'b1; @(negedge clk); op_present <= 1'b0;
-            for (b = 0; b < 16; b = b + 1) push(1'b0, n[19:0], b[3:0], 8'h00);
-            repeat (40) @(negedge clk);
+            pq_busy_r <= 1'b1;
+            beats(1'b1, 8'(n / NPG), 8'(n % NPG), 4'd0);
+            pq_busy_r <= 1'b0;
+            repeat (60) @(negedge clk);
         end
         repeat (200) @(negedge clk);
 
-        // ---- 1. a write, then its line: the order holds ------------------------
+        // ---- 1. a page written and fetched right behind it comes back written --
         gate = 1'b1; out_take = 1'b1;
         @(negedge clk); op_present <= 1'b1; @(negedge clk); op_present <= 1'b0;
-        push(1'b0, 20'd17, 4'd5, 8'hA7);
-        push(1'b1, 20'd17, 4'd5, 8'h00);
-        repeat (CYC - 6) @(negedge clk);
-        if (fills != 1 || fill_bad != 0) begin
-            $display("FAIL: write-then-fill: %0d fills, %0d bad bytes", fills, fill_bad);
+        pq_busy_r <= 1'b1;
+        beats(1'b1, 8'd0, 8'd3, 4'd0);
+        beats(1'b0, 8'd0, 8'd3, 4'd5);
+        drain_reads;
+        pq_busy_r <= 1'b0;
+        while (phase < CYC - 2) @(negedge clk);
+        if (fill_bad != 0) begin
+            $display("FAIL: write-then-fill: %0d bad bytes", fill_bad);
             errors = errors + 1;
-        end else $display("  ok: a byte written and its line fetched right behind it come back written");
+        end else $display("  ok: a page written and fetched right behind it comes back written");
 
-        // ---- 2. random cycles: writes and fills against the image, batches beneath --
+        // ---- 2. random cycles: the engine's shape, batches beneath ----------------
+        // Most cycles carry a miss transaction - a sixteen-beat fill,
+        // critical-first, then the victim's sixteen-beat flush behind it,
+        // exactly as rtl/page_cache.sv drives it - and the whole thing must
+        // be over well inside the bus cycle.
         for (n = 0; n < NCYC; n = n + 1) begin
             @(negedge clk); op_present <= 1'b1; @(negedge clk); op_present <= 1'b0;
             r = $urandom % 100;
-            line = (r < 70) ? ($urandom % 8) : ($urandom % NL);
-            b = $urandom % 16;
-            if (r < 45)      push(1'b0, line[19:0], b[3:0], 8'($urandom));
-            else if (r < 85) push(1'b1, line[19:0], b[3:0], 8'h00);
+            if (r < 70) begin
+                repeat (4) @(negedge clk);        // the decision's clocks
+                pq_busy_r <= 1'b1;
+                bk = $urandom % 2; pg = $urandom % NPG;
+                beats(1'b0, 8'(bk), 8'(pg), 4'($urandom));
+                drain_reads;
+                if (r < 42)                       // a dirty victim: flush behind
+                    beats(1'b1, 8'(1 - bk), 8'(pg), 4'd0);
+                pq_busy_r <= 1'b0;
+                if (phase > tot_max) tot_max = phase;
+                if (phase > 92) tot_t = tot_t + 1;
+            end
             gate     = ($urandom % 100) < 70;
             out_take = ($urandom % 100) < 60;
-            repeat (CYC - 4) @(negedge clk);
+            while (phase < CYC - 2) @(negedge clk);
         end
-        $display("  %0d fills: mean %0d clocks from request to line, max %0d",
-                 fills, fill_sum / (fills > 0 ? fills : 1), fill_max);
+        $display("  %0d transactions: first line mean %0d clocks after the burst began, max %0d; whole transaction max %0d",
+                 xacts, lat1_sum / (xacts > 0 ? xacts : 1), lat1_max, tot_max);
         if (fill_bad != 0) begin $display("FAIL: %0d fill bytes differ from the image", fill_bad); errors = errors + 1; end
-        else $display("  ok: every fill matches the image");
-        if (fill_late != 0 || fill_max > 80) begin
-            $display("FAIL: %0d fills after clock 90, max %0d", fill_late, fill_max); errors = errors + 1;
-        end else $display("  ok: every fill landed inside its bus cycle, %0d clocks at worst", fill_max);
+        else $display("  ok: every fill matches the image, critical-first, through the flushes");
+        if (lat1_max > 60 || tot_t != 0) begin
+            $display("FAIL: first line max %0d, %0d transactions past clock 92", lat1_max, tot_t);
+            errors = errors + 1;
+        end else $display("  ok: every transaction inside its bus cycle, the critical line %0d clocks at worst", lat1_max);
         if (refs_timed < NCYC / 12) begin
             $display("FAIL: only %0d refreshes over %0d cycles", refs_timed, NCYC); errors = errors + 1;
         end else if (refs_outside != 0) begin

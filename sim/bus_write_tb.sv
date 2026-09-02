@@ -72,6 +72,11 @@ module bus_write_tb;
     wire       drv_sync;
     reg  [7:0] data_sync = 8'hA5;
     reg        master_active = 1'b0;
+    // The sequencer's levels and an override, driven by the cases below.
+    reg        bus_owns   = 1'b1;
+    reg        core_valid = 1'b1;
+    reg        ovr_en     = 1'b0;
+    wire       op_dummy, op_inflight, op_present, op_commit, op_ovr;
 
     wire [15:0] addr_drive;
     wire        rw_drive;
@@ -86,17 +91,19 @@ module bus_write_tb;
         .clk (clk), .rst (rst),
         .phi0_sync (phi0), .data_sync (data_sync),
         .master_active (master_active),
+        .bus_owns (bus_owns), .core_valid (core_valid),
+        .op_dummy (op_dummy), .op_inflight (op_inflight),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),
         .cpu_sync (cpu_sync), .drv_sync (drv_sync),
         .cyc_en (cyc_en), .cpu_din (cpu_din),
         // No peripheral in this tb: the claim is tied low, which is also the
         // proof that an idle claim changes nothing the checks below assert.
-        .op_addr (), .op_rw (), .op_wdata (), .op_present (), .op_commit (),
+        .op_addr (), .op_rw (), .op_wdata (), .op_present (op_present), .op_commit (op_commit),
         .slot_rd_claim (1'b0), .slot_rd_data (8'h00),
         .din_sub_en (1'b0), .din_sub_data (8'h00),
         // No boot hold either: the override is idle, which is what every
         // cycle looks like once a machine has booted.
-        .ovr_en (1'b0), .ovr_addr (16'h0000), .ovr_rw (1'b1), .ovr_wdata (8'h00), .op_ovr (), .nxt_addr (), .divert (1'b0), .op_divert (),
+        .ovr_en (ovr_en), .ovr_addr (16'hC000), .ovr_rw (1'b1), .ovr_wdata (8'h00), .op_ovr (op_ovr), .nxt_addr (), .divert (1'b0), .op_divert (),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)
@@ -187,6 +194,34 @@ module bus_write_tb;
             sync_changes = 0;
         end
     end
+
+    // ---- observers for the sequencer's levels --------------------------------
+    // Counted only while `watch` is set, over whole bus cycles.
+    reg     watch = 1'b0;
+    integer w_cycles = 0, w_cycen = 0, w_present = 0, w_commit = 0;
+    integer w_dummy_mid = 0, w_parked_mid = 0, w_ovr_mid = 0;
+    integer w_infl_mid = 0, w_infl_late = 0;
+    always @(posedge clk) if (!rst && watch) begin
+        if (cyc_en)     w_cycen   = w_cycen + 1;
+        if (op_present) w_present = w_present + 1;
+        if (op_commit)  w_commit  = w_commit + 1;
+        if (since_fall == 30) begin
+            w_cycles = w_cycles + 1;
+            if (op_dummy) w_dummy_mid = w_dummy_mid + 1;
+            if (addr_drive == 16'h0000 && rw_drive) w_parked_mid = w_parked_mid + 1;
+            if (op_ovr && addr_drive == 16'hC000) w_ovr_mid = w_ovr_mid + 1;
+            if (op_inflight) w_infl_mid = w_infl_mid + 1;
+        end
+        // T_DIN is rise+45 = fall+94; two clocks later the flag must be down.
+        if (since_fall == 97 && op_inflight) w_infl_late = w_infl_late + 1;
+    end
+    task clear_watch;
+        begin
+            w_cycles = 0; w_cycen = 0; w_present = 0; w_commit = 0;
+            w_dummy_mid = 0; w_parked_mid = 0; w_ovr_mid = 0;
+            w_infl_mid = 0; w_infl_late = 0;
+        end
+    endtask
 
     integer i;
     initial begin
@@ -282,6 +317,51 @@ module bus_write_tb;
             fail("din did not follow the bus");
         else
             $display("  ok: din is latched from the bus and stable at cyc_en");
+
+        // --- case 9 / nothing on offer: a DUMMY, and the core does not move --
+        // core_valid low for a run of cycles: the bus is still driven, as the
+        // parked read of $0000, op_present/op_commit still tick (the peripherals
+        // count bus cycles on them), op_dummy says so, and cyc_en is withheld.
+        @(negedge clk); core_valid = 1'b0;
+        repeat (98) @(posedge clk);          // let the level land at a present
+        @(negedge clk); clear_watch; watch = 1'b1;
+        repeat (5 * 98) @(posedge clk);
+        @(negedge clk); watch = 1'b0;
+        if (w_cycles != 5)                 fail("dummy window did not span five cycles");
+        else if (w_dummy_mid != 5)         fail("op_dummy not raised on every unoffered cycle");
+        else if (w_parked_mid != 5)        fail("an unoffered cycle was not the parked $0000 read");
+        else if (w_cycen != 0)             fail("cyc_en fired for a dummy cycle");
+        else if (w_present != 5 || w_commit != 5)
+            fail("op_present/op_commit did not tick once per dummy cycle");
+        else
+            $display("  ok: with nothing on offer every cycle is a $0000 read, op_dummy set, no cyc_en, present/commit still ticking");
+
+        // --- case 10 / an override is refused while the bus is not owned -----
+        // ovr_en up but bus_owns down: still dummies.  Then bus_owns up: the
+        // override is presented, and op_inflight spans present to data phase.
+        @(negedge clk); ovr_en = 1'b1; bus_owns = 1'b0;
+        repeat (98) @(posedge clk);
+        @(negedge clk); clear_watch; watch = 1'b1;
+        repeat (3 * 98) @(posedge clk);
+        @(negedge clk); watch = 1'b0;
+        if (w_dummy_mid != 3 || w_ovr_mid != 0 || w_infl_mid != 0)
+            fail("an override was presented while bus_owns was low");
+        else
+            $display("  ok: an override is refused while the bus is not owned");
+        @(negedge clk); bus_owns = 1'b1;
+        repeat (98) @(posedge clk);
+        @(negedge clk); clear_watch; watch = 1'b1;
+        repeat (3 * 98) @(posedge clk);
+        @(negedge clk); watch = 1'b0;
+        if (w_ovr_mid != 3 || w_dummy_mid != 0) fail("the override was not presented once bus_owns rose");
+        else if (w_cycen != 0)                   fail("cyc_en fired for an override cycle");
+        else if (w_infl_mid != 3)                fail("op_inflight not up mid-cycle on an override");
+        else if (w_infl_late != 0)               fail("op_inflight still up after the data phase");
+        else
+            $display("  ok: with bus_owns the override is presented; op_inflight spans present to data phase");
+
+        @(negedge clk); ovr_en = 1'b0; core_valid = 1'b1;
+        repeat (2 * 98) @(posedge clk);
 
         // --- case 8 / giving the bus back is immediate and total -------------
         @(negedge clk); master_active = 1'b0;

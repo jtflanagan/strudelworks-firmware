@@ -1,5 +1,16 @@
 # The floppy: a Disk II on the card, the disks on the host
 
+> **On branch `page_cache` the two per-drive track buffers became ONE**,
+> shared and tagged with whose track it holds — only one drive is ever
+> live (the phases and the enable reach the selected drive alone), so a
+> drive switch flushes-and-refetches exactly as a head movement does, one
+> ~0.5 ms refetch no correct software can notice: everything resyncs on an
+> address field after a switch anyway, and a real drive needs up to a
+> second of motor first.  Two BRAM tiles returned (docs/PAGE_CACHE.md
+> carries the budget); the protocol, the host, and FD_STAT's register
+> shape are unchanged — a drive without the buffer simply reports stale.
+> The per-drive-buffer mechanics below are historical here.
+
 A Disk II controller card in a slot of the host's choosing (default 6), with
 two drives, for `.dsk`/`.do`/`.po`/`.nib` images. The controller and every
 cycle of its timing are in `rtl/floppy_card.sv`; the images, the nibblizing
@@ -9,6 +20,13 @@ The reference model is AppleWin's `source/Disk.cpp`, its non-WOZ path, with
 one deliberate departure: the data register's timing is taken from
 AppleWin's LSS path instead, because that is the physical one, and this card
 can afford to be physical - it counts bus cycles.
+
+
+> **Under acceleration (ACCELERATION.md)** the card's tick is one per op of
+> the core rather than one per bus cycle - a fast op the bus never saw ticks
+> too, a dummy cycle does not - so the disk turns as fast as the core runs
+> and the cycle-counted loops see what they always did. `fill_max` and `late`
+> are in those ticks.
 
 ## Where the seam is, and why
 

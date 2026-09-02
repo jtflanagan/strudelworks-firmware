@@ -47,3 +47,7 @@ __pycache__/
 
 # host-side build products
 /tools/ft601/ft601_probe
+/sim/accel_work/
+/sim/boot_work/
+/sim/cpu_predict_work/
+/sim/tlb_work/

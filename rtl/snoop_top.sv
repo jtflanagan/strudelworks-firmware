@@ -88,6 +88,9 @@ module snoop_top #(
         .capture_on (capture_on), .capture_real (capture_real),
         .real_data (real_data), .real_valid (real_valid),
         .real_mark (1'b0), .real_mark_free (16'd0),   // no scanner lock without a CPU
+        // ...and no sequencer: no dummies, no fast ops.
+        .real_dummy (1'b0), .fast_valid (1'b0), .fast_addr (16'd0), .fast_rw (1'b1),
+        .fast_data (8'd0), .fast_sync (1'b0), .fast_vbl (1'b0), .merge_overflows (),
         .phi0_live (phi0_live),
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (),          // nothing here can act on it
@@ -111,14 +114,19 @@ module snoop_top #(
         .vbl_state (4'd0), .vbl_locked (1'b0), .vbl_pal (1'b0), .vbl_busy (1'b0),
         .vbl_err (4'd0), .vbl_stat (32'd0), .vbl_pos (32'd0),   // nor find the beam
         .mem_op_present (1'b0),                          // nor keep a memory
-        .mq_valid (1'b0), .mq_kind (1'b0), .mq_id (2'd0), .mq_line (20'd0),
-        .mq_byte (4'd0), .mq_data (8'd0), .mq_ready (),
-        .mr_valid (), .mr_id (), .mr_data (), .mem_image_ready (),
+        .pq_busy (1'b0), .pq_valid (1'b0), .pq_we (1'b0), .pq_line (20'd0),
+        .pq_wdata (128'd0), .pq_ready (),
+        .pr_valid (), .pr_data (), .mem_image_ready (),
         .mem_serve (), .mem_cnt_clr (), .mem_inval (),
         .mem_sw (12'd0), .mem_rw_bank (8'd0), .mem_invalidating (1'b0), .mem_rom_loaded (1'b0),
         .mem_late_fills (8'd0), .mem_fifo_drops (8'd0),
         .mem_hits (32'd0), .mem_misses (32'd0), .mem_mismatch (32'd0),
         .mem_served (32'd0), .mem_last (32'd0), .mem_diverted (32'd0),
+        .mem_intc8rom (1'b0),
+        .accel_mode (), .accel_target (), .accel_cnt_clr (),
+        .accel_on (1'b0), .accel_stat (32'd0), .accel_fast (32'd0), .accel_bus (32'd0),
+        .accel_cycles (32'd0), .accel_wait (32'd0), .accel_turbo (32'd0),
+        .ev_fast_room (),
         .fb_serve (), .fb_cnt_clr (), .fb_peek_addr (),   // nor simulate the floating bus
         .fb_mode (7'd0), .fb_compared (32'd0), .fb_mismatch (32'd0), .fb_last (32'd0),
         .fb_last2 (32'd0), .fb_other (32'd0), .fb_peek_data (8'd0),

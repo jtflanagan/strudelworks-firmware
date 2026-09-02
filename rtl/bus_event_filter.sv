@@ -52,6 +52,28 @@
 // In FULL mode every event is kept and the count stays zero, so this is a
 // register in the path and nothing more: one clock of latency, both modes,
 // and the pass-through exercised by every capture there has ever been.
+//
+// ...UNTIL THE CORE IS ACCELERATED (rtl/accel_seq.sv, docs/ACCELERATION.md),
+// when two more kinds of word arrive through rtl/event_merge.sv:
+//
+//   - a DUMMY cycle: a bus cycle that carried no op, the parked read of
+//     $0000.  It is a cycle, so it moves the host's clocks; it is nobody's
+//     op, so the host has no use for its word.  It goes into the count - in
+//     BOTH modes, so a full capture of an accelerated machine has SKIPs in
+//     it - UNLESS it is one of the cycles the keep rule exists for: the
+//     first after enable, the marked cycle, a cycle where the blanking level
+//     or RES' changes.  Under acceleration most cycles are dummies and the
+//     whole of a RES'-low window is, so an edge that fell on a dummy and
+//     was counted away would leave the host's beam slipping every frame and
+//     its mirror never seeing a reset.  Such a dummy is kept as the event
+//     it is: a read of $0000 is harmless to every consumer the host has.
+//   - a FAST op, tagged 0xC: an op the core took from the card, never a
+//     cycle.  Kept by the rule a cycle's event would be (every one in full,
+//     writes in sparse - a fast op is never in $Cxxx), NEVER counted, and
+//     NEVER consulted for the edge rule: a fast op taken between one cycle's
+//     tick and the next carries the next cycle's level, and an edge seen on
+//     it would not be seen again on the cycle's own event - the one the
+//     host places its beam by.
 //////////////////////////////////////////////////////////////////////////////////
 
 module bus_event_filter #(
@@ -69,6 +91,7 @@ module bus_event_filter #(
     input  wire        in_valid,
     input  wire        in_mark,
     input  wire [15:0] in_mark_free,
+    input  wire        in_dummy,       // this cycle carried no op (see the header)
 
     output logic [31:0] out_data,
     output logic        out_valid,
@@ -77,7 +100,9 @@ module bus_event_filter #(
 );
 
     localparam [3:0] T_SKIP = 4'hD;
+    localparam [3:0] T_FAST = 4'hC;
 
+    wire in_fast = (in_data[31:28] == T_FAST);
     wire in_vbl = in_data[19];
     wire in_res = in_data[17];
     wire in_rw  = in_data[16];
@@ -94,8 +119,12 @@ module bus_event_filter #(
     logic        hold_mark  = 1'b0;
     logic [15:0] hold_free  = '0;
 
-    wire keep = !sparse || first || in_io || !in_rw ||
-                (in_vbl != prev_vbl) || (in_res != prev_res);
+    wire on_edge = first || in_mark || (in_vbl != prev_vbl) || (in_res != prev_res);
+    wire keep = in_fast  ? (!sparse || !in_rw) :
+                in_dummy ? on_edge :
+                           (!sparse || on_edge || in_io || !in_rw);
+    // A fast op is not a cycle: it neither counts nor moves the edge rule.
+    wire cycle = in_valid && !in_fast;
 
     always_ff @(posedge clk) begin
         out_valid <= 1'b0;
@@ -114,9 +143,11 @@ module bus_event_filter #(
             out_mark_free <= hold_free;
             hold_valid    <= 1'b0;
         end else if (in_valid) begin
-            prev_vbl <= in_vbl;
-            prev_res <= in_res;
-            first    <= 1'b0;
+            if (cycle) begin
+                prev_vbl <= in_vbl;
+                prev_res <= in_res;
+                first    <= 1'b0;
+            end
             if (keep) begin
                 if (cnt != '0) begin
                     out_data   <= {T_SKIP, cnt};
@@ -132,6 +163,8 @@ module bus_event_filter #(
                     out_mark      <= in_mark;
                     out_mark_free <= in_mark_free;
                 end
+            end else if (!cycle) begin
+                // A fast read nobody wants: gone, and not a cycle to count.
             end else if (cnt == 28'(CAP - 1)) begin
                 out_data  <= {T_SKIP, 28'(CAP)};
                 out_valid <= 1'b1;

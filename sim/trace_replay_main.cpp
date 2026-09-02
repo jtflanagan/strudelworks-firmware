@@ -389,11 +389,11 @@ int emit(const std::string& path, uint64_t cycles, uint8_t s_before) {
     dut.irq_n = 1;
     dut.nmi_n = 1;
     dut.rst = 1;
-    dut.din = 0;
+    dut.i_din = dut.d_din = 0;
     dut.clk = 0;
     auto tick = [&](uint8_t din) {
         if (!dut.rw) mem[dut.addr] = static_cast<uint8_t>(dut.dout);
-        dut.din = din;
+        dut.i_din = dut.d_din = din;
         dut.clk = 0; dut.eval();
         dut.clk = 1; dut.eval();
     };
@@ -496,9 +496,9 @@ static ResetShape probe_core_reset(uint16_t vec) {
     mem[0xFFFD] = static_cast<uint8_t>(vec >> 8);
 
     Vcpu65c02 dut;
-    dut.cyc_en = 1; dut.irq_n = 1; dut.nmi_n = 1; dut.rst = 1; dut.din = 0; dut.clk = 0;
+    dut.cyc_en = 1; dut.irq_n = 1; dut.nmi_n = 1; dut.rst = 1; dut.i_din = dut.d_din = 0; dut.clk = 0;
     auto tick = [&] {
-        dut.din = mem[dut.addr];
+        dut.i_din = dut.d_din = mem[dut.addr];
         dut.clk = 0; dut.eval();
         dut.clk = 1; dut.eval();
     };
@@ -557,11 +557,11 @@ static Result replay(const Options& opt, std::size_t align_at, int skew, uint8_t
     dut.irq_n = 1;
     dut.nmi_n = 1;
     dut.rst = 1;
-    dut.din = 0;
+    dut.i_din = dut.d_din = 0;
     dut.clk = 0;
 
     auto tick = [&](uint8_t din) {
-        dut.din = din;
+        dut.i_din = dut.d_din = din;
         dut.clk = 0; dut.eval();
         dut.clk = 1; dut.eval();
     };

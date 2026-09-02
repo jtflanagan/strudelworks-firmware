@@ -24,7 +24,7 @@
 // the holder.
 //
 // ONE STRICT-PRIORITY SLOT ABOVE THE ROTATION, when HAS_PRIO is set: client
-// N-1 - the Apple's memory (rtl/mem_client.sv), whose fill has a bus cycle's
+// N-1 - the Apple's memory (rtl/page_client.sv), whose fill has a bus cycle's
 // deadline.  It is never in the rotation and it does not wait for a batch to
 // end: the clock after it asks, the port is its, and the rotation's holder is
 // stalled where it stands.  Nothing is cancelled - a stalled stb is the
@@ -36,7 +36,7 @@
 // the ~8 clocks docs/DDR3_USAGE.md budgets, not a batch.
 //
 // rot_ok is the free-window predicate §6 describes: a rotation grant may only
-// START while it is high.  mem_client raises it early in a bus cycle, so a
+// START while it is high.  page_client raises it early in a bus cycle, so a
 // batch begun then is over before the next cycle can need the memory.  The
 // pre-emption is what makes this a performance knob rather than a correctness
 // requirement.

@@ -1,5 +1,15 @@
 # The floating bus, simulated
 
+> **On branch `page_cache` the side copy is GONE**: main memory lives whole
+> in the page cache's main bank (docs/PAGE_CACHE.md), and `rtl/fb_sim.sv`
+> reads the scanner's byte straight from that bank's port B, alternating
+> clocks with the host's peek — same three-clock latency, no copy to keep
+> in sync, 4.5 BRAM tiles returned (docs/PAGE_CACHE.md carries the full
+> budget).  The prediction, the monitor's three
+> counts, serve's rules and FB_PEEK's address packing are all unchanged and
+> this file remains their reference; the side-copy mechanics are historical
+> here.
+
 Status: **✅ on hardware, 2026-08-29.** Master build of 19:5x (WNS +0.336 ns,
 35.5 of 50 tiles) on a IIe, headless from the Pi: locked at the boot menu
 and the lock's and the probe's frames of `$C054` reads - 34,060 of them -

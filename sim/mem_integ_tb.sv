@@ -93,7 +93,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [7:0]  cpu_dout, cpu_din;
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
-        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
+        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .i_din (cpu_din), .d_din (cpu_din),
         .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
     );
 
@@ -108,6 +108,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
         .master_active (master_active),
+        // Without the sequencer: the bus owns every cycle, the core is always on offer.
+        .bus_owns (1'b1), .core_valid (1'b1),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
         .drv_sync (drv_sync), .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
@@ -123,10 +125,10 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     );
 
     // ---- the memory path --------------------------------------------------------------
-    wire        cl_valid, cl_rw, cl_wr_image;
+    wire        cl_valid, cl_rw, cl_wr_image, cl_aux;
     wire [1:0]  cl_cls;
-    wire [23:0] cl_pa;
-    wire [13:0] cl_rom_addr;
+    wire [7:0]  cl_bank;
+    wire [15:0] cl_off, pf_off;
     wire [11:0] sw_state;
     wire [7:0]  rw_bank;
     wire [7:0]  rom_byte;
@@ -136,41 +138,46 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     reg         msg_valid = 1'b0, pay_valid = 1'b0;
     reg  [7:0]  msg_type = 8'd0, msg_len = 8'd0;
     reg  [31:0] pay_data = 32'd0;
-    wire        mq_valid, mq_kind, mq_ready, mr_valid;
-    wire [1:0]  mq_id, mr_id;
-    wire [19:0] mq_line;
-    wire [3:0]  mq_byte;
-    wire [7:0]  mq_data;
-    wire [127:0] mr_data;
+    wire        pq_busy, pq_valid, pq_we, pq_ready, pr_valid;
+    wire [19:0] pq_line;
+    wire [127:0] pq_wdata, pr_data;
 
     apple_mmu u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
-        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rom_addr (cl_rom_addr),
-        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .sw_state (sw_state), .rw_bank (rw_bank),
-        .q_addr (nxt_addr), .q_divert (q_divert)
+        .rom_ok (rom_loaded), .intc8rom (), .q_rw (1'b1), .q_cls (),
+        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
+        .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (pf_off),
+        .sw_state (sw_state), .rw_bank (rw_bank),
+        .q_addr (nxt_addr), .q_divert (q_divert),
+        .p_addr (16'd0), .p_cls (), .p_aux (), .p_off (), .map_changed ()
     );
     apple_rom u_rom (
         .clk (clk), .rst (rst),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
-        .rd_en (cl_valid), .rd_addr (cl_rom_addr), .rd_data (rom_byte), .rom_loaded (rom_loaded)
+        .rd_en (op_present), .rd_addr (op_addr[13:0]), .rd_data (rom_byte),
+        .r2_en (1'b0), .r2_addr (12'd0), .r2_data (), .r2_busy (), .rom_loaded (rom_loaded)
     );
-    mem_cache u_cache (
+    page_cache u_cache (
         .clk (clk), .rst (rst),
-        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_pa (cl_pa), .cl_rw (cl_rw),
-        .cl_wr_image (cl_wr_image), .op_addr (op_addr), .op_wdata (op_wdata),
+        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
+        .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (pf_off),
+        .op_addr (op_addr), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit), .op_divert (op_divert), .data_sync (data_sync),
         .rom_byte (rom_byte), .rom_loaded (rom_loaded),
         .sub_en (sub_en), .sub_data (sub_data),
-        .serve (serve), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),
+        .fb_addr (16'd0), .fb_byte (),
+        .il_req (1'b0), .il_aux (1'b0), .il_bank (8'd0), .il_line (12'd0),
+        .il_ack (), .il_ok (), .il_row (),
+        .serve (serve[0]), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
         .hits (hits), .misses (misses), .served (served), .mismatches (mismatches),
         .last_mismatch (last_mismatch), .diverted (diverted), .late_fills (late_fills), .fifo_drops (fifo_drops),
-        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
-        .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
-        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data)
+        .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pr_valid (pr_valid), .pr_data (pr_data)
     );
 
     wire [1:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;
@@ -195,12 +202,13 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .wb_data (wb_data), .wb_sel (wb_sel), .wb_aux (wb_aux),
         .wb_stall (wb_stall), .wb_ack (wb_ack), .wb_rdata (wb_rdata), .wb_rdata_aux (wb_rdata_aux)
     );
-    mem_client u_client (
+    page_client u_client (
         .clk (clk), .rst (rst), .calib_complete (1'b1),
         .master_active (master_active), .op_present (op_present),
-        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id), .mq_line (mq_line),
-        .mq_byte (mq_byte), .mq_data (mq_data), .mq_ready (mq_ready),
-        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
+        .accel (1'b0),
+        .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pr_valid (pr_valid), .pr_data (pr_data),
         .req (c_req[1]), .gnt (c_gnt[1]), .cyc (c_cyc[1]), .stb (c_stb[1]),
         .we (c_we[1]), .addr (c_addr[47:24]), .data (c_data[255:128]), .sel (c_sel[31:16]),
         .stall (c_stall[1]), .ack (c_ack[1]), .rdata (c_rdata),
@@ -208,10 +216,11 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .image_ready (image_ready)
     );
 
-    // ---- the DDR3 stub: the image, in order, twelve clocks late ---------------------
-    // Image banks 0-4: main, and the RamWorks's banks 0-3.
-    localparam integer NRW = 4;                 // RamWorks banks the machine has
-    localparam integer IMG = (NRW + 1) * 65536;
+    // ---- the DDR3 stub: the aux region, in order, twelve clocks late ----------------
+    // RamWorks banks 0-3, and nothing else: main memory lives in the card's
+    // block RAM and the DDR3 never sees it (docs/PAGE_CACHE.md).
+    localparam integer NRW = 4;                 // RamWorks banks the run uses
+    localparam integer IMG = NRW * 65536;
     reg [7:0] smem [0:IMG-1];
     localparam integer DL = 64;
     reg [127:0] dl_d [0:DL-1];
@@ -373,11 +382,12 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             aux_ram[m_auxidx(op_addr)] <= op_wdata;
         end
     end
-    // The byte the reference holds at an image address in a bank the machine
-    // does not have: what a served read there must return.
-    function automatic [7:0] ref_byte(input [23:0] pa);
-        if (pa[15:0] < 16'hC000) ref_byte = aux_ram[(pa[23:16] - 1) * 65536 + pa[15:0]];
-        else                     ref_byte = lc_aux[(pa[23:16] - 1) * 16384 + (pa[15:0] - 16'hC000)];
+    // The byte the reference holds at a banked-aux offset the machine does
+    // not have: what a served read there must return.  cl_off carries the LC
+    // fold, so the $C000 hole IS the lc_aux index.
+    function automatic [7:0] ref_byte(input [7:0] bank, input [15:0] off);
+        if (off < 16'hC000) ref_byte = aux_ram[bank * 65536 + off];
+        else                ref_byte = lc_aux[bank * 16384 + (off - 16'hC000)];
     endfunction
 
     // ---- the running checks --------------------------------------------------------
@@ -390,16 +400,16 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         if (op_rw) begin
             reads = reads + 1;
             if (sub_en) served_reads = served_reads + 1;
-            if (cl_pa[23:17] != 7'd0 && (cl_cls == 2'd1 || cl_cls == 2'd2)) begin
+            if (cl_aux && cl_bank != 8'd0 && (cl_cls == 2'd1 || cl_cls == 2'd2)) begin
                 // RAM or LC in a bank the machine does not have: the
-                // reference is the truth.  (cl_pa carries bank bits for a
-                // BUS or ROM op too, whose byte comes from elsewhere.)
+                // reference is the truth.  (cl_aux/cl_bank stand for a BUS
+                // or ROM op too, whose byte comes from elsewhere.)
                 banked_reads = banked_reads + 1;
-                if (cpu_din !== ref_byte(cl_pa)) begin
+                if (cpu_din !== ref_byte(cl_bank, cl_off)) begin
                     reads_bad = reads_bad + 1;
                     if (reads_bad <= 5)
-                        $display("    read $%04X (pa %06x): core got %02x, the reference says %02x (sub_en %0d)",
-                                 op_addr, cl_pa, cpu_din, ref_byte(cl_pa), sub_en);
+                        $display("    read $%04X (bank %0d off %04x): core got %02x, the reference says %02x (sub_en %0d)",
+                                 op_addr, cl_bank, cl_off, cpu_din, ref_byte(cl_bank, cl_off), sub_en);
                 end
             end else if (cpu_din !== mach_byte) begin
                 reads_bad = reads_bad + 1;
@@ -408,7 +418,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                              op_addr, cpu_din, mach_byte, sub_en, sw_state);
             end
         end else begin
-            if (cl_pa[23:17] != 7'd0 && (cl_cls == 2'd1 || cl_cls == 2'd2)) begin
+            if (cl_aux && cl_bank != 8'd0 && (cl_cls == 2'd1 || cl_cls == 2'd2)) begin
                 banked_writes = banked_writes + 1;
                 if (!op_divert) pin_writes_banked = pin_writes_banked + 1;
             end
@@ -455,19 +465,33 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     endtask
 
+    // The card's byte at a main offset: the main bank IS main memory.
+    function automatic [7:0] card_main(input [15:0] off);
+        card_main = u_cache.u_main.mem[off[15:4]][8 * off[3:0] +: 8];
+    endfunction
+    // The card's byte at a banked-aux offset: the aux bank if the page is
+    // resident for that bank, the DDR3 stub otherwise.
+    function automatic [7:0] card_aux(input [7:0] b, input [15:0] off);
+        if (u_cache.vld[off[15:8]] && u_cache.tag_bank[off[15:8]] == b)
+            card_aux = u_cache.u_aux.mem[off[15:4]][8 * off[3:0] +: 8];
+        else
+            card_aux = smem[b * 65536 + off];
+    endfunction
+
     task check_image(input string what);
         integer a, b, bad;
         begin
             bad = 0;
             for (a = 0; a < 16'hC000; a = a + 1) begin
-                if (smem[a] !== main_ram[a]) bad = bad + 1;
+                if (card_main(16'(a)) !== main_ram[a]) bad = bad + 1;
                 for (b = 0; b < NRW; b = b + 1)
-                    if (smem[(b + 1) * 65536 + a] !== aux_ram[b * 65536 + a]) bad = bad + 1;
+                    if (card_aux(8'(b), 16'(a)) !== aux_ram[b * 65536 + a]) bad = bad + 1;
             end
+            // The LC fold: bank 1 of $D000 in the $C000 hole, the rest in place.
             for (a = 0; a < 16384; a = a + 1) begin
-                if (smem[17'h0C000 + a] !== lc_main[a]) bad = bad + 1;
+                if (card_main(16'hC000 + 16'(a)) !== lc_main[a]) bad = bad + 1;
                 for (b = 0; b < NRW; b = b + 1)
-                    if (smem[(b + 1) * 65536 + 16'hC000 + a] !== lc_aux[b * 16384 + a]) bad = bad + 1;
+                    if (card_aux(8'(b), 16'hC000 + 16'(a)) !== lc_aux[b * 16384 + a]) bad = bad + 1;
             end
             if (bad != 0) fail($sformatf("%0s: %0d image bytes differ from the reference", what, bad));
             else ok(what);
@@ -497,6 +521,10 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         for (a = 0; a < 16384; a = a + 1) begin lc_main[a] = 8'h00; phys_lcaux[a] = 8'h00; end
         for (a = 0; a < NRW * 16384; a = a + 1) lc_aux[a] = 8'h00;
         for (a = 0; a < IMG; a = a + 1) smem[a] = 8'h00;
+        for (a = 0; a < 4096; a = a + 1) begin
+            u_cache.u_main.mem[a] = 128'd0;        // the banks power up known,
+            u_cache.u_aux.mem[a]  = 128'd0;        // as the references do
+        end
         for (a = 0; a < 12288; a = a + 1) rom_img[a] = $urandom;
         for (a = 0; a < 4096; a = a + 1) rom_img[12288 + a] = prog[a];
         rom_img[16'h1000] = 8'hC7;                 // what the program expects at ROM $D000
@@ -540,7 +568,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
         repeat (4 * CYCLE) @(negedge clk);
         if (ovr_cycles != 16) fail($sformatf("%0d override cycles, expected 16", ovr_cycles));
-        else if (smem[17'h2100] !== 8'h80 || smem[17'h210F] !== 8'h8F || main_ram[16'h2100] !== 8'h80)
+        else if (card_main(16'h2100) !== 8'h80 || card_main(16'h210F) !== 8'h8F || main_ram[16'h2100] !== 8'h80)
             fail("the DMA's writes did not reach the image and the machine alike");
         else ok("a DMA through the override path lands in the image as it does in the machine");
 

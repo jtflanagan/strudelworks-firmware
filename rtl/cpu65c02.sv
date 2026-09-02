@@ -19,10 +19,13 @@
 // the CMOS page-wrap fix.  So the rule the microcode obeys is:
 //
 //   *** no microinstruction adds two arbitrary 8-bit operands into the high
-//       byte.  The AGU's high half is an incrementer, never an adder. ***
+//       byte.  The AGU's high half is an incrementer, never an adder - and it
+//       never consumes a live carry: agu_co lands in the agu_c register
+//       before anything arithmetic reads it. ***
 //
-// The longest arithmetic path in the core is therefore eight bits wide.  See
-// sim/gen_microcode.py, which is where that rule is enforced and explained.
+// The longest arithmetic path in the core is therefore eight bits wide, and
+// no cycle chains two arithmetic events.  See sim/gen_microcode.py, which is
+// where both rules are enforced and explained.
 //
 // THE OTHER HALF OF THE SPEED is that the ROM address is {opcode, ucycle} with
 // no mapping stage.  There is no instruction decoder: the opcode indexes the ROM
@@ -100,16 +103,64 @@ module cpu65c02 #(
     output wire  [15:0] addr,
     output wire         rw,         // 1 = read, 0 = write
     output wire  [7:0]  dout,
-    input  wire  [7:0]  din,
+    // The data return, SPLIT BY STREAM (the user's design): the byte for a
+    // program-stream cycle arrives on i_din, everything else on d_din, and
+    // the core muxes by its own cyc_is_i - so an instruction front can hold
+    // its predicted byte on i_din every clock, and a data front its own on
+    // d_din, neither ever caring what the other is speculating.  A consumer
+    // with one data source ties them together and nothing changes.
+    input  wire  [7:0]  i_din,
+    input  wire  [7:0]  d_din,
 
     input  wire         irq_n,      // level sensitive, active low
     input  wire         nmi_n,      // edge sensitive, active low
 
     output wire         sync,       // high during an opcode fetch
-    output wire         halted      // STP executed; only rst clears it
+    output wire         halted,     // STP executed; only rst clears it
+
+    // ---- the split I/D front (acceleration) ---------------------------------
+    // Classified views of the one bus above, plus the one piece of genuinely
+    // new information a predictive icache needs.  The 6502 cannot fetch
+    // instructions and data at once, so these are not a second bus: cyc_is_i
+    // says which stream THIS cycle belongs to, i_addr/d_addr are addr seen
+    // through that classification, and i_pred is the address of the NEXT
+    // program-stream fetch - driven a cycle ahead of it, which is what lets an
+    // icache have the line already read when the fetch begins.  The data
+    // return is split above (i_din/d_din), muxed by cyc_is_i inside.  A
+    // consumer that does not care (the bus-locked driver, every existing
+    // testbench) ties the two din ports together, ignores the rest, and
+    // nothing changes.
+    output wire         cyc_is_i,   // 1: program stream (opcode fetch or any
+                                    //    cycle addressed from PC, dummies
+                                    //    included); 0: data, stack, vectors,
+                                    //    and the LAST/FIXUP dummy re-reads
+    output wire  [15:0] i_addr,     // = addr; the I view, meaningful when cyc_is_i
+    output wire  [15:0] pc_addr,    // {pch, pcl}, REGISTER-DIRECT: equals addr on
+                                    //    every PC-sourced cycle by construction
+                                    //    (the mux's default case IS these
+                                    //    registers), and free of the AGU and din
+                                    //    on every other - the compare source an
+                                    //    instruction front wants
+    output wire  [15:0] i_pred,     // next program-stream address (see next_pc)
+    output wire  [15:0] d_addr,     // = addr; the D view, meaningful when !cyc_is_i
+    output wire         d_rw,       // = rw
+    output wire  [7:0]  d_dout,     // = dout
+    output wire  [7:0]  p_flags     // {N,V,1,0,D,I,Z,C} REGISTER-DIRECT: the
+                                    // flags a branch will test, final from the
+                                    // edge that begins its opcode fetch (the
+                                    // previous instruction's writeback landed
+                                    // there, and a branch writes none) - the
+                                    // instruction front resolves branches early
+                                    // on them (rtl/iline.sv)
 );
 
 `include "cpu65c02_ucode.vh"
+
+    // The one data return the architecture sees, muxed from the split ports
+    // by this cycle's own stream classification (cyc_is_i, below).  One 2:1
+    // level on a path whose sources - the fronts' registered bytes - are
+    // register-direct.
+    wire [7:0] din = cyc_is_i ? i_din : d_din;
 
     // ---- microcode ROM ------------------------------------------------------
     // {opcode, ucycle} addressing, so there is no decode between the opcode
@@ -118,7 +169,13 @@ module cpu65c02 #(
     // out of the datapath's critical path.
     localparam int UA_W = 8 + UC_SLOTS_LOG2;
 
-    (* rom_style = "block" *) logic [UC_W-1:0] ucode [0:(1 << UA_W) - 1];
+    // Distributed, not block: the microcode is a CONSTANT ($readmemh at
+    // synthesis, never written), so Vivado logic-optimizes the contents
+    // rather than storing them - measured +257 LUTs against the block
+    // version's 3 RAMB36, the two tiles the page cache's banks needed back
+    // on the XC7A35T (docs/PAGE_CACHE.md), and no SLICEM spent.  The fetch
+    // stays a registered read; the one-clock contract is unchanged.
+    (* rom_style = "distributed" *) logic [UC_W-1:0] ucode [0:(1 << UA_W) - 1];
     initial $readmemh(UCODE_FILE, ucode);
 
     logic [UC_W-1:0] uc;            // the microinstruction driving THIS cycle
@@ -162,6 +219,7 @@ module cpu65c02 #(
     logic [15:0] last_addr;
 
     wire [7:0] p_bits = {f_n, f_v, 1'b1, 1'b0, f_d, f_i, f_z, f_c};
+    assign p_flags = p_bits;
 
     // ---- AGU ----------------------------------------------------------------
     // Low half: a real 8-bit adder.  High half: an incrementer/decrementer only.
@@ -188,7 +246,12 @@ module cpu65c02 #(
             UC_LO_B_ONE: lo_b = 8'h01;
             UC_LO_B_FF:  lo_b = 8'hFF;
             UC_LO_B_ADL: lo_b = adl;
-            UC_LO_B_DIN: lo_b = din;
+            // There is deliberately no din arm here.  No microinstruction ever
+            // fed the bus into the adder, but the arm's mere existence put the
+            // instruction front's combinational serve path in series with this
+            // carry chain on every static timing path through the AGU - the
+            // depth audit's whole 18-20-level tail.  Every remaining operand
+            // is a register or a constant.
             UC_LO_B_VEC: lo_b = vec_lo;
             default:     lo_b = 8'h00;
         endcase
@@ -209,10 +272,13 @@ module cpu65c02 #(
         endcase
     end
 
-    // +1, -1 or nothing.  `SAVED` is the carry from an index add a cycle or more
-    // ago - the cycle the instruction set granted for exactly this.
-    wire hi_carry = (f_hi_c == UC_HI_C_LIVE)  ? agu_co :
-                    (f_hi_c == UC_HI_C_SAVED) ? agu_c  : 1'b0;
+    // +1, -1 or nothing.  `SAVED` is the carry from an add a cycle or more ago -
+    // the cycle the instruction set granted for exactly this.  There is no LIVE
+    // arm: the high byte never consumes agu_co in the cycle that computes it
+    // (the rule in sim/gen_microcode.py), so the low adder's carry chain and
+    // this incrementer are never in series.  agu_co's only arithmetic consumer
+    // is the agu_c register below.
+    wire hi_carry = (f_hi_c == UC_HI_C_SAVED) ? agu_c : 1'b0;
     wire hi_dec   = (f_hi_d == UC_HI_D_ONE)   ? 1'b1   :
                     (f_hi_d == UC_HI_D_SIGN)  ? adl[7] : 1'b0;
     wire [7:0] agu_hi = hi_a + {7'd0, hi_carry} - {7'd0, hi_dec};
@@ -229,7 +295,13 @@ module cpu65c02 #(
     // Every source but AGU is a plain concatenation of registers, so this mux
     // costs one level and no arithmetic.
     logic [15:0] addr_mux;
+    logic        asel_is_pc;        // this cycle's address comes from PC: the
+                                    // program stream, for cyc_is_i.  Set in the
+                                    // one place that knows, so the
+                                    // classification can never drift from the
+                                    // mux it describes.
     always_comb begin
+        asel_is_pc = 1'b0;
         case (f_asel)
             UC_ADDR_AGU:  addr_mux = {agu_hi, agu_lo};
             // The address driven during the PREVIOUS bus cycle.  This is the
@@ -254,11 +326,23 @@ module cpu65c02 #(
             UC_ADDR_SP:   addr_mux = {8'h01, s};
             UC_ADDR_VEC:  addr_mux = {8'hFF, vec_lo};
             UC_ADDR_VEC1: addr_mux = {8'hFF, vec_lo + 8'd1};
-            default:      addr_mux = {pch, pcl};
+            default: begin
+                addr_mux   = {pch, pcl};
+                asel_is_pc = 1'b1;
+            end
         endcase
     end
 
     assign addr   = addr_mux;
+
+    // The classified views.  Same wires, two names: which one is meaningful
+    // this cycle is exactly what cyc_is_i says.
+    assign cyc_is_i = asel_is_pc;
+    assign i_addr   = addr_mux;
+    assign pc_addr  = {pch, pcl};
+    assign d_addr   = addr_mux;
+    assign d_rw     = rw;
+    assign d_dout   = dout;
 
     // One cycle of history, for UC_ADDR_LAST above.  Advanced on cyc_en so it
     // tracks BUS cycles rather than clocks, which is what the rule is about.
@@ -460,6 +544,35 @@ module cpu65c02 #(
     // without changing its cycle count.
     wire ld_en = ~f_ld_if | cond_met;
 
+    // ---- next PC ------------------------------------------------------------
+    // The value the PC registers take at this cycle's edge - equivalently, the
+    // address of the NEXT program-stream fetch, whenever it comes.  Exported
+    // as i_pred so a predictive icache can have the line read BEFORE the fetch
+    // cycle begins: sequential flow, taken branches, jumps and returns all
+    // predict exactly, because this is not a guess - it is the same mux that
+    // loads the registers, and the registers load FROM it below, so predictor
+    // and architecture cannot disagree.  It inherits din's timing
+    // (UC_LD_PC_JMP takes the high byte from the bus), so it settles when din
+    // does and no earlier.
+    //
+    // Held on an interrupt entry - see int_pc_hold above.  BRK and every
+    // ordinary fetch still advance.
+    logic [15:0] next_pc;
+    always_comb begin
+        next_pc = {pch, pcl};
+        if (ld_en) begin
+            case (f_ld_pc)
+                UC_LD_PC_INC:    if (!int_pc_hold) next_pc = {pch_inc, pcl_inc};
+                UC_LD_PC_AGU:    next_pc = {agu_hi, agu_lo};
+                UC_LD_PC_AGU_LO: next_pc = {pch, agu_lo};
+                UC_LD_PC_AGU_HI: next_pc = {agu_hi, pcl};
+                UC_LD_PC_JMP:    next_pc = {din, md};
+                default: ;
+            endcase
+        end
+    end
+    assign i_pred = next_pc;
+
     always_ff @(posedge clk) begin
         if (rst) begin
             a <= 8'h00; x <= 8'h00; y <= 8'h00; s <= 8'h00;
@@ -493,6 +606,13 @@ module cpu65c02 #(
             uc   <= ucode[uaddr];
             ucyc <= f_sync ? 3'd0 : (wai_wake ? 3'd2 : ucyc_next);
 
+            // The PC loads FROM next_pc - the same mux i_pred exports - so a
+            // predictive icache follows the architecture by construction.
+            // next_pc already folds in ld_en, int_pc_hold and the hold default,
+            // hence no gate here.
+            pcl <= next_pc[7:0];
+            pch <= next_pc[15:8];
+
             nmi_prev <= nmi_n;
             if (nmi_prev & ~nmi_n) nmi_pend <= 1'b1;
 
@@ -521,18 +641,6 @@ module cpu65c02 #(
                 case (f_ld_adh)
                     UC_LD_ADH_AGU: adh <= agu_hi;
                     UC_LD_ADH_DIN: adh <= din;
-                    default: ;
-                endcase
-                case (f_ld_pc)
-                    // Held on an interrupt entry - see int_pc_hold.  BRK and
-                    // every ordinary fetch still advance.
-                    UC_LD_PC_INC: if (!int_pc_hold) begin
-                                     pcl <= pcl_inc; pch <= pch_inc;
-                                  end
-                    UC_LD_PC_AGU:    begin pcl <= agu_lo;  pch <= agu_hi;  end
-                    UC_LD_PC_AGU_LO:       pcl <= agu_lo;
-                    UC_LD_PC_AGU_HI:       pch <= agu_hi;
-                    UC_LD_PC_JMP:    begin pcl <= md;      pch <= din;     end
                     default: ;
                 endcase
                 case (f_ld_s)

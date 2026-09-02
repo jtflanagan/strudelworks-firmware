@@ -46,10 +46,20 @@
 // are OR'd into that instead (master_top).  Same signal, same polarity at the
 // core, no pin - the same argument as drv_sync in apple_bus_write.
 //
-// The VIA timers count phi0 cycles: slow_clock is op_commit, which
-// apple_bus_write pulses exactly once per bus cycle, so a T1 programmed for
-// 1000 fires every 1002 microseconds of MACHINE time - the rate the music
-// player on the other side of the vectors is counting on.
+// The VIA timers count the CORE's cycles, not the bus's: slow_clock ticks
+// once per op the core completes - a bus cycle that carried one of its ops,
+// or a fast op the sequencer served from the card's memory - and never for a
+// dummy cycle the driver put on the bus while the core ran ahead.  With the
+// core locked to the bus that is exactly one tick per phi0 cycle, so a T1
+// programmed for 1000 fires every 1002 microseconds of machine time, the rate
+// the music player on the other side of the vectors is counting on.  With the
+// core accelerated the timers run at the core's pace, which is what the
+// software expects: every Mockingboard detection routine (Ultima, Skyfox,
+// Total Replay's) writes a timer and reads it back a known number of
+// INSTRUCTIONS later, and accepts the card only if the count moved by the
+// cycles those instructions took.  A timer on bus time under a 12x core
+// moves by a twelfth of that and the card is "not present" - the floppy's
+// lesson (rtl/floppy_card.sv) over again.
 //////////////////////////////////////////////////////////////////////////////////
 module mockingboard (
     input  wire        clk,
@@ -74,6 +84,10 @@ module mockingboard (
     input  wire [7:0]  op_wdata,
     input  wire        op_present,     // pulse: a new op has been presented
     input  wire        op_commit,      // pulse: the cycle's data phase
+    input  wire        op_dummy,       // this bus cycle carried no op: no tick
+    // A fast op of the accelerated core completed: a tick of the core's
+    // time that the bus never saw.  Tied low without the sequencer.
+    input  wire        fast_tick,
 
     // Back to apple_bus_write: claim this read cycle and the byte to emit.
     // Registered at op_present, so they are stable long before the emit window
@@ -115,7 +129,9 @@ module mockingboard (
     wire [7:0] via0_data_out, via1_data_out;
     wire       via0_irq, via1_irq;
 
-    wire via_slow_clock = op_commit && enabled;
+    // The core's clock, see the header: a bus cycle that carried one of the
+    // core's ops, or a fast op; never a dummy.
+    wire via_slow_clock = enabled && ((op_commit && !op_dummy) || fast_tick);
     wire via0_strobe    = op_commit && hit_q && !op_addr[7];
     wire via1_strobe    = op_commit && hit_q &&  op_addr[7];
 

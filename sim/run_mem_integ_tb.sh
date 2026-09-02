@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
 # The whole memory path under the real core: the driver, the reader, the MMU
-# shadow, the ROM, the cache, the DDR3 client and the arbiter, running
+# shadow, the ROM, the page cache, the DDR3 client and the arbiter, running
 # sim/mem_integ.s against a model of a 128K IIe with a language card - first
 # tracking only, then serving every class under the running program.  ~1 min.
 # See sim/mem_integ_tb.sv.
@@ -27,8 +27,8 @@ if ! iverilog -g2012 -I "$root/rtl" -o "$work/mem_integ_tb.out" -s mem_integ_tb 
         -Pmem_integ_tb.PROG="\"$work/mem_integ.hex\"" \
         "$root/sim/mem_integ_tb.sv" "$root/rtl/cpu65c02.sv" \
         "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv" \
-        "$root/rtl/apple_mmu.sv" "$root/rtl/apple_rom.sv" "$root/rtl/mem_cache.sv" \
-        "$root/rtl/cache_way_ram.sv" "$root/rtl/mem_client.sv" "$root/rtl/wb_arb.sv" \
+        "$root/rtl/apple_mmu.sv" "$root/rtl/apple_rom.sv" "$root/rtl/page_cache.sv" \
+        "$root/rtl/bank_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" \
         > "$work/iverilog_integ.log" 2>&1; then
     grep -vE "sorry: constant selects|cannot be synthesized" "$work/iverilog_integ.log" >&2
     echo "compile failed" >&2

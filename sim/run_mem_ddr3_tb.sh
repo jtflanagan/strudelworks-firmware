@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
-# The memory client in the arbiter's priority slot against the real UberDDR3
+# The page client in the arbiter's priority slot against the real UberDDR3
 # controller and the Micron DDR3 model, the TX ring streaming beside it: order,
-# fill latency under pre-emption, and where the refreshes land.  Slow, like
+# pipelined burst latency under pre-emption, and where the refreshes land.  Slow, like
 # run_tx_ring_ddr3_tb.sh: a few minutes.  See sim/mem_ddr3_tb.sv.
 set -euo pipefail
 
@@ -23,7 +23,7 @@ iverilog -g2012 -o "$out" -s mem_ddr3_tb \
     -I "$tb" \
     "$root/sim/mem_ddr3_tb.sv" \
     "$root/rtl/tx_ring.sv" \
-    "$root/rtl/mem_client.sv" \
+    "$root/rtl/page_client.sv" \
     "$root/rtl/msg_master.sv" \
     "$root/rtl/wb_arb.sv" \
     "$root/rtl/sync_fifo.sv" \

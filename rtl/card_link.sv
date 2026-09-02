@@ -75,6 +75,18 @@ module card_link #(
     input  wire        real_valid,
     input  wire        real_mark,
     input  wire [15:0] real_mark_free,
+    // ...and, under acceleration (rtl/accel_seq.sv, rtl/event_merge.sv):
+    // whether that cycle was a dummy, and the core's fast ops as they
+    // happen, with the blanking level their word carries.  A watching top
+    // ties them to 0.
+    input  wire        real_dummy,
+    input  wire        fast_valid,
+    input  wire [15:0] fast_addr,
+    input  wire        fast_rw,
+    input  wire [7:0]  fast_data,
+    input  wire        fast_sync,
+    input  wire        fast_vbl,
+    output wire [7:0]  merge_overflows,
     input  wire        phi0_live,
 
     // Synchronised RES', for the CPU_SOURCE latch, and what it latched.
@@ -171,21 +183,20 @@ module card_link #(
     input  wire [31:0] vbl_stat,
     input  wire [31:0] vbl_pos,
 
-    // The memory image (rtl/mem_cache.sv in a mastering top, rtl/mem_client.sv
-    // here, docs/MEMORY.md): the cache's requests in and its fills out, the
-    // registers' levels and pulses out, the counters and state back.  A
-    // watching top ties the inputs to 0 and leaves the outputs unconnected.
+    // The memory image (rtl/page_cache.sv in a mastering top,
+    // rtl/page_client.sv here, docs/PAGE_CACHE.md): the page engine's
+    // pipelined line stream in, a read's lines out, the registers' levels
+    // and pulses out, the counters and state back.  A watching top ties the
+    // inputs to 0 and leaves the outputs unconnected.
     input  wire        mem_op_present,
-    input  wire        mq_valid,
-    input  wire        mq_kind,
-    input  wire [1:0]  mq_id,
-    input  wire [19:0] mq_line,
-    input  wire [3:0]  mq_byte,
-    input  wire [7:0]  mq_data,
-    output wire        mq_ready,
-    output wire        mr_valid,
-    output wire [1:0]  mr_id,
-    output wire [127:0] mr_data,
+    input  wire        pq_busy,
+    input  wire        pq_valid,
+    input  wire        pq_we,
+    input  wire [19:0] pq_line,
+    input  wire [127:0] pq_wdata,
+    output wire        pq_ready,
+    output wire        pr_valid,
+    output wire [127:0] pr_data,
     output wire        mem_image_ready,
     output wire         mem_serve,
     output wire        mem_cnt_clr,
@@ -202,6 +213,23 @@ module card_link #(
     input  wire [31:0] mem_served,
     input  wire [31:0]  mem_last,
     input  wire [31:0]  mem_diverted,
+    input  wire         mem_intc8rom,
+
+    // The accelerated core (rtl/accel_seq.sv in a mastering top): ACCEL_CTRL
+    // out, the sequencer's status and counters back, and `accel_on` for the
+    // memory client's windows.  A watching top ties the inputs to 0.
+    output wire [1:0]   accel_mode,
+    output wire [15:0]  accel_target,
+    output wire         accel_cnt_clr,
+    input  wire         accel_on,
+    input  wire [31:0]  accel_stat,
+    input  wire [31:0]  accel_fast,
+    input  wire [31:0]  accel_bus,
+    input  wire [31:0]  accel_cycles,
+    input  wire [31:0]  accel_wait,
+    input  wire [31:0]  accel_turbo,
+    // The merge's shed-at-source level, for the instruction front.
+    output wire         ev_fast_room,
     // The floating-bus simulator's seam (rtl/fb_sim.sv <-> wb_regfile,
     // docs/FLOATING_BUS.md): FB_CTRL's serve level and clear pulse and
     // FB_PEEK's address out, the mode, the counters and the peeked byte back.
@@ -722,10 +750,44 @@ module card_link #(
     // The synthetic source has no scanner, so no frame to mark.
     wire        ev_mark  = source_real && real_mark;
 
+    // The merge, always in the path: the bus's cycles and the accelerated
+    // core's fast ops into one stream in program order, spaced for the
+    // filter (rtl/event_merge.sv).  Fast ops and the dummy flag belong to the
+    // real bus only.
+    wire [31:0] mg_data;
+    wire        mg_valid, mg_mark, mg_dummy;
+    wire [15:0] mg_mark_free;
+
+    event_merge #(.DEPTH (8)) u_merge (
+        .clk           (clk_ctrl),
+        .rst           (rst),
+        .enable        (capture_enable),
+        .bus_valid     (ev_valid),
+        .bus_data      (ev_data),
+        .bus_mark      (ev_mark),
+        .bus_mark_free (real_mark_free),
+        .bus_dummy     (source_real && real_dummy),
+        .fast_valid    (source_real && fast_valid),
+        .fast_addr     (fast_addr),
+        .fast_rw       (fast_rw),
+        .fast_data     (fast_data),
+        .fast_sync     (fast_sync),
+        .vbl_level     (fast_vbl),
+        .res_level     (apple_res_sync),
+        .out_valid     (mg_valid),
+        .out_data      (mg_data),
+        .out_mark      (mg_mark),
+        .out_mark_free (mg_mark_free),
+        .out_dummy     (mg_dummy),
+        .overflows     (merge_overflows),
+        .fast_room     (ev_fast_room)
+    );
+
     // The filter, always in the path: a wire in full mode, the keep rule
-    // and the SKIP words in sparse.  Sparse applies to the real bus only -
-    // the synthetic stream is the link's self-test, and the host checks
-    // its every word.
+    // and the SKIP words in sparse - and under acceleration the dummies'
+    // count and the fast words' rule in both.  Sparse applies to the real
+    // bus only - the synthetic stream is the link's self-test, and the host
+    // checks its every word.
     wire [31:0] fev_data;
     wire        fev_valid, fev_mark;
     wire [15:0] fev_mark_free;
@@ -735,10 +797,11 @@ module card_link #(
         .rst           (rst),
         .enable        (capture_enable),
         .sparse        (sparse_ctrl && source_real),
-        .in_data       (ev_data),
-        .in_valid      (ev_valid),
-        .in_mark       (ev_mark),
-        .in_mark_free  (real_mark_free),
+        .in_data       (mg_data),
+        .in_valid      (mg_valid),
+        .in_mark       (mg_mark),
+        .in_mark_free  (mg_mark_free),
+        .in_dummy      (mg_dummy),
         .out_data      (fev_data),
         .out_valid     (fev_valid),
         .out_mark      (fev_mark),
@@ -873,6 +936,16 @@ module card_link #(
         .mem_served        (mem_served),
         .mem_last          (mem_last),
         .mem_diverted      (mem_diverted),
+        .mem_intc8rom      (mem_intc8rom),
+        .accel_mode        (accel_mode),
+        .accel_target      (accel_target),
+        .accel_cnt_clr     (accel_cnt_clr),
+        .accel_stat        (accel_stat),
+        .accel_fast        (accel_fast),
+        .accel_bus         (accel_bus),
+        .accel_cycles      (accel_cycles),
+        .accel_wait        (accel_wait),
+        .accel_turbo       (accel_turbo),
         .fb_serve          (fb_serve),
         .fb_cnt_clr        (fb_cnt_clr),
         .fb_peek_addr      (fb_peek_addr),
@@ -1088,7 +1161,7 @@ module card_link #(
     // the rotation; the Apple's memory at 2, the strict-priority slot above
     // it.  The ring's batches are 32 lines so one begun inside the memory
     // client's window (rot_ok) is over before the next bus cycle; see
-    // rtl/mem_client.sv and wb_arb.
+    // rtl/page_client.sv and wb_arb.
     wire [2:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;
     wire [71:0]  c_addr;
     wire [383:0] c_data;
@@ -1111,16 +1184,16 @@ module card_link #(
     assign c_data[127:0] = 128'd0;          // the reader carries no data
     assign c_sel[31:0]   = {16'hFFFF, 16'hFFFF};
 
-    mem_client u_mem (
+    page_client u_mem (
         .clk            (clk_ctrl),
         .rst            (rst),
         .calib_complete (calib_complete),
         .master_active  (cpu_source_active),
         .op_present     (mem_op_present),
-        .mq_valid (mq_valid), .mq_kind (mq_kind), .mq_id (mq_id),
-        .mq_line (mq_line), .mq_byte (mq_byte), .mq_data (mq_data),
-        .mq_ready (mq_ready),
-        .mr_valid (mr_valid), .mr_id (mr_id), .mr_data (mr_data),
+        .accel          (accel_on),
+        .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pr_valid (pr_valid), .pr_data (pr_data),
         .req   (c_req[2]),  .gnt (c_gnt[2]),  .cyc (c_cyc[2]),
         .stb   (c_stb[2]),  .we (c_we[2]),
         .addr  (c_addr[71:48]), .data (c_data[383:256]), .sel (c_sel[47:32]),

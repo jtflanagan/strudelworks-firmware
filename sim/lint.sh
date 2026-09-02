@@ -56,6 +56,7 @@ run sync_fifo     rtl/sync_fifo.sv
 run synth_bus_events rtl/synth_bus_events.sv
 run bus_event_capture rtl/bus_event_capture.sv rtl/sync_fifo.sv
 run bus_event_filter rtl/bus_event_filter.sv
+run event_merge   rtl/event_merge.sv
 run synchronizer  rtl/synchronizer.sv
 run wb_regfile    rtl/wb_regfile.sv
 run reg_bridge    rtl/reg_bridge.sv
@@ -65,12 +66,16 @@ run msg_master    rtl/msg_master.sv
 run wb_arb        rtl/wb_arb.sv
 run apple_mmu     rtl/apple_mmu.sv
 run apple_rom     rtl/apple_rom.sv
-run cache_way_ram rtl/cache_way_ram.sv
-run mem_cache     rtl/mem_cache.sv rtl/cache_way_ram.sv
-run mem_client    rtl/mem_client.sv
+# bank_ram is the two-process true-dual-port RAM template, like fd_bank.
+run bank_ram      rtl/bank_ram.sv -Wno-MULTIDRIVEN
+run page_cache    rtl/page_cache.sv rtl/bank_ram.sv -Wno-MULTIDRIVEN
+run page_client   rtl/page_client.sv
 run tx_ring       rtl/tx_ring.sv rtl/sync_fifo.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 run apple_bus_write rtl/apple_bus_write.sv
+run accel_seq     rtl/accel_seq.sv
+run iline         rtl/iline.sv rtl/iscan.sv
+run iscan         rtl/iscan.sv
 run boot_hold     rtl/boot_hold.sv
 run kbd_inject    rtl/kbd_inject.sv
 run kbd_notice    rtl/kbd_notice.sv
@@ -85,7 +90,7 @@ run floppy_card   rtl/floppy_card.sv rtl/fd_bank.sv rtl/slot_switches.sv \
                   -Wno-MULTIDRIVEN
 # vbl_lock and fb_sim share the scanner formula, an `include beside the RTL.
 run vbl_lock      -Irtl rtl/vbl_lock.sv
-run fb_sim        -Irtl rtl/fb_sim.sv rtl/fd_bank.sv -Wno-MULTIDRIVEN
+run fb_sim        -Irtl rtl/fb_sim.sv
 # via6522 is third-party (see its header) and linted only as a dependency of
 # the mockingboard, with the style warnings its 2011 idiom trips suppressed
 # rather than fixed - it ran real machines as-is, and diverging from the
