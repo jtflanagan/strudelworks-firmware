@@ -251,7 +251,7 @@ module master_top #(
     wire        turbo_tick, tev_valid, tev_sync, ev_fast_room;
     wire [15:0] tev_addr;
     wire [7:0]  tev_data, i_din_w;
-    wire [31:0] accel_turbo;
+    wire [31:0] accel_turbo, accel_dline;
     wire [1:0]  p_cls;
     wire        p_aux_w, map_changed;
     wire [15:0] p_addr_w, p_off_w;
@@ -347,6 +347,7 @@ module master_top #(
         .accel_fast (accel_fast), .accel_bus (accel_bus),
         .accel_cycles (accel_cycles), .accel_wait (accel_wait),
         .accel_turbo (accel_turbo),
+        .accel_dline (accel_dline),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (fb_mode), .fb_compared (fb_compared), .fb_mismatch (fb_mismatch),
         .fb_last (fb_last), .fb_last2 (fb_last2), .fb_other (fb_other),
@@ -736,7 +737,7 @@ module master_top #(
         .ws_off        (ws_off_w),
         .inval         (mem_inval),
         .cnt_clr       (accel_cnt_clr),
-        .cnt_serves    (),
+        .cnt_serves    (accel_dline),   // ACCEL_DLINE: every retire, reads and writes
         .cnt_claims    (),
         .cnt_splices   (),
         .cnt_cam_serves (),

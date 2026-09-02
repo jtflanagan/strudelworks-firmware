@@ -136,6 +136,8 @@ protocol.
 | `0x8000_0098` | ACCEL_BUS | RO | the core's ops that rode a bus cycle; (FAST + BUS) / CYCLES is the ratio achieved |
 | `0x8000_009C` | ACCEL_CYCLES | RO | bus cycles while accelerating |
 | `0x8000_00A0` | ACCEL_WAIT | RO | clocks the core spent waiting to merge |
+| `0x8000_00A4` | ACCEL_TURBO | RO | the instruction front's one-clock ops (ISTREAM.md) |
+| `0x8000_00A8` | ACCEL_DLINE | RO | the data front's one-clock ops, reads and writes (DLINE.md). Every one of these paid the governor like any other op, so the ratio achieved is (TURBO + DLINE + FAST + BUS) / CYCLES - a display that leaves DLINE out reads a governed 8x as ~5x |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.
