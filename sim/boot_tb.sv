@@ -246,7 +246,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .tev_valid (tev_valid), .tev_addr (tev_addr), .tev_data (tev_data),
         .tev_sync (tev_sync), .ev_room (1'b1),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
-        .rw_bank (rw_bank), .map_changed (map_changed),
+        .rw_bank (rw_bank), .map_changed (map_changed), .intc8rom (intc8rom),
         .il_req (il_req), .il_aux (il_aux_w), .il_bank (il_bank_w), .il_line (il_line_w),
         .il_ack (il_ack && il_req), .il_ok (il_ok), .il_row (il_row),
         .r2_en (rom_r2_en), .r2_addr (rom_r2_addr), .r2_data (rom_r2_data), .r2_busy (rom_r2_busy),
@@ -732,7 +732,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // the core's, fast or bus, and the hard disk's DMA alike - and the
     // INTC8ROM latch from every $C3xx and $CFFF access.
     always @(posedge clk) if (u_present) begin
-        if (u_addr[15:8] == 8'hC3 && !m_intcx && !m_slotc3) m_intc8 <= 1'b1;
+        if (u_addr[15:8] == 8'hC3 && !m_slotc3)              m_intc8 <= 1'b1;   // UTAIIe 5-28: INTCXROM does not matter
         if (u_addr == 16'hCFFF)                              m_intc8 <= 1'b0;
         if (!u_rw && u_addr[15:12] != 4'hC) begin
             if (u_addr >= 16'hD000) begin

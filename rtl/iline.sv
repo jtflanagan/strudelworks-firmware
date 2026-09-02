@@ -37,10 +37,14 @@
 // WHAT IS NEVER SERVED HERE, by rule:
 //   * anything the classifier calls BUS - so all of $C000-$C0FF, every
 //     slot's pages, and the internal ROM before it has loaded;
-//   * page $C3 and the $CFF0 line: an access there moves the IIe's INTC8ROM
-//     latch, which the MMU shadow learns from the unified op stream - a
-//     turbo retire never reaches that stream, so these ride the sequencer
-//     (rtl/apple_mmu.sv, "INTC8ROM");
+//   * the $CFF0 line, always, and page $C3 while the IIe's INTC8ROM latch
+//     is CLEAR: an access there moves the latch, which the MMU shadow
+//     learns from the unified op stream - a turbo retire never reaches
+//     that stream, so the access that sets it rides the sequencer
+//     (rtl/apple_mmu.sv, "INTC8ROM").  Once set, a $C3xx access changes
+//     nothing on the card or the machine and the page is served like any
+//     internal-ROM page; the clear ($CFFF, reset) pulses map_changed,
+//     which empties the front, and the exclusion resumes;
 //   * any cycle while an op is on the bus, an override is engaging, the
 //     reset sequence is riding the pins, or the sequencer lacks credit -
 //     all folded into turbo_ok (rtl/accel_seq.sv).
@@ -130,6 +134,7 @@ module iline (
     input  wire [15:0] p_off,
     input  wire [7:0]  rw_bank,
     input  wire        map_changed,
+    input  wire        intc8rom,      // apple_mmu's latch: page $C3 is servable while set
 
     // The page cache's line port (rtl/page_cache.sv).
     output wire         il_req,
@@ -363,6 +368,25 @@ module iline (
     wire tgt_here  = tgt_v && cyc_is_i && cpu_rw && (pc_addr == tgt_q);
     wire tgt_serve = tgt_here && tgt_lhit_q && !(lhit_q && (exp_q == pc_addr));
 
+    // ---- the INTC8ROM latch, registered once -------------------------------
+    // Pages a retire must never eat while the latch could still move: page
+    // $C3 until the latch is set (the first access rides the sequencer and
+    // sets it at op_present; map_changed pulses the clock after, before any
+    // $C3 line can even be wanted), and the $CFFx line always ($CFFF is the
+    // clear itself).  A clear pulses map_changed too, which kills every
+    // line and the CAM; kill_now below also refuses a $C3 serve on the
+    // clock the registered latch reads clear, so the RTS that follows the
+    // 80-column firmware's own `LDX $CFFF` ($C372) rides the sequencer and
+    // re-sets the latch whatever the driver's data/cyc_en spacing.  ONE
+    // register stage here (a second would still be safe - a want relaunched
+    // by f_restart re-evaluates at F_IDLE two clocks after the pulse - a
+    // third would not).
+    logic intc8rom_q;
+    always_ff @(posedge clk) intc8rom_q <= rst ? 1'b0 : intc8rom;
+    function automatic logic excl(input [11:0] tag);
+        excl = (tag[11:4] == 8'hC3 && !intc8rom_q) || (tag == 12'hCFF);
+    endfunction
+
     // A taken branch to a non-resident line asks the engine early (the
     // want travels while the branch's own dummies run); the engine filters
     // residency and class exactly as it does the scanner's wants.
@@ -375,8 +399,7 @@ module iline (
         end else begin
             if (ew_taken) ew_v <= 1'b0;
             if (resolving && res_taken &&
-                !(res_tgt[15:8] == 8'hC0) && !(res_tgt[15:8] == 8'hC3) &&
-                !(res_tgt[15:4] == 12'hCFF)) begin
+                !(res_tgt[15:8] == 8'hC0) && !excl(res_tgt[15:4])) begin
                 ew_v   <= 1'b1;
                 ew_tag <= res_tgt[15:4];
             end
@@ -477,6 +500,9 @@ module iline (
     wire [3:0]  sc_off;
 
     wire kill_now = map_changed || inval || !serve ||
+                    // The INTC8ROM latch read clear under a $C3 fetch: the
+                    // serve is refused before map_changed's kill lands.
+                    (pc_addr[15:8] == 8'hC3 && !intc8rom_q) ||
                     (hslot ? snp_kill1 : snp_kill0) ||
                     ((hslot ? t_rom[1] : t_rom[0]) && r2_busy) ||
                     // ...and a retained copy of THIS fetch's line dying on
@@ -514,11 +540,6 @@ module iline (
     logic [11:0] f_vtag, f_poff;
     logic [127:0] f_buf;
     wire f_active = (fst != F_IDLE);
-
-    // Pages a retire must never eat (the INTC8ROM latch's food).
-    function automatic logic excl(input [11:0] tag);
-        excl = (tag[11:4] == 8'hC3) || (tag == 12'hCFF);
-    endfunction
 
     // The engine's pick, and the classifier's answer for it.  The demand
     // preference compares against the REGISTERED miss tag, not the live
@@ -707,6 +728,7 @@ module iline (
         .clk         (clk),
         .rst         (rst),
         .enable      (turbo_en && serve && !cpu_rst),
+        .intc8rom    (intc8rom_q),
         .anchor_v    (anchor_v),
         .anchor_addr (pc_addr),
         .rd_slot     (sc_slot),

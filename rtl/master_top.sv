@@ -642,6 +642,7 @@ module master_top #(
         .p_off         (p_off_w),
         .rw_bank       (mem_rw_bank),
         .map_changed   (map_changed),
+        .intc8rom      (mem_intc8rom),
         .il_req        (il_req),
         .il_aux        (il_aux_w),
         .il_bank       (il_bank_w),

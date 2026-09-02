@@ -264,7 +264,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .tev_valid (tev_valid), .tev_addr (tev_addr), .tev_data (tev_data),
         .tev_sync (tev_sync), .ev_room (1'b1),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
-        .rw_bank (rw_bank), .map_changed (map_changed),
+        .rw_bank (rw_bank), .map_changed (map_changed), .intc8rom (intc8rom),
         .il_req (il_req), .il_aux (il_aux_w), .il_bank (il_bank_w), .il_line (il_line_w),
         .il_ack (il_ack && il_req), .il_ok (il_ok), .il_row (il_row),
         .r2_en (rom_r2_en), .r2_addr (rom_r2_addr), .r2_data (rom_r2_data), .r2_busy (rom_r2_busy),
@@ -682,7 +682,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // The reference, from the unified stream: every write in program order,
     // and the INTC8ROM latch from every $C3xx and $CFFF access, fast or not.
     always @(posedge clk) if (u_present) begin
-        if (u_addr[15:8] == 8'hC3 && !m_intcx && !m_slotc3) m_intc8 <= 1'b1;
+        if (u_addr[15:8] == 8'hC3 && !m_slotc3)              m_intc8 <= 1'b1;   // UTAIIe 5-28: INTCXROM does not matter
         if (u_addr == 16'hCFFF)                              m_intc8 <= 1'b0;
         if (!u_rw && u_addr[15:12] != 4'hC) begin
             if (u_addr >= 16'hD000) begin
@@ -747,9 +747,13 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     end
     // Fast ops: on the clock the core takes the byte, against the reference.
+    // fast_c3 / turbo_c3: page $C3's fetches by path - the latch's food
+    // rides the sequencer, the rest the front, once it is set.
+    integer fast_c3 = 0, turbo_c3 = 0, turbo_c3_0 = 0;
     always @(posedge clk) if (fev_valid) begin
         if (fev_rw) begin
             reads = reads + 1; fast_reads = fast_reads + 1;
+            if (fev_addr[15:8] == 8'hC3) fast_c3 = fast_c3 + 1;
             if (fev_data !== exp_read(fev_addr)) begin
                 reads_bad = reads_bad + 1;
                 if (reads_bad <= 5) $display("    fast read $%04X: core got %02x, the reference says %02x", fev_addr, fev_data, exp_read(fev_addr));
@@ -763,8 +767,10 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     end
     // The front's one-clock ops, by the same rules: every byte the
-    // reference's, never a slot's page, never page $C3 or the $CFFx line
-    // (the INTC8ROM latch's food rides the sequencer, by rule).
+    // reference's, never a slot's page, never the $CFFx line, never page
+    // $C3 while the model's latch is clear (the latch's food rides the
+    // sequencer, by rule; the model clears at PRESENT of $CFFF, the card
+    // at its commit, so this is the stricter of the two).
     integer turbo_reads = 0, turbo_bad = 0, turbo_excl_bad = 0;
     always @(posedge clk) if (tev_valid) begin
         reads = reads + 1; turbo_reads = turbo_reads + 1;
@@ -773,7 +779,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             if (reads_bad <= 5) $display("    turbo read $%04X: core got %02x, the reference says %02x", tev_addr, tev_data, exp_read(tev_addr));
         end
         if (tev_addr[15:12] == 4'hC) begin
-            if (tev_addr[15:8] == 8'hC3 || tev_addr[15:4] == 12'hCFF) turbo_excl_bad = turbo_excl_bad + 1;
+            if (tev_addr[15:8] == 8'hC3) turbo_c3 = turbo_c3 + 1;
+            if ((tev_addr[15:8] == 8'hC3 && !m_intc8) || tev_addr[15:4] == 12'hCFF) turbo_excl_bad = turbo_excl_bad + 1;
             if (tev_addr[11:8] == 4'd0) turbo_excl_bad = turbo_excl_bad + 1;
             if (!tev_addr[11] && tev_addr[11:8] != 4'd0 &&
                 !(m_intcx || (tev_addr[11:8] == 4'd3 && !m_slotc3))) turbo_excl_bad = turbo_excl_bad + 1;
@@ -1027,6 +1034,19 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         for (a = 0; a < 4096; a = a + 1) rom_img[12288 + a] = prog[a];
         for (a = 0; a < 256; a = a + 1) hd_rom[a] = $urandom;
         rom_img[16'h1000] = 8'hC7;
+        // Page $C3's residents, for cxtest (sim/accel.s): the 80-column
+        // firmware's own shape at $C372 (LDX $CFFF / RTS - the clear, then
+        // an RTS the front must not serve), a one-line loop at $C380
+        // (LDX #16 / DEX / BNE / RTS), and a loop across two lines at
+        // $C39A-$C3A5 (LDX #8 / NOP x6 / DEX / BNE / RTS) for the crossing.
+        rom_img[16'h0372] = 8'hAE; rom_img[16'h0373] = 8'hFF; rom_img[16'h0374] = 8'hCF;
+        rom_img[16'h0375] = 8'h60;
+        rom_img[16'h0380] = 8'hA2; rom_img[16'h0381] = 8'h10; rom_img[16'h0382] = 8'hCA;
+        rom_img[16'h0383] = 8'hD0; rom_img[16'h0384] = 8'hFD; rom_img[16'h0385] = 8'h60;
+        rom_img[16'h039A] = 8'hA2; rom_img[16'h039B] = 8'h08;
+        for (a = 16'h039C; a <= 16'h03A1; a = a + 1) rom_img[a] = 8'hEA;
+        rom_img[16'h03A2] = 8'hCA; rom_img[16'h03A3] = 8'hD0; rom_img[16'h03A4] = 8'hF7;
+        rom_img[16'h03A5] = 8'h60;
         m_reset();
         resets = 0;
 
@@ -1082,6 +1102,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("mode 1: %0d internal-ROM reads of $C100-$CFFF served from the card, every one the model's byte", cx_fast));
         if (cx_slot_fast != 0) fail($sformatf("mode 1: %0d slot reads were served fast", cx_slot_fast));
         else ok("mode 1: every slot read - the slot-5 ROM, the empty slots - rode the bus");
+        if (turbo_c3 == 0) fail("mode 1: no $C3xx fetch was served in one clock");
+        else ok($sformatf("mode 1: %0d $C3xx fetches served in one clock once INTC8ROM was set (%0d rode the sequencer: the latch's food)", turbo_c3, fast_c3));
         check_image("mode 1: the image equals the reference");
 
         // ---- 3. mode 2: reads and writes on the card ------------------------------------
@@ -1090,7 +1112,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         bp_prom0 = u_iline.cnt_promotes;   bp_pin0  = u_iline.cnt_loop_hold;
         bp_scan0 = u_iline.cnt_scan_fills; bp_fill0 = u_iline.cnt_cam_fills;
         bp_serv0 = u_iline.cnt_cam_serves; bp_tgt0 = u_iline.cnt_tgt_serves;
-        bp_slow0 = u_iline.cnt_slow_i;
+        bp_slow0 = u_iline.cnt_slow_i; turbo_c3_0 = turbo_c3;
         @(negedge clk); mode <= 2'd2;
         wait_passes(n0 + 3, "mode 2, unlimited");
         repeat (3 * CYCLE) @(negedge clk);
@@ -1102,6 +1124,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("mode 2: %.1fx (%0d turbo, %0d fast, %0d dline, %0d bus over %0d cycles)", real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles), turbo_ops, fast_ops, u_dline.cnt_serves, bus_ops, cycles));
         if (turbo_ops == 0) fail("mode 2: no fetch was served in one clock");
         else ok($sformatf("mode 2: %0d fetches served in one clock by the line front", turbo_ops));
+        if (turbo_c3 == turbo_c3_0) fail("mode 2: no $C3xx fetch was served in one clock");
+        else ok($sformatf("mode 2: %0d $C3xx fetches served in one clock once INTC8ROM was set", turbo_c3 - turbo_c3_0));
         $display("    front: %0d promotes, %0d fill retains, %0d scan prefetches, %0d pinned crossings, %0d want-behind-scan clocks, %0d CAM serves, %0d zero-stall branches, %0d slow ifetches",
                  u_iline.cnt_promotes, u_iline.cnt_cam_fills, u_iline.cnt_scan_fills,
                  u_iline.cnt_loop_hold, u_iline.cnt_scan_block, u_iline.cnt_cam_serves,

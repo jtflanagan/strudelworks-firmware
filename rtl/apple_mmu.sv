@@ -135,13 +135,18 @@
 //   $CFFF, every write, every $C0xx    -> BUS
 //
 // INTC8ROM is the IIe's unreadable latch: set by any access to $C3xx while
-// INTCXROM and SLOTC3ROM are both clear, cleared by any access to $CFFF or by
-// RES'.  It decides whether $C800-$CFFF is the internal ROM's.  It is set at
+// SLOTC3ROM is clear - in EITHER state of INTCXROM (UTAIIe 5-28, AppleWin's
+// Memory.cpp: with INTCXROM set the latch is invisible until INTCXROM is
+// cleared again, and then $C800-$CFFF stays the internal ROM's without a
+// $C3xx access in between) - cleared by any access to $CFFF or by RES'.  It
+// decides whether $C800-$CFFF is the internal ROM's.  It is set at
 // op_present rather than op_commit, because a $C3xx fetch served from the
 // card has no data phase on the bus - and for one that does, present-versus-
 // commit only differs for the NEXT op, which cannot be presented before this
 // one's commit.  $CFFF is a bus op and clears it at commit like every other
-// switch.  MEM_STAT[13] reads it.
+// switch.  MEM_STAT[13] reads it.  The instruction front (rtl/iline.sv)
+// serves page $C3 only while the latch is SET: a turbo retire never reaches
+// this stream, so the access that sets it always rides the sequencer.
 //
 // The internal ROM not yet loaded classifies as BUS, so "ROM class" always
 // means "the card has the byte": rtl/page_cache.sv needs no further check.
@@ -340,7 +345,7 @@ module apple_mmu (
     wire acc_cfff = (op_addr == 16'hCFFF);
     always_ff @(posedge clk) begin
         if (rst || !res_sync)                                       intc8rom <= 1'b0;
-        else if (op_present && acc_c3xx && !intcxrom && !slotc3rom) intc8rom <= 1'b1;
+        else if (op_present && acc_c3xx && !slotc3rom)              intc8rom <= 1'b1;
         else if (op_commit && acc_cfff)                             intc8rom <= 1'b0;
     end
 

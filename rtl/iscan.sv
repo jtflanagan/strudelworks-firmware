@@ -57,6 +57,7 @@ module iscan (
     input  wire        clk,
     input  wire        rst,
     input  wire        enable,        // turbo serving: the front's lines are live
+    input  wire        intc8rom,      // iline's registered latch: page $C3 is a target while set
 
     // The anchor: a program-stream opcode fetch completing this clock.
     input  wire        anchor_v,
@@ -181,9 +182,12 @@ module iscan (
 
     wire tgt_held0 = v0 && (tgt_tag == vtag0);
     wire tgt_held1 = v1 && (tgt_tag == vtag1);
-    // Pages a prefetch must never touch: the engine would refuse them too,
-    // but the filter is a clock and an engine slot saved.
-    wire tgt_excl  = (tgt_tag[11:4] == 8'hC0) || (tgt_tag[11:4] == 8'hC3) ||
+    // Pages a prefetch must never touch: the engine would refuse them too
+    // (rtl/iline.sv `excl`, the correctness gate), but the filter is a
+    // clock and an engine slot saved.  Page $C3 only while INTC8ROM is
+    // clear - set, it is an internal-ROM page like any other.
+    wire tgt_excl  = (tgt_tag[11:4] == 8'hC0) ||
+                     (tgt_tag[11:4] == 8'hC3 && !intc8rom) ||
                      (tgt_tag == 12'hCFF);
 
     // The transfer's OWN line, captured when it is first decoded - the loop

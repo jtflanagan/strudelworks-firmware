@@ -217,7 +217,10 @@ $CFFF, every write, every $C0xx        -> BUS
 ```
 
 `intc8rom` is the IIe's unreadable latch: set by any access to `$C3xx`
-while INTCXROM and SLOTC3ROM are both clear, cleared by any access to `$CFFF`
+while SLOTC3ROM is clear - in either state of INTCXROM, UTAIIe 5-28 as
+AppleWin has it (the first cut also required INTCXROM clear; with INTCXROM
+set, a `$C3xx` access, then INTCXROM cleared, the machine keeps `$C800-$CFFF`
+internal and the card now agrees) - cleared by any access to `$CFFF`
 and by RES′. It is set at `op_present` rather than `op_commit`, because a
 `$C3xx` fetch served from the card has no data phase; for one that does the
 difference only reaches the *next* op, which cannot be presented before this

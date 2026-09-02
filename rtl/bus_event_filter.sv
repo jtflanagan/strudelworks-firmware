@@ -69,7 +69,8 @@
 //     it is: a read of $0000 is harmless to every consumer the host has.
 //   - a FAST op, tagged 0xC: an op the core took from the card, never a
 //     cycle.  Kept by the rule a cycle's event would be (every one in full,
-//     writes in sparse - a fast op is never in $Cxxx), NEVER counted, and
+//     writes in sparse - a fast op is a read of RAM, LC or ROM, the
+//     motherboard's $C1xx-$CFxx ROM included, never a switch), NEVER counted, and
 //     NEVER consulted for the edge rule: a fast op taken between one cycle's
 //     tick and the next carries the next cycle's level, and an edge seen on
 //     it would not be seen again on the cycle's own event - the one the

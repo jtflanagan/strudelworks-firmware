@@ -1,10 +1,73 @@
-# $Cxxx under acceleration: what to serve fast - the record before the plan
+# $Cxxx under acceleration: what to serve fast
 
-Status: **NOT PLANNED YET** (2026-09-02).  This file is the evidence and the
-open questions, written so the plan can be made in a fresh context.  The
-user's decision: treat "what in $C000-$CFFF can be served fast" as ONE plan
-rather than piecemeal exceptions, and take it up BEFORE dline rung 4
-(docs/DLINE.md; streams are deferred, not dropped).
+Status: **STEP 1 BUILT AND SIMULATED** (2026-09-02) - page $C3 on the
+instruction front once the INTC8ROM latch is set; hardware proof pending.
+The user's decision: treat "what in $C000-$CFFF can be served fast" as ONE
+programme rather than piecemeal exceptions, taken up BEFORE dline rung 4
+(docs/DLINE.md; streams are deferred, not dropped), starting with $C3xx
+because AUXMOVE lives there.  The standing rule holds throughout: a $Cxxx
+access that is not the motherboard's own ROM is slow, nothing else is.
+
+## Step 1 (2026-09-02): $C3xx on the front - what was done and why
+
+**The premise, corrected.**  The exclusion of $C3xx was never for the host.
+The host models nothing in $C100-$CFFF: strudelworks-host classifies all
+of $Cxxx as Bus, tracks INTCXROM/SLOTC3ROM only from the $C006/7 and
+$C00A/B WRITES (src/apple_memory.cpp, src/mb_audio.cpp - the Mockingboard
+gates VIA writes with them), has no INTC8ROM anywhere, and its MEM_STAT
+decode skips bit 13.  Nothing on the host consumes a $C3xx read; the
+cycles a turbo fetch replaces are dummies on the pins, counted into
+SKIPs, so the beam and the sound clocks never notice.  No bus event, no
+"slot owner" notice, no host change.  The one consumer that would desync
+was the CARD's own shadow: apple_mmu.intc8rom learns from the unified op
+stream at op_present, and a turbo retire never reaches that stream.
+
+**The change (firmware only, branch dcache):**
+
+1. `rtl/apple_mmu.sv`: the latch sets on any $C3xx access with SLOTC3ROM
+   clear, in EITHER state of INTCXROM - UTAIIe 5-28 as AppleWin's
+   Memory.cpp has it.  The first cut also required INTCXROM clear, a
+   divergence in the safe direction (after INTCXROM off without $CFFF the
+   card called $C8xx BUS and the machine's internal ROM answered on the
+   bus: right byte, slow).  Gone.
+2. `rtl/iline.sv`: `excl` refuses page $C3 only while a registered copy of
+   the latch reads CLEAR; the $CFFx line always.  The first $C3xx access
+   still rides the sequencer (a ROM-class FAST op) and sets the latch at
+   op_present; map_changed pulses the clock after and empties the front,
+   and no $C3 line can even be wanted before that.  The clear ($CFFF, a
+   bus op; or reset) pulses map_changed too, and `kill_now` additionally
+   refuses a $C3 serve on the clock the registered latch reads clear - so
+   the RTS after the 80-column firmware's own `LDX $CFFF` at $C372 rides
+   the sequencer and re-sets the latch whatever the driver's data/cyc_en
+   spacing (today it works by T_CYCEN = T_DIN + 1 alone: zero clocks of
+   margin, the same property every switch write relies on).  The
+   resolved-branch early want uses the same function; the scanner's own
+   pre-filter (`rtl/iscan.sv` tgt_excl - a SEPARATE copy, the earlier
+   version of this file said "the same function" and was wrong) carries
+   the same term.
+3. The testbenches: both machine models set the latch the machine's way;
+   accel_tb asserts the STRICTER rule (its model clears at present of
+   $CFFF, the card at commit) and counts page $C3's fetches by path; the
+   internal ROM image gets code resident in $C3xx ($C372 the firmware's
+   shape, $C380 a one-line loop, $C39A a loop across two lines) and
+   cxtest runs all four shapes including the INTCXROM-set case.
+
+**Sim result (sim/run_accel_vl.sh, both PHI0 sweeps): 65 checks, 0
+errors.**  Per sweep 1170 $C3xx fetches at one clock and exactly 15 on
+the sequencer - three per pass, one per latch-set episode ($C380 after
+the entry clear, the RTS at $C375, $C380 under INTCXROM), five passes.
+Mode 2 unlimited 68.9x as before (the test program is not AUXMOVE-bound).
+
+**Not run:** sim/run_mmu_trace.sh - the real captures (sim/trace_work,
+gitignored) are not on this machine.  Note for when they are: a BUS-class
+read is never compared there, so diff the ROM `classes`/`compared` counts
+before and after; more ROM compares at 0 mismatches is the proof of the
+changed set condition.
+
+**Hardware proof pending:** governed 8x reading 8.00 in both wave.dsk
+sections, the unlimited end loop against the main section's 80x, and a
+sparse trace through tools/swtrace_mix.py with the $C39x fetches gone
+from the fast-op census.
 
 ## The finding that started it (2026-09-02, on hardware)
 
@@ -46,7 +109,7 @@ same exclusion sits in the dline's last-byte serve ($Cxxx whole).
   not the motherboard's own ROM is slow - every slot is hardware and rides
   the bus - and nothing else is slow.  The plan must keep that.
 
-## The one refinement already identified (NOT built)
+## The refinement as first identified (BUILT as step 1, above - the term is the latch alone after the set-condition fix; and iscan has its own copy of the rule)
 
 Exclude $C3xx from the instruction front only while the latch could still
 change: while INTCXROM and INTC8ROM are both clear.  Once INTC8ROM is set
@@ -61,12 +124,13 @@ scanner's want filter (it uses the same function).  Expected effect:
 AUXMOVE and every 80-column-firmware loop at one clock; the demo's end
 loop from 22x toward the fast section's figure.
 
-## Open questions for the plan
+## Open questions for the next steps
 
-1. The latch pages, as above - and whether the dline's data-side $Cxxx
-   exclusions (the last byte; the CAM never holds ROM class) should follow
-   the same logic for ROM-class data reads of $C1xx-$CFxx (the firmware
-   reads its own tables).
+1. (Latch pages: DONE, step 1.)  Whether the dline's data-side $Cxxx
+   exclusions (the last byte excludes $Cxxx whole; the CAM never holds ROM
+   class) should follow the same logic for ROM-class data reads of
+   $C1xx-$CFxx (the firmware reads its own tables) - with a trace first
+   showing the data side is where cycles go.
 2. $C800-$CFFF: already ROM class when the latch says internal; the front
    serves it.  Confirm on a trace that 80-column text output (COUT through
    $C3xx into $C8xx) is one-clock end to end after (1).

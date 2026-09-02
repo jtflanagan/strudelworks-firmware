@@ -223,6 +223,22 @@ cxtest: sta $C007               ; INTCXROM on: all of $C100-$CFFF is internal
         lda $C300               ; ...which is empty
         lda $C800               ; still nothing: no INTC8ROM without slot 3 internal
         sta $C00A               ; restore
+        ; Code RESIDENT in $C3xx (the testbench pokes it into the internal
+        ; ROM image): the first fetch rides the sequencer and sets INTC8ROM,
+        ; every fetch after that is the front's (accel_tb: turbo_c3).
+        jsr $C380               ; LDX #16 / DEX / BNE / RTS - one line
+        jsr $C380               ; one clock throughout now
+        jsr $C39A               ; a loop across two lines: the crossing
+        jsr $C372               ; LDX $CFFF / RTS - the 80-column firmware's
+                                ; own shape: the clear, then an RTS the front
+                                ; must NOT serve - it re-sets the latch...
+        lda $C800               ; ...so this is the internal ROM again
+        lda $CFFF               ; clear
+        sta $C007               ; INTCXROM on
+        jsr $C380               ; sets INTC8ROM on the machine regardless
+        sta $C006               ; INTCXROM off...
+        lda $C800               ; ...and $C800 is STILL internal (UTAIIe 5-28)
+        lda $CFFF               ; clear: back to the entry state
         rts
 
 sub:    lda #$C3
