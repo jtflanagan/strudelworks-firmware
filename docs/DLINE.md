@@ -1,13 +1,42 @@
 # The dline: 1-clock data
 
-Status: **rung 1 DONE and on hardware** (fw e9170ab: 39.5x, sim and the
-user's hardware observation agreeing); **the boot bench BUILT AND GREEN
-2026-09-02** (docs/BOOT_BENCH.md: both images, both modes, traces
-identical mode 0 vs mode 2). **Next: rung 2.** Branch `dcache`, both repos,
+Status: **rung 1 and rung 2 DONE and ON HARDWARE** (2026-09-02).
+- Rung 1 (fw e9170ab): the zp/stack shadow, 39.5x, sim and HW agreeing.
+- Rung 2 (fw 2e85924): the 4-line CAM + last-byte serve, 45.2x on the
+  bench, virtual-tag serve, on HW.
+- **SMC fill-window fix (fw 95a5911), HW-PROVEN**: hunting a long-standing
+  HGR corruption / Moon-Patrol-at-accel lockup ([[hgr-corruption-hunt]] in
+  memory) turned up a coherence hole in the page cache's shared fill port
+  (il_ack), NOT in the dline itself: a store reaches the banks at P+3, the
+  front snoops an in-flight fill at P+1, but P+2 was open - a fill reading
+  there took the pre-write byte and nothing restarted it, so self-modifying
+  code (compiled sprites) fetched stale. il_ack now holds off P+2 for the
+  fill's own physical line. Proven on HW at 4x/full-capture with a trace
+  coherence oracle: 1877 stale reads at $3CF5 -> 0, user visually clean.
+  Rung 3's posted-write path builds on this same fill port, so keep the
+  P+2 law in mind. WNS +0.048.
+- Boot bench BUILT AND GREEN (docs/BOOT_BENCH.md): both images, both
+  modes, traces identical mode 0 vs mode 2. Runs per rung, Verilator.
+- New sim coverage in sim/accel.s (fw 95a5911): an interrupt storm over
+  the data front (Mockingboard-shaped timer IRQ interposing on every op),
+  HGR page-flipping under it, and an SMC-into-a-hot-line sweep. None
+  reproduce the P+2 race (cycle-exact prefetch phase, not craftable from
+  asm), but they close real coverage gaps; wait_passes timeout raised to
+  120M for the heavier program.
+- Host: a **BUS CAPTURE** menu row toggles sparse/full read-write capture
+  live ([[bus-capture-menu]]) - the tool that made the tracing possible.
+
+**NEXT: rung 3 - writes (splice + post).** Branch `dcache`, both repos,
 cut from the merged master (page cache + istream front + carry gift, all
 hardware-proven). The old acceleration-branch D$ plan (its DCACHE_PLAN.md)
 is explicitly NOT the basis for this work: it solved a cache-hierarchy
 problem this architecture no longer has.
+
+NOTHING PUSHED OR MERGED: the dcache branch holds boot bench (7d97feb),
+rung 2 (2e85924), the SMC fix + coverage (95a5911) on firmware, and the
+BUS CAPTURE menu (92379e0) on host. Measured accel on the bench: 45.2x
+(rung 2); the rung-1/2 ratios are per docs; HW at 4x for the corruption
+hunt (the artifact sweet spot), max/unlimited otherwise.
 
 ## The target, and why it is the target
 
@@ -158,7 +187,14 @@ only a real boot has historically caught. Built and green on both
 images, both modes; from here every rung runs it beside the accel
 battery (Verilator for the boot; iverilog is a pre-hardware spot check).
 
-### Rung 2 - the 4-line CAM: DONE IN SIM (2026-09-02)
+### Rung 2 - the 4-line CAM: DONE AND ON HARDWARE (2026-09-02)
+
+**On HW (fw 2e85924 built, ran; the SMC fill-window fix fw 95a5911 rides
+on the same bit now proven clean at 4x).** The virtual-tag serve lesson
+(below) held; no dline coherence bug surfaced - the corruption chased
+this session was the page cache's fill port (il_ack P+2), fixed there,
+not in the dline. Original sim result:
+
 
 45.2x from 39.5x on the bench (56 checks, 0 errors, both simulators,
 both sweeps); boot bench green on both images both modes with the
@@ -235,6 +271,20 @@ rather than prose:
   the design section, each one term.
 - Snoops check the FIFO too (or ride the FIFO-empty waits; whichever
   the boot bench proves simpler-correct).
+- **THE FILL-PORT P+2 LAW (learned the hard way this session, fw
+  95a5911).** A posted write does not reach the banks the clock it
+  retires; there is a pipeline between retire and the bank write, and a
+  fill (iline's or the dline's) that reads the banks inside that window
+  takes the pre-write byte. The page cache now holds il_ack off the
+  write's P+2 for the write's own physical line - but rung 3 lengthens
+  the write's life (retire -> FIFO -> drain -> banks), so the window
+  widens. The posted FIFO must either (a) make il_ack/il_ok see a line
+  with a posted write still in flight as "not yet servable" (block the
+  fill until the drain lands, the P+2 law generalized to the FIFO's
+  depth), or (b) forward the posted byte into the fill's row. Do NOT
+  assume the single-cycle P+2 fix covers a multi-entry FIFO; it does
+  not. This is the same hazard as the read-after-write FIFO-empty wait,
+  seen from the instruction/fill side.
 
 Expect the write population (~10% of ops) to move; the dispatcher is
 then bus-ops-only. Bench toward ~60x.
