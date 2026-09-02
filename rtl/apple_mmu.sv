@@ -212,6 +212,17 @@ module apple_mmu (
     output wire [1:0]  p_cls,
     output wire        p_aux,
     output wire [15:0] p_off,
+
+    // ...and the data front's (rtl/dline.sv): the same question for a DATA
+    // access at d_addr - rooted at dline's REGISTERED candidate address, so
+    // this cone runs through the serve cycle, never on d_pred's late cone.
+    // d_rw picks the bank side a write would take (rung 3 stamps posted
+    // writes through this same port); the wanted RamWorks bank is rw_bank.
+    input  wire [15:0] d_addr,
+    input  wire        d_rw,
+    output wire [1:0]  d_cls,
+    output wire        d_aux,
+    output wire [15:0] d_off,
     // One pulse whenever anything that feeds classification moved - a soft
     // switch, the language card, the bank register, INTC8ROM, a reset.  The
     // front's held lines die on it: their classification was captured when
@@ -368,6 +379,20 @@ module apple_mmu (
     assign p_cls = p_class[2:1];
     assign p_aux = (p_hi || p_zp) ? altzp : p_mid;
     assign p_off = (p_d && !lc_bank2) ? {4'hC, p_addr[11:0]} : p_addr;
+
+    // ---- the data front's query ---------------------------------------------------
+    wire d_zp_w    = (d_addr[15:9]  == 7'd0);
+    wire d_text_w  = (d_addr[15:10] == 6'b000001);
+    wire d_hires_w = (d_addr[15:13] == 3'b001);
+    wire d_d_w     = (d_addr[15:12] == 4'hD);
+    wire d_hi_w    = (d_addr[15:12] >= 4'hD);
+    wire d_mid_w   = (store80 && d_text_w)           ? page2 :
+                     (store80 && hires && d_hires_w) ? page2 :
+                     (d_rw ? ramrd : ramwrt);
+    wire [2:0] d_class = classify(d_addr, d_rw);
+    assign d_cls = d_class[2:1];
+    assign d_aux = (d_hi_w || d_zp_w) ? altzp : d_mid_w;
+    assign d_off = (d_d_w && !lc_bank2) ? {4'hC, d_addr[11:0]} : d_addr;
 
     // ---- the map's edge -----------------------------------------------------------
     // Everything classification reads, watched as one word; sw_state carries

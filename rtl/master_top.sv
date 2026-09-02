@@ -237,8 +237,12 @@ module master_top #(
     wire [15:0] cpu_d_pred, dev_addr;
     wire        cpu_d_pred_v, cpu_d_pred_rw;
     wire [7:0]  d_din_w, dev_data;
-    wire        dl_req_w;
+    wire        dl_req_w, dl_aux_w;
+    wire [7:0]  dl_bank_w;
     wire [11:0] dl_line_w;
+    wire [15:0] dq_addr_w, doff_w;
+    wire [1:0]  dcls_w;
+    wire        daux_w;
     wire        turbo_tick, tev_valid, tev_sync, ev_fast_room;
     wire [15:0] tev_addr;
     wire [7:0]  tev_data, i_din_w;
@@ -666,6 +670,7 @@ module master_top #(
         .cyc_is_i      (cpu_cyc_is_i),
         .il_cyc_en     (iline_cyc_en),
         .accel_din     (cpu_din),
+        .i_din         (i_din_w),
         .cyc_en        (cpu_cyc_en),
         .d_din         (d_din_w),
         .turbo_en      (turbo_en),
@@ -678,7 +683,15 @@ module master_top #(
         .dev_data      (dev_data),
         .ev_room       (ev_fast_room),
         .altzp         (mem_sw[3]),
+        .dq_addr       (dq_addr_w),
+        .d_cls         (dcls_w),
+        .d_aux         (daux_w),
+        .d_off         (doff_w),
+        .rw_bank       (mem_rw_bank),
+        .map_changed   (map_changed),
         .dl_req        (dl_req_w),
+        .dl_aux        (dl_aux_w),
+        .dl_bank       (dl_bank_w),
         .dl_line       (dl_line_w),
         .dl_ack        (il_ack && !il_req),
         .dl_ok         (il_ok),
@@ -687,13 +700,16 @@ module master_top #(
         .cl_rw         (cl_rw),
         .cl_wr_image   (cl_wr_image),
         .cl_aux        (cl_aux),
+        .cl_bank       (cl_bank),
         .cl_off        (cl_off),
         .wdata         (u_wdata),
         .inval         (mem_inval),
         .cnt_clr       (accel_cnt_clr),
         .cnt_serves    (),
         .cnt_claims    (),
-        .cnt_splices   ()
+        .cnt_splices   (),
+        .cnt_cam_serves (),
+        .cnt_lb_serves ()
     );
 
     // ---- the hold: the boot menu's door and the runtime menu's -------------
@@ -863,6 +879,11 @@ module master_top #(
         .p_cls      (p_cls),
         .p_aux      (p_aux_w),
         .p_off      (p_off_w),
+        .d_addr     (dq_addr_w),
+        .d_rw       (1'b1),
+        .d_cls      (dcls_w),
+        .d_aux      (daux_w),
+        .d_off      (doff_w),
         .map_changed (map_changed)
     );
 
@@ -916,8 +937,8 @@ module master_top #(
         // data front's - iline first, always: its fills serve the running
         // fetch stream, the shadow's claims can only be early.
         .il_req      (il_req | dl_req_w),
-        .il_aux      (il_req ? il_aux_w : 1'b0),
-        .il_bank     (il_req ? il_bank_w : 8'd0),
+        .il_aux      (il_req ? il_aux_w : dl_aux_w),
+        .il_bank     (il_req ? il_bank_w : dl_bank_w),
         .il_line     (il_req ? il_line_w : dl_line_w),
         .il_ack      (il_ack),
         .il_ok       (il_ok),

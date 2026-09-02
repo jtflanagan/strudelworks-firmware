@@ -181,8 +181,12 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid;
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
-    wire        dl_req_w;
+    wire        dl_req_w, dl_aux_w;
+    wire [7:0]  dl_bank_w;
     wire [11:0] dl_line_w;
+    wire [15:0] dq_addr_w, doff_w;
+    wire [1:0]  dcls_w;
+    wire        daux_w;
     wire [15:0] tev_addr;
     wire [7:0]  tev_data;
     wire [31:0] turbo_ops;
@@ -252,20 +256,23 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cyc_is_i (cpu_cyc_is_i),
-        .il_cyc_en (iline_cyc_en), .accel_din (cpu_din),
+        .il_cyc_en (iline_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
         .cyc_en (cpu_cyc_en), .d_din (d_din_w),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok),
         .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick),
         .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data),
         .ev_room (1'b1),
         .altzp (sw_state[3]),
-        .dl_req (dl_req_w), .dl_line (dl_line_w),
+        .dq_addr (dq_addr_w), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
+        .rw_bank (rw_bank), .map_changed (map_changed),
+        .dl_req (dl_req_w), .dl_aux (dl_aux_w), .dl_bank (dl_bank_w), .dl_line (dl_line_w),
         .dl_ack (il_ack && !il_req), .dl_ok (il_ok), .dl_row (il_row),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
-        .cl_aux (cl_aux), .cl_off (cl_off), .wdata (u_wdata),
+        .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off), .wdata (u_wdata),
         .inval (inval),
         .cnt_clr (cnt_clr),
-        .cnt_serves (), .cnt_claims (), .cnt_splices ()
+        .cnt_serves (), .cnt_claims (), .cnt_splices (),
+        .cnt_cam_serves (), .cnt_lb_serves ()
     );
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
@@ -331,6 +338,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
+        .d_addr (dq_addr_w), .d_rw (1'b1),
+        .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .map_changed (map_changed)
     );
     apple_rom u_rom (
@@ -350,8 +359,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .rom_byte (rom_byte), .rom_loaded (1'b1),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .fb_addr (16'd0), .fb_byte (),
-        .il_req (il_req | dl_req_w), .il_aux (il_req ? il_aux_w : 1'b0),
-        .il_bank (il_req ? il_bank_w : 8'd0), .il_line (il_req ? il_line_w : dl_line_w),
+        .il_req (il_req | dl_req_w), .il_aux (il_req ? il_aux_w : dl_aux_w),
+        .il_bank (il_req ? il_bank_w : dl_bank_w), .il_line (il_req ? il_line_w : dl_line_w),
         .il_ack (il_ack), .il_ok (il_ok), .il_row (il_row),
         .serve (serve), .inval (inval), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
@@ -760,7 +769,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     end
     // The data front's one-clock reads: every byte the reference's, and never
-    // outside physical main pages 0/1 - the only real estate the shadow owns.
+    // $Cxxx - the shadow, the CAM and the last byte serve RAM and LC classes
+    // only, and no LC virtual address is in $Cxxx.
     integer dline_reads = 0, dline_bad = 0;
     always @(posedge clk) if (dev_valid) begin
         reads = reads + 1; dline_reads = dline_reads + 1;
@@ -769,7 +779,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             if (reads_bad <= 20) $display("[%0t] BAD dline read $%04X: core got %02x, the reference says %02x",
                                           $time, dev_addr, dev_data, exp_read(dev_addr));
         end
-        if (dev_addr[15:9] != 7'd0 || m_altzp) dline_bad = dline_bad + 1;
+        if (dev_addr[15:12] == 4'hC) dline_bad = dline_bad + 1;
     end
 
     // ---- the host, mirrored off the driver's op stream ------------------------------
@@ -1293,8 +1303,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                  reads, turbo_reads, fast_reads, dline_reads, reads_bad, mismatches, last_mismatch);
         $display("    counters: fast_ops %0d turbo_ops %0d bus_ops %0d cycles %0d",
                  fast_ops, turbo_ops, bus_ops, cycles);
-        $display("    dline: %0d serves, %0d claims, %0d splices",
-                 u_dline.cnt_serves, u_dline.cnt_claims, u_dline.cnt_splices);
+        $display("    dline: %0d serves (%0d CAM, %0d last-byte), %0d claims, %0d splices",
+                 u_dline.cnt_serves, u_dline.cnt_cam_serves, u_dline.cnt_lb_serves,
+                 u_dline.cnt_claims, u_dline.cnt_splices);
         $display("    iline: %0d promotes, %0d fill retains, %0d scan prefetches, %0d pinned crossings, %0d CAM serves, %0d zero-stall branches, %0d slow ifetches",
                  u_iline.cnt_promotes, u_iline.cnt_cam_fills, u_iline.cnt_scan_fills,
                  u_iline.cnt_loop_hold, u_iline.cnt_cam_serves, u_iline.cnt_tgt_serves,

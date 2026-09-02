@@ -158,9 +158,30 @@ only a real boot has historically caught. Built and green on both
 images, both modes; from here every rung runs it beside the accel
 battery (Verilator for the boot; iverilog is a pre-hardware spot check).
 
-### Rung 2 - the 4-line CAM
+### Rung 2 - the 4-line CAM: DONE IN SIM (2026-09-02)
 
-RAM-class reads outside the shadow's pages. The shape:
+45.2x from 39.5x on the bench (56 checks, 0 errors, both simulators,
+both sweeps); boot bench green on both images both modes with the
+traces identical mode 0 vs mode 2 (CAM live on real boots: ~92k serves
+on the nox boot, ~23k on ProDOS; the last byte ~600-1000); predict
+contract green; build WNS +0.059 / WHS +0.048.  NOT yet on hardware.
+
+The one lesson this rung paid for: **the serve compares VIRTUAL tags.**
+The first build put the MMU classify plus a 21-bit x 4 physical
+compare in serve_hit, whose cone ends in cyc_en and therefore in every
+candidate register's enable - 16 levels, WNS -0.689.  Because the CAM
+flash-clears on every map_changed, one virtual line is one physical
+line under an unchanged map and the class it entered with still holds,
+so the serve needs a 12-bit virtual compare and nothing else; the
+physical tags stay beside it for the snoops (writes arrive physical),
+and the fill trigger's classify registers one clock behind a freshness
+bit (claims are lazy by design).  The last-byte serve's class guard is
+virtual for the same reason: exclude $Cxxx whole, and every map
+concern already clears the register.  WATCHPOINT: the serve-byte cone
+(dq_addr -> shadow row read / CAM row mux -> d_din) is the WNS path at
++0.059, 14 levels - the next rung must not lean on it.
+
+The shape as planned, and as built:
 
 - 4 entries (user's number; grow only on measured evidence): FF tags
   carrying PHYSICAL identity - {aux, bank, folded off[15:4]} - one

@@ -21,6 +21,12 @@ PTR     = $06
 :
 .endmacro
 
+.macro  jcs target
+        bcc :+
+        jmp target
+:
+.endmacro
+
 .segment "CODE"
 
 main:
@@ -119,7 +125,7 @@ ver:    tya
 
         ; ---- 4. auxiliary memory, from the ROM -------------------------------
         jsr auxtest
-        bcs fail
+        jcs fail
 
         ; ---- 5. the RamWorks banks, from the ROM - once the card is serving.
         ; The machine the testbench models has no RamWorks; the card is it,
@@ -128,7 +134,7 @@ ver:    tya
         lda RWFLAG
         beq norw
         jsr rwtest
-        bcs fail
+        jcs fail
 norw:
         jsr cxtest
 
@@ -140,6 +146,10 @@ norw:
         ; ---- 7. the branch-prefetch front: hot loops, calls, and writes
         ; into retained lines (rtl/iline.sv's CAM, rtl/iscan.sv's scanner)
         jsr bptest
+        bcs fail
+
+        ; ---- 8. the CMOS dummy re-reads (rtl/dline.sv's last byte) --------
+        jsr dumtest
         bcs fail
 
         inc PASS
@@ -170,6 +180,34 @@ cxtest: sta $C007               ; INTCXROM on: all of $C100-$CFFF is internal
         rts
 
 sub:    lda #$C3
+        rts
+
+; The CMOS dummy re-reads, made unavoidable: a page-crossing indexed read's
+; FIXUP cycle re-reads the operand byte - here in RAM, in dumrom's twin in
+; ROM - and an absolute RMW's LAST cycle re-reads its own target.  The data
+; front's last-byte register (rtl/dline.sv) is the only server for a cold
+; one; the testbench checks its count.  Carry set on failure.
+dumtest:
+        lda #$5A
+        sta $6BFF
+        lda #$A5
+        sta $6C00
+        ldx #$01
+        lda $6BFF,x             ; crosses into $6C00: FIXUP re-reads the operand
+        cmp #$A5
+        jne dumfail
+        lda #$11
+        sta $6D00
+        inc $6D00               ; absolute RMW: LAST re-reads $6D00
+        lda $6D00
+        cmp #$12
+        jne dumfail
+        jsr dumrom              ; the twin with its operand bytes in ROM
+        bcs dumfail
+        clc
+        rts
+dumfail:
+        sec
         rts
 
 fail:   lda #$FF
@@ -506,6 +544,20 @@ rwfail: sta $C002
         ldx #0
         stx $C073
         sec
+        rts
+
+; dumtest's twin, resident in ROM so the crossing's FIXUP dummy re-reads a
+; ROM operand byte - the last-byte serve's ROM-class case.
+dumrom: lda #$77
+        sta $6E00
+        ldx #$01
+        lda $6DFF,x             ; crosses into $6E00: FIXUP re-reads ROM
+        cmp #$77
+        beq dumrom_ok
+        sec
+        rts
+dumrom_ok:
+        clc
         rts
 
 .segment "VECTORS"
