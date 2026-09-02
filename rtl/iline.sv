@@ -452,7 +452,8 @@ module iline (
     wire        sw_v;
     wire [11:0] sw_tag;
     wire        lb_v, lb_slot;
-    wire [15:0] sc_addr;
+    wire        sc_slot;
+    wire [3:0]  sc_off;
 
     wire kill_now = map_changed || inval || !serve ||
                     (hslot ? snp_kill1 : snp_kill0) ||
@@ -669,12 +670,11 @@ module iline (
     // ---- the branch scanner (rtl/iscan.sv) ----------------------------------
     // Reads the held lines a byte at a time through its own mux - the serve
     // path's registers are untouched - and anchors on every completed
-    // program-stream opcode fetch, turbo or slow.
-    wire        sc0 = v[0] && (sc_addr[15:4] == vtag[0]);
-    wire        sc1 = v[1] && (sc_addr[15:4] == vtag[1]);
-    wire        sc_held = sc0 || sc1;
-    wire [7:0]  sc_byte = sc0 ? ldata[0][8 * sc_addr[3:0] +: 8]
-                              : ldata[1][8 * sc_addr[3:0] +: 8];
+    // program-stream opcode fetch, turbo or slow.  The scanner resolves which
+    // slot holds its line from its own registered memberships, so the seam is
+    // a slot bit and an offset and this mux is all that remains here.
+    wire [7:0]  sc_byte = sc_slot ? ldata[1][8 * sc_off +: 8]
+                                  : ldata[0][8 * sc_off +: 8];
     wire        anchor_v = !cpu_rst && cyc_is_i && cpu_rw && cpu_sync &&
                            (retire || accel_cyc_en);
     iscan u_scan (
@@ -683,8 +683,8 @@ module iline (
         .enable      (turbo_en && serve && !cpu_rst),
         .anchor_v    (anchor_v),
         .anchor_addr (pc_addr),
-        .rd_addr     (sc_addr),
-        .rd_held     (sc_held),
+        .rd_slot     (sc_slot),
+        .rd_off      (sc_off),
         .rd_byte     (sc_byte),
         .v0          (v[0]),
         .v1          (v[1]),
