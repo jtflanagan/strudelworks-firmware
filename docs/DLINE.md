@@ -1,8 +1,9 @@
 # The dline: 1-clock data
 
 Status: **rung 1 DONE and on hardware** (fw e9170ab: 39.5x, sim and the
-user's hardware observation agreeing). **Next: the boot bench
-(docs/BOOT_BENCH.md), then rung 2.** Branch `dcache`, both repos,
+user's hardware observation agreeing); **the boot bench BUILT AND GREEN
+2026-09-02** (docs/BOOT_BENCH.md: both images, both modes, traces
+identical mode 0 vs mode 2). **Next: rung 2.** Branch `dcache`, both repos,
 cut from the merged master (page cache + istream front + carry gift, all
 hardware-proven). The old acceleration-branch D$ plan (its DCACHE_PLAN.md)
 is explicitly NOT the basis for this work: it solved a cache-hierarchy
@@ -149,11 +150,13 @@ claim's one-clock lag must be fenced (the fc_q||claim_q retire gate)
 against serve_hit rising mid-stall, or a settled dispatcher and a fresh
 retire double-serve one cycle. Every rung below inherits all three.
 
-### The boot bench, before rung 2
+### The boot bench, before rung 2: DONE (2026-09-02)
 
 docs/BOOT_BENCH.md. Rung 1's nastiest bug was caught by review, not by a
 bench; rungs 2-4 are snoop/kill/ordering machinery, exactly the species
-only a real boot has historically caught.
+only a real boot has historically caught. Built and green on both
+images, both modes; from here every rung runs it beside the accel
+battery (Verilator for the boot; iverilog is a pre-hardware spot check).
 
 ### Rung 2 - the 4-line CAM
 

@@ -1,8 +1,24 @@
 # The boot bench: the plan
 
-Status: **not started**. Written 2026-09-01 for a fresh session, at the
-close of the session that landed dline rung 1 (39.5x, sim and hardware
-agreeing). Branch `dcache`, both repos. First thing in any session:
+Status: **BUILT AND GREEN, 2026-09-02** (sim/boot_tb.sv,
+sim/run_boot_tb.sh, tools/trace_diff.py). All four proof runs pass at 2M
+bus cycles under Verilator (~2.5 min each, ~1.4M clk/s): the ProDOS 2.4.3
+.po and nox_los.HDV, each at mode 0 and mode 2 unlimited - zero bad
+reads, zero monitor mismatches, image == reference every bank, and the
+mode-0 vs mode-2 traces architecturally IDENTICAL for the full mode-0
+prefix on both images (1.97M / 1.96M ops).  The trace starts at the
+first SYNC after the boot reset releases; everything before it (the
+core free-running against a half-loaded ROM, the in-reset $0000
+cycles) is bench artifact and is excluded by design.  Updates against
+the old bench this transliterated: the host model matches the
+config-file-era host - a write's block is captured from the reference
+through the read map at the EXECUTE (the real host reads its mirror,
+src/pipeline.cpp, and never sends HD_FETCH), and HD_DONE bytes land by
+bus DMA through the override path so the reference follows the unified
+stream with nothing applied by hand.  Not modeled: the event merge and
+the host mirror (ev_room tied high, as accel_tb ties it); rung 3's
+write-events-at-retire law will want the real merge wired in.
+Branch `dcache`, both repos. First thing in any session:
 `git status` both repos and commit anything old (the standing rule).
 
 ## What it is
@@ -86,8 +102,17 @@ structure is proven and most of it transliterates:
 4. **Two images**: the ProDOS master and nox_los (the second image is
    what found the resurrection bug - one image is not coverage).
 5. From then on: **the boot bench runs per dline rung** beside the accel
-   battery, both simulators for the battery, Verilator for the boot
-   (iverilog at ~10x slower is a pre-hardware spot check, not a cycle).
+   battery, both simulators for the battery, Verilator for the boot.
+   MEASURED 2026-09-02: Verilator ~1.4M clk/s (a full 2M-cycle boot
+   ~2.5 min; the four-run matrix ~10 min in parallel); iverilog ~36k
+   clk/s - ~40x slower here, not the battery's ~10x, because the
+   bench's tb side (the pin-level machine model, the reference arrays,
+   the per-op trace) is all interpreted under vvp.  A full iverilog
+   boot would be ~90 min, so the POLICY (user-agreed 2026-09-02) is:
+   the boot cycle is Verilator-only; two-simulator RTL coverage comes
+   from the accel battery, which runs both simulators per rung; and
+   ONE 300k-cycle iverilog boot smoke (~14 min, PASS 2026-09-02) runs
+   in the background per rung before a bitstream, costing no attention.
 
 ## Session discipline (the standing rules, applied here)
 
