@@ -1,13 +1,25 @@
 # The dline: 1-clock data
 
-Status: **rung 1 and rung 2 DONE and ON HARDWARE; rung 3 DONE IN SIM**
-(2026-09-02).
+Status: **rungs 1-3 DONE and ON HARDWARE** (2026-09-02).  **Rung 4
+(streams) is DEFERRED** by the user's decision: the next work is the
+$Cxxx plan (docs/CXXX.md) - what in $C000-$CFFF can be served fast, as one
+plan rather than piecemeal - because a trace of wave.dsk's end loop showed
+its cycles going to dispatcher-served instruction fetches in the $C3xx
+firmware (AUXMOVE), not to the bus.
 - Rung 1 (fw e9170ab): the zp/stack shadow, 39.5x, sim and HW agreeing.
 - Rung 2 (fw 2e85924): the 4-line CAM + last-byte serve, 45.2x on the
   bench, virtual-tag serve, on HW.
-- Rung 3 (this commit): writes at one clock, splice + post - **68.9x on
-  the bench** (from 45.2x), build WNS +0.018, NOT yet on hardware.  See
-  its section below.
+- Rung 3 (fw 00fc407): writes at one clock, splice + post - **68.9x on
+  the bench** (from 45.2x), build WNS +0.018; **ON HARDWARE 2026-09-02**
+  (fw 8c59006 in SRAM, host 9239498): wave.dsk's main section 80x
+  unlimited, its end loop 22x, and a governed 8x reads 8.00 in both.
+- **ACCEL_DLINE (fw 8c59006, host cd7bfe7/9239498)**: the "8x configured,
+  5.2x shown" the user saw was a MISMEASUREMENT - the dline's one-clock
+  ops paid the governor but never reached a register, so the host's
+  (turbo + fast + bus) / cycles left out about a third of all ops under
+  rung 3.  0x8000_00A8 now exports the dline's retires and the host sums
+  them (ratio, HUD, status line `adline=`).  The HUD's rotation wrap had
+  to grow with the list.
 - **SMC fill-window fix (fw 95a5911), HW-PROVEN**: hunting a long-standing
   HGR corruption / Moon-Patrol-at-accel lockup ([[hgr-corruption-hunt]] in
   memory) turned up a coherence hole in the page cache's shared fill port
@@ -30,7 +42,7 @@ Status: **rung 1 and rung 2 DONE and ON HARDWARE; rung 3 DONE IN SIM**
 - Host: a **BUS CAPTURE** menu row toggles sparse/full read-write capture
   live ([[bus-capture-menu]]) - the tool that made the tracing possible.
 
-**NEXT: rung 3 on hardware, then rung 4 - streams.** Branch `dcache`, both repos,
+**NEXT: the $Cxxx plan (docs/CXXX.md), then rung 4 - streams.** Branch `dcache`, both repos,
 cut from the merged master (page cache + istream front + carry gift, all
 hardware-proven). The old acceleration-branch D$ plan (its DCACHE_PLAN.md)
 is explicitly NOT the basis for this work: it solved a cache-hierarchy
@@ -334,7 +346,7 @@ rtl/page_cache.sv, rtl/accel_seq.sv, rtl/iline.sv, rtl/event_merge.sv):
   margin covers the three edges between sampling and the word's arrival;
   readers (tev, the dline's reads) now shed at a live "room >= 7", one
   higher, so in a saturated turbo run the room hovers where writes never
-  wait.  The
+  wait.  (HW-confirmed: aovf stays 0.)  The
   accel bench instantiates the real merge as an observer (the producers'
   ev_room stays high so every read is still checked): zero write words
   dropped across 307k, and a phase with the room withheld at random
