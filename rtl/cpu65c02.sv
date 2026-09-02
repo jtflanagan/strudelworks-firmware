@@ -145,6 +145,20 @@ module cpu65c02 #(
     output wire  [15:0] d_addr,     // = addr; the D view, meaningful when !cyc_is_i
     output wire         d_rw,       // = rw
     output wire  [7:0]  d_dout,     // = dout
+    // The data-stream prediction, i_pred's mirror (see d_pred_mux below): the
+    // address and direction of the NEXT cycle, valid when that cycle is a
+    // data cycle - driven a cycle ahead of it, which is what lets a data
+    // front have the byte already read when the cycle begins.  Not a guess:
+    // the next microinstruction's addr_sel is in the ROM's combinational read
+    // this cycle, and every data source it can pick is a register whose
+    // next-state value this cycle already computes.  It inherits din's timing
+    // (the ROM read descends from din at a sync), so it settles when din does
+    // and no earlier - the consumer REGISTERS it, always.  d_pred_v covers
+    // every data cycle but a next-cycle live-AGU address, which after the
+    // carry-gift work only the $5C NOP drives.
+    output wire  [15:0] d_pred,
+    output wire         d_pred_v,   // next cycle is a data cycle and d_pred names it
+    output wire         d_pred_rw,  // ... and will be a read (1) or a write (0)
     output wire  [7:0]  p_flags     // {N,V,1,0,D,I,Z,C} REGISTER-DIRECT: the
                                     // flags a branch will test, final from the
                                     // edge that begins its opcode fetch (the
@@ -572,6 +586,83 @@ module cpu65c02 #(
         end
     end
     assign i_pred = next_pc;
+
+    // ---- next data address --------------------------------------------------
+    // d_pred: the address of the NEXT cycle when that cycle is a data cycle -
+    // the D-side mirror of next_pc/i_pred, and like it, not a guess.  The
+    // microinstruction that will RUN next cycle is ucode[uaddr], already in
+    // this cycle's combinational ROM read for the uc register; its addr_sel
+    // names next cycle's source, and every data source is either a register
+    // this cycle's loads settle (adl/adh/s - the next-state values below are
+    // the same expressions the register file's edge applies), this cycle's own
+    // bus address (LAST re-reads it), or this cycle's carry-out (FIXUP,
+    // consumed next cycle as the saved carry).  A next-cycle live-AGU address
+    // is the one thing not named a cycle early; after the carry-gift work only
+    // the $5C NOP drives one, and d_pred_v is simply low there.
+    //
+    // Nothing here is new logic on any existing path: the ROM read is the one
+    // uc already takes, and the next-state muxes parallel the register file.
+    // Like i_pred this settles with din; a consumer registers it and has the
+    // full data cycle to act on the registered copy (rtl/iline.sv's contract).
+    wire [UC_W-1:0] uc_next  = ucode[uaddr];
+    wire [3:0]      n_asel   = uc_next[UCP_ADDR_SEL +: 4];
+    wire            n_rw_bit = uc_next[UCP_RW];
+
+    // The registers as this cycle's edge will leave them - the same arms,
+    // gated the same way, as the clocked loads below.
+    logic [7:0] adl_n, adh_n, s_n;
+    always_comb begin
+        adl_n = adl; adh_n = adh; s_n = s;
+        if (ld_en) begin
+            case (f_ld_adl)
+                UC_LD_ADL_AGU: adl_n = agu_lo;
+                UC_LD_ADL_DIN: adl_n = din;
+                UC_LD_ADL_MD:  adl_n = md;
+                default: ;
+            endcase
+            case (f_ld_adh)
+                UC_LD_ADH_AGU: adh_n = agu_hi;
+                UC_LD_ADH_DIN: adh_n = din;
+                default: ;
+            endcase
+            case (f_ld_s)
+                UC_LD_S_INC: s_n = s + 8'd1;
+                UC_LD_S_DEC: s_n = s - 8'd1;
+                default: ;
+            endcase
+            if (f_wb == UC_WB_S) s_n = alu_res;   // TXS: S is the ALU's too
+        end
+    end
+
+    // Reset holds rw high next cycle as this one (`rw = f_rw | in_rst`); the
+    // vector fetch's PC load is what ends in_rst, on this cycle's edge.
+    wire in_rst_n = in_rst && !(cyc_en && f_ld_pc == UC_LD_PC_JMP);
+
+    logic [15:0] d_pred_mux;
+    logic        d_pred_known;
+    always_comb begin
+        d_pred_known = 1'b1;
+        case (n_asel)
+            UC_ADDR_ZP:    d_pred_mux = {8'h00, adl_n};
+            UC_ADDR_AD:    d_pred_mux = {adh_n, adl_n};
+            UC_ADDR_SP:    d_pred_mux = {8'h01, s_n};
+            UC_ADDR_VEC:   d_pred_mux = {8'hFF, vec_lo};
+            UC_ADDR_VEC1:  d_pred_mux = {8'hFF, vec_lo + 8'd1};
+            UC_ADDR_LAST:  d_pred_mux = addr_mux;
+            UC_ADDR_FIXUP: d_pred_mux = agu_co ? addr_mux : {adh_n, adl_n};
+            default: begin
+                // AGU: a live add next cycle ($5C only).  PC-sourced cycles
+                // are the I stream and d_pred_v is gated off below either way.
+                d_pred_mux   = 16'h0000;
+                d_pred_known = (n_asel != UC_ADDR_AGU);
+            end
+        endcase
+    end
+
+    assign d_pred    = d_pred_mux;
+    assign d_pred_v  = d_pred_known &&
+                       (n_asel != UC_ADDR_PC) && (n_asel != UC_ADDR_AGU);
+    assign d_pred_rw = n_rw_bit | in_rst_n;
 
     always_ff @(posedge clk) begin
         if (rst) begin
