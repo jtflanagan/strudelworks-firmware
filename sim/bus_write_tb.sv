@@ -90,7 +90,7 @@ module bus_write_tb;
     ) dut (
         .clk (clk), .rst (rst),
         .phi0_sync (phi0), .data_sync (data_sync),
-        .master_active (master_active),
+        .master_active (master_active), .park_kbd (1'b0),
         .bus_owns (bus_owns), .core_valid (core_valid),
         .op_dummy (op_dummy), .op_inflight (op_inflight),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),

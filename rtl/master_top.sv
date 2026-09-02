@@ -214,6 +214,7 @@ module master_top #(
     wire [7:0]  fb_peek_data;
     // The sequencer: ACCEL_CTRL in, its stream, status and counters out.
     wire [1:0]  accel_mode;
+    wire        accel_swint_dis;
     wire [15:0] accel_target;
     wire        accel_cnt_clr, accel_on, accel_held;
     wire [3:0]  seq_state;
@@ -341,6 +342,7 @@ module master_top #(
         .mem_served (mem_served), .mem_last (mem_last), .mem_diverted (mem_diverted),
         .mem_intc8rom (mem_intc8rom),
         .accel_mode (accel_mode), .accel_target (accel_target),
+        .accel_swint_dis (accel_swint_dis),
         .accel_cnt_clr (accel_cnt_clr),
         .accel_on (accel_on),
         .accel_stat ({7'd0, accel_reset_seq, accel_retries, merge_overflows, seq_state, bus_owns, 1'b0, accel_held, accel_on}),
@@ -491,12 +493,27 @@ module master_top #(
                                 fd_rd_claim    ? fd_rd_data    :
                                 vidhd_rd_claim ? vidhd_rd_data : mb_rd_data;
 
+    // ---- the keyboard in the dummies (docs/ACCELERATION.md) ------------------
+    // The closed regime: mode 2, serving, the chicken bit clear - and the
+    // core NOT held: while a hold reads the keyboard for the host, the
+    // dummies park at $0000 so no edge-kept dummy can look like a keypress
+    // to the host's menus.  The driver's dummies then read $C000, every one
+    // a sample into kbd_inject's latch; the sequencer serves the program's
+    // $C00x reads from it (accel_seq swi_*), and int_rd applies the read's
+    // bookkeeping once, at the retirement.
+    wire sw_int = accel_on && (accel_mode == 2'd2) && mem_serve &&
+                  !accel_swint_dis && !boot_held;
+    wire        swi_commit, kbd_int_ok;
+    wire [7:0]  kbd_int_byte;
+    wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+
     apple_bus_write u_write (
         .clk           (apple_clk),
         .rst           (apple_rst),
         .phi0_sync     (apple_phi0_sync),
         .data_sync     (apple_data_sync),
         .master_active (cpu_source_active),
+        .park_kbd      (sw_int),
         .bus_owns      (bus_owns),
         .core_valid    (core_valid),
         .cpu_addr      (cpu_addr),
@@ -543,6 +560,10 @@ module master_top #(
         .cpu_rst       (cpu_rst),
         .master_active (cpu_source_active),
         .mode          (accel_mode),
+        .swi_on        (sw_int),
+        .swi_ok        (kbd_int_ok),
+        .swi_byte      (kbd_int_byte),
+        .swi_commit    (swi_commit),
         .target        (accel_target),
         .cnt_clr       (accel_cnt_clr),
         .mem_serve     (mem_serve),
@@ -824,6 +845,12 @@ module master_top #(
         .rst           (apple_rst),
         .cpu_rst       (cpu_rst),
         .master_active (cpu_source_active),
+        .park_kbd      (sw_int),
+        .op_dummy      (op_dummy),
+        .int_ok        (kbd_int_ok),
+        .int_rd        (kbd_int_rd),
+        .int_byte      (kbd_int_byte),
+        .int_low       (),
         .press         (kbd_press),
         .press_key     (kbd_press_key),
         .drop          (kbd_drop),

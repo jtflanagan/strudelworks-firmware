@@ -50,6 +50,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                  parameter integer MODE = 2,
                  parameter integer TARGET = 0,          // ACCEL target, 8.8
                  parameter integer HD_SLOT = 7,
+                 parameter integer SWINT_DIS = 0,
                  parameter integer HOST_DELAY = 2000,   // clks, EXECUTE->answer
                  parameter integer MAX_CYCLES = 2_000_000,  // bus-cycle advances
                  parameter integer MAX_CLKS = 400_000_000,
@@ -104,8 +105,10 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        mem_sub_en, bus_owns, core_valid;
     wire [7:0]  mem_sub_data;
     // The cache's byte reaches the driver and the reader only for a bus op.
-    wire        sub_en   = mem_sub_en && bus_owns;
-    wire [7:0]  sub_data = mem_sub_data;
+    wire        kbd_sub_en;
+    wire [7:0]  kbd_sub_data;
+    wire        sub_en   = (mem_sub_en && bus_owns) || kbd_sub_en;
+    wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data : mem_sub_data;
     wire [15:0] op_addr, nxt_addr;
     wire        op_rw, op_present, op_commit, op_ovr, op_divert, op_dummy, op_inflight, q_divert;
     wire [7:0]  op_wdata;
@@ -205,9 +208,32 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [11:0] rom_r2_addr;
     wire [31:0] rom_r2_data;
 
+    // ---- the keyboard in the dummies, as master_top gates it (no injection) --
+    reg  swint_dis = (SWINT_DIS != 0);
+    wire sw_int = accel_on && (mode == 2'd2) && serve && !swint_dis && !held;
+    wire        swi_commit, kbd_int_ok;
+    wire [7:0]  kbd_int_byte;
+    wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+    kbd_inject u_kbdi (
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
+        .master_active (master_active),
+        .park_kbd (sw_int), .op_dummy (op_dummy),
+        .int_rd (kbd_int_rd), .int_ok (kbd_int_ok),
+        .int_byte (kbd_int_byte), .int_low (),
+        .press (1'b0), .press_key (7'd0), .drop (1'b0), .lock (1'b0),
+        .hotkey_en (1'b0), .hotkey (7'd0), .held (held),
+        .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
+        .data_sync (data_sync),
+        .sub_en (kbd_sub_en), .sub_data (kbd_sub_data),
+        .strobe (), .seen (), .touched (), .pressed (), .taken (),
+        .flushed (), .replaced (), .resolved_key (), .changed (),
+        .hotkey_hit ()
+    );
+
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
+        .swi_on (sw_int), .swi_ok (kbd_int_ok), .swi_byte (kbd_int_byte), .swi_commit (swi_commit),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
@@ -286,7 +312,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
-        .master_active (master_active),
+        .master_active (master_active), .park_kbd (sw_int),
         .bus_owns (bus_owns), .core_valid (core_valid),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
         .drv_sync (drv_sync), .cyc_en (drv_cyc_done), .cpu_din (drv_din),
@@ -759,7 +785,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     // ---- the running checks ---------------------------------------------------------
     integer reads = 0, reads_bad = 0, fast_reads = 0, bus_reads = 0;
-    always @(posedge clk) if (u_commit) begin
+    always @(posedge clk) if (u_commit && !swi_commit) begin
         if (u_rw) begin
             reads = reads + 1; bus_reads = bus_reads + 1;
             if (cl_cls == 2'd0 && u_addr[15:8] == 8'hC0) begin

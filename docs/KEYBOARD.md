@@ -366,3 +366,13 @@ person: a key pressed at the Apple under the lock, which must not reach the
 prompt and must set `touched`. Total Replay is not a good vehicle for this -
 it reads and flushes the keyboard on its own schedule - which is why the
 test types BASIC at a ProDOS prompt and reads the screen back.
+
+## The keyboard in the dummies (2026-09-02)
+
+Under acceleration in the closed regime the driver's parked dummy cycles
+read `$C000` instead of `$0000`, every one a sample of the real IOU into a
+latch here, and the program's own `$C00x` reads are served from that latch
+on the card instead of riding a bus cycle - through the same decision a bus
+read gets, so injection, the lock and the hotkey behave exactly as before;
+only where the real sample comes from changed.  Details, the lever and the
+measurements: docs/ACCELERATION.md, "The keyboard in the dummies".

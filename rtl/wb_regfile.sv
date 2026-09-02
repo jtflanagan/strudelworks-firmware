@@ -186,6 +186,7 @@ module wb_regfile #(
     // counters back.  A watching top ties the inputs to 0 and leaves the
     // outputs unconnected.
     output logic [1:0]     accel_mode,
+    output logic           accel_swint_dis, // [28]: no internalized keyboard, dummies at $0000
     output logic [15:0]    accel_target,
     output logic           accel_cnt_clr,   // pulses
     input  wire [31:0]     accel_stat,
@@ -714,16 +715,21 @@ module wb_regfile #(
             accel_mode    <= 2'd0;
             accel_target  <= 16'd0;
             accel_cnt_clr <= 1'b0;
+            accel_swint_dis <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
                 accel_mode    <= wb_dat_w[1:0];
                 accel_target  <= wb_dat_w[23:8];
+                accel_swint_dis <= wb_dat_w[28];
             end
             accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
         end
     end
 
-    wire [31:0] accel_ctrl_rd = {8'd0, accel_target, 6'd0, accel_mode};
+    //   [28]     swint_dis  RW   1 = the keyboard is not internalized and the
+    //                           dummy parks at $0000: every $C00x read rides
+    //                           the bus, as before the closed regime
+    wire [31:0] accel_ctrl_rd = {3'd0, accel_swint_dis, 4'd0, accel_target, 6'd0, accel_mode};
 
     // ---- FB_CTRL ------------------------------------------------------------
     //

@@ -150,6 +150,14 @@ ver:    tya
 norw:
         jsr cxtest
 
+        ; ---- 5b. the keyboard: served from the parked-dummy latch in the
+        ; closed regime, the bus otherwise; the same byte either way.
+        lda $C000
+        sta $0310               ; the tb watches this byte
+        bpl nokey
+        lda $C010               ; a key waited: take it, clear the strobe
+nokey:
+
         ; ---- 6. self-modifying code: the operand and the opcode change
         ; under the icache's feet.  A stale line shows as the wrong A or X.
         jsr smctest

@@ -268,13 +268,69 @@ own event. An ordinary cycle's event keeps the old rule. The host's
 `sparse_filter.hpp` says the same, and `accel_test` holds the two to the same
 stream.
 
+## The keyboard in the dummies (2026-09-02)
+
+The finding (docs/CXXX.md, "The second finding"): Nox at its overworld map
+showed 20x, and a full trace put 92% of the bus events at $C000 - the
+keyboard poll - each costing TWO bus cycles (the read's own, and the next
+present point missed by the op that follows), 72% of the machine's time.
+
+So in the closed regime - mode 2, serving, ACCEL_CTRL[28] clear, and the
+core NOT held - the driver's dummy cycles park at `$C000` instead of
+`$0000` (`park_kbd` into apple_bus_write): every idle bus cycle samples
+the real IOU, key and strobe together, into a latch in rtl/kbd_inject.sv
+(the raw pins' byte; a dummy is a SAMPLE, never a read, so no
+substitution lands on it and none of the read-side state moves).  A
+program's read of `$C000-$C00F` is then served on the card: accel_seq
+decodes it beside the class (`q_swi`, a 12-bit compare on the live
+address registered into `dq_swi`), the op rides S_FAST like any fast op
+(the cache decides it with nothing served), the byte is kbd_inject's
+`int_byte` - the same decision a bus read gets: the injected key first,
+the latch's real byte unless locked or the hotkey, else {0, last_read} -
+and the retirement raises a SYNTHETIC COMMIT on the unified stream
+(`swi_commit`), the one deliberate bend of "fast ops have a present and
+no commit", so every commit-gated consumer sees a bus op's commit and
+`int_rd` applies the read's bookkeeping (seen, last_read, the hotkey)
+exactly once.  A strobe-clearing bus op (`$C010`, a `$C01x` write)
+clears the latch's bit 7 as it clears the IOU's, so $C010-then-$C000
+cannot hand a key over twice.  `$C010` and the `$C01x` accesses stay on
+the bus: they are the real strobe's.  While a HOLD reads the keyboard for
+the host the dummies park at `$0000` again, so no edge-kept dummy can
+look like a keypress to the host's menus; the latch refills on the first
+dummy after the release and `int_ok` gates serving until it has.
+
+How real keys and injected keys interact is unchanged - only where the
+real sample comes from.  The stream: a served read is a fast-op word
+(dropped in sparse like any read); the dummies are counted into SKIPs as
+before, and the edge-kept ones are now reads of `$C000` carrying the
+machine's own byte.
+
+The lever: ACCEL_CTRL[28] `swint_dis`; `swint = on|off` in the
+configuration; `swctl accel swint on|off` at runtime; the accel status
+line says "swint OFF".  Off parks the dummy at `$0000` and puts every
+`$C00x` read back on the bus.
+
+The testbench (sim/accel_tb.sv, SWINT parameter): the program polls the
+keyboard once a pass; in mode 1 every poll rides the bus, in mode 2 none
+does once the latch has filled, and an injected key pressed from the
+bench is served to the poll from the card, taken with the `$C010` that
+rides the bus, and stored by the program as {1, $41}.  The boot bench
+carries the same instance (no injection, `--swint-off` to compare).
+
+Left for later, deliberately (the acceleration branch's fuller version of
+this regime, commit 15c8444 there, is the reference): the status page
+`$C011-$C01F` from the shadow, the switch WRITES `$C000-$C00F`/`$C05x`/
+`$C08x`, the RamWorks bank; a menu hotkey found by the parked dummies
+themselves, which would let Ctrl-6 work in a program that never polls.
+
 ## The registers
 
 ```
 ACCEL_CTRL    0x8000_008C   [1:0] mode: 0 off, 1 reads on the card / writes on
                             the bus, 2 reads and writes on the card; [23:8]
                             target, ops per bus cycle, 8.8, 0 = unlimited;
-                            [31] W1 clear counters
+                            [28] swint_dis: the keyboard not internalized,
+                            dummies at $0000 (a level); [31] W1 clear counters
 ACCEL_STAT    0x8000_0090   [0] accelerating; [1] held by the governor;
                             [3] bus_owns; [7:4] state; [15:8] merge overflows
                             (must be 0); [23:16] fast ops decided twice;

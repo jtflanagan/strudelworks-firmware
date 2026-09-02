@@ -172,6 +172,7 @@ module reg_map_tb;
     wire       mem_serve;
     wire       mem_cnt_clr, mem_inval;
     wire [1:0] accel_mode;
+    wire       accel_swint_dis;
     wire [15:0] accel_target;
     wire       accel_cnt_clr;
     integer    accel_cnt_clrs = 0;
@@ -220,7 +221,7 @@ module reg_map_tb;
         .mem_hits (32'h0000_1111), .mem_misses (32'h0000_0022),
         .mem_mismatch (32'h0000_0003), .mem_served (32'h0000_0444), .mem_diverted (32'h0000_0777),
         .mem_last (32'h1234_5C3A), .mem_intc8rom (1'b1),
-        .accel_mode (accel_mode), .accel_target (accel_target),
+        .accel_mode (accel_mode), .accel_target (accel_target), .accel_swint_dis (accel_swint_dis),
         .accel_cnt_clr (accel_cnt_clr),
         .accel_stat (32'h0000_0A11), .accel_fast (32'h0001_F00D), .accel_bus (32'h0000_0B05),
         .accel_cycles (32'h000C_0CE5), .accel_turbo (32'hCAFE0011), .accel_wait (32'h0000_0A17),
@@ -1294,6 +1295,16 @@ module reg_map_tb;
         if (out_mem[base+2] !== 32'h0000_0001 || accel_cnt_clrs != 1) begin
             $display("FAIL: ACCEL_CTRL second write reads %08x, clears %0d", out_mem[base+2], accel_cnt_clrs); errors = errors + 1;
         end else $display("  ok: ...and a write without the W1 bit does not pulse it");
+        do_write(32'h8000_008C, 32'h1000_0001);           // swint_dis on, mode 1
+        base = out_n;
+        do_read(32'h8000_008C);
+        if (out_mem[base+2] !== 32'h1000_0001 || accel_swint_dis !== 1'b1) begin
+            $display("FAIL: ACCEL_CTRL with swint_dis reads %08x (level %0d)", out_mem[base+2], accel_swint_dis); errors = errors + 1;
+        end else $display("  ok: ACCEL_CTRL[28] swint_dis is a level and reads back");
+        do_write(32'h8000_008C, 32'h0000_0001);
+        if (accel_swint_dis !== 1'b0) begin
+            $display("FAIL: swint_dis did not clear"); errors = errors + 1;
+        end
         base = out_n;
         do_read(32'h8000_0090);
         do_read(32'h8000_0094);

@@ -152,6 +152,25 @@ module kbd_inject (
     output wire        sub_en,
     output wire [7:0]  sub_data,
 
+    // ---- the internalized keyboard (docs/ACCELERATION.md) -------------------
+    // In the closed regime the driver parks its dummy cycles at $C000
+    // instead of $0000, and the byte each one brings back - the real IOU's
+    // answer, key and strobe together - lands in a latch here.  A program's
+    // $C00x read is then served on the card: int_byte is the decision
+    // kbd_byte makes for a bus read, taken against the latch, and int_rd
+    // applies the read's bookkeeping (seen, last_read, the hotkey) exactly
+    // once, at the op's retirement.  A dummy is a SAMPLE, never a read:
+    // none of the read-side state moves on one.  A strobe-clearing bus op
+    // clears the latch's bit 7 the way it clears the IOU's, so a $C010
+    // followed at once by an internalized $C000 cannot hand the same key
+    // over twice.
+    input  wire        park_kbd,        // dummies park at $C000 (level)
+    input  wire        op_dummy,        // the committed op was a dummy
+    output wire        int_ok,          // the latch holds a byte: serving allowed
+    input  wire        int_rd,          // one clock: an internalized $C00x read retired
+    output wire [7:0]  int_byte,        // ...and its answer
+    output wire [6:0]  int_low,         // the latch's low bits, for status reads
+
     // Read back through the registers, and carried by the notice.
     output logic       strobe,          // an injected key is waiting
     output logic       seen,            // ...and a $C00x read has returned it
@@ -190,13 +209,44 @@ module kbd_inject (
                           (data_sync[7] && !lock && !hot_byte) ? data_sync :
                                                     {1'b0, last_read};
 
-    assign sub_en   = master_active && (kbd_read || (lock && strb_read));
+    // A parked dummy is a SAMPLE: no substitution lands on it, so the
+    // capture's byte for a dummy is the machine's own.
+    assign sub_en   = master_active && !op_dummy && (kbd_read || (lock && strb_read));
     assign sub_data = kbd_read ? kbd_byte : {1'b0, last_read};
 
-    // The same decision at the data phase, on the byte the core took.
+    // The same decision at the data phase, on the byte the core took.  A
+    // parked dummy looks like a $C00x read on the op stream and must not
+    // move any read-side state.
     wire commit     = op_commit && master_active;
     wire real_q     = data_q[7];
-    wire kbd_take   = commit && kbd_read;
+    wire kbd_take   = commit && kbd_read && !op_dummy;
+
+    // ---- the parked-dummy latch ---------------------------------------------
+    logic [7:0] real_latch;
+    logic       latch_v;
+    wire dummy_kbd = commit && op_dummy && park_kbd && op_rw &&
+                     (op_addr[15:4] == 12'hC00);
+    always_ff @(posedge clk) begin
+        if (rst || cpu_rst || !park_kbd) begin
+            latch_v <= 1'b0;
+        end else if (dummy_kbd) begin
+            real_latch <= data_q;
+            latch_v    <= 1'b1;
+        end else if (commit && !op_dummy && kbd_clear) begin
+            // The strobe just cleared on the machine; the latch follows,
+            // key kept, exactly the IOU's rule.
+            real_latch[7] <= 1'b0;
+        end
+    end
+
+    // The internal serve: kbd_byte's decision against the latch.
+    wire int_hot = hotkey_en && !held && !lock && real_latch[7] &&
+                   (real_latch[6:0] == hotkey);
+    assign int_byte = strobe                                   ? {1'b1, key} :
+                      (real_latch[7] && !lock && !int_hot)     ? real_latch :
+                                                                 {1'b0, last_read};
+    assign int_ok  = latch_v && master_active;
+    assign int_low = int_byte[6:0];
     wire clear_now  = commit && kbd_clear && strobe;
     // A press over a waiting key that is not being cleared or dropped this
     // same clock replaces it.
@@ -215,9 +265,9 @@ module kbd_inject (
             strobe <= 1'b0;
             seen   <= 1'b0;
         end else begin
-            if (commit && kbd_clear) strobe <= 1'b0;
+            if (commit && kbd_clear && !op_dummy) strobe <= 1'b0;
             if (drop)                strobe <= 1'b0;
-            if (kbd_take && strobe)  seen <= 1'b1;
+            if ((kbd_take || int_rd) && strobe)  seen <= 1'b1;
             // Last, so a press in the same clock as a clear is a new key,
             // not a lost one.
             if (press) begin
@@ -234,6 +284,9 @@ module kbd_inject (
         end else if (kbd_take) begin
             if (strobe)                           last_read <= key;
             else if (real_q && !lock && !hot_q)   last_read <= data_q[6:0];
+        end else if (int_rd) begin
+            if (strobe)                                      last_read <= key;
+            else if (real_latch[7] && !lock && !int_hot)     last_read <= real_latch[6:0];
         end
     end
 
@@ -242,7 +295,8 @@ module kbd_inject (
     // not the machine's.
     always_ff @(posedge clk) begin
         if (rst) hotkey_hit <= 1'b0;
-        else     hotkey_hit <= commit && kbd_read && hot_q;
+        else     hotkey_hit <= (kbd_take && hot_q) ||
+                               (int_rd && int_hot && !strobe);
     end
 
     // ---- the card's: counts, touched, changed -------------------------------
@@ -270,7 +324,8 @@ module kbd_inject (
             end
             // A fresh lock starts a fresh record.
             if (lock && !lock_q) touched <= 1'b0;
-            else if (kbd_take && !strobe && real_q && lock && !touched) begin
+            else if (((kbd_take && real_q) || (int_rd && real_latch[7])) &&
+                     !strobe && lock && !touched) begin
                 touched <= 1'b1;
                 changed <= 1'b1;
             end

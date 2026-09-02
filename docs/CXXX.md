@@ -2,6 +2,12 @@
 
 Status: **STEP 1 PROVEN ON HARDWARE** (2026-09-02, fw 2db1baf, bit in
 SRAM) - page $C3 on the instruction front once the INTC8ROM latch is set.
+**STEP 2 BUILT AND SIMULATED** (2026-09-02): the keyboard in the dummies -
+docs/ACCELERATION.md "The keyboard in the dummies".  Battery 70 checks
+0 errors both sweeps; the ProDOS boot bench (2M bus cycles, mode 2
+unlimited) 137.2M ops = 68.6x at Bitsy Bye where step 1's bit stood at
+~8x there, bus reads over the whole run 12.6k; traces identical to mode
+0.  Hardware pending: Nox at the overworld map, the 20x to beat.
 wave.dsk: the main section stays at 80x, the end loop goes from 22x to
 past 90x - it was almost entirely AUXMOVE fetching from slow memory - and
 the user reports everything else on the machine working as before.

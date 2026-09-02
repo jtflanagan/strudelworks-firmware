@@ -9,6 +9,7 @@
 #   sim/run_boot_tb.sh IMAGE.hdv [options]
 #     --mode=N         accel mode (default 2)
 #     --target=N       governor target in 8.8 fixed point, decimal (0 = unlimited)
+#     --swint-off      the keyboard not internalized: dummies at $0000, $C00x on the bus
 #     --slot=N         the hard disk's slot (default 7)
 #     --cycles=N       run length in BUS CYCLES (default 2000000: ~2 s at 1x)
 #     --clks=N         hard ceiling in 100 MHz clocks (default 400000000)
@@ -27,7 +28,7 @@ mkdir -p "$work"
 hdv="$1"; shift
 [ -f "$hdv" ] || { echo "no such image: $hdv" >&2; exit 2; }
 
-mode=2 target=0 slot=7 cyclim=2000000 clks=400000000 tag=run vl=0
+mode=2 target=0 slot=7 swint=0 cyclim=2000000 clks=400000000 tag=run vl=0
 rom="$root/../strudelworks-host/assets/Apple2e_Enhanced.rom"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport.bin"
 trace=""
@@ -35,6 +36,7 @@ for a in "$@"; do
     case "$a" in
         --mode=*) mode="${a#*=}" ;;
         --target=*) target="${a#*=}" ;;
+        --swint-off) swint=1 ;;
         --slot=*) slot="${a#*=}" ;;
         --cycles=*) cyclim="${a#*=}" ;;
         --clks=*) clks="${a#*=}" ;;
@@ -84,6 +86,7 @@ if [ "$vl" = 1 ]; then
         -GHDV_BLOCKS="$blocks" \
         -GMODE="$mode" \
         -GTARGET="$target" \
+        -GSWINT_DIS="$swint" \
         -GHD_SLOT="$slot" \
         -GMAX_CYCLES="$cyclim" \
         -GMAX_CLKS="$clks" \
@@ -103,6 +106,7 @@ else
             -Pboot_tb.HDV_BLOCKS="$blocks" \
             -Pboot_tb.MODE="$mode" \
             -Pboot_tb.TARGET="$target" \
+            -Pboot_tb.SWINT_DIS="$swint" \
             -Pboot_tb.HD_SLOT="$slot" \
             -Pboot_tb.MAX_CYCLES="$cyclim" \
             -Pboot_tb.MAX_CLKS="$clks" \

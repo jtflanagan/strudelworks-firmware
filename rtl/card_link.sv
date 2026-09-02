@@ -219,6 +219,7 @@ module card_link #(
     // out, the sequencer's status and counters back, and `accel_on` for the
     // memory client's windows.  A watching top ties the inputs to 0.
     output wire [1:0]   accel_mode,
+    output wire         accel_swint_dis,
     output wire [15:0]  accel_target,
     output wire         accel_cnt_clr,
     input  wire         accel_on,
@@ -941,6 +942,7 @@ module card_link #(
         .mem_diverted      (mem_diverted),
         .mem_intc8rom      (mem_intc8rom),
         .accel_mode        (accel_mode),
+        .accel_swint_dis   (accel_swint_dis),
         .accel_target      (accel_target),
         .accel_cnt_clr     (accel_cnt_clr),
         .accel_stat        (accel_stat),

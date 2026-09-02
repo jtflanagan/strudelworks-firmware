@@ -27,7 +27,8 @@
 // fast op is BUS class, every BUS-class op rode exactly one bus cycle, two
 // consecutive BUS ops rode consecutive cycles, no request was dropped.
 //////////////////////////////////////////////////////////////////////////////////
-module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
+module accel_tb #(parameter integer SWINT = 1,
+                  parameter UCODE = "cpu65c02_ucode.hex",
                   parameter PROG = "accel.hex",
                   parameter integer PHI0_HIGH = 49);
 
@@ -75,8 +76,10 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        mem_sub_en, bus_owns, core_valid;
     wire [7:0]  mem_sub_data;
     // The cache's byte reaches the driver and the reader only for a bus op.
-    wire        sub_en   = mem_sub_en && bus_owns;
-    wire [7:0]  sub_data = mem_sub_data;
+    wire        kbd_sub_en;
+    wire [7:0]  kbd_sub_data;
+    wire        sub_en   = (mem_sub_en && bus_owns) || kbd_sub_en;
+    wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data : mem_sub_data;
     wire [15:0] op_addr, nxt_addr, op_wdata_w;
     wire        op_rw, op_present, op_commit, op_ovr, op_divert, op_dummy, op_inflight, q_divert;
     wire [7:0]  op_wdata;
@@ -223,9 +226,39 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [11:0] rom_r2_addr;
     wire [31:0] rom_r2_data;
 
+    // ---- the keyboard in the dummies, as master_top gates it -----------------
+    // SWINT = 0 is the chicken bit: dummies park at $0000, $C00x rides the bus.
+    reg  swint_dis = (SWINT == 0);
+    wire sw_int = accel_on && (mode == 2'd2) && serve && !swint_dis && !held;
+    wire        swi_commit, kbd_int_ok;
+    wire [7:0]  kbd_int_byte;
+    wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+    reg        kb_press = 1'b0, kb_drop = 1'b0, kb_lock = 1'b0;
+    reg [6:0]  kb_key = 7'd0;
+    wire       kb_strobe, kb_seen, kb_touched, kb_changed, kb_hot;
+    wire [7:0] kb_pressed, kb_taken, kb_flushed, kb_replaced;
+    wire [6:0] kb_resolved;
+    kbd_inject u_kbdi (
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
+        .master_active (master_active),
+        .park_kbd (sw_int), .op_dummy (op_dummy),
+        .int_rd (kbd_int_rd), .int_ok (kbd_int_ok),
+        .int_byte (kbd_int_byte), .int_low (),
+        .press (kb_press), .press_key (kb_key), .drop (kb_drop), .lock (kb_lock),
+        .hotkey_en (1'b0), .hotkey (7'd0), .held (held),
+        .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
+        .data_sync (data_sync),
+        .sub_en (kbd_sub_en), .sub_data (kbd_sub_data),
+        .strobe (kb_strobe), .seen (kb_seen), .touched (kb_touched),
+        .pressed (kb_pressed), .taken (kb_taken), .flushed (kb_flushed),
+        .replaced (kb_replaced), .resolved_key (kb_resolved),
+        .changed (kb_changed), .hotkey_hit (kb_hot)
+    );
+
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
+        .swi_on (sw_int), .swi_ok (kbd_int_ok), .swi_byte (kbd_int_byte), .swi_commit (swi_commit),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
@@ -346,7 +379,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
-        .master_active (master_active),
+        .master_active (master_active), .park_kbd (sw_int),
         .bus_owns (bus_owns), .core_valid (core_valid),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
         .drv_sync (drv_sync), .cyc_en (drv_cyc_done), .cpu_din (drv_din),
@@ -581,10 +614,36 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             else                                           cx_byte = FLOAT;
         end
     endfunction
-    // What the core must read at `a`, from the reference: everything but $C0xx.
+    // The bench's own keyboard model, independent of kbd_inject: the tb
+    // drives the presses, the machine's keyboard is silent (the pins answer
+    // $00), so the truth is one strobe and one latch tracked here.
+    reg       tb_kstrobe = 1'b0;
+    reg [6:0] tb_kkey = 7'd0, tb_klast = 7'd0;
+    always @(posedge clk) begin
+        // A retired read of $C00x hands the key over.
+        if ((kbd_int_rd || (u_commit && !swi_commit && u_rw && !u_ovr && (u_addr[15:4] == 12'hC00)))
+            && tb_kstrobe) tb_klast <= tb_kkey;
+        if ((u_commit && !swi_commit && (u_addr == 16'hC010)) ||
+            (u_commit && !swi_commit && !u_rw && (u_addr[15:4] == 12'hC01)) || kb_drop)
+            tb_kstrobe <= 1'b0;
+        if (kb_press) begin
+            tb_kkey <= kb_key;
+            tb_kstrobe <= 1'b1;
+        end
+        if (cpu_rst) tb_kstrobe <= 1'b0;
+    end
+    // What a $C00x read must return, on the card or off it: the injected
+    // key while its strobe stands, else the latch with the strobe clear.
+    function automatic [7:0] c0_exp(input [15:0] a);
+        c0_exp = tb_kstrobe ? {1'b1, tb_kkey} : {1'b0, tb_klast};
+    endfunction
+
+    // What the core must read at `a`, from the reference: everything but
+    // $C01x-$C0FF (the machine's), the keyboard from the model above.
     function automatic [7:0] exp_read(input [15:0] a);
         begin
-            if (a[15:12] == 4'hC) exp_read = cx_byte(a);
+            if (a[15:4] == 12'hC00) exp_read = c0_exp(a);
+            else if (a[15:12] == 4'hC) exp_read = cx_byte(a);
             else if (a >= 16'hD000) begin
                 if (m_lcrd) exp_read = m_altzp ? ref_lcaux[m_bank * 16384 + m_lcidx(a)] : ref_lc[m_lcidx(a)];
                 else        exp_read = rom_img[a - 16'hC000];
@@ -710,6 +769,18 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // ---- the running checks --------------------------------------------------------
     integer reads = 0, reads_bad = 0, fast_reads = 0, bus_reads = 0, ovr_cycles = 0;
     integer dummies = 0, dummies_bad = 0, pin_ram_writes = 0;
+    // The internalized keyboard: served reads, and reads that should have
+    // been served but rode the bus (decoded as accel_seq decodes them).
+    integer swi_ops = 0, swi_bus_trips = 0;
+    always @(posedge clk) begin
+        if (swi_commit) swi_ops = swi_ops + 1;
+        if (op_present && !op_dummy && !op_ovr && sw_int && op_rw &&
+            (op_addr[15:4] == 12'hC00) && kbd_int_ok && !u_seq.reset_seq) begin
+            swi_bus_trips = swi_bus_trips + 1;
+            if (swi_bus_trips <= 5)
+                $display("[%0t] keyboard read on the bus with the latch full: $%04X", $time, op_addr);
+        end
+    end
     integer fast_bus_cls = 0, bus_bus_cls = 0, u_core_ops = 0, cx_fast = 0, cx_bus = 0, cx_slot_fast = 0;
     integer merge_gaps = 0, presents = 0, last_bus_present = -1, last_was_bus = 0;
     integer check_gaps = 0, drv_cycen = 0, seq_cycen = 0, mode0_bad = 0, bus_ram_reads = 0;
@@ -724,7 +795,10 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     end
 
     // Bus ops: at the data phase, against the machine ($C0xx) or the reference.
-    always @(posedge clk) if (u_commit) begin
+    // A SYNTHETIC commit is an internalized keyboard read's - it never rode
+    // the bus, the core is ops ahead, and its byte was checked on the fev
+    // path - so the bus-side compare skips it.
+    always @(posedge clk) if (u_commit && !swi_commit) begin
         if (u_ovr) ovr_cycles = ovr_cycles + 1;
         if (u_ovr && u_addr == 16'h210F) dma_last_hits = dma_last_hits + 1;
         if (u_rw) begin
@@ -734,7 +808,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             if ((cl_cls == 2'd1 || cl_cls == 2'd2) && !u_ovr && !u_seq.reset_seq && mode != 2'd0)
                 bus_ram_reads = bus_ram_reads + 1;
             if (cl_cls == 2'd0 && u_addr[15:8] == 8'hC0) begin
-                if (cpu_din !== mach_byte && !u_ovr) begin
+                if (cpu_din !== mach_byte && !u_ovr &&
+                    !(u_addr[15:4] == 12'hC00) && !(u_addr == 16'hC010)) begin
                     reads_bad = reads_bad + 1;
                     if (reads_bad <= 5) $display("    bus read $%04X: core got %02x, the machine said %02x", u_addr, cpu_din, mach_byte);
                 end
@@ -758,7 +833,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                 reads_bad = reads_bad + 1;
                 if (reads_bad <= 5) $display("    fast read $%04X: core got %02x, the reference says %02x", fev_addr, fev_data, exp_read(fev_addr));
             end
-            if (fev_addr[15:12] == 4'hC) begin
+            if (fev_addr[15:12] == 4'hC && fev_addr[11:8] != 4'd0) begin
                 cx_fast = cx_fast + 1;
                 // A slot's page, or $C800+ without the internal ROM: never fast.
                 if (!fev_addr[11] && !(m_intcx || (fev_addr[11:8] == 4'd3 && !m_slotc3))) cx_slot_fast = cx_slot_fast + 1;
@@ -828,10 +903,12 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             if (op_dummy) dummies = dummies + 1;
         end
         if (cl_valid && cl_cls == 2'd0 && !u_ovr) begin
-            if (u_bus_q2) bus_bus_cls = bus_bus_cls + 1; else fast_bus_cls = fast_bus_cls + 1;
+            if (u_bus_q2) bus_bus_cls = bus_bus_cls + 1;
+            else if (!u_seq.swi_q) fast_bus_cls = fast_bus_cls + 1;
         end
         if (since_fall == BUS_AT && driving) begin
-            if (op_dummy && !(addr_drive == 16'h0000 && rw_drive)) dummies_bad = dummies_bad + 1;
+            if (op_dummy && !(addr_drive == (sw_int ? 16'hC000 : 16'h0000) && rw_drive))
+                dummies_bad = dummies_bad + 1;
             if (!rw_drive && data_oe && addr_drive[15:12] != 4'hC && !op_ovr) pin_ram_writes = pin_ram_writes + 1;
         end
         if (drv_cyc_done) drv_cycen = drv_cycen + 1;
@@ -1006,7 +1083,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             if (reads_bad != 0) fail($sformatf("%0s: %0d reads disagreed with the reference (%0d of them turbo)", what, reads_bad, turbo_bad));
             else ok($sformatf("%0s: %0d reads (%0d turbo, %0d fast, %0d dline), every one the reference's byte", what, reads, turbo_reads, fast_reads, dline_reads));
             if (turbo_excl_bad != 0) fail($sformatf("%0s: %0d one-clock ops broke the $Cxxx rules", what, turbo_excl_bad));
-            if (dummies_bad != 0) fail($sformatf("%0s: %0d dummy cycles were not the parked $0000 read", what, dummies_bad));
+            if (dummies_bad != 0) fail($sformatf("%0s: %0d dummy cycles were not the parked read", what, dummies_bad));
             if (fast_bus_cls != 0) fail($sformatf("%0s: %0d BUS-class ops were served fast", what, fast_bus_cls));
             if (late_fills != 0 || fifo_drops != 0) fail($sformatf("%0s: late fills %0d, drops %0d", what, late_fills, fifo_drops));
             if (mismatches != 0) fail($sformatf("%0s: the monitor counted %0d mismatches (last %08x)", what, mismatches, last_mismatch));
@@ -1102,6 +1179,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("mode 1: %0d internal-ROM reads of $C100-$CFFF served from the card, every one the model's byte", cx_fast));
         if (cx_slot_fast != 0) fail($sformatf("mode 1: %0d slot reads were served fast", cx_slot_fast));
         else ok("mode 1: every slot read - the slot-5 ROM, the empty slots - rode the bus");
+        if (swi_ops != 0) fail("mode 1: a keyboard read was served on the card outside the closed regime");
+        else ok("mode 1: every keyboard read rode the bus (the regime is mode 2's)");
         if (turbo_c3 == 0) fail("mode 1: no $C3xx fetch was served in one clock");
         else ok($sformatf("mode 1: %0d $C3xx fetches served in one clock once INTC8ROM was set (%0d rode the sequencer: the latch's food)", turbo_c3, fast_c3));
         check_image("mode 1: the image equals the reference");
@@ -1126,6 +1205,26 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("mode 2: %0d fetches served in one clock by the line front", turbo_ops));
         if (turbo_c3 == turbo_c3_0) fail("mode 2: no $C3xx fetch was served in one clock");
         else ok($sformatf("mode 2: %0d $C3xx fetches served in one clock once INTC8ROM was set", turbo_c3 - turbo_c3_0));
+        // ---- 3b. the keyboard in the dummies --------------------------------
+        if (swi_ops == 0) fail("mode 2: no keyboard read was served on the card");
+        else ok($sformatf("mode 2: %0d keyboard reads served from the parked-dummy latch", swi_ops));
+        if (swi_bus_trips != 0) fail($sformatf("mode 2: %0d keyboard reads rode the bus with the latch full", swi_bus_trips));
+        else ok("mode 2: no keyboard read rode the bus once the latch had filled");
+        // An injected key crosses the internal path end to end: pressed
+        // here, served to the program's poll from the card, taken with the
+        // $C010 that rides the bus, and the byte the program stored is
+        // {1, $41}.
+        n0 = kb_taken;
+        @(negedge clk); kb_press <= 1'b1; kb_key <= 7'h41;
+        @(negedge clk); kb_press <= 1'b0;
+        c = 0;
+        while (kb_taken == n0 && c < 3_000_000) begin @(posedge clk); c = c + 1; end
+        if (kb_taken == n0) fail("the injected key was never taken through the internal path");
+        else ok("an injected key served on the card was taken, its $C010 on the bus");
+        repeat (4 * CYCLE) @(negedge clk);
+        if (ref_main[16'h0310] !== 8'hC1)
+            fail($sformatf("the program stored $%02x for the injected key, wanted $C1", ref_main[16'h0310]));
+        else ok("...and the program read {1, $41} off the card");
         $display("    front: %0d promotes, %0d fill retains, %0d scan prefetches, %0d pinned crossings, %0d want-behind-scan clocks, %0d CAM serves, %0d zero-stall branches, %0d slow ifetches",
                  u_iline.cnt_promotes, u_iline.cnt_cam_fills, u_iline.cnt_scan_fills,
                  u_iline.cnt_loop_hold, u_iline.cnt_scan_block, u_iline.cnt_cam_serves,
