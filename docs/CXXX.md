@@ -1,7 +1,10 @@
 # $Cxxx under acceleration: what to serve fast
 
-Status: **STEP 1 BUILT AND SIMULATED** (2026-09-02) - page $C3 on the
-instruction front once the INTC8ROM latch is set; hardware proof pending.
+Status: **STEP 1 PROVEN ON HARDWARE** (2026-09-02, fw 2db1baf, bit in
+SRAM) - page $C3 on the instruction front once the INTC8ROM latch is set.
+wave.dsk: the main section stays at 80x, the end loop goes from 22x to
+past 90x - it was almost entirely AUXMOVE fetching from slow memory - and
+the user reports everything else on the machine working as before.
 The user's decision: treat "what in $C000-$CFFF can be served fast" as ONE
 programme rather than piecemeal exceptions, taken up BEFORE dline rung 4
 (docs/DLINE.md; streams are deferred, not dropped), starting with $C3xx
@@ -64,10 +67,10 @@ read is never compared there, so diff the ROM `classes`/`compared` counts
 before and after; more ROM compares at 0 mismatches is the proof of the
 changed set condition.
 
-**Hardware proof pending:** governed 8x reading 8.00 in both wave.dsk
-sections, the unlimited end loop against the main section's 80x, and a
-sparse trace through tools/swtrace_mix.py with the $C39x fetches gone
-from the fast-op census.
+**Hardware (2026-09-02, the user driving wave.dsk):** the previously
+fast section unchanged at 80x; the previously slow end loop from 22x to
+past 90x.  Nothing else changed behaviour.  A trace census of the loop
+(tools/swtrace_mix.py) was not taken - the HUD figure was the proof.
 
 ## The finding that started it (2026-09-02, on hardware)
 
