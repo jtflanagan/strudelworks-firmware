@@ -104,14 +104,56 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [15:0] cpu_d_pred;
     wire        cpu_d_pred_v, cpu_d_pred_rw;
     wire [7:0]  d_din_w;
+    // The interrupt line: pulled low by a jittered timer whenever the program
+    // has armed it (a write of nonzero to IRQARM = $03FB), released when the
+    // ISR acks (a write to ISRA = $03FA).  This puts a Mockingboard-shaped
+    // timer IRQ across the accelerated data stream in phase 9 - the one
+    // dimension no sim exercised, and where the hardware lock lives.
+    reg irq_n_tb = 1'b1;
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (d_din_w),
         .cyc_is_i (cpu_cyc_is_i), .i_addr (), .pc_addr (cpu_pc_addr), .i_pred (), .d_addr (), .d_rw (), .d_dout (),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .p_flags (cpu_p_flags),
-        .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
+        .irq_n (irq_n_tb), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
     );
+
+    // The IRQ timer, counted in BUS CYCLES so it scales with machine time
+    // the way a Mockingboard's 6522 timer does - a period in clocks would
+    // drown mode 0 (98 clocks a cycle) in back-to-back ISRs.  A 16-bit LFSR
+    // jitters the period so interrupts land on a spread of instruction- and
+    // cycle-phases rather than one beat the program could dodge.
+    reg         irq_armed = 1'b0;
+    reg [15:0]  irq_lfsr = 16'hACE1;
+    integer     irq_wait = 80;
+    integer     irq_cyc = 0, irq_count = 0, irq_acks = 0;
+    always @(posedge clk) begin
+        // Arm/disarm and ack ride the unified stream, program order.  A
+        // disarm also releases the line, so a fire still pending when the
+        // program masks does not hold IRQ' low forever.
+        if (u_present && !u_rw && u_addr == 16'h03FB) begin
+            irq_armed <= (u_wdata != 8'd0);
+            if (u_wdata == 8'd0) irq_n_tb <= 1'b1;
+        end
+        if (u_present && !u_rw && u_addr == 16'h03FA) begin
+            irq_n_tb <= 1'b1;                       // the ISR acked: release
+            irq_acks <= irq_acks + 1;
+        end
+        if (cpu_rst) begin
+            irq_n_tb <= 1'b1; irq_cyc <= 0;
+        end else if (fall) begin
+            irq_lfsr <= {irq_lfsr[14:0], irq_lfsr[15] ^ irq_lfsr[13] ^ irq_lfsr[12] ^ irq_lfsr[10]};
+            if (irq_armed && irq_n_tb) begin
+                if (irq_cyc >= irq_wait) begin
+                    irq_n_tb <= 1'b0;               // fire: level low until ack
+                    irq_count <= irq_count + 1;
+                    irq_cyc <= 0;
+                    irq_wait <= 40 + (irq_lfsr % 80);   // 40..119 bus cycles, jittered
+                end else irq_cyc <= irq_cyc + 1;
+            end
+        end
+    end
 
     // ACCEL_CTRL, as the testbench drives it.
     reg  [1:0]  mode = 2'd0;
@@ -746,7 +788,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         integer c;
         begin
             c = 0;
-            while (pass_count < n && !failed && c < 8_000_000) begin @(posedge clk); c = c + 1; end
+            while (pass_count < n && !failed && c < 120_000_000) begin @(posedge clk); c = c + 1; end
             if (failed) fail($sformatf("%0s: the program raised its failure flag at pass %0d", what, pass_count));
             else if (pass_count < n) fail($sformatf("%0s: only %0d passes before the timeout", what, pass_count));
             else ok($sformatf("%0s: %0d passes of the program", what, n));
@@ -1141,6 +1183,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("no RAM read rode the bus while accelerating beyond the %0d in flight at the mode switches: a read the card holds is fast", bus_ram_reads));
         if (mismatches != 0) fail($sformatf("the monitor counted %0d mismatches", mismatches));
         else ok("the monitor saw nothing to disagree with");
+        if (irq_acks < 100) fail($sformatf("only %0d interrupts were serviced - the storm did not run", irq_acks));
+        else ok($sformatf("%0d interrupts raised, %0d serviced across the data-front storm", irq_count, irq_acks));
         if (reads_bad != 0) fail($sformatf("the end: %0d reads disagreed with the reference", reads_bad));
         else ok($sformatf("the end: %0d reads (%0d fast), every one the reference's byte", reads, fast_reads));
         if (dummies_bad != 0 || fast_bus_cls != 0 || late_fills != 0 || fifo_drops != 0)

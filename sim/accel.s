@@ -13,7 +13,13 @@
 PASS    = $0300
 FAILF   = $03FF
 RWFLAG  = $03FE          ; non-zero once the card is serving: run the RamWorks test
+IRQARM  = $03FB          ; irqtest writes 1 here to start the tb's IRQ timer, 0 to stop
+ISRA    = $03FA          ; the ISR acks by writing here; the tb drops IRQ' on it
+ISRC    = $03F9          ; the ISR's own counter
+SMCRES  = $03F8          ; smcsweep's target writes its loaded byte here
+SMCTMP  = $03F7          ; smcsweep's compare scratch
 PTR     = $06
+IPTR    = $08            ; irqtest's roving pointer, distinct from PTR
 
 .macro  jne target
         beq :+
@@ -141,16 +147,50 @@ norw:
         ; ---- 6. self-modifying code: the operand and the opcode change
         ; under the icache's feet.  A stale line shows as the wrong A or X.
         jsr smctest
-        bcs fail
+        jcs fail
 
         ; ---- 7. the branch-prefetch front: hot loops, calls, and writes
         ; into retained lines (rtl/iline.sv's CAM, rtl/iscan.sv's scanner)
         jsr bptest
-        bcs fail
+        jcs fail
 
         ; ---- 8. the CMOS dummy re-reads (rtl/dline.sv's last byte) --------
         jsr dumtest
-        bcs fail
+        jcs fail
+
+        ; ---- 9. the data front under an interrupt storm ------------------
+        ; The dimension no sim has exercised and the one the hardware lock
+        ; lives in: a Mockingboard-shaped timer IRQ interposing on the
+        ; accelerated data stream (docs/DLINE.md, the hgr-corruption hunt).
+        ; A wrong byte served across an interposed interrupt fails here -
+        ; the testbench's program-order reference checks every served byte -
+        ; or in the compares below.  IRQ-safe by construction: default map,
+        ; main bank 0, ALTZP off, the ISR touching only its own page-3
+        ; scratch and preserving every register.
+        jsr irqtest
+        jcs fail
+
+        ; ---- 10b. self-modifying code into a HOT icache line -----------
+        ; Moon Patrol's compiled-sprite shape, found in a hardware trace: a
+        ; STA patches the operand byte of an instruction in a DIFFERENT
+        ; 16-byte line, and that line is hot in the icache from the loop's
+        ; previous pass.  If the front's SMC snoop misses the cross-line
+        ; write, the operand fetch serves the stale cached byte - the
+        ; graphics corruption.  The testbench's reference catches the stale
+        ; fetch; the compare here is a second net.  Swept over the operand's
+        ; offset within the line by smcsweep.
+        jsr smcsweep
+        jcs fail
+
+        ; ---- 10. HGR page-flipping under the interrupt storm ------------
+        ; Moon Patrol's actual shape: 80STORE+PAGE2 steer the hires page
+        ; ($2000-$3FFF) between main and aux, holding DIFFERENT bytes in
+        ; each, flipped under the interrupt storm.  The CAM serves rung-2
+        ; reads on a virtual tag and is kept honest only by the flash-clear
+        ; on map_changed; a stale line surviving a flip serves the WRONG
+        ; BANK's byte.  Both the compares here and the reference catch it.
+        jsr hgrtest
+        jcs fail
 
         inc PASS
         jmp loop
@@ -180,6 +220,193 @@ cxtest: sta $C007               ; INTCXROM on: all of $C100-$CFFF is internal
         rts
 
 sub:    lda #$C3
+        rts
+
+; The data front under an interrupt storm.  A timer in the testbench pulls
+; IRQ' low while IRQARM is set and releases it when the ISR acks, so an
+; interrupt interposes on the accelerated data stream at every phase of
+; every instruction - the Moon Patrol lockup's shape (Mockingboard timer
+; IRQs over HGR-heavy code).  The traffic hammers all three servers: the
+; zero-page/stack shadow, the CAM across a spread of $6000-$7FFF lines, and
+; the last byte through crossing reads' FIXUP dummies.  A byte served wrong
+; across an interposed interrupt fails the testbench's own program-order
+; reference immediately; the self-checks here are a second net.  Carry set
+; on failure.  Runs in the default map with A/X/Y all its own.
+irqtest:
+        ; A known-safe map: main memory both ways, ALTZP off, ROM readable
+        ; at the vectors, bank 0 - so the ISR (resident in RAM) is reached
+        ; through the ROM vector and touches only main.
+        lda $C082               ; LC reads ROM ($D000-$FFFF the vector's home)
+        sta $C000               ; 80STORE off
+        sta $C002               ; RAMRD main
+        sta $C004               ; RAMWRT main
+        sta $C008               ; ALTZP main
+        lda #$00
+        sta $C073               ; RamWorks bank 0
+        sta ISRC
+        ; A deterministic pattern: $7000+i = i, $7100+i = i.
+        ldx #$00
+@fill:  txa
+        sta $7000,x
+        sta $7100,x
+        inx
+        bne @fill
+        ; Start the storm, then unmask: interrupts fire only across this
+        ; hammer, never in the delicate phases above.
+        lda #$01
+        sta IRQARM
+        cli
+        ; Hammer: a few passes over the page, each iteration a crossing read
+        ; (FIXUP), a straight read (shadow/CAM), a copy (splice), and a
+        ; stack round trip whose byte must survive the interposition.  Kept
+        ; small so mode 0's 98-clocks-a-cycle stays inside the timeout; the
+        ; interrupt RATE, not the loop size, is what saturates the window.
+        ldy #$04
+@outer: ldx #$00
+@inner: lda $6000,x             ; a spread of CAM lines under pressure: this
+        lda $6800,x             ; code's own pages, tracked by the reference
+        lda $70FF,x             ; crosses to $7100+ at x>=1: FIXUP re-reads operand
+        lda $7000,x             ; = x, straight through a server
+        sta $7200,x             ; copy out, splicing into any holder
+        pha                     ; onto the stack (shadow page 1)
+        pla                     ; back off it
+        cmp $7000,x             ; the pulled byte must still be x
+        jne irqbad
+        ; Every 64 iterations flip the video switches - PAGE2 then HIRES,
+        ; net-neutral with 80STORE off (no change to what RAM the reads
+        ; resolve to) but each edge pulses map_changed, so the CAM flash-
+        ; clears mid-stream while interrupts interpose: Moon Patrol's shape
+        ; (page flipping under a music IRQ), aimed at the rung-2 mechanism
+        ; a bench has never raced.
+        txa
+        and #$3F
+        bne @nosw
+        sta $C055               ; PAGE2 on  -> map_changed
+        sta $C054               ; PAGE2 off -> map_changed
+        lda $C057               ; HIRES on  -> map_changed
+        lda $C056               ; HIRES off -> map_changed
+@nosw:  inx
+        bne @inner
+        dey
+        bne @outer
+        ; Mask, stop the storm, then verify quietly that nothing moved.
+        sei
+        lda #$00
+        sta IRQARM
+        ldx #$00
+@ver:   txa
+        cmp $7000,x             ; the source is untouched
+        jne irqbad
+        txa
+        cmp $7200,x             ; the copy took every byte faithfully
+        jne irqbad
+        inx
+        bne @ver
+        clc
+        rts
+irqbad:   sei
+        lda #$00
+        sta IRQARM              ; never leave the storm running on the way out
+        sec
+        rts
+
+; The interrupt service routine, resident in RAM (this segment runs at
+; $6000+).  Reached through the ROM IRQ vector; preserves every register,
+; exercises a server or two from inside the interrupt, acks so the testbench
+; releases IRQ', and returns.  Touches only its own page-3 scratch and reads.
+irqsvc: pha
+        phx
+        phy
+        inc ISRC                ; abs RMW at $03F9: a LAST dummy in the ISR
+        lda IPTR                ; a zero-page read through the shadow
+        ldx #$01
+        lda $70FF,x             ; a crossing read: the ISR's own FIXUP dummy
+        lda #$01
+        sta ISRA                ; ack: the testbench drops IRQ'
+        ply
+        plx
+        pla
+        rti
+
+; HGR page-flipping under the storm.  80STORE on and HIRES on steer the
+; hires page by PAGE2; $2000+i holds i in main and i EOR $FF in aux.  The
+; loop flips PAGE2 (a bus op, so map_changed and the CAM flash-clear have
+; the whole cycle) and reads each bank back under interrupts, twice per
+; side so the CAM fills then serves.  A stale virtual-tagged line surviving
+; a flip reads as the wrong bank.  The ISR stays map-neutral (zero page,
+; page 1, page 3 - none of them the hires page), so it never disturbs the
+; pattern.  Carry set on failure.
+hgrtest:
+        lda $C082               ; ROM at the vectors
+        sta $C001               ; 80STORE on
+        sta $C057               ; HIRES on: $2000-$3FFF now steered by PAGE2
+        sta $C008               ; ALTZP off (the ISR's zp/stack are main)
+        lda #$00
+        sta $C073               ; bank 0
+        sta $C054               ; PAGE2 off: writes reach main
+        ldx #$00
+@hfm:   txa
+        sta $2000,x
+        inx
+        bne @hfm
+        sta $C055               ; PAGE2 on: writes reach aux
+        ldx #$00
+@hfa:   txa
+        eor #$FF
+        sta $2000,x
+        inx
+        bne @hfa
+        sta $C054               ; PAGE2 off
+        lda #$01
+        sta IRQARM
+        cli
+        ldy #$08
+@hl:    sta $C054               ; PAGE2 off: $2000+x reads main = x
+        jsr @rdm
+        jcs @hbad
+        jsr @rdm
+        jcs @hbad
+        sta $C055               ; PAGE2 on: $2000+x reads aux = x EOR $FF
+        jsr @rda
+        jcs @hbad
+        jsr @rda
+        jcs @hbad
+        dey
+        bne @hl
+        sei
+        lda #$00
+        sta IRQARM
+        sta $C054               ; PAGE2 off
+        sta $C000               ; 80STORE off
+        sta $C056               ; HIRES off
+        clc
+        rts
+@hbad:  sei
+        lda #$00
+        sta IRQARM
+        sta $C054
+        sta $C000
+        sta $C056
+        sec
+        rts
+@rdm:   ldx #$00
+@rml:   txa
+        cmp $2000,x             ; main byte is x
+        bne @hf
+        inx
+        bne @rml
+        clc
+        rts
+@rda:   ldx #$00
+@ral:   txa
+        eor #$FF
+        cmp $2000,x             ; aux byte is x EOR $FF
+        bne @hf
+        inx
+        bne @ral
+        clc
+        rts
+@hf:    sec
         rts
 
 ; The CMOS dummy re-reads, made unavoidable: a page-crossing indexed read's
@@ -248,6 +475,93 @@ smop:   nop                     ; becomes INX, then DEX
         rts
 smfail: sec
         rts
+
+; Self-modifying code into a hot icache line - the Moon Patrol shape.  Each
+; of the four target lines below is 16-byte aligned and holds an LDA #imm
+; whose operand sits at a DIFFERENT offset (1,4,7,10); the sweep patches
+; that operand from here (a different line) and calls the target, which is
+; hot in the icache from the previous pass.  A stale operand fetch - the
+; front serving a cached line the cross-line write did not invalidate -
+; shows as SMCRES != the value patched in.  Carry set on failure.
+        ; The loop body straddles two 16-byte lines: the STA and its NOP
+        ; fill in the first, the patched LDA and the loop control in the
+        ; second.  Both lines are executed every pass, so both stay hot in
+        ; the icache; the STA patches the OPERAND of the LDA one line ahead,
+        ; which the icache holds cached from the previous pass.  This is the
+        ; Moon Patrol shape (a compiled sprite patching a hot line it is
+        ; about to fall through).  The STA (3 bytes) plus 13 NOPs is exactly
+        ; 16, so smctgt is one line after @lp whatever @lp's own offset.
+; One variant of the loop: the STA sits N bytes into its line, so its cycle
+; falls at a different phase against the scanner's prefetch of the next line
+; - and STA(3)+N+.res(13-N) is always 16, so the patched line is exactly one
+; line on whatever N.  Sweeping N walks the STA across the window; the phase
+; that lands the prefetch's bank read on the write's P+2 fetches stale.
+.macro SMCV n
+        .ident(.sprintf("smcvlp%d", n)):
+        .res n, $EA
+        stx .ident(.sprintf("smcvt%d", n)) + 1
+        .res 13 - n, $EA
+        .ident(.sprintf("smcvt%d", n)):
+        lda #$00
+        sta SMCRES
+        lda SMCRES
+        stx SMCTMP
+        cmp SMCTMP
+        bne .ident(.sprintf("smcvb%d", n))
+        inx
+        bne .ident(.sprintf("smcvlp%d", n))
+        clc
+        rts
+        .ident(.sprintf("smcvb%d", n)):
+        sec
+        rts
+.endmacro
+
+.macro SMCVDEF n
+        .ident(.sprintf("smcv%d", n)):
+        ldx #$00
+        SMCV n
+.endmacro
+
+.macro SMCVCALL n
+        jsr .ident(.sprintf("smcv%d", n))
+        jcs smcsweep_bad
+.endmacro
+
+smcsweep:
+        SMCVCALL 0
+        SMCVCALL 1
+        SMCVCALL 2
+        SMCVCALL 3
+        SMCVCALL 4
+        SMCVCALL 5
+        SMCVCALL 6
+        SMCVCALL 7
+        SMCVCALL 8
+        SMCVCALL 9
+        SMCVCALL 10
+        SMCVCALL 11
+        SMCVCALL 12
+        SMCVCALL 13
+        clc
+        rts
+smcsweep_bad:
+        sec
+        rts
+        SMCVDEF 0
+        SMCVDEF 1
+        SMCVDEF 2
+        SMCVDEF 3
+        SMCVDEF 4
+        SMCVDEF 5
+        SMCVDEF 6
+        SMCVDEF 7
+        SMCVDEF 8
+        SMCVDEF 9
+        SMCVDEF 10
+        SMCVDEF 11
+        SMCVDEF 12
+        SMCVDEF 13
 
 ; The branch-prefetch front's food (rtl/iline.sv, rtl/iscan.sv).  Carry set
 ; on failure.  Every loop is wider than one 16-byte line, so the two-slot
@@ -561,4 +875,4 @@ dumrom_ok:
         rts
 
 .segment "VECTORS"
-        .word reset, reset, reset
+        .word reset, reset, irqsvc

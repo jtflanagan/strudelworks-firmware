@@ -189,10 +189,32 @@ module page_cache (
     logic [127:0] fb_row;
     logic [3:0]   fb_lo_q;
 
+    // A write reaches the banks at P3 (mw_en/aw_en, which block il_ack
+    // below); its classification is at P2 (cl_valid) and the front snoops
+    // and restarts an IN-FLIGHT fill there.  But P3-minus-one - the write
+    // classified, not yet in the banks, the snoop pulse already gone - is a
+    // hole: a fill that reaches its read on THAT clock takes the pre-write
+    // byte and nothing restarts it, so self-modifying code fetches stale
+    // (the Moon Patrol icache corruption, found in a hardware trace).  Hold
+    // il_ack off that clock when the write in it is the fill's own physical
+    // line; the fill waits the write out and reads it whole.  Registered so
+    // only a same-line compare, not the classify cone, reaches il_ack.
+    logic        wr_blk_v, wr_blk_aux;
+    logic [7:0]  wr_blk_bank;
+    logic [11:0] wr_blk_off;
+    always_ff @(posedge clk) begin
+        wr_blk_v    <= !rst && cl_valid && cl_wr_image && !cl_rw;
+        wr_blk_aux  <= cl_aux;
+        wr_blk_bank <= cl_bank;
+        wr_blk_off  <= cl_off[15:4];
+    end
+    wire wr_block = wr_blk_v && (wr_blk_aux == il_aux) &&
+                    (!il_aux || wr_blk_bank == il_bank) && (wr_blk_off == il_line);
+
     // The front's grant: port A free of the op path this clock.  Aux asks
     // one more thing - the engine idle (the tags are its while it runs) and
     // the wanted bank resident.
-    assign il_ack = il_req && !op_present && !mw_en && !aw_en;
+    assign il_ack = il_req && !op_present && !mw_en && !aw_en && !wr_block;
     assign il_ok  = il_ack && (!il_aux ||
                     ((state == E_IDLE) && vld[il_line[11:4]] &&
                      tag_bank[il_line[11:4]] == il_bank));
