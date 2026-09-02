@@ -7,7 +7,25 @@ docs/ACCELERATION.md "The keyboard in the dummies".  Battery 70 checks
 0 errors both sweeps; the ProDOS boot bench (2M bus cycles, mode 2
 unlimited) 137.2M ops = 68.6x at Bitsy Bye where step 1's bit stood at
 ~8x there, bus reads over the whole run 12.6k; traces identical to mode
-0.  Hardware pending: Nox at the overworld map, the 20x to beat.
+0.  **ON HARDWARE** (fw 9d8d574 / host 3dce2a0, SRAM): Nox at the
+overworld map 20x -> 50-60x depending on what it is doing (the user's
+HUD reading).  The comparison trace (5 s SPARSE - full capture wedges
+the link at this acceleration, the FT601 behaviour ACCELERATION.md
+"Sparse capture goes with acceleration" recorded, so the fast-op side
+is writes only; every bus event and every cycle is exact):
+
+- bus events 21,145 in 5.00 s of machine time (5.1M cycles) against
+  1,005,020 in 2.49 s before - 0.0041 per cycle from 0.3952, a 95x
+  reduction; at ~2 cycles a bus op that is <1% of the machine's time on
+  the bus.
+- $C000 reads: 595 = 119/s = exactly the edge-kept dummies (two per
+  frame), i.e. NO program poll rides the bus.
+- What remains, all periodic and small: the LC pair $C083/$C08B (2,936
+  each), RAMRD/RAMWRT writes $C002-$C004 (5,870), the status reads
+  $C011/12/13/14/16 (1,468 each), $C054/$C055 (734 each).  Those are the
+  swint-status-page and switch-write items left for later - at <1% of
+  the time they are not worth a step on this screen; a trace of a busier
+  scene should decide.
 wave.dsk: the main section stays at 80x, the end loop goes from 22x to
 past 90x - it was almost entirely AUXMOVE fetching from slow memory - and
 the user reports everything else on the machine working as before.

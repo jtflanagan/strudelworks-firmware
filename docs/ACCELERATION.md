@@ -382,7 +382,10 @@ capture, and the mode set once the link is up, it has run for as long as it
 was watched. Whether the rate or the timing is what the FT601 objected to is
 not yet known.  On this branch the host's `sparse` key DEFAULTS TO ON, by
 decision - full capture is for trace-replay debugging only, and cannot keep
-up with an accelerated core.
+up with an accelerated core.  Reproduced 2026-09-02 with the keyboard in
+the dummies: at 50-60x a FULL capture wedges the link (the user switched
+the BUS CAPTURE row back to sparse to run at all); the Nox comparison
+trace was taken sparse for that reason.
 
 **Programs that count CPU cycles between floating-bus reads break**,
 inherently: the floating bus is real time and the core is not. Every
