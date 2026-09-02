@@ -101,10 +101,14 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        cpu_rw, cpu_sync, cpu_cyc_en, cpu_cyc_is_i;
     wire [15:0] cpu_pc_addr;
     wire [7:0]  cpu_dout, cpu_din, i_din_w, cpu_p_flags;
+    wire [15:0] cpu_d_pred;
+    wire        cpu_d_pred_v, cpu_d_pred_rw;
+    wire [7:0]  d_din_w;
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
-        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (cpu_din),
+        .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (d_din_w),
         .cyc_is_i (cpu_cyc_is_i), .i_addr (), .pc_addr (cpu_pc_addr), .i_pred (), .d_addr (), .d_rw (), .d_dout (),
+        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .p_flags (cpu_p_flags),
         .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
     );
@@ -143,6 +147,12 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // master_top.
     wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim;
     wire        turbo_tick, tev_valid, tev_sync;
+    // The data front between iline and the core, as in master_top.
+    wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid;
+    wire [15:0] dev_addr;
+    wire [7:0]  dev_data;
+    wire        dl_req_w;
+    wire [11:0] dl_line_w;
     wire [15:0] tev_addr;
     wire [7:0]  tev_data;
     wire [31:0] turbo_ops;
@@ -165,7 +175,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
         .cyc_en (seq_cyc_en), .cpu_din (cpu_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok),
-        .turbo_commit (turbo_commit), .turbo_claim (turbo_claim),
+        .turbo_commit (turbo_commit), .d_commit (d_commit_w),
+        .turbo_claim (turbo_claim | d_claim_w),
         .op_present (op_present), .op_commit (op_commit), .op_dummy (op_dummy), .op_ovr (op_ovr),
         .op_divert (op_divert), .op_sync (drv_sync), .op_addr (op_addr), .op_rw (op_rw),
         .op_wdata (op_wdata), .cyc_done (drv_cyc_done), .drv_din (drv_din),
@@ -188,7 +199,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .pc_addr (cpu_pc_addr), .cpu_rw (cpu_rw), .cpu_sync (cpu_sync),
         .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
-        .cyc_en (cpu_cyc_en), .i_din (i_din_w),
+        .cyc_en (iline_cyc_en), .i_din (i_din_w),
         .accel_cyc_en (seq_cyc_en), .accel_din (cpu_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok), .claim (turbo_claim),
         .turbo_commit (turbo_commit), .turbo_sync (turbo_sync),
@@ -198,11 +209,35 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .rw_bank (rw_bank), .map_changed (map_changed),
         .il_req (il_req), .il_aux (il_aux_w), .il_bank (il_bank_w), .il_line (il_line_w),
-        .il_ack (il_ack), .il_ok (il_ok), .il_row (il_row),
+        .il_ack (il_ack && il_req), .il_ok (il_ok), .il_row (il_row),
         .r2_en (rom_r2_en), .r2_addr (rom_r2_addr), .r2_data (rom_r2_data), .r2_busy (rom_r2_busy),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
         .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
         .serve (serve), .inval (inval)
+    );
+
+    // The data front, chained after the instruction front exactly as in
+    // master_top: its cyc_en is the core's, its byte is d_din, its books ride
+    // the sequencer's d_commit, and its row claims take the line port only on
+    // clocks iline is not asking.
+    dline u_dline (
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
+        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
+        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cyc_is_i (cpu_cyc_is_i),
+        .il_cyc_en (iline_cyc_en), .accel_din (cpu_din),
+        .cyc_en (cpu_cyc_en), .d_din (d_din_w),
+        .turbo_en (turbo_en), .turbo_ok (turbo_ok),
+        .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick),
+        .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data),
+        .ev_room (1'b1),
+        .altzp (sw_state[3]),
+        .dl_req (dl_req_w), .dl_line (dl_line_w),
+        .dl_ack (il_ack && !il_req), .dl_ok (il_ok), .dl_row (il_row),
+        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
+        .cl_aux (cl_aux), .cl_off (cl_off), .wdata (u_wdata),
+        .inval (inval),
+        .cnt_clr (cnt_clr),
+        .cnt_serves (), .cnt_claims (), .cnt_splices ()
     );
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
@@ -290,7 +325,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .rom_byte (rom_byte), .rom_loaded (1'b1),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .fb_addr (16'd0), .fb_byte (),
-        .il_req (il_req), .il_aux (il_aux_w), .il_bank (il_bank_w), .il_line (il_line_w),
+        .il_req (il_req | dl_req_w), .il_aux (il_req ? il_aux_w : 1'b0),
+        .il_bank (il_req ? il_bank_w : 8'd0), .il_line (il_req ? il_line_w : dl_line_w),
         .il_ack (il_ack), .il_ok (il_ok), .il_row (il_row),
         .serve (serve), .inval (inval), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
@@ -622,6 +658,17 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             if ( tev_addr[11] && !(m_intcx || m_intc8)) turbo_excl_bad = turbo_excl_bad + 1;
         end
     end
+    // The data front's one-clock reads: every byte the reference's, and never
+    // outside physical main pages 0/1 - the only real estate the shadow owns.
+    integer dline_reads = 0, dline_bad = 0;
+    always @(posedge clk) if (dev_valid) begin
+        reads = reads + 1; dline_reads = dline_reads + 1;
+        if (dev_data !== exp_read(dev_addr)) begin
+            dline_bad = dline_bad + 1; reads_bad = reads_bad + 1;
+            if (reads_bad <= 5) $display("    dline read $%04X: core got %02x, the reference says %02x", dev_addr, dev_data, exp_read(dev_addr));
+        end
+        if (dev_addr[15:9] != 7'd0 || m_altzp) dline_bad = dline_bad + 1;
+    end
     // The stream's bookkeeping: passes, the failure flag, classes, merging.
     always @(posedge clk) begin
         if (u_present && !u_rw) begin
@@ -807,19 +854,22 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     task check_ratio(input real want, input string what);
         real got;
         begin
-            got = real'(fast_ops + bus_ops + turbo_ops) / real'(cycles);
+            // Every op the governor charged: the dispatcher's, the instruction
+            // front's, and the data front's - the last counted by the front
+            // itself (rtl/dline.sv), charged through d_commit.
+            got = real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles);
             if (cycles == 0) fail($sformatf("%0s: no bus cycles counted", what));
             else if (got < want * 0.95 || got > want * 1.05)
-                fail($sformatf("%0s: %0d ops over %0d cycles = %.2f per cycle, wanted %.2f", what, fast_ops + bus_ops + turbo_ops, cycles, got, want));
-            else ok($sformatf("%0s: %.2f ops per bus cycle (wanted %.2f; %0d turbo, %0d fast, %0d bus over %0d cycles)",
-                              what, got, want, turbo_ops, fast_ops, bus_ops, cycles));
+                fail($sformatf("%0s: %0d ops over %0d cycles = %.2f per cycle, wanted %.2f", what, fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves, cycles, got, want));
+            else ok($sformatf("%0s: %.2f ops per bus cycle (wanted %.2f; %0d turbo, %0d fast, %0d dline, %0d bus over %0d cycles)",
+                              what, got, want, turbo_ops, fast_ops, u_dline.cnt_serves, bus_ops, cycles));
         end
     endtask
 
     task common_checks(input string what);
         begin
             if (reads_bad != 0) fail($sformatf("%0s: %0d reads disagreed with the reference (%0d of them turbo)", what, reads_bad, turbo_bad));
-            else ok($sformatf("%0s: %0d reads (%0d turbo, %0d fast), every one the reference's byte", what, reads, turbo_reads, fast_reads));
+            else ok($sformatf("%0s: %0d reads (%0d turbo, %0d fast, %0d dline), every one the reference's byte", what, reads, turbo_reads, fast_reads, dline_reads));
             if (turbo_excl_bad != 0) fail($sformatf("%0s: %0d one-clock ops broke the $Cxxx rules", what, turbo_excl_bad));
             if (dummies_bad != 0) fail($sformatf("%0s: %0d dummy cycles were not the parked $0000 read", what, dummies_bad));
             if (fast_bus_cls != 0) fail($sformatf("%0s: %0d BUS-class ops were served fast", what, fast_bus_cls));
@@ -889,9 +939,9 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         common_checks("mode 1");
         if (fast_ops + turbo_ops == 0 || dummies == 0) fail("mode 1: no fast ops or no dummies");
         else ok($sformatf("mode 1: %0d fast ops, %0d bus ops, %0d bus cycles, %0d dummies", fast_ops, bus_ops, cycles, dummies));
-        check_ratio(real'(fast_ops + bus_ops + turbo_ops) / real'(cycles), "mode 1 measured");
-        if (fast_ops + bus_ops + turbo_ops < 3 * cycles) fail("mode 1: less than 3x");
-        else ok($sformatf("mode 1: %.1fx", real'(fast_ops + bus_ops + turbo_ops) / real'(cycles)));
+        check_ratio(real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles), "mode 1 measured");
+        if (fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves < 3 * cycles) fail("mode 1: less than 3x");
+        else ok($sformatf("mode 1: %.1fx", real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles)));
         if (turbo_ops == 0) fail("mode 1: no fetch was served in one clock");
         else ok($sformatf("mode 1: %0d fetches served in one clock by the line front", turbo_ops));
         if (phys_diff(1) != 0) fail("mode 1: the machine's memory differs from the reference - a write missed the bus");
@@ -918,8 +968,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         common_checks("mode 2");
         if (pin_ram_writes != 0) fail($sformatf("mode 2: %0d RAM writes reached the pins", pin_ram_writes));
         else ok("mode 2: no RAM write reached the pins");
-        if (fast_ops + bus_ops + turbo_ops < 6 * cycles) fail($sformatf("mode 2: only %.1fx", real'(fast_ops + bus_ops + turbo_ops) / real'(cycles)));
-        else ok($sformatf("mode 2: %.1fx (%0d turbo, %0d fast, %0d bus over %0d cycles)", real'(fast_ops + bus_ops + turbo_ops) / real'(cycles), turbo_ops, fast_ops, bus_ops, cycles));
+        if (fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves < 6 * cycles) fail($sformatf("mode 2: only %.1fx", real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles)));
+        else ok($sformatf("mode 2: %.1fx (%0d turbo, %0d fast, %0d dline, %0d bus over %0d cycles)", real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles), turbo_ops, fast_ops, u_dline.cnt_serves, bus_ops, cycles));
         if (turbo_ops == 0) fail("mode 2: no fetch was served in one clock");
         else ok($sformatf("mode 2: %0d fetches served in one clock by the line front", turbo_ops));
         $display("    front: %0d promotes, %0d fill retains, %0d scan prefetches, %0d pinned crossings, %0d want-behind-scan clocks, %0d CAM serves, %0d zero-stall branches, %0d slow ifetches",
@@ -942,6 +992,14 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         $display("    mode 2 ifetch: %0d turbo, %0d slow - %.1f%% of the instruction stream at one clock",
                  turbo_ops, u_iline.cnt_slow_i - bp_slow0,
                  100.0 * real'(turbo_ops) / real'(turbo_ops + (u_iline.cnt_slow_i - bp_slow0)));
+        // The data front: rung 1 owns zp/stack reads.  sim/accel.s lives in
+        // zero page like any 6502 program, so a shadow that never fires is a
+        // wiring failure, not a workload property.
+        if (u_dline.cnt_serves < 100)
+            fail($sformatf("mode 2: the data front served only %0d zp/stack reads", u_dline.cnt_serves));
+        else ok($sformatf("mode 2: %0d zp/stack reads served in one clock by the data front (%0d line claims, %0d splices)",
+                          u_dline.cnt_serves, u_dline.cnt_claims, u_dline.cnt_splices));
+        if (dline_bad != 0) fail($sformatf("mode 2: %0d dline serves wrong or out of bounds", dline_bad));
         if (merge_gaps != 0) fail($sformatf("mode 2: %0d consecutive bus ops did not ride consecutive cycles", merge_gaps));
         else ok("mode 2: consecutive bus ops rode consecutive cycles");
         if (phys_diff(0) == 0) fail("mode 2: the machine's memory still equals the reference - writes went out");

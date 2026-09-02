@@ -75,6 +75,7 @@ run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
 run apple_bus_write rtl/apple_bus_write.sv
 run accel_seq     rtl/accel_seq.sv
 run iline         rtl/iline.sv rtl/iscan.sv
+run dline         rtl/dline.sv
 run iscan         rtl/iscan.sv
 run boot_hold     rtl/boot_hold.sv
 run kbd_inject    rtl/kbd_inject.sv

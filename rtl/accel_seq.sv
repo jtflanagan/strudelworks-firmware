@@ -149,6 +149,8 @@ module accel_seq (
     output wire        turbo_en,       // steady: accelerating, serving, past the reset sequence
     output wire        turbo_ok,       // this clock: a turbo retire may happen
     input  wire        turbo_commit,   // one op retired on this edge (charge and count)
+    input  wire        d_commit,       // the data front's retire: charged the same,
+                                       // counted by the front itself (rtl/dline.sv)
     input  wire        turbo_claim,    // the front is clocks from answering: hold the dispatcher
 
     // Time.
@@ -316,7 +318,7 @@ module accel_seq (
         // core has sat still for a clock: never on the clock of arrival -
         // and a turbo retire moves the core without this module's cyc_en,
         // so it resets the settling the same way.
-        settled <= (st == S_DECIDE) && !cyc_en && !turbo_commit;
+        settled <= (st == S_DECIDE) && !cyc_en && !turbo_commit && !d_commit;
 
         // From reset until $FFFD has ridden the bus (see the header).  Cleared
         // in mode 0 too, where it could not be observed but must not stick.
@@ -361,11 +363,11 @@ module accel_seq (
             // The token: consumption (and only consumption) takes it away;
             // the pool re-arms it when it covers a credit net of the debit
             // still in flight.  The verdict lands on two one-bit D inputs.
-            spent_q <= (disp_pay || turbo_commit) && !unlimited;
+            spent_q <= (disp_pay || turbo_commit || d_commit) && !unlimited;
             if (cpu_rst || !master_active || off || unlimited) begin
                 grant_q <= 1'b0;
                 spent_q <= 1'b0;
-            end else if (disp_pay || turbo_commit) begin
+            end else if (disp_pay || turbo_commit || d_commit) begin
                 grant_q <= 1'b0;
             end else if (!grant_q && credit >= (spent_q ? 20'd512 : 20'd256)) begin
                 grant_q <= 1'b1;
