@@ -178,7 +178,11 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim;
     wire        turbo_tick, tev_valid, tev_sync;
     // The data front between iline and the core, as in master_top.
-    wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid;
+    wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
+    wire        d_pending_w, turbo_wr, dq_rw_w, cl_posted;
+    wire        pw_valid_w, pw_aux_w, pw_take_w, pw_ready_w, ws_valid_w, ws_aux_w;
+    wire [7:0]  pw_bank_w, pw_data_w, ws_bank_w, cl_wdata;
+    wire [15:0] pw_off_w, ws_off_w;
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
     wire        dl_req_w, dl_aux_w;
@@ -211,6 +215,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .turbo_en (turbo_en), .turbo_ok (turbo_ok),
         .turbo_commit (turbo_commit), .d_commit (d_commit_w),
         .turbo_claim (turbo_claim | d_claim_w),
+        .turbo_wr (turbo_wr), .d_pending (d_pending_w),
         .op_present (op_present), .op_commit (op_commit), .op_dummy (op_dummy), .op_ovr (op_ovr),
         .op_divert (op_divert), .op_sync (drv_sync), .op_addr (op_addr), .op_rw (op_rw),
         .op_wdata (op_wdata), .cyc_done (drv_cyc_done), .drv_din (drv_din),
@@ -247,6 +252,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .r2_en (rom_r2_en), .r2_addr (rom_r2_addr), .r2_data (rom_r2_data), .r2_busy (rom_r2_busy),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
         .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
+        .ws_valid (ws_valid_w), .ws_aux (ws_aux_w), .ws_bank (ws_bank_w), .ws_off (ws_off_w),
         .serve (serve), .inval (inval)
     );
 
@@ -255,24 +261,27 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     dline u_dline (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
-        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cyc_is_i (cpu_cyc_is_i),
+        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (iline_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
         .cyc_en (cpu_cyc_en), .d_din (d_din_w),
-        .turbo_en (turbo_en), .turbo_ok (turbo_ok),
-        .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick),
-        .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data),
-        .ev_room (1'b1),
+        .turbo_en (turbo_en), .turbo_ok (turbo_ok), .wr_en (turbo_wr),
+        .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick), .pending (d_pending_w),
+        .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data), .dev_rw (dev_rw),
+        .ev_room (1'b1), .ev_room_w (1'b1),
         .altzp (sw_state[3]),
-        .dq_addr (dq_addr_w), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
+        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .rw_bank (rw_bank), .map_changed (map_changed),
         .dl_req (dl_req_w), .dl_aux (dl_aux_w), .dl_bank (dl_bank_w), .dl_line (dl_line_w),
         .dl_ack (il_ack && !il_req), .dl_ok (il_ok), .dl_row (il_row),
-        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
-        .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off), .wdata (u_wdata),
+        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
+        .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off), .wdata (cl_wdata),
+        .pw_valid (pw_valid_w), .pw_aux (pw_aux_w), .pw_bank (pw_bank_w), .pw_off (pw_off_w),
+        .pw_data (pw_data_w), .pw_take (pw_take_w),
+        .ws_valid (ws_valid_w), .ws_aux (ws_aux_w), .ws_bank (ws_bank_w), .ws_off (ws_off_w),
         .inval (inval),
         .cnt_clr (cnt_clr),
         .cnt_serves (), .cnt_claims (), .cnt_splices (),
-        .cnt_cam_serves (), .cnt_lb_serves ()
+        .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits ()
     );
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
@@ -334,11 +343,14 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .rom_ok (rom_loaded),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .intc8rom (intc8rom),
+        .cl_posted (cl_posted), .cl_wdata (cl_wdata),
+        .pw_valid (pw_valid_w), .pw_aux (pw_aux_w), .pw_bank (pw_bank_w), .pw_off (pw_off_w),
+        .pw_data (pw_data_w), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
-        .d_addr (dq_addr_w), .d_rw (1'b1),
+        .d_addr (dq_addr_w), .d_rw (dq_rw_w),
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .map_changed (map_changed)
     );
@@ -353,8 +365,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     page_cache u_cache (
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
-        .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (pf_off),
-        .op_addr (u_addr), .op_wdata (u_wdata),
+        .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
+        .pw_pending (d_pending_w), .pw_ready (pw_ready_w), .pf_off (pf_off),
+        .op_addr (u_addr), .op_wdata (cl_wdata),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .rom_byte (rom_byte), .rom_loaded (1'b1),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
@@ -731,6 +744,18 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             else                              ref_main[u_addr] <= u_wdata;
         end
     end
+    // Posted writes (rtl/dline.sv, rung 3) never ride the unified stream:
+    // the reference takes them from the data front's event, emitted at the
+    // retire - program order, as the host's mirror will see them.
+    always @(posedge clk) if (dev_valid && !dev_rw && dev_addr[15:12] != 4'hC) begin
+        if (dev_addr >= 16'hD000) begin
+            if (m_wren) begin
+                if (m_altzp) ref_lcaux[m_bank * 16384 + m_lcidx(dev_addr)] <= dev_data;
+                else         ref_lc[m_lcidx(dev_addr)] <= dev_data;
+            end
+        end else if (m_aux(dev_addr, 1'b0)) ref_aux[m_bank * 65536 + dev_addr] <= dev_data;
+        else                                ref_main[dev_addr] <= dev_data;
+    end
 
     // ---- the running checks ---------------------------------------------------------
     integer reads = 0, reads_bad = 0, fast_reads = 0, bus_reads = 0;
@@ -771,16 +796,19 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // The data front's one-clock reads: every byte the reference's, and never
     // $Cxxx - the shadow, the CAM and the last byte serve RAM and LC classes
     // only, and no LC virtual address is in $Cxxx.
-    integer dline_reads = 0, dline_bad = 0;
+    integer dline_reads = 0, dline_bad = 0, dline_writes = 0, drained = 0;
     always @(posedge clk) if (dev_valid) begin
-        reads = reads + 1; dline_reads = dline_reads + 1;
-        if (dev_data !== exp_read(dev_addr)) begin
-            dline_bad = dline_bad + 1; reads_bad = reads_bad + 1;
-            if (reads_bad <= 20) $display("[%0t] BAD dline read $%04X: core got %02x, the reference says %02x",
-                                          $time, dev_addr, dev_data, exp_read(dev_addr));
-        end
+        if (dev_rw) begin
+            reads = reads + 1; dline_reads = dline_reads + 1;
+            if (dev_data !== exp_read(dev_addr)) begin
+                dline_bad = dline_bad + 1; reads_bad = reads_bad + 1;
+                if (reads_bad <= 5) $display("    %0t dline read $%04X: core got %02x, the reference says %02x",
+                                              $time, dev_addr, dev_data, exp_read(dev_addr));
+            end
+        end else dline_writes = dline_writes + 1;
         if (dev_addr[15:12] == 4'hC) dline_bad = dline_bad + 1;
     end
+    always @(posedge clk) if (cl_valid && cl_posted) drained = drained + 1;
 
     // ---- the host, mirrored off the driver's op stream ------------------------------
     // strudelworks-host src/hd_card.cpp, register for register.
@@ -1175,7 +1203,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         integer a, b, bad;
         begin
             @(negedge clk);
-            while (busy || u_cache.mw_en || u_cache.aw_en) @(negedge clk);
+            while (busy || u_cache.mw_en || u_cache.aw_en || d_pending_w) @(negedge clk);
             bad = 0;
             for (a = 0; a < 16'hC000; a = a + 1) begin
                 if (card_main(16'(a)) !== ref_main[a]) begin
@@ -1303,9 +1331,10 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                  reads, turbo_reads, fast_reads, dline_reads, reads_bad, mismatches, last_mismatch);
         $display("    counters: fast_ops %0d turbo_ops %0d bus_ops %0d cycles %0d",
                  fast_ops, turbo_ops, bus_ops, cycles);
-        $display("    dline: %0d serves (%0d CAM, %0d last-byte), %0d claims, %0d splices",
+        $display("    dline: %0d serves (%0d CAM, %0d last-byte), %0d claims, %0d splices; %0d writes posted (%0d clocks waited, %0d aux misses at the drain, %0d drained)",
                  u_dline.cnt_serves, u_dline.cnt_cam_serves, u_dline.cnt_lb_serves,
-                 u_dline.cnt_claims, u_dline.cnt_splices);
+                 u_dline.cnt_claims, u_dline.cnt_splices, u_dline.cnt_posts, u_dline.cnt_post_waits,
+                 u_cache.cnt_posted_miss, drained);
         $display("    iline: %0d promotes, %0d fill retains, %0d scan prefetches, %0d pinned crossings, %0d CAM serves, %0d zero-stall branches, %0d slow ifetches",
                  u_iline.cnt_promotes, u_iline.cnt_cam_fills, u_iline.cnt_scan_fills,
                  u_iline.cnt_loop_hold, u_iline.cnt_cam_serves, u_iline.cnt_tgt_serves,
@@ -1335,6 +1364,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         if (hd_blocks_read == 0) fail("no block was ever read - the image did not boot");
         else ok($sformatf("%0d blocks read: the image booted", hd_blocks_read));
         if (MODE != 0 && u_dline.cnt_serves == 0) fail("the data front never served a zp/stack read - a wiring failure");
+        if (MODE == 2 && u_dline.cnt_posts == 0) fail("mode 2: the data front never retired a write - a wiring failure");
+        if (drained > dline_writes || dline_writes - drained > 8) fail($sformatf("%0d writes retired on the front, %0d drained through the classified stage", dline_writes, drained));
+        else if (MODE == 2) ok($sformatf("every one of the %0d posted writes drained through the classified stage exactly once", dline_writes));
         $display("%0d checks, %0d errors", checks, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL");
         $fclose(tf);

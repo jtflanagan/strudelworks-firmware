@@ -79,6 +79,12 @@ ver:    tya
         cmp #$5A
         jne fail
 
+        ; ---- 2b. writes at one clock (rtl/dline.sv rung 3): a push burst
+        ; deeper than the posted FIFO, a fresh line written and read straight
+        ; back, the zero page written and read byte by byte
+        jsr wrtest
+        jcs fail
+
         ; ---- 3. the language card --------------------------------------------
         lda $C083               ; bank 2, read RAM, two reads: write enabled
         lda $C083
@@ -468,12 +474,80 @@ smimm:  lda #$00
         jsr smrun
         cpx #6
         jne smfail
+        ; The store INTO THE NEXT OPCODE, and into the next instruction's
+        ; operand: the tightest self-modification there is.  Under rung 3
+        ; the store retires in one clock and the patched fetch is the very
+        ; next clock (the opcode) or the one after (the operand); the front
+        ; that held the line must kill it in between.
+        ldx #7
+        lda #$E8                ; INX
+        sta smnx
+smnx:   nop                     ; becomes INX, fetched the clock after the store
+        cpx #8
+        jne smfail
+        lda #$EA                ; NOP again, for the next pass
+        sta smnx
+        lda #$5A
+        sta smnx2+1
+smnx2:  lda #$00                ; the operand is the byte just stored
+        cmp #$5A
+        jne smfail
+        lda #$00
+        sta smnx2+1
         clc
         rts
 smrun:
 smop:   nop                     ; becomes INX, then DEX
         rts
 smfail: sec
+        rts
+
+; Rung 3's food (rtl/dline.sv, splice + post).  Twelve pushes in a row
+; supply the posted FIFO faster than the page cache drains it, so writes
+; WAIT for a slot and must never fall to the dispatcher; a line nothing on
+; the front holds is written whole and read straight back, so the read
+; waits the drain out; the zero page is written and read byte by byte
+; through the shadow's splice.  Carry set on failure.
+wrtest:
+        ldx #12
+wrpush: txa
+        pha
+        dex
+        bne wrpush
+        ldx #1
+wrpop:  pla
+        stx SMCTMP
+        cmp SMCTMP
+        bne wrbad
+        inx
+        cpx #13
+        bne wrpop
+        ldx #0
+wrfill: txa
+        eor PASS
+        sta $0F80,x
+        inx
+        cpx #16
+        bne wrfill
+        ldx #0
+wrver:  txa
+        eor PASS
+        cmp $0F80,x
+        bne wrbad
+        inx
+        cpx #16
+        bne wrver
+        ldx #16
+wrzp:   txa
+        eor #$A5
+        sta $E0,x
+        cmp $E0,x
+        bne wrbad
+        dex
+        bne wrzp
+        clc
+        rts
+wrbad:  sec
         rts
 
 ; Self-modifying code into a hot icache line - the Moon Patrol shape.  Each

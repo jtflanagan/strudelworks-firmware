@@ -1,9 +1,13 @@
 # The dline: 1-clock data
 
-Status: **rung 1 and rung 2 DONE and ON HARDWARE** (2026-09-02).
+Status: **rung 1 and rung 2 DONE and ON HARDWARE; rung 3 DONE IN SIM**
+(2026-09-02).
 - Rung 1 (fw e9170ab): the zp/stack shadow, 39.5x, sim and HW agreeing.
 - Rung 2 (fw 2e85924): the 4-line CAM + last-byte serve, 45.2x on the
   bench, virtual-tag serve, on HW.
+- Rung 3 (this commit): writes at one clock, splice + post - **68.9x on
+  the bench** (from 45.2x), build WNS +0.018, NOT yet on hardware.  See
+  its section below.
 - **SMC fill-window fix (fw 95a5911), HW-PROVEN**: hunting a long-standing
   HGR corruption / Moon-Patrol-at-accel lockup ([[hgr-corruption-hunt]] in
   memory) turned up a coherence hole in the page cache's shared fill port
@@ -26,7 +30,7 @@ Status: **rung 1 and rung 2 DONE and ON HARDWARE** (2026-09-02).
 - Host: a **BUS CAPTURE** menu row toggles sparse/full read-write capture
   live ([[bus-capture-menu]]) - the tool that made the tracing possible.
 
-**NEXT: rung 3 - writes (splice + post).** Branch `dcache`, both repos,
+**NEXT: rung 3 on hardware, then rung 4 - streams.** Branch `dcache`, both repos,
 cut from the merged master (page cache + istream front + carry gift, all
 hardware-proven). The old acceleration-branch D$ plan (its DCACHE_PLAN.md)
 is explicitly NOT the basis for this work: it solved a cache-hierarchy
@@ -247,7 +251,102 @@ The shape as planned, and as built:
 Expect most of the remaining ~3,900 dispatcher data reads to move;
 bench somewhere near 50x.
 
-### Rung 3 - writes: splice + post
+### Rung 3 - writes: splice + post: DONE IN SIM (2026-09-02)
+
+**68.9x from 45.2x on the bench** (mode 2 unlimited, sweep 49): 43,911
+writes retired in one clock, 422 clocks of room-wait among them, 6
+posted writes drained through the aux miss engine (RamWorks pages not
+resident at the drain), every read the reference's byte, image equal to
+the reference, the machine's memory stale as it must be.  The accel
+battery green under Verilator, both sweeps (63 checks); the boot bench
+green on both images in mode 2, traces identical to mode 0 for the whole
+mode-0 prefix (1.97M / 1.96M ops), 1.0M / 1.28M writes posted and every
+one drained.  iverilog is OUT of the loop by the user's decision
+(2026-09-02): it was taking hours per sweep for no finding, and is a tool
+for a specific problem now, not a gate.  Build: **WNS +0.018** (WHS
++0.066), LUTs 19,886 / 20,800 (95.6%), BRAM 49/50, depth report's tail
+unchanged in shape.  NOT yet on hardware.
+
+**WATCHPOINT, sharpened.** The WNS path is still the serve-byte cone -
+now vt_reg (a CAM tag) -> chit -> the CAM byte mux -> d_din -> ... ->
+dq_byte / dq_addr, 14 levels at +0.018 - and its far end is
+instructive: from d_din it runs through the core's din mux into the
+MICROCODE ROM ADDRESS (rtl/cpu65c02.sv, `uaddr_alt = {din, 3'd0}` under
+f_sync), through the LUTROM tree (~5 levels) to uc_next, n_asel and
+d_pred, and back into dq_addr's D.  An opcode fetch is a PC-sourced
+cycle - the I stream, i_din - by construction, so the d_din leg of that
+mux can never be the live one on a SYNC cycle: the loop is a
+functionally false path that static timing cannot know is false.  The
+margin lever, when it is wanted: source the ROM address (and ir /
+int_brk) from i_din under f_sync instead of din, which takes the data
+front's byte out of the ROM tree entirely.  A core change; proposed,
+not made, in this rung.
+
+As built (rtl/dline.sv, with the seams in rtl/apple_mmu.sv,
+rtl/page_cache.sv, rtl/accel_seq.sv, rtl/iline.sv, rtl/event_merge.sv):
+
+- **The retire is VIRTUAL and register-rooted.** A write below $C000 is
+  RAM class and lands in the image under every map, so the retire
+  qualifier is dq_wv (a registered write prediction), dq_addr[15:14] !=
+  11, a registered "bank register is zero" bit, wr_en (turbo_en AND mode
+  2, registered in the sequencer), the posted FIFO's room and the
+  merge's room.  NO classify cone reaches the retire (the rung-2 lesson,
+  applied before it could bite).  LC writes and writes under a non-zero
+  RamWorks bank ride the dispatcher as before.
+- **A write that cannot retire yet WAITS, it does not miss.** w_serv
+  alone claims the dispatcher; the FIFO's and the merge's room gate only
+  the retire.  Both free themselves within a few clocks (the drain, the
+  merge's pop cadence), so a write never pays the dispatcher's price.
+- **The stamp, registered at retire (spl_*):** the MMU query's {aux,
+  bank, folded off} for the registered candidate - the map of that
+  instant - plus the byte.  Everything after the retire is rooted here.
+- **The splice is one clock after retire, from spl_*:** shadow row RMW,
+  CAM per-entry write, in-flight claim abort, and the SAME register is a
+  second snoop port into iline (ws_*) with its own compare set OR'd
+  behind the existing ones (a mux in front would have sat in kill_now's
+  cone).  The store into the very next opcode is exactly one clock from
+  its fetch, which is why the snoop cannot wait for the drain.  Splicing
+  a clock late is ISA-safe (a write is an instruction's last cycle, or a
+  push followed by a push or a vector fetch) and CHECKED by a simulation
+  assertion in the RTL rather than fenced live: the live fence (a 16-bit
+  compare in serve_hit) cost 0.3 ns in the cyc_en cone on the first
+  build, WNS -0.275, for logic the ISA makes dead.
+- **The post drains through the MMU's classified stage.** The FIFO's
+  head (pw_*) is taken into cl_* with cl_posted set on a clock the page
+  cache's whole pipeline is clear (pw_ready); the page cache then runs
+  its ordinary write path - P2 decision, P3 bank write, the aux miss
+  engine when the page is not resident - with `busy` ignoring the posted
+  stages (turbo retires continue around the drain) and `decided`
+  silent.  One posted write in the pipeline at a time, ~4 clocks each.
+  Nothing is re-derived: the stamp is copied, cls forced RAM.  The dline
+  ignores the posted write when it comes back round (cl_posted) - it was
+  spliced at retire; iline snoops it a second time, harmlessly.
+- **`pending` is the one ordering term:** spl_v OR FIFO non-empty OR a
+  3-clock shift register after each take (P1..P3).  It gates the
+  dispatcher's dispatch (both branches, and disp_pay), S_HELD's entry and
+  exit, and EVERY il_ack - the P+2 law generalized to the FIFO's depth,
+  as (a) in the plan above.  The grant-clock race (a fill granted on the
+  retire clock read the banks pre-write) is closed by the retire+1 snoop
+  restarting iline's fill and aborting the dline's claim.
+- **The write's event is never dropped:** its retire waits for
+  event_merge's fast_room_w, a REGISTERED "room >= 6" registered once
+  more in the dline (with the FIFO's room, one slot in hand), whose
+  margin covers the three edges between sampling and the word's arrival;
+  readers (tev, the dline's reads) now shed at a live "room >= 7", one
+  higher, so in a saturated turbo run the room hovers where writes never
+  wait.  The
+  accel bench instantiates the real merge as an observer (the producers'
+  ev_room stays high so every read is still checked): zero write words
+  dropped across 307k, and a phase with the room withheld at random
+  proves the wait path.
+- **The testbenches take posted writes from the front's event** (they
+  never ride the unified stream): the reference update, the PASS/fail
+  and IRQ arm/ack hooks all watch both paths.  sim/accel.s grew wrtest
+  (a push burst deeper than the FIFO, a fresh line written and read
+  straight back, the zero page byte by byte) and the store-into-the-
+  next-opcode/operand cases in smctest.
+
+The plan, as written before the build:
 
 A mode-2 data write retires in one clock: splice into whatever holds the
 address (shadow, CAM, stream buffer - the write-port arbitration again),
@@ -287,7 +386,7 @@ rather than prose:
   seen from the instruction/fill side.
 
 Expect the write population (~10% of ops) to move; the dispatcher is
-then bus-ops-only. Bench toward ~60x.
+then bus-ops-only. Bench toward ~60x.  (Measured: 68.9x.)
 
 ### Rung 4 - streams
 

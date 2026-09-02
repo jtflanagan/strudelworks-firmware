@@ -64,10 +64,21 @@ module event_merge #(
 
     output logic [7:0]  overflows,
 
-    // For a producer that sheds at the source (rtl/iline.sv): comfortably
-    // more free slots than one clock can consume, so a word offered under
-    // this level can never be the one that overflows.
-    output wire         fast_room
+    // For producers that shed at the source (rtl/iline.sv, rtl/dline.sv's
+    // reads): comfortably more free slots than one clock can consume, so a
+    // word offered under this level can never be the one that overflows.
+    output wire         fast_room,
+    // For a producer that may NOT shed (rtl/dline.sv's posted writes): a
+    // REGISTERED level with the margin its use needs.  The front registers
+    // this once more, gates a write's retire on that copy, and the write's
+    // word arrives the clock after the retire: three edges between the
+    // sample and the word's push, each able to take one fast word and at
+    // most one of them the bus's, four words in all, and the word's own
+    // need is at most two.  Sampled at six, the word always fits.  The
+    // readers' level above sits one higher so that in a saturated turbo
+    // run - reads shedding, a pop every three clocks - the room hovers
+    // where this stays true and a write never waits.
+    output logic        fast_room_w
 );
 
     localparam [3:0] T_FAST = 4'hC;
@@ -87,7 +98,8 @@ module event_merge #(
     wire push_fast = enable && fast_valid;
     wire [AW:0] need = push_bus ? (AW+1)'(2) : (AW+1)'(1);
     wire fast_fits = room >= need;
-    assign fast_room = room >= (AW+1)'(3);
+    assign fast_room = room >= (AW+1)'(7);
+    always_ff @(posedge clk) fast_room_w <= (rst || !enable) ? 1'b1 : (room >= (AW+1)'(6));
     wire take_fast = push_fast && fast_fits;
     wire [AW-1:0] wp_fast = wp[AW-1:0] + (push_bus ? (AW)'(1) : (AW)'(0));
     wire [AW:0]   pushed  = (push_bus ? (AW+1)'(1) : (AW+1)'(0)) + (take_fast ? (AW+1)'(1) : (AW+1)'(0));

@@ -146,10 +146,20 @@ module iline (
     input  wire [31:0] r2_data,
     input  wire        r2_busy,       // load traffic: ROM lines and fills die
 
-    // The write snoop: the MMU's classified op (P1).
+    // The write snoop: the MMU's classified op (P1)...
     input  wire        cl_valid,
     input  wire        cl_rw,
     input  wire        cl_wr_image,
+    // ...and the data front's POSTED write (rtl/dline.sv, rung 3), the
+    // clock after it retired: its stamped identity, register-rooted in the
+    // front.  The store into the very next opcode is one clock from its
+    // fetch, so this port cannot wait for the write to come round through
+    // the classified stream at its drain (where it snoops again, harmlessly:
+    // fills are held off while the write is in flight).
+    input  wire        ws_valid,
+    input  wire        ws_aux,
+    input  wire [7:0]  ws_bank,
+    input  wire [15:0] ws_off,
     input  wire        cl_aux,
     input  wire [7:0]  cl_bank,
     input  wire [15:0] cl_off,
@@ -431,21 +441,32 @@ module iline (
 
     // The snoop, combinational: an image write's folded identity against a
     // held line - and the same-clock race with a serve is a late cancel.
+    // Two sources, each its own compare set (a mux in front of the
+    // compares would sit in kill_now's cone; an OR behind them is free):
+    // the classified stream's write, and the data front's posted write.
     wire        snp = cl_valid && !cl_rw && cl_wr_image;
-    wire snp_kill0 = snp && v[0] && !t_rom[0] && (t_aux[0] == cl_aux) &&
-                     (!cl_aux || t_bank[0] == cl_bank) && (t_poff[0] == cl_off[15:4]);
-    wire snp_kill1 = snp && v[1] && !t_rom[1] && (t_aux[1] == cl_aux) &&
-                     (!cl_aux || t_bank[1] == cl_bank) && (t_poff[1] == cl_off[15:4]);
+    wire snp_kill0 = (snp && v[0] && !t_rom[0] && (t_aux[0] == cl_aux) &&
+                      (!cl_aux || t_bank[0] == cl_bank) && (t_poff[0] == cl_off[15:4])) ||
+                     (ws_valid && v[0] && !t_rom[0] && (t_aux[0] == ws_aux) &&
+                      (!ws_aux || t_bank[0] == ws_bank) && (t_poff[0] == ws_off[15:4]));
+    wire snp_kill1 = (snp && v[1] && !t_rom[1] && (t_aux[1] == cl_aux) &&
+                      (!cl_aux || t_bank[1] == cl_bank) && (t_poff[1] == cl_off[15:4])) ||
+                     (ws_valid && v[1] && !t_rom[1] && (t_aux[1] == ws_aux) &&
+                      (!ws_aux || t_bank[1] == ws_bank) && (t_poff[1] == ws_off[15:4]));
 
     // ...and against every CAM entry, the same terms: a retained line is a
     // held line for coherence purposes, however long it sits.
     wire [CAMN-1:0] cam_snp_kill;
     genvar gk;
     generate for (gk = 0; gk < CAMN; gk = gk + 1) begin : g_camsnp
-        assign cam_snp_kill[gk] = snp && cam_v[gk] && !cam_rom[gk] &&
-                                  (cam_aux[gk] == cl_aux) &&
-                                  (!cl_aux || cam_bank[gk] == cl_bank) &&
-                                  (cam_poff[gk] == cl_off[15:4]);
+        assign cam_snp_kill[gk] = (snp && cam_v[gk] && !cam_rom[gk] &&
+                                   (cam_aux[gk] == cl_aux) &&
+                                   (!cl_aux || cam_bank[gk] == cl_bank) &&
+                                   (cam_poff[gk] == cl_off[15:4])) ||
+                                  (ws_valid && cam_v[gk] && !cam_rom[gk] &&
+                                   (cam_aux[gk] == ws_aux) &&
+                                   (!ws_aux || cam_bank[gk] == ws_bank) &&
+                                   (cam_poff[gk] == ws_off[15:4]));
     end endgenerate
 
     // The scanner's seams (rtl/iscan.sv, instantiated below).
@@ -533,9 +554,14 @@ module iline (
             if (cam_m[k]) cam_idx = 3'(k);
     end
 
-    // The snoop against the fill in flight.
-    wire snp_fill = snp && f_active && !f_rom && (f_aux == cl_aux) &&
-                    (!cl_aux || f_bank == cl_bank) && (f_poff == cl_off[15:4]);
+    // The snoop against the fill in flight, both sources.  A posted
+    // write's grant-clock race is exactly this: a fill granted on the
+    // write's retire clock read the banks before the write could reach
+    // them, and the posted snoop a clock later restarts it.
+    wire snp_fill = (snp && f_active && !f_rom && (f_aux == cl_aux) &&
+                     (!cl_aux || f_bank == cl_bank) && (f_poff == cl_off[15:4])) ||
+                    (ws_valid && f_active && !f_rom && (f_aux == ws_aux) &&
+                     (!ws_aux || f_bank == ws_bank) && (f_poff == ws_off[15:4]));
     // Everything that restarts or kills a fill.  A restart keeps the want:
     // the relaunch re-classifies and re-reads.
     wire f_restart = f_active && (map_changed || inval || snp_fill ||

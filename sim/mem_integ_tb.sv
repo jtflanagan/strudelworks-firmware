@@ -125,9 +125,9 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     );
 
     // ---- the memory path --------------------------------------------------------------
-    wire        cl_valid, cl_rw, cl_wr_image, cl_aux;
+    wire        cl_valid, cl_rw, cl_wr_image, cl_aux, cl_posted;
     wire [1:0]  cl_cls;
-    wire [7:0]  cl_bank;
+    wire [7:0]  cl_bank, cl_wdata;
     wire [15:0] cl_off, pf_off;
     wire [11:0] sw_state;
     wire [7:0]  rw_bank;
@@ -149,6 +149,9 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .rom_ok (rom_loaded), .intc8rom (), .q_rw (1'b1), .q_cls (),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (pf_off),
+        .cl_posted (cl_posted), .cl_wdata (cl_wdata),
+        .pw_valid (1'b0), .pw_aux (1'b0), .pw_bank (8'd0), .pw_off (16'd0), .pw_data (8'd0),
+        .pw_ready (1'b0), .pw_take (),
         .sw_state (sw_state), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert),
         .p_addr (16'd0), .p_cls (), .p_aux (), .p_off (), .map_changed ()
@@ -164,7 +167,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (pf_off),
-        .op_addr (op_addr), .op_wdata (op_wdata),
+        .cl_posted (cl_posted), .pw_pending (1'b0), .pw_ready (),
+        .op_addr (op_addr), .op_wdata (cl_wdata),
         .op_present (op_present), .op_commit (op_commit), .op_divert (op_divert), .data_sync (data_sync),
         .rom_byte (rom_byte), .rom_loaded (rom_loaded),
         .sub_en (sub_en), .sub_data (sub_data),

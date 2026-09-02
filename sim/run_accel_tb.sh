@@ -36,7 +36,7 @@ for high in "${highs[@]}"; do
             "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv" \
             "$root/rtl/boot_hold.sv" \
             "$root/rtl/apple_mmu.sv" "$root/rtl/apple_rom.sv" "$root/rtl/page_cache.sv" \
-            "$root/rtl/bank_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" \
+            "$root/rtl/bank_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" "$root/rtl/event_merge.sv" \
             > "$work/iverilog.log" 2>&1; then
         grep -vE "sorry: constant selects|cannot be synthesized" "$work/iverilog.log" >&2
         echo "compile failed" >&2

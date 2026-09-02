@@ -233,7 +233,12 @@ module master_top #(
     // The instruction front (rtl/iline.sv) and its seams.
     wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim;
     // The data front, chained after the instruction front (rtl/dline.sv).
-    wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid;
+    wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
+    wire        d_pending_w, turbo_wr, dq_rw_w, ev_fast_room_w;
+    wire        pw_valid_w, pw_aux_w, pw_take_w, pw_ready_w, ws_valid_w, ws_aux_w;
+    wire [7:0]  pw_bank_w, pw_data_w, ws_bank_w, cl_wdata;
+    wire [15:0] pw_off_w, ws_off_w;
+    wire        cl_posted;
     wire [15:0] cpu_d_pred, dev_addr;
     wire        cpu_d_pred_v, cpu_d_pred_rw;
     wire [7:0]  d_din_w, dev_data;
@@ -284,12 +289,13 @@ module master_top #(
         // priority here is form, not arbitration.
         .fast_valid (fev_valid || tev_valid || dev_valid),
         .fast_addr (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
-        .fast_rw (fev_valid ? fev_rw : 1'b1),
+        .fast_rw (fev_valid ? fev_rw : tev_valid ? 1'b1 : dev_rw),
         .fast_data (fev_valid ? fev_data : tev_valid ? tev_data : dev_data),
         .fast_sync (fev_valid ? fev_sync : tev_valid ? tev_sync : 1'b0),
         .fast_vbl (vbl_level),
         .merge_overflows (merge_overflows),
         .ev_fast_room (ev_fast_room),
+        .ev_fast_room_w (ev_fast_room_w),
         .phi0_live (phi0_live),
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (cpu_source_active),
@@ -553,6 +559,8 @@ module master_top #(
         .turbo_commit  (turbo_commit),
         .d_commit      (d_commit_w),
         .turbo_claim   (turbo_claim | d_claim_w),
+        .turbo_wr      (turbo_wr),
+        .d_pending     (d_pending_w),
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
@@ -650,13 +658,19 @@ module master_top #(
         .cl_aux        (cl_aux),
         .cl_bank       (cl_bank),
         .cl_off        (cl_off),
+        .ws_valid      (ws_valid_w),
+        .ws_aux        (ws_aux_w),
+        .ws_bank       (ws_bank_w),
+        .ws_off        (ws_off_w),
         .serve         (mem_serve),
         .inval         (mem_inval)
     );
 
     // ---- the data front -----------------------------------------------------
-    // The zp/stack shadow between the instruction front and the core's d_din:
-    // a data read of physical main pages 0/1 retires in one clock.  See
+    // The shadow, the CAM and the last byte between the instruction front
+    // and the core's d_din: a data read the front holds retires in one
+    // clock, and so does a mode-2 write - spliced into the holders, posted
+    // to the page cache through the MMU's classified stage.  See
     // rtl/dline.sv and docs/DLINE.md.
     dline u_dline (
         .clk           (apple_clk),
@@ -667,6 +681,7 @@ module master_top #(
         .d_pred_rw     (cpu_d_pred_rw),
         .cpu_addr      (cpu_addr),
         .cpu_rw        (cpu_rw),
+        .cpu_dout      (cpu_dout),
         .cyc_is_i      (cpu_cyc_is_i),
         .il_cyc_en     (iline_cyc_en),
         .accel_din     (cpu_din),
@@ -675,15 +690,20 @@ module master_top #(
         .d_din         (d_din_w),
         .turbo_en      (turbo_en),
         .turbo_ok      (turbo_ok),
+        .wr_en         (turbo_wr),
         .d_commit      (d_commit_w),
         .claim         (d_claim_w),
         .tick_q        (dline_tick),
+        .pending       (d_pending_w),
         .dev_valid     (dev_valid),
         .dev_addr      (dev_addr),
         .dev_data      (dev_data),
+        .dev_rw        (dev_rw),
         .ev_room       (ev_fast_room),
+        .ev_room_w     (ev_fast_room_w),
         .altzp         (mem_sw[3]),
         .dq_addr       (dq_addr_w),
+        .dq_rw         (dq_rw_w),
         .d_cls         (dcls_w),
         .d_aux         (daux_w),
         .d_off         (doff_w),
@@ -699,17 +719,30 @@ module master_top #(
         .cl_valid      (cl_valid),
         .cl_rw         (cl_rw),
         .cl_wr_image   (cl_wr_image),
+        .cl_posted     (cl_posted),
         .cl_aux        (cl_aux),
         .cl_bank       (cl_bank),
         .cl_off        (cl_off),
-        .wdata         (u_wdata),
+        .wdata         (cl_wdata),
+        .pw_valid      (pw_valid_w),
+        .pw_aux        (pw_aux_w),
+        .pw_bank       (pw_bank_w),
+        .pw_off        (pw_off_w),
+        .pw_data       (pw_data_w),
+        .pw_take       (pw_take_w),
+        .ws_valid      (ws_valid_w),
+        .ws_aux        (ws_aux_w),
+        .ws_bank       (ws_bank_w),
+        .ws_off        (ws_off_w),
         .inval         (mem_inval),
         .cnt_clr       (accel_cnt_clr),
         .cnt_serves    (),
         .cnt_claims    (),
         .cnt_splices   (),
         .cnt_cam_serves (),
-        .cnt_lb_serves ()
+        .cnt_lb_serves (),
+        .cnt_posts     (),
+        .cnt_post_waits ()
     );
 
     // ---- the hold: the boot menu's door and the runtime menu's -------------
@@ -867,6 +900,15 @@ module master_top #(
         .cl_off     (cl_off),
         .cl_rw      (cl_rw),
         .cl_wr_image (cl_wr_image),
+        .cl_posted  (cl_posted),
+        .cl_wdata   (cl_wdata),
+        .pw_valid   (pw_valid_w),
+        .pw_aux     (pw_aux_w),
+        .pw_bank    (pw_bank_w),
+        .pw_off     (pw_off_w),
+        .pw_data    (pw_data_w),
+        .pw_ready   (pw_ready_w),
+        .pw_take    (pw_take_w),
         .pf_off     (pf_off),
         .sw_state   (mem_sw),
         .vid_sw     (vid_sw),
@@ -880,7 +922,7 @@ module master_top #(
         .p_aux      (p_aux_w),
         .p_off      (p_off_w),
         .d_addr     (dq_addr_w),
-        .d_rw       (1'b1),
+        .d_rw       (dq_rw_w),
         .d_cls      (dcls_w),
         .d_aux      (daux_w),
         .d_off      (doff_w),
@@ -918,9 +960,12 @@ module master_top #(
         .cl_off      (cl_off),
         .cl_rw       (cl_rw),
         .cl_wr_image (cl_wr_image),
+        .cl_posted   (cl_posted),
+        .pw_pending  (d_pending_w),
+        .pw_ready    (pw_ready_w),
         .pf_off      (pf_off),
         .op_addr     (u_addr),
-        .op_wdata    (u_wdata),
+        .op_wdata    (cl_wdata),
         .op_present  (u_present),
         .op_commit   (u_commit),
         .op_divert   (u_divert),

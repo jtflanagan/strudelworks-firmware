@@ -167,7 +167,14 @@ module apple_mmu (
     // would answer is BUS class.
     input  wire        rom_ok,
 
-    // The classified op, one clock after op_present.
+    // The classified op, one clock after op_present - or a POSTED WRITE
+    // from the data front (rtl/dline.sv, rung 3), taken from pw_* on a
+    // clock the op path is idle: it arrives already stamped {aux, bank,
+    // folded off} under the map of its retire, and is copied into cl_*
+    // as an image write with cl_posted set.  Nothing is re-classified:
+    // the map cannot have moved since (every map-changing op waits for
+    // the front's pending to clear).  cl_wdata carries the write's byte
+    // for both kinds - the stream's op_wdata, or the posted entry's.
     output logic        cl_valid,
     output logic [1:0]  cl_cls,        // CLS_*
     output logic        cl_aux,        // reaches the auxiliary memory
@@ -175,6 +182,16 @@ module apple_mmu (
     output logic [15:0] cl_off,        // offset in a 64 KB bank, LC folded
     output logic        cl_rw,
     output logic        cl_wr_image,   // a write that lands in the image
+    output logic        cl_posted,     // a posted write draining, not an op
+    output logic [7:0]  cl_wdata,      // the write's byte
+    // The posted FIFO's head, and the page cache's leave to take it.
+    input  wire         pw_valid,
+    input  wire         pw_aux,
+    input  wire [7:0]   pw_bank,
+    input  wire [15:0]  pw_off,
+    input  wire [7:0]   pw_data,
+    input  wire         pw_ready,      // the page cache's pipeline is clear
+    output wire         pw_take,       // pulse: cl_* carries it next clock
     // The INTC8ROM latch, for MEM_STAT.
     output logic        intc8rom,
     // cl_off's combinational preview, valid with op_present: the banks'
@@ -440,6 +457,10 @@ module apple_mmu (
     wire       n_wr_image = n_class[0];
     wire       n_aux      = in_hi ? altzp : aux_sel;
 
+    // A posted write takes the classified stage only when no op is being
+    // presented: the op's is the older claim on the pipeline.
+    assign pw_take = pw_valid && pw_ready && !op_present && !rst;
+
     always_ff @(posedge clk) begin
         if (rst) begin
             cl_valid    <= 1'b0;
@@ -449,8 +470,10 @@ module apple_mmu (
             cl_off      <= 16'd0;
             cl_rw       <= 1'b1;
             cl_wr_image <= 1'b0;
+            cl_posted   <= 1'b0;
+            cl_wdata    <= 8'd0;
         end else begin
-            cl_valid <= op_present;
+            cl_valid <= op_present || pw_take;
             if (op_present) begin
                 cl_cls      <= n_cls;
                 cl_aux      <= n_aux;
@@ -458,6 +481,17 @@ module apple_mmu (
                 cl_off      <= pf_off;
                 cl_rw       <= op_rw;
                 cl_wr_image <= n_wr_image;
+                cl_posted   <= 1'b0;
+                cl_wdata    <= op_wdata;
+            end else if (pw_take) begin
+                cl_cls      <= CLS_RAM;      // the front posts RAM class only
+                cl_aux      <= pw_aux;
+                cl_bank     <= pw_bank;
+                cl_off      <= pw_off;
+                cl_rw       <= 1'b0;
+                cl_wr_image <= 1'b1;
+                cl_posted   <= 1'b1;
+                cl_wdata    <= pw_data;
             end
         end
     end

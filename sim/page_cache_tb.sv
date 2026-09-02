@@ -93,6 +93,7 @@ module page_cache_tb;
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux),
         .cl_bank (cl_bank), .cl_off (cl_off), .cl_rw (cl_rw),
         .cl_wr_image (cl_wr_image), .pf_off (pf_off),
+        .cl_posted (1'b0), .pw_pending (1'b0), .pw_ready (),
         .op_addr (op_addr), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit), .op_divert (1'b0),
         .data_sync (data_sync),

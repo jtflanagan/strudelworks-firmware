@@ -230,6 +230,7 @@ module card_link #(
     input  wire [31:0]  accel_turbo,
     // The merge's shed-at-source level, for the instruction front.
     output wire         ev_fast_room,
+    output wire         ev_fast_room_w,
     // The floating-bus simulator's seam (rtl/fb_sim.sv <-> wb_regfile,
     // docs/FLOATING_BUS.md): FB_CTRL's serve level and clear pulse and
     // FB_PEEK's address out, the mode, the counters and the peeked byte back.
@@ -780,7 +781,8 @@ module card_link #(
         .out_mark_free (mg_mark_free),
         .out_dummy     (mg_dummy),
         .overflows     (merge_overflows),
-        .fast_room     (ev_fast_room)
+        .fast_room     (ev_fast_room),
+        .fast_room_w   (ev_fast_room_w)
     );
 
     // The filter, always in the path: a wire in full mode, the keep rule

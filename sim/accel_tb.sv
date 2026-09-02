@@ -110,6 +110,9 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // timer IRQ across the accelerated data stream in phase 9 - the one
     // dimension no sim exercised, and where the hardware lock lives.
     reg irq_n_tb = 1'b1;
+    wire        prog_wr;
+    wire [15:0] prog_waddr;
+    wire [7:0]  prog_wdata;
     cpu65c02 #(.UCODE_FILE (UCODE)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_addr), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (d_din_w),
@@ -132,11 +135,14 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         // Arm/disarm and ack ride the unified stream, program order.  A
         // disarm also releases the line, so a fire still pending when the
         // program masks does not hold IRQ' low forever.
-        if (u_present && !u_rw && u_addr == 16'h03FB) begin
-            irq_armed <= (u_wdata != 8'd0);
-            if (u_wdata == 8'd0) irq_n_tb <= 1'b1;
+        // A write reaches the testbench on the unified stream (a bus op,
+        // the dispatcher's) or as the data front's event (a posted write,
+        // rtl/dline.sv rung 3) - never both.
+        if (prog_wr && prog_waddr == 16'h03FB) begin
+            irq_armed <= (prog_wdata != 8'd0);
+            if (prog_wdata == 8'd0) irq_n_tb <= 1'b1;
         end
-        if (u_present && !u_rw && u_addr == 16'h03FA) begin
+        if (prog_wr && prog_waddr == 16'h03FA) begin
             irq_n_tb <= 1'b1;                       // the ISR acked: release
             irq_acks <= irq_acks + 1;
         end
@@ -190,7 +196,11 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim;
     wire        turbo_tick, tev_valid, tev_sync;
     // The data front between iline and the core, as in master_top.
-    wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid;
+    wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
+    wire        d_pending_w, turbo_wr, dq_rw_w, cl_posted;
+    wire        pw_valid_w, pw_aux_w, pw_take_w, pw_ready_w, ws_valid_w, ws_aux_w;
+    wire [7:0]  pw_bank_w, pw_data_w, ws_bank_w, cl_wdata;
+    wire [15:0] pw_off_w, ws_off_w;
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
     wire        dl_req_w, dl_aux_w;
@@ -223,6 +233,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .turbo_en (turbo_en), .turbo_ok (turbo_ok),
         .turbo_commit (turbo_commit), .d_commit (d_commit_w),
         .turbo_claim (turbo_claim | d_claim_w),
+        .turbo_wr (turbo_wr), .d_pending (d_pending_w),
         .op_present (op_present), .op_commit (op_commit), .op_dummy (op_dummy), .op_ovr (op_ovr),
         .op_divert (op_divert), .op_sync (drv_sync), .op_addr (op_addr), .op_rw (op_rw),
         .op_wdata (op_wdata), .cyc_done (drv_cyc_done), .drv_din (drv_din),
@@ -259,6 +270,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .r2_en (rom_r2_en), .r2_addr (rom_r2_addr), .r2_data (rom_r2_data), .r2_busy (rom_r2_busy),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
         .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
+        .ws_valid (ws_valid_w), .ws_aux (ws_aux_w), .ws_bank (ws_bank_w), .ws_off (ws_off_w),
         .serve (serve), .inval (inval)
     );
 
@@ -269,25 +281,68 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     dline u_dline (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
-        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cyc_is_i (cpu_cyc_is_i),
+        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (iline_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
         .cyc_en (cpu_cyc_en), .d_din (d_din_w),
-        .turbo_en (turbo_en), .turbo_ok (turbo_ok),
-        .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick),
-        .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data),
-        .ev_room (1'b1),
+        .turbo_en (turbo_en), .turbo_ok (turbo_ok), .wr_en (turbo_wr),
+        .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick), .pending (d_pending_w),
+        .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data), .dev_rw (dev_rw),
+        .ev_room (1'b1), .ev_room_w (ev_room_w_tb),
         .altzp (sw_state[3]),
-        .dq_addr (dq_addr_w), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
+        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .rw_bank (rw_bank), .map_changed (map_changed),
         .dl_req (dl_req_w), .dl_aux (dl_aux_w), .dl_bank (dl_bank_w), .dl_line (dl_line_w),
         .dl_ack (il_ack && !il_req), .dl_ok (il_ok), .dl_row (il_row),
-        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
-        .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off), .wdata (u_wdata),
+        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
+        .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off), .wdata (cl_wdata),
+        .pw_valid (pw_valid_w), .pw_aux (pw_aux_w), .pw_bank (pw_bank_w), .pw_off (pw_off_w),
+        .pw_data (pw_data_w), .pw_take (pw_take_w),
+        .ws_valid (ws_valid_w), .ws_aux (ws_aux_w), .ws_bank (ws_bank_w), .ws_off (ws_off_w),
         .inval (inval),
         .cnt_clr (cnt_clr),
         .cnt_serves (), .cnt_claims (), .cnt_splices (),
-        .cnt_cam_serves (), .cnt_lb_serves ()
+        .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits ()
     );
+
+    assign prog_wr    = (u_present && !u_rw) || (dev_valid && !dev_rw);
+    assign prog_waddr = u_present ? u_addr  : dev_addr;
+    assign prog_wdata = u_present ? u_wdata : dev_data;
+
+    // ---- the event merge, as an observer (rtl/event_merge.sv) ---------------
+    // The producers' ev_room stays tied high, so every one-clock READ still
+    // emits its event and the reference checks it.  The merge sees the
+    // stream the card would carry - reads shed at its input by its own
+    // fast_room, exactly as the fronts shed at the source - and hands the
+    // data front its write-room level, so a posted write retires under the
+    // real merge's dynamics.  A write's word must never be the one that
+    // overflows: counted below through the merge's own verdict.  room_rand
+    // withholds the write room at random on top, for the wait path.
+    wire        mg_room, mg_room_w, mg_out_valid;
+    wire [31:0] mg_out_data;
+    wire [7:0]  mg_overflows;
+    wire        mg_fast_valid = fev_valid || (tev_valid && mg_room) ||
+                                (dev_valid && (!dev_rw || mg_room));
+    wire        mg_fast_rw    = fev_valid ? fev_rw : tev_valid ? 1'b1 : dev_rw;
+    reg         room_rand = 1'b0;
+    reg [15:0]  room_lfsr = 16'h5EED;
+    always @(posedge clk) room_lfsr <= {room_lfsr[14:0], room_lfsr[15] ^ room_lfsr[13] ^ room_lfsr[12] ^ room_lfsr[10]};
+    wire        ev_room_w_tb = mg_room_w && (!room_rand || room_lfsr[3]);
+    event_merge #(.DEPTH (8)) u_merge (
+        .clk (clk), .rst (rst), .enable (1'b1),
+        .bus_valid (bus_tick), .bus_data (32'd0), .bus_mark (1'b0), .bus_mark_free (16'd0), .bus_dummy (1'b0),
+        .fast_valid (mg_fast_valid), .fast_addr (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
+        .fast_rw (mg_fast_rw), .fast_data (8'd0), .fast_sync (1'b0), .vbl_level (1'b0), .res_level (1'b0),
+        .out_valid (mg_out_valid), .out_data (mg_out_data), .out_mark (), .out_mark_free (), .out_dummy (),
+        .overflows (mg_overflows), .fast_room (mg_room), .fast_room_w (mg_room_w)
+    );
+    integer mg_write_in = 0, mg_write_out = 0, mg_write_drops = 0;
+    always @(posedge clk) begin
+        if (u_merge.push_fast && !mg_fast_rw) begin
+            mg_write_in = mg_write_in + 1;
+            if (!u_merge.fast_fits) mg_write_drops = mg_write_drops + 1;
+        end
+        if (mg_out_valid && mg_out_data[31:28] == 4'hC && !mg_out_data[16]) mg_write_out = mg_write_out + 1;
+    end
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
@@ -351,11 +406,14 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .rom_ok (rom_loaded),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .intc8rom (intc8rom),
+        .cl_posted (cl_posted), .cl_wdata (cl_wdata),
+        .pw_valid (pw_valid_w), .pw_aux (pw_aux_w), .pw_bank (pw_bank_w), .pw_off (pw_off_w),
+        .pw_data (pw_data_w), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
-        .d_addr (dq_addr_w), .d_rw (1'b1),
+        .d_addr (dq_addr_w), .d_rw (dq_rw_w),
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .map_changed (map_changed)
     );
@@ -370,8 +428,9 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     page_cache u_cache (
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
-        .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (pf_off),
-        .op_addr (u_addr), .op_wdata (u_wdata),
+        .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
+        .pw_pending (d_pending_w), .pw_ready (pw_ready_w), .pf_off (pf_off),
+        .op_addr (u_addr), .op_wdata (cl_wdata),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .rom_byte (rom_byte), .rom_loaded (1'b1),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
@@ -635,6 +694,18 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             else                              ref_main[u_addr] <= u_wdata;
         end
     end
+    // Posted writes (rtl/dline.sv, rung 3) never ride the unified stream:
+    // the reference takes them from the data front's event, emitted at the
+    // retire - program order, as the host's mirror will see them.
+    always @(posedge clk) if (dev_valid && !dev_rw && dev_addr[15:12] != 4'hC) begin
+        if (dev_addr >= 16'hD000) begin
+            if (m_wren) begin
+                if (m_altzp) ref_lcaux[m_bank * 16384 + m_lcidx(dev_addr)] <= dev_data;
+                else         ref_lc[m_lcidx(dev_addr)] <= dev_data;
+            end
+        end else if (m_aux(dev_addr, 1'b0)) ref_aux[m_bank * 65536 + dev_addr] <= dev_data;
+        else                                ref_main[dev_addr] <= dev_data;
+    end
 
     // ---- the running checks --------------------------------------------------------
     integer reads = 0, reads_bad = 0, fast_reads = 0, bus_reads = 0, ovr_cycles = 0;
@@ -712,23 +783,28 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // The data front's one-clock reads: every byte the reference's, and never
     // $Cxxx - the shadow, the CAM and the last byte serve RAM and LC classes
     // only, and no LC virtual address is in $Cxxx.
-    integer dline_reads = 0, dline_bad = 0;
+    // ...and its one-clock writes: counted, and every one must come back
+    // round through the classified stage as it drains (cl_posted).
+    integer dline_reads = 0, dline_bad = 0, dline_writes = 0, drained = 0;
     always @(posedge clk) if (dev_valid) begin
-        reads = reads + 1; dline_reads = dline_reads + 1;
-        if (dev_data !== exp_read(dev_addr)) begin
-            dline_bad = dline_bad + 1; reads_bad = reads_bad + 1;
-            if (reads_bad <= 5) $display("    dline read $%04X: core got %02x, the reference says %02x", dev_addr, dev_data, exp_read(dev_addr));
-        end
+        if (dev_rw) begin
+            reads = reads + 1; dline_reads = dline_reads + 1;
+            if (dev_data !== exp_read(dev_addr)) begin
+                dline_bad = dline_bad + 1; reads_bad = reads_bad + 1;
+                if (reads_bad <= 5) $display("    dline read $%04X: core got %02x, the reference says %02x", dev_addr, dev_data, exp_read(dev_addr));
+            end
+        end else dline_writes = dline_writes + 1;
         if (dev_addr[15:12] == 4'hC) dline_bad = dline_bad + 1;
     end
+    always @(posedge clk) if (cl_valid && cl_posted) drained = drained + 1;
     // The stream's bookkeeping: passes, the failure flag, classes, merging.
     always @(posedge clk) begin
-        if (u_present && !u_rw) begin
-            if (u_addr == 16'h0300) begin
-                pass_count = u_wdata;
-                $display("    pass %0d at %0t (%0d reads: %0d fast, %0d bus)", u_wdata, $time, reads, fast_reads, bus_reads);
+        if (prog_wr) begin
+            if (prog_waddr == 16'h0300) begin
+                pass_count = prog_wdata;
+                $display("    pass %0d at %0t (%0d reads: %0d fast, %0d bus)", prog_wdata, $time, reads, fast_reads, bus_reads);
             end
-            if (u_addr == 16'h03FF && u_wdata == 8'hFF) failed = 1'b1;
+            if (prog_waddr == 16'h03FF && prog_wdata == 8'hFF) failed = 1'b1;
         end
         if (u_present && !u_ovr) begin
             u_core_ops = u_core_ops + 1;
@@ -856,7 +932,7 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             // bank only at P3: wait for the write pipeline to drain, or a
             // mid-flight write reads as a one-byte mismatch.
             @(negedge clk);
-            while (busy || u_cache.mw_en || u_cache.aw_en) @(negedge clk);
+            while (busy || u_cache.mw_en || u_cache.aw_en || d_pending_w) @(negedge clk);
             bad = 0;
             for (a = 0; a < 16'hC000; a = a + 1) begin
                 if (card_main(16'(a)) !== ref_main[a]) bad = bad + 1;
@@ -998,6 +1074,8 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("mode 1: %0d fetches served in one clock by the line front", turbo_ops));
         if (phys_diff(1) != 0) fail("mode 1: the machine's memory differs from the reference - a write missed the bus");
         else ok("mode 1: every write reached the machine; its memory equals the reference");
+        if (dline_writes != 0) fail($sformatf("mode 1: %0d writes retired on the data front", dline_writes));
+        else ok("mode 1: no write retired on the data front - writes stay on the bus by mode");
         if (merge_gaps != 0) fail($sformatf("mode 1: %0d consecutive bus ops did not ride consecutive cycles", merge_gaps));
         else ok("mode 1: consecutive bus ops rode consecutive cycles");
         if (cx_fast == 0) fail("mode 1: no internal-ROM read of $C100-$CFFF was served fast");
@@ -1060,15 +1138,27 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             fail("mode 2: the last-byte register never served a dummy re-read");
         else ok($sformatf("mode 2: %0d dummy re-reads served from the last byte", u_dline.cnt_lb_serves));
         if (dline_bad != 0) fail($sformatf("mode 2: %0d dline serves wrong or out of bounds", dline_bad));
+        // Rung 3: writes at one clock.  sim/accel.s's wrtest pushes deeper
+        // than the posted FIFO and reads fresh lines straight back; the
+        // program's own stores go through the shadow and the CAM all the
+        // time.  Every posted write drains through the classified stage
+        // exactly once, and its event is never the one the merge drops.
+        if (u_dline.cnt_posts == 0) fail("mode 2: no write retired in one clock on the data front");
+        else ok($sformatf("mode 2: %0d writes retired in one clock by the data front (%0d clocks waited for room, %0d aux misses at the drain)",
+                          u_dline.cnt_posts, u_dline.cnt_post_waits, u_cache.cnt_posted_miss));
+        if (u_cache.cnt_posted_miss == 0) fail("mode 2: no posted write ever raised the aux page engine at its drain");
+        else ok($sformatf("mode 2: %0d posted writes drained through the aux miss engine", u_cache.cnt_posted_miss));
         if (merge_gaps != 0) fail($sformatf("mode 2: %0d consecutive bus ops did not ride consecutive cycles", merge_gaps));
         else ok("mode 2: consecutive bus ops rode consecutive cycles");
         if (phys_diff(0) == 0) fail("mode 2: the machine's memory still equals the reference - writes went out");
         else ok("mode 2: the machine's memory is stale, as it must be");
         check_image("mode 2: the image equals the reference");
 
-        // ---- 4. the governor ------------------------------------------------------------
+        // ---- 4. the governor, with the merge's write room withheld at random -----------
+        // A write that cannot emit its event waits, claiming the dispatcher;
+        // it never falls to the dispatcher and never loses its event.
         clear_counters();
-        @(negedge clk); target <= 16'h0400;     // 4.0
+        @(negedge clk); target <= 16'h0400; room_rand <= 1'b1;     // 4.0
         n0 = pass_count;
         wait_passes(n0 + 3, "mode 2 at 4.0");
         check_ratio(4.0, "governor at 4.0");
@@ -1077,8 +1167,11 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         n0 = pass_count;
         wait_passes(n0 + 2, "mode 2 at 1.0");
         check_ratio(1.0, "governor at 1.0");
-        @(negedge clk); target <= 16'd0;
+        @(negedge clk); target <= 16'd0; room_rand <= 1'b0;
         common_checks("the governor");
+        if (u_dline.cnt_post_waits == 0) fail("the governor: the merge's room was withheld and no write ever waited");
+        else ok($sformatf("the governor: writes waited %0d clocks for the merge's room and retired on the front all the same (%0d)",
+                          u_dline.cnt_post_waits, u_dline.cnt_posts));
 
         // ---- 5. a DMA, in mode 2 ---------------------------------------------------------
         ovr_cycles = 0; dma_last_hits = 0;
@@ -1189,6 +1282,15 @@ module accel_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else ok($sformatf("the end: %0d reads (%0d fast), every one the reference's byte", reads, fast_reads));
         if (dummies_bad != 0 || fast_bus_cls != 0 || late_fills != 0 || fifo_drops != 0)
             fail("the end: a bad dummy, a fast BUS-class op, a late fill or a drop");
+        // The program is still running as these are sampled: up to the posted
+        // FIFO's depth plus the drain pipeline may be between retire and
+        // drain, and up to the merge's depth between push and pop.
+        if (drained > dline_writes || dline_writes - drained > 8)
+            fail($sformatf("the end: %0d writes retired on the front, %0d drained through the classified stage", dline_writes, drained));
+        else ok($sformatf("the end: every one of the %0d posted writes drained through the classified stage exactly once", dline_writes));
+        if (mg_write_drops != 0 || mg_write_out > mg_write_in || mg_write_in - mg_write_out > 8)
+            fail($sformatf("the end: the merge took %0d write words, dropped %0d, delivered %0d", mg_write_in, mg_write_drops, mg_write_out));
+        else ok($sformatf("the end: the merge took %0d write words and dropped none (%0d overflows of any kind)", mg_write_in, mg_overflows));
         if (u_core_ops != fast_ops + bus_ops + seq_cycen - seq_cycen) ;  // informational
 
         $display("%0d checks, %0d errors", checks, errors);

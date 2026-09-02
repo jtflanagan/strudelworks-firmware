@@ -152,6 +152,8 @@ module accel_seq (
     input  wire        d_commit,       // the data front's retire: charged the same,
                                        // counted by the front itself (rtl/dline.sv)
     input  wire        turbo_claim,    // the front is clocks from answering: hold the dispatcher
+    output wire        turbo_wr,       // steady: turbo_en AND mode 2 - the data front may retire writes
+    input  wire        d_pending,      // the data front's posted writes are not all in the banks
 
     // Time.
     input  wire        bus_tick,
@@ -188,7 +190,7 @@ module accel_seq (
 );
 
     localparam [1:0] CLS_BUS = 2'd0;
-    localparam [1:0] MODE_OFF = 2'd0, MODE_READS = 2'd1;
+    localparam [1:0] MODE_OFF = 2'd0, MODE_READS = 2'd1, MODE_RW = 2'd2;
 
     typedef enum logic [2:0] {
         S_RST,      // the core is in reset, or this card is not the CPU
@@ -275,18 +277,24 @@ module accel_seq (
     // cache pipeline, no override engaging (the boot hold catching a SYNC
     // cancels the retire through exactly this term), credit to pay, and never
     // on a fast op's event clock, so the two never collide at the merge.
-    logic turbo_en_q;
+    logic turbo_en_q, turbo_wr_q;
     always_ff @(posedge clk) begin
-        if (rst) turbo_en_q <= 1'b0;
-        else     turbo_en_q <= accel_on && mem_serve && !reset_seq;
+        if (rst) begin
+            turbo_en_q <= 1'b0;
+            turbo_wr_q <= 1'b0;
+        end else begin
+            turbo_en_q <= accel_on && mem_serve && !reset_seq;
+            turbo_wr_q <= accel_on && mem_serve && !reset_seq && (mode == MODE_RW);
+        end
     end
     assign turbo_en = turbo_en_q;
+    assign turbo_wr = turbo_wr_q;
     assign turbo_ok = turbo_en_q && (st == S_DECIDE) && !ovr_en && !op_inflight &&
                       !busy && mem_image_ready && can_pay && !fev_valid;
 
     // What the dispatcher will charge for on this edge, for the governor's
     // one writer: exactly the two dispatching branches below.
-    wire disp_pay = (st == S_DECIDE) && settled && !dq_ovr && !turbo_claim &&
+    wire disp_pay = (st == S_DECIDE) && settled && !d_pending && !dq_ovr && !turbo_claim &&
                     can_pay && (needs_bus || fast_ok) && !off &&
                     !cpu_rst && master_active;
 
@@ -392,7 +400,16 @@ module accel_seq (
                     end
 
                     S_DECIDE: if (settled) begin
-                        if (dq_ovr) begin
+                        // THE POSTED WRITES FIRST (rtl/dline.sv, rung 3).
+                        // Nothing leaves this state while one is short of
+                        // the banks: a dispatched read of a line the front
+                        // does not hold would read the pre-write byte; a
+                        // map-changing bus op would classify what follows
+                        // under a map the posted stamp was not; a hold's
+                        // DMA would land under the write it should be
+                        // over.  Bounded by the drain - a few clocks.
+                        if (d_pending) begin
+                        end else if (dq_ovr) begin
                             st <= S_HELD;
                             bus_owns_q   <= 1'b1;
                             core_valid_q <= 1'b0;
@@ -448,7 +465,7 @@ module accel_seq (
                     end
 
                     S_HELD: begin
-                        if (!ovr_en && !op_inflight && !busy) st <= S_DECIDE;
+                        if (!ovr_en && !op_inflight && !busy && !d_pending) st <= S_DECIDE;
                     end
 
                     default: st <= S_RST;
