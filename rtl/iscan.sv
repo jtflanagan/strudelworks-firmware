@@ -6,8 +6,9 @@
 //
 // Lives inside rtl/iline.sv.  Walks instruction boundaries forward from the
 // program's last opcode fetch through the two held lines, one instruction per
-// clock (two for a branch, three for a JMP/JSR - the operand bytes each take
-// a read), using the 65C02's length table.  For every branch, JMP or JSR it
+// clock (three for a branch, four for a JMP/JSR - the operand bytes each take
+// a read, and the target's math-and-decision takes a granted beat of its own,
+// S_TGT below), using the 65C02's length table.  For every branch, JMP or JSR it
 // finds, it names the target's line so the front can prefetch it into the
 // retention CAM - the line stands ready before the branch is taken.  It
 // follows unconditional flow (JMP abs, BRA, JSR) and falls through
@@ -104,11 +105,23 @@ module iscan (
     endfunction
 
     // ---- the walk ------------------------------------------------------------
-    localparam [1:0] S_IDLE = 2'd0, S_OP = 2'd1, S_O1 = 2'd2, S_O2 = 2'd3;
-    logic [1:0]  st;
+    // S_TGT is the beat the scanner GRANTS ITSELF.  The depth audit's crown
+    // path was one beat doing four arithmetic events in series: the window
+    // address add, the held-line tag compare and byte serve, the target add on
+    // the byte just served, and the tag compares gating the want.  The scanner
+    // has no cycle contract - it can only be wasteful, never wrong - so unlike
+    // the core, which had to find the ISA's granted cycles, the scan simply
+    // takes one: the operand beats end at registers (o1_q/o2_q), and S_TGT
+    // computes the target, runs the filters and raises the want from those
+    // registers alone.  One extra beat per TRANSFER found, never per byte
+    // walked, so the sequential walk still outruns the turbo core.
+    localparam [2:0] S_IDLE = 3'd0, S_OP = 3'd1, S_O1 = 3'd2, S_O2 = 3'd3,
+                     S_TGT = 3'd4;
+    logic [2:0]  st;
     logic [15:0] ptr;
     logic [2:0]  cls_q;               // the transfer being decoded across beats
-    logic [7:0]  o1_q;                // the absolute target's low byte
+    logic [7:0]  o1_q;                // relative offset, or the abs target's low
+    logic [7:0]  o2_q;                // the absolute target's high byte
 
     assign rd_addr = (st == S_O1) ? ptr + 16'd1 :
                      (st == S_O2) ? ptr + 16'd2 : ptr;
@@ -117,9 +130,11 @@ module iscan (
     wire [2:0] dec_cls = dec[4:2];
     wire [1:0] dec_len = dec[1:0];
 
-    wire [15:0] rel_tgt = ptr + 16'd2 + {{8{rd_byte[7]}}, rd_byte};
-    wire [15:0] abs_tgt = {rd_byte, o1_q};
-    wire [15:0] tgt     = (st == S_O2) ? abs_tgt : rel_tgt;
+    // The target, from registers only.  A relative's ptr already advanced to
+    // the fall-through in S_O1, so the target is ptr + the signed offset; an
+    // absolute's is a plain concatenation, no arithmetic at all.
+    wire [15:0] tgt     = (cls_q == C_ABS) ? {o2_q, o1_q}
+                                           : ptr + {{8{o1_q[7]}}, o1_q};
     wire [11:0] tgt_tag = tgt[15:4];
 
     wire tgt_held0 = v0 && (tgt_tag == vtag0);
@@ -131,8 +146,14 @@ module iscan (
     wire tgt_excl  = (tgt_tag[11:4] == 8'hC0) || (tgt_tag[11:4] == 8'hC3) ||
                      (tgt_tag == 12'hCFF);
 
-    // The target is known at S_O1 for a relative, S_O2 for an absolute.
-    wire issuing = rd_held && ((st == S_O1 && cls_q != C_ABS) || (st == S_O2));
+    // The transfer's OWN line, captured when it is first decoded - the loop
+    // bit must name the line the branch LIVES in, and by S_TGT a relative's
+    // ptr has already moved to the fall-through, which for an opcode in a
+    // line's last two bytes is the NEXT line.  Registering it here also keeps
+    // the ptr-vs-tag compare out of the decision beat.
+    logic src0, src1;
+
+    wire issuing = (st == S_TGT);
 
     // The last target issued: a tight loop rescans every iteration, and this
     // keeps it from re-asking for the line every time.  Cleared with the
@@ -149,8 +170,9 @@ module iscan (
         lb_v <= 1'b0;
         if (rst || !enable) begin
             st <= S_IDLE; sw_v <= 1'b0; last_v <= 1'b0;
-            ptr <= 16'd0; cls_q <= C_SEQ; o1_q <= 8'd0;
+            ptr <= 16'd0; cls_q <= C_SEQ; o1_q <= 8'd0; o2_q <= 8'd0;
             sw_tag <= 12'd0; last_tag <= 12'd0; lb_slot <= 1'b0;
+            src0 <= 1'b0; src1 <= 1'b0;
         end else begin
             if (sw_taken) sw_v <= 1'b0;
 
@@ -162,7 +184,10 @@ module iscan (
                     end else case (dec_cls)
                         C_SEQ: ptr <= ptr + {14'd0, dec_len};
                         C_END: begin st <= S_IDLE; last_v <= 1'b0; end
-                        default: begin cls_q <= dec_cls; st <= S_O1; end
+                        default: begin
+                            cls_q <= dec_cls; st <= S_O1;
+                            src0 <= ptr_in0; src1 <= ptr_in1;
+                        end
                     endcase
                 end
                 S_O1: begin
@@ -171,24 +196,35 @@ module iscan (
                     end else if (cls_q == C_ABS) begin
                         o1_q <= rd_byte; st <= S_O2;
                     end else begin
-                        ptr <= (cls_q == C_BRA) ? rel_tgt : ptr + 16'd2;
-                        st  <= S_OP;
+                        // The offset lands in a register; the fall-through
+                        // advance happens now so S_TGT's add is ptr + offset
+                        // for BOTH the conditional (which continues here) and
+                        // BRA (which loads the sum).
+                        o1_q <= rd_byte;
+                        ptr  <= ptr + 16'd2;
+                        st   <= S_TGT;
                     end
                 end
                 S_O2: begin
                     if (!rd_held) begin
                         st <= S_IDLE; last_v <= 1'b0;
                     end else begin
-                        ptr <= abs_tgt;   // JMP and JSR both followed
-                        st  <= S_OP;
+                        o2_q <= rd_byte; st <= S_TGT;
                     end
+                end
+                // The granted beat: registers in, want out.  No window read
+                // happens here, so rd_held has no say - the operand beats
+                // already vouched for the bytes.
+                S_TGT: begin
+                    if (cls_q != C_REL) ptr <= tgt;   // BRA and JMP/JSR followed
+                    st <= S_OP;
                 end
                 default: st <= S_IDLE;
             endcase
 
             if (issuing) begin
-                if (ptr_in0 && tgt_held1) begin lb_v <= 1'b1; lb_slot <= 1'b0; end
-                if (ptr_in1 && tgt_held0) begin lb_v <= 1'b1; lb_slot <= 1'b1; end
+                if (src0 && tgt_held1) begin lb_v <= 1'b1; lb_slot <= 1'b0; end
+                if (src1 && tgt_held0) begin lb_v <= 1'b1; lb_slot <= 1'b1; end
                 if (!tgt_held0 && !tgt_held1 && !tgt_excl &&
                     !(sw_v && !sw_taken) && !(last_v && tgt_tag == last_tag)) begin
                     sw_v     <= 1'b1;
