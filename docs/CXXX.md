@@ -212,6 +212,49 @@ accelerating rotation and ACCEL_FAST the HUD's, so within one line
 they are of different ages - the census's proportions are exact, its
 sum against ACCEL_FAST is not (50.1M vs 36.5M over this interval).
 
+## The fourth finding (2026-09-02, on hardware): the animated map
+
+The user's steer: the keyboard poll is the definition of an idle task and
+is already cheap; what matters is how the DATA side does.  A second Nox
+map, half the screen tiles in a 4-frame animation - real data traffic.
+Counters over 21 s (wrap-safe: turbo wraps every ~75 s at 60x), 55.7x,
+1.76 clocks per op:
+
+| | count | |
+|---|---|---|
+| data front hits (reads + writes, ACCEL_DLINE) | 229M | 19% of all ops |
+| data read misses (all RAM class; LC/ROM/CX zero) | 43.0M | 14.6% of data accesses |
+| data write misses (the dispatcher's writes) | 22.6M | 7.7% of data accesses |
+| **data-access hit ratio** | | **77.7%** |
+| clocks: data misses / bus / keyboard / I misses | | ~25% / ~18% / ~9% / ~3% |
+
+The 5 s sparse trace of the same screen says what the two visible
+kinds are:
+
+- **The bus (447k events, 18% of clocks) is AUXMOVE's setup, 99% of
+  it**: $C004 W 147k, $C002 W and $C003 W 73.7k each, $C013 R and
+  $C014 R 73.7k each - 73.7k AUXMOVE calls in 5 s, six bus ops apiece
+  at two cycles each.  The copy loop itself is fast (step 1); its
+  RAMRD/RAMWRT dance is now the single largest bus item on a busy
+  screen.  The acceleration branch's swint (15c8444 there) internalized
+  exactly these - the $C00x switch writes and the $C01x status page from
+  the shadow - so that port is the next bus step.
+- **The write misses are the language card**: $D522/$D523/$D528/$D529 W
+  1.18M each in 5 s = 4.7M, ~20M over 21 s = the 22.6M FAST_WR.  Nox
+  keeps its variables in LC RAM; the data front's write retire is
+  "virtual and below $C000" (rung 3), so every LC write rides the
+  dispatcher while LC READS of the same bytes hit the CAM (LC data
+  misses: zero).  A registered LC-class write qualifier in dline.sv
+  would take those at one clock: ~9% of clocks here.
+- **The read misses (43M, ~16% of clocks) are not visible in sparse**
+  (fast reads are dropped).  By the program they are AUXMOVE's source
+  bytes - `LDA ($3C),Y` walking main memory - and the tile data: the
+  eight-line CAM against streaming reads.  That is rung 4's case (a
+  stream/next-line prefetch on the data front), and now it has a number.
+
+Ranked by clocks on this screen: read misses ~16%, AUXMOVE's switches
+~18% (two-cycle bus ops), LC writes ~9%, keyboard ~9%, I misses ~3%.
+
 ## Open questions for the next steps
 
 1. (Latch pages: DONE, step 1.)  Whether the dline's data-side $Cxxx
