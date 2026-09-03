@@ -2,6 +2,8 @@
 
 Status: **STEP 1 PROVEN ON HARDWARE** (2026-09-02, fw 2db1baf, bit in
 SRAM) - page $C3 on the instruction front once the INTC8ROM latch is set.
+**STEPS BANKED 2026-09-02** (below, "The next steps, BANKED"): nothing
+further on this card until the larger FPGA arrives.
 **STEP 2 BUILT AND SIMULATED** (2026-09-02): the keyboard in the dummies -
 docs/ACCELERATION.md "The keyboard in the dummies".  Battery 70 checks
 0 errors both sweeps; the ProDOS boot bench (2M bus cycles, mode 2
@@ -254,6 +256,65 @@ kinds are:
 
 Ranked by clocks on this screen: read misses ~16%, AUXMOVE's switches
 ~18% (two-cycle bus ops), LC writes ~9%, keyboard ~9%, I misses ~3%.
+
+## The next steps, BANKED (the user's decision, 2026-09-02)
+
+Written up so they can be picked up cold; not to be built now.  The
+reasons: the animated map is a realistic workload but a slightly
+idiosyncratic one (AUXMOVE around every tile, variables in the LC), and
+the efforts should not overfit to it; and the current card is under
+very tight resource constraints - LUTs at ~96%, BRAM 49/50, placement
+so tight that a zero-margin cone flips on any nearby netlist change
+(three failed builds for the census) - and unnecessary fights are not
+worth having until the new, larger FPGA card arrives and there are
+large reserves of LUTs, BRAM and placement space again.
+
+In the order the counters rank them on the animated map:
+
+1. **The closed-regime switch port** (~18% of clocks there).  The
+   acceleration branch's 15c8444, minus what step 2 already carried.
+   Gated exactly as the keyboard is - mode 2, serving, ACCEL_CTRL[28]
+   clear, not held - which is the user's rule: internalizing a mapping
+   switch is legitimate only when RAM is entirely internal; in mode 1
+   writes land on the bus and the motherboard's switches must stay in
+   step with them, so everything rides the bus there.
+   - WRITES $C000-$C005, $C008/9, $C00C-$C00F (80STORE, RAMRD, RAMWRT,
+     ALTZP, 80COL, ALTCHAR) as fast ops with the synthetic commit, so
+     the shadow, map_changed and the fronts' kills fire as for a bus op.
+   - READS $C011-$C01F: bit 7 from the shadow over the keyboard latch's
+     low bits (kbd_inject.int_low, already a port); $C019 only with the
+     VBL lock, else the bus.
+   - STAYS ON THE BUS: INTCXROM/SLOTC3ROM writes (four slot cards track
+     them from the driver's stream, rtl/slot_switches.sv); $C010 and the
+     $C01x writes (the strobe); the video toggles $C05x and the LC $C08x
+     for this slice (they want fb_sim's floating byte; small here).
+   - Mechanics: the keyboard-only q_swi decode moves from accel_seq into
+     apple_mmu beside q_cls (the shadow bits are there; decode from a
+     REGISTERED address copy, the acceleration branch's f841b5c lesson:
+     the live decode was its worst path); swi_byte gains the status
+     page; the acceleration branch's 2d switch-storm phase (accel.s +
+     accel_tb's c0_exp/c0_pin_stat and the synthetic-commit model
+     update) comes across.  Cost: a few dozen LUTs, no BRAM.
+2. **LC-class writes on the data front** (~9%).  rtl/dline.sv's write
+   retire is virtual-and-below-$C000 by design (no classify cone on the
+   retire); an LC write needs lc_wren, lc_bank2 and altzp - registered
+   levels - folded into the $D000 hole the way p_off/d_off already fold
+   reads.  Same splice/post path as rung 3.  Verify with the P+2 law's
+   tests and a boot bench (ProDOS keeps its own state in the LC).
+3. **Rung 4, the data streams** (~16%: the read misses).  AUXMOVE's
+   `LDA ($3C),Y` source walk and the tile reads against an eight-line
+   CAM.  The shape to decide with a busier scene's census, not this
+   one: next-line prefetch on a sequential miss pattern vs a wider CAM.
+   BRAM-hungry; the one that most wants the new card.
+4. **The keyboard read at one clock** (~9% idle, ~9% animated).  The
+   user's call: an idle task, already cheap; not worth a fight now.
+5. **Census refinement**: split FAST_WR by class (RAM vs LC vs other)
+   using the spare bucket code 3'd7, so item 2's figure is exact
+   without a trace.  Trivial, but it is a build.
+
+Measurement discipline for whichever comes first: `swctl accel status`
+twice N seconds apart, deltas mod 2^32 (the turbo counter wraps every
+~75 s at 60x), clocks = 98 x cycles; a sparse trace for the bus side.
 
 ## Open questions for the next steps
 
