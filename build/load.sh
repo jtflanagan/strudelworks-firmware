@@ -2,12 +2,19 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
 #
-# Load a bitstream into the Alchitry Au over JTAG, VOLATILE (SRAM) - it is gone
-# at power-off, which is what you want for test iterations.
+# Load a bitstream into the Alchitry board over JTAG, VOLATILE (SRAM) - it is
+# gone at power-off, which is what you want for test iterations.
 #
 #   build/load.sh                      # loads build/results/au_top.bit
 #   build/load.sh path/to/other.bit
 #   build/load.sh --detach             # hand the board back to Windows
+#   BOARD=au_v2 build/load.sh ...      # override the board (see below)
+#
+# WHICH BOARD: build/build.tcl writes <bitstream>.board beside every bitstream
+# it produces (au_v2 | pt_v2), and that is what decides the
+# loader's part below.  BOARD=... overrides it; without either, pt_v2.
+# openFPGALoader checks the IDCODE before it writes anything, so a bitstream
+# for the wrong board is refused rather than loaded.
 #
 # WHY THIS EXISTS: programming from the Vivado GUI keeps the project open, and
 # the GUI holds a lock on the Windows-side work directory, so the next
@@ -15,8 +22,8 @@
 # over openFPGALoader touches neither Vivado nor the project, so build and flash
 # stop fighting each other.
 #
-# The Au's USB is an FT2232H (0403:6010): channel A is JTAG, channel B is the
-# UART this design prints its report on.  usbipd moves the WHOLE device to WSL,
+# Both boards' USB is an FT2232H (0403:6010): channel A is JTAG, channel B is
+# the UART this design prints its report on.  usbipd moves the WHOLE device to WSL,
 # so while attached, Windows loses both - Vivado cannot see the board and the
 # Windows COM port disappears.  In exchange the UART shows up here as
 # /dev/ttyUSB* and the report can be read from this side.  `--detach` reverses it.
@@ -29,8 +36,19 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 USBIPD="/mnt/c/Program Files/usbipd-win/usbipd.exe"
-VIDPID="0403:6010"          # FT2232H on the Alchitry Au
-BOARD="alchitry_au"         # native openFPGALoader board definition
+VIDPID="0403:6010"          # FT2232H on the Alchitry Au V2 and Pt V2 alike
+
+# openFPGALoader arguments per board.  The Au has a native board definition;
+# the Pt does not (openFPGALoader 0.12), but a board definition is only a cable
+# plus a part, and both are known: the same FT2232H cable, and xc7a100tfgg484,
+# for which openFPGALoader ships the spiOverJtag bridge that -f (flash) needs.
+loader_args() {
+    case "$1" in
+        au_v2)              echo "-b alchitry_au" ;;
+        pt_v2)  echo "-c ft2232 --fpga-part xc7a100tfgg484" ;;
+        *) echo "unknown board '$1' (au_v2 | pt_v2)" >&2; return 1 ;;
+    esac
+}
 
 # Absolute path ON PURPOSE.  ~/.local/bin/openFPGALoader is a WSL->Windows
 # wrapper for oss-cad-suite's openFPGALoader.EXE (used by the Tang Mega work),
@@ -81,6 +99,16 @@ busid="${BUSID:-$(find_busid)}"
 bit="${1:-$root/build/results/au_top.bit}"
 [ -f "$bit" ] || { echo "No bitstream at $bit - run build/build.sh first" >&2; exit 1; }
 
+# The board: BOARD= if given, else the sidecar build.tcl wrote, else pt_v2.
+sidecar="${bit%.bit}.board"
+if [ -z "${BOARD:-}" ] && [ -f "$sidecar" ]; then
+    BOARD="$(tr -d '[:space:]' < "$sidecar")"
+fi
+BOARD="${BOARD:-pt_v2}"
+loader_str="$(loader_args "$BOARD")" || exit 1
+read -r -a LOADER_ARGS <<< "$loader_str"
+echo "board: $BOARD  (openFPGALoader ${LOADER_ARGS[*]})"
+
 # Match the whole line, not $NF: the STATE column holds multi-word values, and
 # "Not shared" ends in "shared", so a last-field test reads exactly backwards.
 if ! printf '%s\n' "$USBIPD_LIST" | grep -q "^$busid .*Attached"; then
@@ -124,6 +152,6 @@ for iface in /sys/bus/usb/drivers/ftdi_sio/*:1.0; do
 done
 
 echo "loading $(basename "$bit") into the FPGA (SRAM, volatile)"
-"$LOADER" -b "$BOARD" "$bit"
+"$LOADER" "${LOADER_ARGS[@]}" "$bit"
 echo
 echo "done.  UART report:  build/report.sh   (or: /dev/ttyUSB1 at 115200)"

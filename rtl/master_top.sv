@@ -111,7 +111,7 @@ module master_top #(
     inout  wire [31:0] ft_data,
     inout  wire [3:0]  ft_be,
 
-    // DDR3 (constr/ddr3.xdc).  The card's outgoing stream crosses it; see
+    // DDR3 (constr/<board>/ddr3.xdc).  The card's outgoing stream crosses it; see
     // card_link and docs/TX_RING.md.  Names match au_top's.
     output wire [13:0] ddr3_addr,
     output wire [2:0]  ddr3_ba,

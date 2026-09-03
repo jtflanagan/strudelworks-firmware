@@ -31,7 +31,7 @@ module au_top (
     input  wire       usb_rx,
     output wire       usb_tx,
 
-    // DDR3 - names match constr/ddr3.xdc
+    // DDR3 - names match constr/<board>/ddr3.xdc
     output wire [13:0] ddr3_addr,
     output wire [2:0]  ddr3_ba,
     output wire        ddr3_ras_n,
@@ -39,7 +39,7 @@ module au_top (
     output wire        ddr3_we_n,
     output wire        ddr3_reset_n,
     // [0:0] rather than scalar, deliberately: MIG named these as 1-bit vectors,
-    // so constr/ddr3.xdc (a transcription of MIG's) constrains ddr3_ck_p[0] and
+    // so constr/<board>/ddr3.xdc (a transcription of MIG's) constrains ddr3_ck_p[0] and
     // friends.  Declared scalar, those five constraints silently match nothing -
     // Vivado emits only a warning, and the DDR3 clock, CKE, CS and ODT end up
     // unconstrained and placed wherever the placer likes.  UberDDR3's own ports

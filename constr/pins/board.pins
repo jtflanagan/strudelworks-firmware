@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-FileCopyrightText: 2026 jtflanagan
+# On-board pins of the Alchitry board itself - oscillator, reset button, LEDs
+# and the FT2232H's UART channel - by their Alchitry names.  Same names on the
+# Au V2 and the Pt V2, different balls.  tools/gen_pin_xdc.py turns this into
+# constr/<board>/board.xdc.  Format as in ft601.pins: `pin` lines are looked
+# up, everything else is copied through verbatim.
+
+# 100 MHz on-board oscillator on both boards.  Everything - controller, DDR3
+# PHY, IDELAYCTRL reference and the Apple-bus domain - is derived from this by
+# rtl/clk_gen.v.
+pin clk_pin CLOCK    LVCMOS33
+create_clock -period 10.000 -name clk_100 -waveform {0.000 5.000} [get_ports clk_pin]
+
+# Board RESET button, active low.
+pin rst_n RESET    LVCMOS33
+set_false_path -from [get_ports rst_n]
+
+# 8 on-board LEDs.
+pin led[0] LED0     LVCMOS33
+pin led[1] LED1     LVCMOS33
+pin led[2] LED2     LVCMOS33
+pin led[3] LED3     LVCMOS33
+pin led[4] LED4     LVCMOS33
+pin led[5] LED5     LVCMOS33
+pin led[6] LED6     LVCMOS33
+pin led[7] LED7     LVCMOS33
+set_false_path -to [get_ports {led[*]}]
+
+# USB-serial bridge on the board (the FT2232H's UART channel, not the Ft+ FT601).
+pin usb_rx USB_RX   LVCMOS33
+pin usb_tx USB_TX   LVCMOS33
+set_false_path -from [get_ports usb_rx]
+set_false_path -to [get_ports usb_tx]
+
+##############################################################################
+# Bitstream / configuration
+#
+# The board boots from its QSPI flash.  A standalone Vivado flow (no Alchitry
+# Labs wrapper) has to set these itself.  Values are the ones proven by flashing
+# the Au V2; Alchitry Labs V2 itself writes CONFIGRATE 66 and SPI_BUSWIDTH 4 for
+# both the Au V2 and the Pt V2, which would boot faster - a change to make
+# deliberately, on hardware, not as a side effect of the port.
+##############################################################################
+set_property CONFIG_VOLTAGE 3.3 [current_design]
+set_property CFGBVS VCCO [current_design]
+set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]
+set_property BITSTREAM.CONFIG.CONFIGRATE 33 [current_design]
+set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 1 [current_design]
+set_property BITSTREAM.CONFIG.SPI_FALL_EDGE YES [current_design]
+set_property BITSTREAM.CONFIG.SPI_32BIT_ADDR NO [current_design]

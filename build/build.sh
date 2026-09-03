@@ -14,11 +14,29 @@
 #      path.  Hence the wslpath conversions below.  Passing /home/... makes
 #      Vivado report the script as missing.
 #
-# Usage: build/build.sh [extra tclargs...]
+# Usage: build/build.sh [--master|--snoop|--ft601|--diag] [--board <b>] [extra tclargs...]
 #   VIVADO=/mnt/c/AMDDesignTools/2026.1/Vivado/bin/vivado.bat build/build.sh
+#   BOARD=au_v2 build/build.sh --master      # same as --board au_v2
+#
+# The board (au_v2 | pt_v2, tools/boards.py) picks the part and
+# the per-board pin constraints in constr/<board>/.  Default pt_v2; the
+# generators' --check below refuses to build if that default has drifted from
+# tools/boards.py.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+BOARD="${BOARD:-pt_v2}"
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --board|-board) shift; BOARD="$1" ;;
+    *) args+=("$1") ;;
+  esac
+  shift
+done
+set -- "${args[@]+"${args[@]}"}"
+echo "board: $BOARD"
 
 VIVADO="${VIVADO:-}"
 if [ -z "$VIVADO" ]; then
@@ -54,9 +72,12 @@ if [ ! -d "$root/third_party/UberDDR3/rtl" ]; then
   "$root/third_party/fetch_uberddr3.sh"
 fi
 
-# Verify the generated DDR3 constraints still agree with the MIG reference before
-# spending 15 minutes on a build against a stale pinout.
-python3 "$root/tools/gen_ddr3_xdc.py" --check
+# Verify the generated constraints still agree with their sources before
+# spending 15 minutes on a build against a stale pinout: the DDR3 XDC against
+# the board's MIG project and Alchitry's pin table, the pin XDCs against the
+# connector-named sources, and build.tcl's board table against tools/boards.py.
+python3 "$root/tools/gen_ddr3_xdc.py" --check --board "$BOARD"
+python3 "$root/tools/gen_pin_xdc.py" --check --board "$BOARD"
 
 # Stamp the bitstream with when this build started, readable back over the link
 # as registers 0 and 1.  Captured HERE rather than inside Vivado so that the two
@@ -97,6 +118,9 @@ case "${1:-}" in
   --snoop) WORKDIR="${WORKDIR}-snoop" ;;
   --master) WORKDIR="${WORKDIR}-master" ;;
 esac
+# And per board, for the same reason: a pt_v2 project must not inherit an
+# au_v2 project's state.
+WORKDIR="${WORKDIR}-${BOARD}"
 if [ -e "$WORKDIR" ] && ! rm -rf "$WORKDIR" 2>/dev/null; then
   cat >&2 <<EOF
 
@@ -135,5 +159,5 @@ vivado_win="$(wslpath -w "$VIVADO")"
 cd /
 exec cmd.exe /c "$vivado_win" -mode batch -nojournal -notrace \
     -log "$log_win" -journal "$jou_win" \
-    -source "$script_win" -tclargs -outdir "$workdir_win" \
+    -source "$script_win" -tclargs -outdir "$workdir_win" -board "$BOARD" \
     -stamp-date "$STAMP_DATE" -stamp-time "$STAMP_TIME" "$@"

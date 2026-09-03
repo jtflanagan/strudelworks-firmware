@@ -7,7 +7,8 @@
 #
 # Optional -tclargs:
 #   -jobs <n>      parallel synth/impl jobs (default 4)
-#   -part <part>   override the target part
+#   -board <b>     au_v2 | pt_v2 - picks the part and constr/<b>/
+#   -part <part>   override the target part (the board's, normally)
 #   -open          leave the project open (GUI-less; for interactive tcl work)
 #
 # Everything is built from source.  There is no .xci in this project by design:
@@ -18,7 +19,17 @@
 
 set root [file normalize [file join [file dirname [info script]] ..]]
 
-set part      xc7a35tftg256-2
+# ---- board ---------------------------------------------------------------
+# One of tools/boards.py's entries.  The part and the pin constraints follow
+# from it: constr/<board>/ holds the generated per-board XDCs (board pins,
+# FT601 pins, Apple-bus pins, DDR3), constr/*.xdc the board-neutral timing.
+# tools/gen_pin_xdc.py --check keeps this table and boards.py in agreement,
+# and build/build.sh runs that before every build.
+set board pt_v2
+set board_part(au_v2) xc7a35tftg256-2
+set board_part(pt_v2) xc7a100tfgg484-2
+
+set part      ""
 set jobs      4
 set keep_open 0
 set outdir    [file join $root build work]
@@ -36,6 +47,8 @@ set stamp_time 0
 for {set i 0} {$i < $argc} {incr i} {
     switch -- [lindex $argv $i] {
         -jobs   { incr i; set jobs [lindex $argv $i] }
+        -board  -
+        --board { incr i; set board [lindex $argv $i] }
         -part   { incr i; set part [lindex $argv $i] }
         -outdir { incr i; set outdir [lindex $argv $i] }
         -open   { set keep_open 1 }
@@ -57,6 +70,21 @@ if {($diag + $ft601 + $snoop + $master) > 1} {
     puts "ERROR: -diag, -ft601, -snoop and -master select different top levels; pick one."
     exit 1
 }
+
+if {![info exists board_part($board)]} {
+    puts "ERROR: unknown board '$board'; one of: [lsort [array names board_part]]"
+    exit 1
+}
+if {$part eq ""} { set part $board_part($board) }
+set cdir [file join $root constr $board]
+if {![file isdirectory $cdir]} {
+    puts "ERROR: $cdir missing - run python3 tools/gen_pin_xdc.py and tools/gen_ddr3_xdc.py"
+    exit 1
+}
+puts "=========================================================="
+puts " board : $board"
+puts " part  : $part"
+puts "=========================================================="
 
 # One place decides the top level, so the source list, the constraint list and
 # the bitstream name below cannot drift apart.
@@ -171,8 +199,8 @@ if {$snoop || $master} {
         add_files -norecurse [list [file join $root rtl snoop_top.sv]]
     }
 } elseif {$ft601} {
-    # FT601 link bring-up: no DDR3 and no Apple bus, so only alchitry_au.xdc and
-    # ft601.xdc apply.  No .xci here either - the FT601 clock is used directly (ft_clk_buf.v) and v5.s
+    # FT601 link bring-up: no DDR3 and no Apple bus, so only the board pins and
+    # the ft601 pair apply.  No .xci here either - the FT601 clock is used directly (ft_clk_buf.v) and v5.s
     # clk_wiz_0 and ft601_fifo.sv uses xpm_fifo_async in place of fifo_ft600.
     add_files -norecurse [list \
         [file join $root rtl clk_gen.v] \
@@ -222,16 +250,24 @@ if {$stamp_date != 0 || $stamp_time != 0} {
 
 # ---- constraints ---------------------------------------------------------
 # An XDC naming a port that does not exist is an error, not a warning, so each
-# constraint file goes only to the tops that declare its ports: ft601.xdc to the
-# builds with ft_* ports, apple_bus.xdc to the two Apple-facing ones, and
-# apple_bus_master.xdc to the one that actually drives them.
+# constraint file goes only to the tops that declare its ports: the ft601 pair
+# to the builds with ft_* ports, the apple_bus pair to the two Apple-facing
+# ones, and apple_bus_master.xdc to the one that actually drives them.
+#
+# Each interface is two files: constr/<board>/*_pins.xdc, generated per board
+# from the connector-named sources in constr/pins/ (PACKAGE_PIN + IOSTANDARD,
+# nothing else), and constr/*.xdc, the board-neutral timing, false paths and
+# IOB packing.  The board's own pins (clock, reset, LEDs, UART) and the
+# bitstream properties are constr/<board>/board.xdc.
 if {$snoop || $master} {
     # ddr3.xdc too: the outgoing stream crosses the DDR3 in both (rtl/tx_ring.sv).
     add_files -fileset constrs_1 -norecurse [list \
-        [file join $root constr alchitry_au.xdc] \
+        [file join $cdir board.xdc] \
+        [file join $cdir ft601_pins.xdc] \
         [file join $root constr ft601.xdc] \
+        [file join $cdir apple_bus_pins.xdc] \
         [file join $root constr apple_bus.xdc] \
-        [file join $root constr ddr3.xdc] \
+        [file join $cdir ddr3.xdc] \
     ]
     # The output direction exists only in the build that drives.  An XDC naming
     # a path that cannot exist is an error, not a warning, so a set_false_path
@@ -243,17 +279,18 @@ if {$snoop || $master} {
     }
 } elseif {$ft601} {
     add_files -fileset constrs_1 -norecurse [list \
-        [file join $root constr alchitry_au.xdc] \
+        [file join $cdir board.xdc] \
+        [file join $cdir ft601_pins.xdc] \
         [file join $root constr ft601.xdc] \
     ]
 } elseif {$diag} {
     add_files -fileset constrs_1 -norecurse [list \
-        [file join $root constr alchitry_au.xdc] \
+        [file join $cdir board.xdc] \
     ]
 } else {
     add_files -fileset constrs_1 -norecurse [list \
-        [file join $root constr alchitry_au.xdc] \
-        [file join $root constr ddr3.xdc] \
+        [file join $cdir board.xdc] \
+        [file join $cdir ddr3.xdc] \
     ]
 }
 
@@ -340,6 +377,11 @@ set bit [file join $outdir strudelworks.runs impl_1 $topname.bit]
 if {[file exists $bit]} {
     file copy -force $bit [file join $results $topname.bit]
     puts "bitstream: [file join $results $topname.bit]"
+    # Which board the bitstream is for, beside it.  build/load.sh reads this to
+    # pick the loader's part, and to refuse to push an Au bitstream at a Pt.
+    set fh [open [file join $results $topname.board] w]
+    puts $fh $board
+    close $fh
 }
 foreach r {timing_summary.rpt utilization.rpt logic_depth.rpt design_analysis.rpt} {
     if {[file exists [file join $outdir $r]]} {

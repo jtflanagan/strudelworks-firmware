@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
-// clk_gen - all clocks for the strudelworks design, from the Au's 100 MHz osc.
+// clk_gen - all clocks for the strudelworks design, from the board's 100 MHz
+// oscillator (the same frequency on the Au V2 and the Pt V2).
 //
 // Written as a direct MMCME2_BASE instantiation rather than a clk_wiz IP core so
 // the whole project builds from plain source with no .xci to regenerate.  That is
@@ -29,7 +30,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 
 module clk_gen #(
-    parameter real CLKIN_PERIOD_NS = 10.000,  // 100 MHz Au oscillator
+    parameter real CLKIN_PERIOD_NS = 10.000,  // 100 MHz board oscillator
     parameter real MULT            = 12.000,  // -> VCO 1200 MHz
     parameter integer DIV_IN       = 1,
     parameter integer DIV_CTRL     = 12,      // 100 MHz
