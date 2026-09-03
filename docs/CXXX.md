@@ -182,6 +182,36 @@ AUXMOVE switch traffic (questions 1/3: RAMRD/RAMWRT writes internalized,
 $C013/$C014 answered from the shadow) is the next 7.7% of bus ops.
 Evidence trace: nox_map.swbt (session scratchpad, 105 MB, not kept).
 
+## The third finding (2026-09-02, on hardware): the census at the Nox map
+
+fw 463d85c / host 9210eee, `swctl accel status` twice 7 s apart, Nox idle
+at the overworld map, 61.1x, 1.60 clocks per op:
+
+| bucket | ops in 7 s | share of the dispatcher's ops | ~share of all clocks |
+|---|---|---|---|
+| keyboard ($C00x from the latch) | 46.2M | 92.2% | 53% |
+| RAM data (the data front missed) | 3.1M | 6.2% | 3.6% |
+| I-fetch (the front missed) | 0.6M | 1.2% | 0.7% |
+| writes | 0.18M | 0.4% | 0.2% |
+| LC / ROM $D000+ / ROM $Cxxx data | 0 | 0 | 0 |
+
+So step 2 moved the poll off the bus and onto the DISPATCHER, and at
+6.6M polls a second the dispatcher's ~8-clock round trip is now HALF of
+all clocks by itself: the loop is ~12 ops, eleven at one clock and the
+keyboard read at eight.  RAM misses, the presumed rung-4 target, are
+3.6% of clocks here; ROM-class data reads are zero.  The next step is
+therefore the keyboard read at ONE clock on the data front (a `$C00x`
+term in rtl/dline.sv's serve, the byte kbd_inject's int_byte, the
+bookkeeping pulse int_rd from the dline's retire, the governor charged
+through d_commit), which on this arithmetic takes the map from 61x to
+~90x.  Rung 4 proper (RAM coverage) is worth ~4% here and wants a
+busier scene's census before it is designed.
+
+Note on reading the status line: the seven census registers ride the
+accelerating rotation and ACCEL_FAST the HUD's, so within one line
+they are of different ages - the census's proportions are exact, its
+sum against ACCEL_FAST is not (50.1M vs 36.5M over this interval).
+
 ## Open questions for the next steps
 
 1. (Latch pages: DONE, step 1.)  Whether the dline's data-side $Cxxx
