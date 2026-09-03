@@ -173,6 +173,8 @@ module reg_map_tb;
     wire       mem_cnt_clr, mem_inval;
     wire [1:0] accel_mode;
     wire       accel_swint_dis;
+    reg        cen_v = 1'b0;
+    reg [2:0]  cen_sel = 3'd0;
     wire [15:0] accel_target;
     wire       accel_cnt_clr;
     integer    accel_cnt_clrs = 0;
@@ -225,6 +227,7 @@ module reg_map_tb;
         .accel_cnt_clr (accel_cnt_clr),
         .accel_stat (32'h0000_0A11), .accel_fast (32'h0001_F00D), .accel_bus (32'h0000_0B05),
         .accel_cycles (32'h000C_0CE5), .accel_turbo (32'hCAFE0011), .accel_wait (32'h0000_0A17),
+        .accel_cen_v (cen_v), .accel_cen_sel (cen_sel),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (7'b1010101), .fb_compared (32'h0004_2870), .fb_mismatch (32'h0000_0005),
         .fb_last (32'hA55A_C0A3), .fb_last2 (32'h5427_D8C2), .fb_other (32'h0002_0001),
@@ -1305,6 +1308,26 @@ module reg_map_tb;
         if (accel_swint_dis !== 1'b0) begin
             $display("FAIL: swint_dis did not clear"); errors = errors + 1;
         end
+        // The census: two RAM-bucket retirements, one keyboard; read back;
+        // the W1 clear zeroes them with the rest.
+        @(posedge clk); cen_v <= 1'b1; cen_sel <= 3'd1;
+        @(posedge clk); cen_sel <= 3'd1;
+        @(posedge clk); cen_sel <= 3'd6;
+        @(posedge clk); cen_v <= 1'b0;
+        repeat (3) @(posedge clk);
+        base = out_n;
+        do_read(32'h8000_00B0);
+        do_read(32'h8000_00C4);
+        do_read(32'h8000_00AC);
+        if (out_mem[base+2] !== 32'd2 || out_mem[base+5] !== 32'd1 || out_mem[base+8] !== 32'd0) begin
+            $display("FAIL: the census reads RAM %0d KBD %0d I %0d, expected 2 1 0", out_mem[base+2], out_mem[base+5], out_mem[base+8]); errors = errors + 1;
+        end else $display("  ok: ACCEL_FAST_DRAM/KBD/I count the sequencer's buckets");
+        do_write(32'h8000_008C, 32'h8000_0001);           // W1 clear
+        base = out_n;
+        do_read(32'h8000_00B0);
+        if (out_mem[base+2] !== 32'd0) begin
+            $display("FAIL: the census did not clear with the counters"); errors = errors + 1;
+        end else $display("  ok: ...and the W1 clear zeroes them with the rest");
         base = out_n;
         do_read(32'h8000_0090);
         do_read(32'h8000_0094);

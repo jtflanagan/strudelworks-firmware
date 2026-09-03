@@ -63,7 +63,7 @@ xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
 
 srcs=(
     "$root/sim/boot_tb.sv"
-    "$root/rtl/cpu65c02.sv" "$root/rtl/accel_seq.sv"
+    "$root/rtl/cpu65c02.sv" "$root/rtl/accel_seq.sv" "$root/rtl/fast_census.sv"
     "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv"
     "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv"
     "$root/rtl/boot_hold.sv"

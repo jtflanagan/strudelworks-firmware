@@ -255,13 +255,23 @@ module accel_tb #(parameter integer SWINT = 1,
         .changed (kb_changed), .hotkey_hit (kb_hot)
     );
 
+    // The census's counters, as the register file keeps them.
+    wire        cen_v;
+    wire [2:0]  cen_sel;
+    wire [31:0] cs_i, cs_dram, cs_dlc, cs_drom, cs_dcx, cs_wr, cs_kbd;
+    fast_census u_census (
+        .clk (clk), .rst (rst), .clr (cnt_clr), .v (cen_v), .sel (cen_sel),
+        .fast_i (cs_i), .fast_dram (cs_dram), .fast_dlc (cs_dlc), .fast_drom (cs_drom),
+        .fast_dcx (cs_dcx), .fast_wr (cs_wr), .fast_kbd (cs_kbd)
+    );
+
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
         .swi_on (sw_int), .swi_ok (kbd_int_ok), .swi_byte (kbd_int_byte), .swi_commit (swi_commit),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
-        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
+        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
         .cyc_en (seq_cyc_en), .cpu_din (cpu_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok),
         .turbo_commit (turbo_commit), .d_commit (d_commit_w),
@@ -280,7 +290,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .fev_valid (fev_valid), .fev_addr (fev_addr), .fev_rw (fev_rw), .fev_data (fev_data),
         .fev_sync (fev_sync),
         .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
-        .fast_ops (fast_ops), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
+        .fast_ops (fast_ops), .cen_v (cen_v), .cen_sel (cen_sel), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
         .cycles (cycles), .wait_clocks (wait_clocks),
         .retries (retries)
     );
@@ -1085,6 +1095,13 @@ module accel_tb #(parameter integer SWINT = 1,
             if (turbo_excl_bad != 0) fail($sformatf("%0s: %0d one-clock ops broke the $Cxxx rules", what, turbo_excl_bad));
             if (dummies_bad != 0) fail($sformatf("%0s: %0d dummy cycles were not the parked read", what, dummies_bad));
             if (fast_bus_cls != 0) fail($sformatf("%0s: %0d BUS-class ops were served fast", what, fast_bus_cls));
+            // The census: seven exclusive buckets that sum to ACCEL_FAST.
+            if (cs_i + cs_dram + cs_dlc + cs_drom +
+                cs_dcx + cs_wr + cs_kbd != fast_ops)
+                fail($sformatf("%0s: the fast-op census (%0d I, %0d RAM, %0d LC, %0d ROM, %0d CX, %0d WR, %0d KBD) does not sum to %0d fast ops",
+                               what, cs_i, cs_dram, cs_dlc, cs_drom, cs_dcx, cs_wr, cs_kbd, fast_ops));
+            else ok($sformatf("%0s: fast-op census %0d I, %0d RAM, %0d LC, %0d ROM, %0d CX, %0d WR, %0d KBD = %0d",
+                              what, cs_i, cs_dram, cs_dlc, cs_drom, cs_dcx, cs_wr, cs_kbd, fast_ops));
             if (late_fills != 0 || fifo_drops != 0) fail($sformatf("%0s: late fills %0d, drops %0d", what, late_fills, fifo_drops));
             if (mismatches != 0) fail($sformatf("%0s: the monitor counted %0d mismatches (last %08x)", what, mismatches, last_mismatch));
             if (u_core_ops != fast_ops + bus_ops + ovr_cycles - ovr_cycles) ;  // counted below

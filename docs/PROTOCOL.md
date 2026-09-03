@@ -138,6 +138,13 @@ protocol.
 | `0x8000_00A0` | ACCEL_WAIT | RO | clocks the core spent waiting to merge |
 | `0x8000_00A4` | ACCEL_TURBO | RO | the instruction front's one-clock ops (ISTREAM.md) |
 | `0x8000_00A8` | ACCEL_DLINE | RO | the data front's one-clock ops, reads and writes (DLINE.md). Every one of these paid the governor like any other op, so the ratio achieved is (TURBO + DLINE + FAST + BUS) / CYCLES - a display that leaves DLINE out reads a governed 8x as ~5x |
+| `0x8000_00AC` | ACCEL_FAST_I | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): instruction-stream fetches of any class - the front missed or declined. The seven sum to ACCEL_FAST |
+| `0x8000_00B0` | ACCEL_FAST_DRAM | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of RAM class - the data front missed. The seven sum to ACCEL_FAST |
+| `0x8000_00B4` | ACCEL_FAST_DLC | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of the language card. The seven sum to ACCEL_FAST |
+| `0x8000_00B8` | ACCEL_FAST_DROM | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of the system ROM ($D000-$FFFF). The seven sum to ACCEL_FAST |
+| `0x8000_00BC` | ACCEL_FAST_DCX | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of the internal ROM in $C100-$CFFF. The seven sum to ACCEL_FAST |
+| `0x8000_00C0` | ACCEL_FAST_WR | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): writes. The seven sum to ACCEL_FAST |
+| `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

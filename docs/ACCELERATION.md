@@ -323,6 +323,22 @@ this regime, commit 15c8444 there, is the reference): the status page
 `$C08x`, the RamWorks bank; a menu hotkey found by the parked dummies
 themselves, which would let Ctrl-6 work in a program that never polls.
 
+## The census (2026-09-02)
+
+At 58x on hardware (Nox, moving about the map) the counters put 92% of
+the ops at one clock and the dispatcher's fast ops - 7.6% of the ops at
+~8 clocks each - at 36% of all clocks, bus ops (two cycles each) at 9%;
+the arithmetic closes, there is no other stall pool.  So the road from
+60x toward the 98x ceiling is the dispatcher's share, and the question
+is WHICH reads those are.  A full trace would say but wedges the link at
+this speed, so the sequencer counts them: ACCEL_FAST_I (I-stream fetches
+the front missed or declined), ACCEL_FAST_DRAM (data reads the data
+front missed), ACCEL_FAST_DLC, ACCEL_FAST_DROM ($D000+), ACCEL_FAST_DCX
+(the internal ROM's tables in $Cxxx), ACCEL_FAST_WR, ACCEL_FAST_KBD -
+seven exclusive buckets that sum to ACCEL_FAST, cleared with the rest.
+The host polls them while accelerating and `swctl accel status` reports
+them after the ratio.
+
 ## The registers
 
 ```
@@ -339,6 +355,10 @@ ACCEL_FAST    0x8000_0094   fast ops
 ACCEL_BUS     0x8000_0098   the core's ops that rode a bus cycle
 ACCEL_CYCLES  0x8000_009C   bus cycles while accelerating
 ACCEL_WAIT    0x8000_00A0   clocks the core spent waiting to merge
+ACCEL_FAST_I .. ACCEL_FAST_KBD  0x8000_00AC .. 0x8000_00C4   the census of
+                            ACCEL_FAST: I-stream fetches, data reads of
+                            RAM / LC / ROM $D000+ / ROM $Cxxx, writes, the
+                            keyboard - seven buckets that sum to it
 ```
 
 Levels, like MEM_CTRL's, safe under a running machine - with **one rule**:

@@ -230,6 +230,8 @@ module card_link #(
     input  wire [31:0]  accel_wait,
     input  wire [31:0]  accel_turbo,
     input  wire [31:0]  accel_dline,
+    input  wire         accel_cen_v,
+    input  wire [2:0]   accel_cen_sel,
     // The merge's shed-at-source level, for the instruction front.
     output wire         ev_fast_room,
     output wire         ev_fast_room_w,
@@ -952,6 +954,8 @@ module card_link #(
         .accel_wait        (accel_wait),
         .accel_turbo       (accel_turbo),
         .accel_dline       (accel_dline),
+        .accel_cen_v       (accel_cen_v),
+        .accel_cen_sel     (accel_cen_sel),
         .fb_serve          (fb_serve),
         .fb_cnt_clr        (fb_cnt_clr),
         .fb_peek_addr      (fb_peek_addr),

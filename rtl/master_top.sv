@@ -253,6 +253,8 @@ module master_top #(
     wire [15:0] tev_addr;
     wire [7:0]  tev_data, i_din_w;
     wire [31:0] accel_turbo, accel_dline;
+    wire        accel_cen_v;
+    wire [2:0]  accel_cen_sel;
     wire [1:0]  p_cls;
     wire        p_aux_w, map_changed;
     wire [15:0] p_addr_w, p_off_w;
@@ -350,6 +352,7 @@ module master_top #(
         .accel_cycles (accel_cycles), .accel_wait (accel_wait),
         .accel_turbo (accel_turbo),
         .accel_dline (accel_dline),
+        .accel_cen_v (accel_cen_v), .accel_cen_sel (accel_cen_sel),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (fb_mode), .fb_compared (fb_compared), .fb_mismatch (fb_mismatch),
         .fb_last (fb_last), .fb_last2 (fb_last2), .fb_other (fb_other),
@@ -574,6 +577,7 @@ module master_top #(
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
         .cpu_sync      (cpu_sync),
+        .cyc_is_i      (cpu_cyc_is_i),
         .cyc_en        (seq_cyc_en),
         .cpu_din       (cpu_din),
         .turbo_en      (turbo_en),
@@ -622,6 +626,8 @@ module master_top #(
         .state_o       (seq_state),
         .reset_seq_o   (accel_reset_seq),
         .fast_ops      (accel_fast),
+        .cen_v         (accel_cen_v),
+        .cen_sel       (accel_cen_sel),
         .turbo_ops     (accel_turbo),
         .bus_ops       (accel_bus),
         .cycles        (accel_cycles),

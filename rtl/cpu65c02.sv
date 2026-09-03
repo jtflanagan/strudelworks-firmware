@@ -560,7 +560,14 @@ module cpu65c02 #(
         if (f_sync) begin
             // The opcode is on din right now.  An interrupt hijacks the slot by
             // running BRK's microcode against the byte that was just discarded.
-            uaddr_alt = take_int ? {8'h00, 3'd0} : {din, 3'd0};
+            // i_din, not din: a SYNC cycle is an instruction-stream cycle by
+            // definition (cyc_is_i = asel_is_pc), so the byte is i_din's and
+            // the mux is transparent - but written through `din` the data
+            // front's served byte (d_din) reached the microcode ROM address
+            // and, through it, the D-side prediction: a false path static
+            // timing charged at zero margin (docs/DLINE.md, the serve-byte
+            // cone).  Sourcing the opcode from the I byte cuts it.
+            uaddr_alt = take_int ? {8'h00, 3'd0} : {i_din, 3'd0};
         end else if (wai_wake) begin
             uaddr_alt = {ir, 3'd2};                     // WAI's exit slot
         end else begin
@@ -742,8 +749,8 @@ module cpu65c02 #(
                     int_nmi  <= nmi_pend;
                     nmi_pend <= 1'b0;
                 end else begin
-                    ir      <= din;
-                    int_brk <= (din == 8'h00);
+                    ir      <= i_din;               // the I byte: see uaddr_alt
+                    int_brk <= (i_din == 8'h00);
                     int_nmi <= 1'b0;
                 end
             end

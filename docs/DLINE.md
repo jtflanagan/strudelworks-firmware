@@ -294,6 +294,13 @@ int_brk) from i_din under f_sync instead of din, which takes the data
 front's byte out of the ROM tree entirely.  A core change; proposed,
 not made, in this rung.
 
+**MADE, 2026-09-02** (the $Cxxx step 2 work, docs/CXXX.md): three
+builds in a row failed on exactly this loop (-0.360, -0.098, -0.071)
+after the fast-op census added flops near the fronts - placement noise
+against a zero-margin cone - so the lever was pulled: `uaddr_alt`, `ir`
+and `int_brk` take i_din under f_sync.  The core suites (Klaus, predict,
+cycles, IRQ, 65816 equivalence) are unchanged, as they must be.
+
 As built (rtl/dline.sv, with the seams in rtl/apple_mmu.sv,
 rtl/page_cache.sv, rtl/accel_seq.sv, rtl/iline.sv, rtl/event_merge.sv):
 

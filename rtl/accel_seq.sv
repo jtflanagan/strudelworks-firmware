@@ -118,6 +118,7 @@ module accel_seq (
     input  wire        cpu_rw,
     input  wire [7:0]  cpu_dout,
     input  wire        cpu_sync,
+    input  wire        cyc_is_i,       // the core's cycle is an instruction-stream fetch (the census)
     output wire        cyc_en,
     output wire [7:0]  cpu_din,
 
@@ -198,6 +199,16 @@ module accel_seq (
     output wire [3:0]   state_o,
     output wire         reset_seq_o,    // the reset sequence is still on the bus
     output logic [31:0] fast_ops,
+    // THE CENSUS of the dispatcher's fast ops (ACCEL_FAST_*): what the two
+    // fronts did NOT serve, so the next rung knows where to aim.  Seven
+    // exclusive buckets that sum to fast_ops: instruction-stream fetches
+    // of any class (the front missed or declined), data reads by class -
+    // RAM (the data front missed), LC, ROM at $D000+, the internal ROM in
+    // $Cxxx - writes, and the internalized keyboard.  Decided here, one
+    // clock behind the retirement; counted in rtl/fast_census.sv beside
+    // the register file, a clock region away from the fronts.
+    output logic        cen_v,          // one clock: a dispatcher op retired...
+    output logic [2:0]  cen_sel,        // ...into this bucket (rtl/fast_census.sv)
     output logic [31:0] turbo_ops,
     output logic [31:0] bus_ops,
     output logic [31:0] cycles,
@@ -206,6 +217,8 @@ module accel_seq (
 );
 
     localparam [1:0] CLS_BUS = 2'd0;
+    localparam [1:0] CLS_RAM = 2'd1;   // the census's buckets, apple_mmu's encoding
+    localparam [1:0] CLS_LC  = 2'd2;
     localparam [1:0] MODE_OFF = 2'd0, MODE_READS = 2'd1, MODE_RW = 2'd2;
 
     typedef enum logic [2:0] {
@@ -269,8 +282,8 @@ module accel_seq (
     //
     // dq_* are the registered copies the decision is made from; `settled`
     // says they describe the op the core has up now (see the header).
-    logic [1:0] dq_cls;
-    logic       dq_rw, dq_ovr, dq_swi, swi_q, settled;
+    logic [1:0] dq_cls, fast_cls_q;
+    logic       dq_rw, dq_ovr, dq_swi, swi_q, fast_i_q, settled;
     wire q_swi = swi_on && swi_ok && cpu_rw && (cpu_addr[15:4] == 12'hC00);
     always_ff @(posedge clk) begin
         dq_cls <= q_cls;
@@ -321,6 +334,22 @@ module accel_seq (
     // the cache's decided is only the pacing.
     wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en || swi_q);
     wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en && !swi_q;
+
+    // ---- the census, one clock behind the retirement -------------------------
+    // The bucket is decided on the retire clock into four flops; the
+    // counters (rtl/fast_census.sv) count from those a clock later still.
+    // fast_hit's fanout (it is the cyc_en and the din mux's select) gains
+    // one load, not 224 counter enables, and no adder lives here.
+    wire fast_retire = (st == S_FAST) && fast_hit;
+    always_ff @(posedge clk) begin
+        cen_v   <= fast_retire && !rst;
+        cen_sel <= swi_q                      ? 3'd6 :
+                   !fast_rw                   ? 3'd5 :
+                   fast_i_q                   ? 3'd0 :
+                   (fast_cls_q == CLS_RAM)    ? 3'd1 :
+                   (fast_cls_q == CLS_LC)     ? 3'd2 :
+                   (u_addr[15:12] == 4'hC)    ? 3'd4 : 3'd3;
+    end
 
     // ---- the core's side ----------------------------------------------------
     assign cyc_en     = off_q ? cyc_done : (st == S_BUS) ? cyc_done : fast_hit;
@@ -453,6 +482,8 @@ module accel_seq (
                             core_valid_q <= 1'b0;
                             fast_rw      <= cpu_rw;
                             swi_q        <= dq_swi;
+                            fast_cls_q   <= dq_cls;
+                            fast_i_q     <= cyc_is_i;
                             // The op, onto the stream.
                             u_present <= 1'b1;
                             u_addr    <= cpu_addr;
