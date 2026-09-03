@@ -26,7 +26,7 @@
 //   led[0] on, no blink -> MMCM locks but the fabric clock is not running
 //   nothing at all   -> configured but held in reset, or not configured
 //
-// Deliberately does NOT instantiate ddr3_wrapper, so constr/ddr3.xdc must be
+// Deliberately does NOT instantiate ddr3_wrapper, so constr/<board>/ddr3.xdc must be
 // left out of this build (its ports do not exist here).  build/build.sh --diag
 // handles that.
 //////////////////////////////////////////////////////////////////////////////////

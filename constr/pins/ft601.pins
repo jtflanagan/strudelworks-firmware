@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-FileCopyrightText: 2026 jtflanagan
+# FT601 (Alchitry Ft+ V2) pins, by CONNECTOR name - the board-neutral source
+# that tools/gen_pin_xdc.py turns into constr/<board>/ft601_pins.xdc.
+#
+# Format: `pin <port> <connector pin> <IOSTANDARD>`; any other line is copied
+# into the generated XDC verbatim.
+#
+# The names are the Alchitry V2 element pinout (A3..A78, B3..B78), the same on
+# the Au V2 and the Pt V2, which is the whole reason the port to the Pt is a
+# table lookup: the Ft+ plugs into the same connector pins on both, only the
+# FPGA ball behind each pin changes.  This list is identical to Alchitry Labs
+# V2's ft_plus_v2.acf, pin for pin (verified by script, 2026-09-03).
+#
+# Timing, IOB packing and the multicycle live in constr/ft601.xdc, which is
+# shared by every board.
+pin ft_clk      A41      LVCMOS33
+pin ft_wakeup   A3       LVCMOS33
+pin ft_reset    A5       LVCMOS33
+pin ft_rxf      A10      LVCMOS33
+pin ft_txe      A12      LVCMOS33
+pin ft_oe       A4       LVCMOS33
+pin ft_rd       A6       LVCMOS33
+pin ft_wr       A9       LVCMOS33
+pin ft_be[0]    A15      LVCMOS33
+pin ft_be[1]    A18      LVCMOS33
+pin ft_be[2]    A16      LVCMOS33
+pin ft_be[3]    A11      LVCMOS33
+pin ft_data[0]  B3       LVCMOS33
+pin ft_data[1]  B5       LVCMOS33
+pin ft_data[2]  B4       LVCMOS33
+pin ft_data[3]  B6       LVCMOS33
+pin ft_data[4]  B9       LVCMOS33
+pin ft_data[5]  B11      LVCMOS33
+pin ft_data[6]  B10      LVCMOS33
+pin ft_data[7]  B12      LVCMOS33
+pin ft_data[8]  B15      LVCMOS33
+pin ft_data[9]  B17      LVCMOS33
+pin ft_data[10] B16      LVCMOS33
+pin ft_data[11] B18      LVCMOS33
+pin ft_data[12] B21      LVCMOS33
+pin ft_data[13] B23      LVCMOS33
+pin ft_data[14] B22      LVCMOS33
+pin ft_data[15] B24      LVCMOS33
+pin ft_data[16] A39      LVCMOS33
+pin ft_data[17] A42      LVCMOS33
+pin ft_data[18] A40      LVCMOS33
+pin ft_data[19] A35      LVCMOS33
+pin ft_data[20] A33      LVCMOS33
+pin ft_data[21] A36      LVCMOS33
+pin ft_data[22] A34      LVCMOS33
+pin ft_data[23] A29      LVCMOS33
+pin ft_data[24] A27      LVCMOS33
+pin ft_data[25] A30      LVCMOS33
+pin ft_data[26] A28      LVCMOS33
+pin ft_data[27] A23      LVCMOS33
+pin ft_data[28] A21      LVCMOS33
+pin ft_data[29] A24      LVCMOS33
+pin ft_data[30] A22      LVCMOS33
+pin ft_data[31] A17      LVCMOS33

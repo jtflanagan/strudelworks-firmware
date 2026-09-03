@@ -357,7 +357,7 @@ built into `au_top`.
 
 - `snoop_top` and `master_top` carry the DDR3 pins through to `card_link`,
   which owns the controller; `build.tcl` adds `ddr3_wrapper.sv` and
-  `constr/ddr3.xdc` to both. `clk_gen` already made the clocks.
+  `constr/<board>/ddr3.xdc` to both. `clk_gen` already made the clocks.
 - `BIST_MODE` is 0 in the link builds. It was left at 1 in `au_top` "until
   the board is trusted"; 123 million error-free accesses later it is, and a
   memory test at every power-up would hold the link for seconds while the

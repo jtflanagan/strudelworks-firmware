@@ -289,7 +289,7 @@ module card_link #(
     inout  wire [31:0] ft_data,
     inout  wire [3:0]  ft_be,
 
-    // DDR3 (constr/ddr3.xdc) - names match au_top's, which match MIG's.
+    // DDR3 (constr/<board>/ddr3.xdc) - names match au_top's, which match MIG's.
     output wire [13:0] ddr3_addr,
     output wire [2:0]  ddr3_ba,
     output wire        ddr3_ras_n,

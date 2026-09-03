@@ -1,7 +1,9 @@
 # strudelworks
 
-Apple II accelerator / peripheral built on the **Alchitry Au** (Xilinx Artix-7
-XC7A35T) plus the **Alchitry Ft+** (FTDI FT601 USB 3.0), interfacing to the host
+Apple II accelerator / peripheral built on the **Alchitry Pt V2** (Xilinx Artix-7
+XC7A100T; the **Au V2**, XC7A35T, remains a build target - see
+[docs/PT_PORT.md](docs/PT_PORT.md)) plus the **Alchitry Ft+** (FTDI FT601 USB 3.0),
+interfacing to the host
 through the **6502/65816 CPU socket**.
 
 This is the low-risk sibling of [appletini-mega](../appletini-mega): same CPU-socket
@@ -26,7 +28,8 @@ sim/        iverilog testbenches. Latency measurement + a derived-timing dump.
 third_party/UberDDR3 and Klaus Dormann's 6502/65C02 functional tests, both
             fetched at pinned commits (GPL-3.0, not vendored).
 ref/        The MIG project + generated XDC from v5, kept as the pinout ground truth.
-tools/      gen_ddr3_xdc.py - regenerates and verifies constr/ddr3.xdc.
+tools/      boards.py, gen_pin_xdc.py, gen_ddr3_xdc.py - the board table and the
+            generators for constr/<board>/ (docs/PT_PORT.md).
 build/      Headless Vivado build (build.sh drives the Windows-side Vivado from WSL).
 hw/         The carrier board (milestone 4). Licensed separately - see hw/README.md.
 docs/       DERISK.md (what has to be proven), DDR3_USAGE.md (how to use the DRAM),
@@ -152,9 +155,14 @@ bind is safe to leave in place.
 
 ⚠ **Flash the board once before SRAM loading will work.** A JTAG SRAM load could
 not bring the DDR3 up from cold; it stalled in read DQS training while Vivado's
-load of the same bitstream succeeded. After one `openFPGALoader -b alchitry_au -f
-build/results/au_top.bit`, so that power-on boots a design which initialises the
-DRAM, SRAM loading works every time. See [docs/DERISK.md](docs/DERISK.md).
+load of the same bitstream succeeded. After one flash (`openFPGALoader -b
+alchitry_au -f build/results/au_top.bit` on the Au V2; `openFPGALoader -c ft2232
+--fpga-part xc7a100tfgg484 -f ...` on the Pt V2), so that power-on boots a design
+which initialises the DRAM, SRAM loading works every time. See
+[docs/DERISK.md](docs/DERISK.md).
+
+`build/load.sh` picks the board from the `.board` file `build/build.sh` writes
+beside each bitstream (`BOARD=au_v2` / `pt_v2` overrides it).
 
 `build/program.tcl` is a headless-Vivado fallback that programs without opening
 the project, so it does not take the lock that breaks `build/build.sh`.

@@ -111,7 +111,7 @@ is sold rather than after.
 
 `ref/` holds two artefacts copied out of the AppleTini v5 Vivado project: the MIG
 settings file, and the XDC MIG generated from it. They are the ground truth for
-the Au's DDR3 pinout and the cross-check that keeps `constr/ddr3.xdc` honest.
+the Au's DDR3 pinout and the cross-check that keeps `constr/<board>/ddr3.xdc` honest.
 
 Their status is genuinely grey. The *content* we depend on is pin assignments —
 facts about how the board is wired, and facts are not copyrightable. But the

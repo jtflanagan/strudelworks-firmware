@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-FileCopyrightText: 2026 jtflanagan
+# Apple bus + level-shifter pins, by CONNECTOR name, as the AppleTini v5.2
+# carrier wires them.  tools/gen_pin_xdc.py turns this into
+# constr/<board>/apple_bus_pins.xdc.  Format as in ft601.pins.
+#
+# B33..B45 land in the Pt V2's multi-voltage bank (bank 13, VCCO set by
+# VBSEL A/B on the control header; both floating = 3.3 V).  The v5.2 carrier
+# leaves both unconnected, so LVCMOS33 holds - see docs/PT_PORT.md.
+#
+# The false paths live in constr/apple_bus.xdc and apple_bus_master.xdc,
+# shared by every board.
+pin apple_data_pin[0]  A47      LVCMOS33
+pin apple_data_pin[1]  A51      LVCMOS33
+pin apple_data_pin[2]  A53      LVCMOS33
+pin apple_data_pin[3]  A57      LVCMOS33
+pin apple_data_pin[4]  A59      LVCMOS33
+pin apple_data_pin[5]  A63      LVCMOS33
+pin apple_data_pin[6]  A65      LVCMOS33
+pin apple_data_pin[7]  A69      LVCMOS33
+pin apple_addr_pin[0]  A46      LVCMOS33
+pin apple_addr_pin[1]  A48      LVCMOS33
+pin apple_addr_pin[2]  A52      LVCMOS33
+pin apple_addr_pin[3]  A54      LVCMOS33
+pin apple_addr_pin[4]  A58      LVCMOS33
+pin apple_addr_pin[5]  A60      LVCMOS33
+pin apple_addr_pin[6]  A64      LVCMOS33
+pin apple_addr_pin[7]  A66      LVCMOS33
+pin apple_addr_pin[8]  A72      LVCMOS33
+pin apple_addr_pin[9]  A76      LVCMOS33
+pin apple_addr_pin[10] A78      LVCMOS33
+pin apple_addr_pin[11] B27      LVCMOS33
+pin apple_addr_pin[12] B29      LVCMOS33
+pin apple_addr_pin[13] B33      LVCMOS33
+pin apple_addr_pin[14] B35      LVCMOS33
+pin apple_addr_pin[15] B39      LVCMOS33
+pin apple_rw_pin       B41      LVCMOS33
+pin apple_phi0_pin     A71      LVCMOS33
+pin apple_m2sel_pin    A75      LVCMOS33
+pin apple_m2b0_pin     A77      LVCMOS33
+pin apple_inh_pin      B30      LVCMOS33
+pin apple_res_pin      B34      LVCMOS33
+pin apple_irq_pin      B36      LVCMOS33
+pin apple_rdy_pin      B40      LVCMOS33
+pin apple_dma_pin      B42      LVCMOS33
+pin tini_oe_pin        B28      LVCMOS33
+pin tini_5v_pin        B45      LVCMOS33
+pin tini_addr_dir_pin  A70      LVCMOS33
+pin tini_data_dir_pin  A45      LVCMOS33

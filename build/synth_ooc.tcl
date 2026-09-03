@@ -25,7 +25,15 @@
 
 set root [file normalize [file join [file dirname [info script]] ..]]
 
-set part    xc7a35tftg256-2
+# Same board table as build/build.tcl (kept in agreement with tools/boards.py
+# by tools/gen_pin_xdc.py --check).  OOC numbers depend on the part: the same
+# speed grade on both boards, so the Fmax figures carry over, but the
+# utilisation denominators do not.
+set board pt_v2
+set board_part(au_v2) xc7a35tftg256-2
+set board_part(pt_v2) xc7a100tfgg484-2
+
+set part    ""
 set top     ""
 set srcs    {}
 set period  10.0
@@ -36,6 +44,8 @@ for {set i 0} {$i < $argc} {incr i} {
     switch -- [lindex $argv $i] {
         -top    { incr i; set top    [lindex $argv $i] }
         -src    { incr i; lappend srcs [lindex $argv $i] }
+        -board  -
+        --board { incr i; set board  [lindex $argv $i] }
         -part   { incr i; set part   [lindex $argv $i] }
         -period { incr i; set period [lindex $argv $i] }
         -effort { incr i; set effort [lindex $argv $i] }
@@ -48,6 +58,12 @@ if {$top eq "" || [llength $srcs] == 0} {
     puts "ERROR: need -top <module> and at least one -src <file>"
     exit 1
 }
+if {![info exists board_part($board)]} {
+    puts "ERROR: unknown board '$board'; one of: [lsort [array names board_part]]"
+    exit 1
+}
+if {$part eq ""} { set part $board_part($board) }
+puts "board: $board  part: $part"
 
 file mkdir $outdir
 
