@@ -219,6 +219,7 @@ module card_link #(
     // out, the sequencer's status and counters back, and `accel_on` for the
     // memory client's windows.  A watching top ties the inputs to 0.
     output wire [1:0]   accel_mode,
+    output wire         accel_swint_dis,
     output wire [15:0]  accel_target,
     output wire         accel_cnt_clr,
     input  wire         accel_on,
@@ -228,8 +229,12 @@ module card_link #(
     input  wire [31:0]  accel_cycles,
     input  wire [31:0]  accel_wait,
     input  wire [31:0]  accel_turbo,
+    input  wire [31:0]  accel_dline,
+    input  wire         accel_cen_v,
+    input  wire [2:0]   accel_cen_sel,
     // The merge's shed-at-source level, for the instruction front.
     output wire         ev_fast_room,
+    output wire         ev_fast_room_w,
     // The floating-bus simulator's seam (rtl/fb_sim.sv <-> wb_regfile,
     // docs/FLOATING_BUS.md): FB_CTRL's serve level and clear pulse and
     // FB_PEEK's address out, the mode, the counters and the peeked byte back.
@@ -780,7 +785,8 @@ module card_link #(
         .out_mark_free (mg_mark_free),
         .out_dummy     (mg_dummy),
         .overflows     (merge_overflows),
-        .fast_room     (ev_fast_room)
+        .fast_room     (ev_fast_room),
+        .fast_room_w   (ev_fast_room_w)
     );
 
     // The filter, always in the path: a wire in full mode, the keep rule
@@ -938,6 +944,7 @@ module card_link #(
         .mem_diverted      (mem_diverted),
         .mem_intc8rom      (mem_intc8rom),
         .accel_mode        (accel_mode),
+        .accel_swint_dis   (accel_swint_dis),
         .accel_target      (accel_target),
         .accel_cnt_clr     (accel_cnt_clr),
         .accel_stat        (accel_stat),
@@ -946,6 +953,9 @@ module card_link #(
         .accel_cycles      (accel_cycles),
         .accel_wait        (accel_wait),
         .accel_turbo       (accel_turbo),
+        .accel_dline       (accel_dline),
+        .accel_cen_v       (accel_cen_v),
+        .accel_cen_sel     (accel_cen_sel),
         .fb_serve          (fb_serve),
         .fb_cnt_clr        (fb_cnt_clr),
         .fb_peek_addr      (fb_peek_addr),

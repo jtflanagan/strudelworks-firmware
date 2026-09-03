@@ -135,13 +135,18 @@
 //   $CFFF, every write, every $C0xx    -> BUS
 //
 // INTC8ROM is the IIe's unreadable latch: set by any access to $C3xx while
-// INTCXROM and SLOTC3ROM are both clear, cleared by any access to $CFFF or by
-// RES'.  It decides whether $C800-$CFFF is the internal ROM's.  It is set at
+// SLOTC3ROM is clear - in EITHER state of INTCXROM (UTAIIe 5-28, AppleWin's
+// Memory.cpp: with INTCXROM set the latch is invisible until INTCXROM is
+// cleared again, and then $C800-$CFFF stays the internal ROM's without a
+// $C3xx access in between) - cleared by any access to $CFFF or by RES'.  It
+// decides whether $C800-$CFFF is the internal ROM's.  It is set at
 // op_present rather than op_commit, because a $C3xx fetch served from the
 // card has no data phase on the bus - and for one that does, present-versus-
 // commit only differs for the NEXT op, which cannot be presented before this
 // one's commit.  $CFFF is a bus op and clears it at commit like every other
-// switch.  MEM_STAT[13] reads it.
+// switch.  MEM_STAT[13] reads it.  The instruction front (rtl/iline.sv)
+// serves page $C3 only while the latch is SET: a turbo retire never reaches
+// this stream, so the access that sets it always rides the sequencer.
 //
 // The internal ROM not yet loaded classifies as BUS, so "ROM class" always
 // means "the card has the byte": rtl/page_cache.sv needs no further check.
@@ -167,7 +172,14 @@ module apple_mmu (
     // would answer is BUS class.
     input  wire        rom_ok,
 
-    // The classified op, one clock after op_present.
+    // The classified op, one clock after op_present - or a POSTED WRITE
+    // from the data front (rtl/dline.sv, rung 3), taken from pw_* on a
+    // clock the op path is idle: it arrives already stamped {aux, bank,
+    // folded off} under the map of its retire, and is copied into cl_*
+    // as an image write with cl_posted set.  Nothing is re-classified:
+    // the map cannot have moved since (every map-changing op waits for
+    // the front's pending to clear).  cl_wdata carries the write's byte
+    // for both kinds - the stream's op_wdata, or the posted entry's.
     output logic        cl_valid,
     output logic [1:0]  cl_cls,        // CLS_*
     output logic        cl_aux,        // reaches the auxiliary memory
@@ -175,6 +187,16 @@ module apple_mmu (
     output logic [15:0] cl_off,        // offset in a 64 KB bank, LC folded
     output logic        cl_rw,
     output logic        cl_wr_image,   // a write that lands in the image
+    output logic        cl_posted,     // a posted write draining, not an op
+    output logic [7:0]  cl_wdata,      // the write's byte
+    // The posted FIFO's head, and the page cache's leave to take it.
+    input  wire         pw_valid,
+    input  wire         pw_aux,
+    input  wire [7:0]   pw_bank,
+    input  wire [15:0]  pw_off,
+    input  wire [7:0]   pw_data,
+    input  wire         pw_ready,      // the page cache's pipeline is clear
+    output wire         pw_take,       // pulse: cl_* carries it next clock
     // The INTC8ROM latch, for MEM_STAT.
     output logic        intc8rom,
     // cl_off's combinational preview, valid with op_present: the banks'
@@ -212,6 +234,17 @@ module apple_mmu (
     output wire [1:0]  p_cls,
     output wire        p_aux,
     output wire [15:0] p_off,
+
+    // ...and the data front's (rtl/dline.sv): the same question for a DATA
+    // access at d_addr - rooted at dline's REGISTERED candidate address, so
+    // this cone runs through the serve cycle, never on d_pred's late cone.
+    // d_rw picks the bank side a write would take (rung 3 stamps posted
+    // writes through this same port); the wanted RamWorks bank is rw_bank.
+    input  wire [15:0] d_addr,
+    input  wire        d_rw,
+    output wire [1:0]  d_cls,
+    output wire        d_aux,
+    output wire [15:0] d_off,
     // One pulse whenever anything that feeds classification moved - a soft
     // switch, the language card, the bank register, INTC8ROM, a reset.  The
     // front's held lines die on it: their classification was captured when
@@ -312,7 +345,7 @@ module apple_mmu (
     wire acc_cfff = (op_addr == 16'hCFFF);
     always_ff @(posedge clk) begin
         if (rst || !res_sync)                                       intc8rom <= 1'b0;
-        else if (op_present && acc_c3xx && !intcxrom && !slotc3rom) intc8rom <= 1'b1;
+        else if (op_present && acc_c3xx && !slotc3rom)              intc8rom <= 1'b1;
         else if (op_commit && acc_cfff)                             intc8rom <= 1'b0;
     end
 
@@ -369,6 +402,20 @@ module apple_mmu (
     assign p_aux = (p_hi || p_zp) ? altzp : p_mid;
     assign p_off = (p_d && !lc_bank2) ? {4'hC, p_addr[11:0]} : p_addr;
 
+    // ---- the data front's query ---------------------------------------------------
+    wire d_zp_w    = (d_addr[15:9]  == 7'd0);
+    wire d_text_w  = (d_addr[15:10] == 6'b000001);
+    wire d_hires_w = (d_addr[15:13] == 3'b001);
+    wire d_d_w     = (d_addr[15:12] == 4'hD);
+    wire d_hi_w    = (d_addr[15:12] >= 4'hD);
+    wire d_mid_w   = (store80 && d_text_w)           ? page2 :
+                     (store80 && hires && d_hires_w) ? page2 :
+                     (d_rw ? ramrd : ramwrt);
+    wire [2:0] d_class = classify(d_addr, d_rw);
+    assign d_cls = d_class[2:1];
+    assign d_aux = (d_hi_w || d_zp_w) ? altzp : d_mid_w;
+    assign d_off = (d_d_w && !lc_bank2) ? {4'hC, d_addr[11:0]} : d_addr;
+
     // ---- the map's edge -----------------------------------------------------------
     // Everything classification reads, watched as one word; sw_state carries
     // the LC and every switch, and the bank register and INTC8ROM ride along.
@@ -415,6 +462,10 @@ module apple_mmu (
     wire       n_wr_image = n_class[0];
     wire       n_aux      = in_hi ? altzp : aux_sel;
 
+    // A posted write takes the classified stage only when no op is being
+    // presented: the op's is the older claim on the pipeline.
+    assign pw_take = pw_valid && pw_ready && !op_present && !rst;
+
     always_ff @(posedge clk) begin
         if (rst) begin
             cl_valid    <= 1'b0;
@@ -424,8 +475,10 @@ module apple_mmu (
             cl_off      <= 16'd0;
             cl_rw       <= 1'b1;
             cl_wr_image <= 1'b0;
+            cl_posted   <= 1'b0;
+            cl_wdata    <= 8'd0;
         end else begin
-            cl_valid <= op_present;
+            cl_valid <= op_present || pw_take;
             if (op_present) begin
                 cl_cls      <= n_cls;
                 cl_aux      <= n_aux;
@@ -433,6 +486,17 @@ module apple_mmu (
                 cl_off      <= pf_off;
                 cl_rw       <= op_rw;
                 cl_wr_image <= n_wr_image;
+                cl_posted   <= 1'b0;
+                cl_wdata    <= op_wdata;
+            end else if (pw_take) begin
+                cl_cls      <= CLS_RAM;      // the front posts RAM class only
+                cl_aux      <= pw_aux;
+                cl_bank     <= pw_bank;
+                cl_off      <= pw_off;
+                cl_rw       <= 1'b0;
+                cl_wr_image <= 1'b1;
+                cl_posted   <= 1'b1;
+                cl_wdata    <= pw_data;
             end
         end
     end

@@ -25,6 +25,15 @@
 //      is ~163 million cycles of sequential flow, branches, jumps, returns and
 //      interrupts entries.
 //
+//   4. DATA PREDICTION.  d_pred's mirror of the same bet, for the dline:
+//      sampled at an advancing edge with d_pred_v set, it must equal the
+//      address of the cycle that edge begins - and d_pred_rw its direction -
+//      whenever that cycle is a data cycle; and d_pred_v must never be set
+//      when the cycle turns out to be program-stream.  Coverage is COUNTED,
+//      not assumed: d_pred_v may sit out a next-cycle live-AGU address (the
+//      $5C NOP is the only one), and the report says how many data cycles
+//      that actually was.
+//
 // The classified views are checked as views (i_addr/d_addr/d_rw/d_dout against
 // the legacy pins) and the classification for sanity: an opcode fetch is I, a
 // write is D.
@@ -105,6 +114,9 @@ int main(int argc, char **argv) {
     unsigned last_fetch = 0xFFFFFFFF;
     unsigned pred = 0xFFFF;         // i_pred sampled at the last advancing edge
     bool pred_valid = false;        // false until the first advancing edge
+    unsigned dpred = 0xFFFF;        // d_pred at the last advancing edge
+    unsigned dprw = 1, dpv = 0;     // ... its direction and validity
+    unsigned long long d_covered = 0, d_uncovered = 0;
     unsigned burst_left = 0;
     bool new_cycle = true;          // the presented cycle began at the last
                                     // edge; false while a cancel retries it
@@ -149,6 +161,20 @@ int main(int argc, char **argv) {
             // at the edge that began it.
             if (is_i && pred_valid && addr != pred) { fail("i_pred missed", addr, pred); break; }
 
+            // The dline bet, both directions: a claimed data address is
+            // exact, and a claim never lands on the program stream.
+            if (pred_valid) {
+                if (!is_i && dpv) {
+                    if (addr != dpred) { fail("d_pred missed", addr, dpred); break; }
+                    if (rw != dprw)    { fail("d_pred_rw missed", rw, dprw); break; }
+                    d_covered++;
+                } else if (!is_i) {
+                    d_uncovered++;
+                } else if (dpv) {
+                    fail("d_pred_v on an I cycle", addr, dpred); break;
+                }
+            }
+
             if (syn) {
                 instrs++;
                 if (addr == last_fetch) {
@@ -157,6 +183,8 @@ int main(int argc, char **argv) {
                            addr == success ? "  is the success trap" : "",
                            cycles, clocks, cancels, instrs);
                     printf("I/D: %llu / %llu cycles\n", i_cycles, d_cycles);
+                    printf("D pred: %llu of %llu data cycles named a cycle early (%llu uncovered)\n",
+                           d_covered, d_covered + d_uncovered, d_uncovered);
                     printf("TRAP=%04x\n", addr);
                     rc = (addr == success) ? 0 : 1;
                     break;
@@ -195,7 +223,10 @@ int main(int argc, char **argv) {
 
         // i_pred is sampled only at an advancing edge, when din is true data -
         // the same discipline the icache will keep.
-        if (!cancel) { pred = dut->i_pred; pred_valid = true; }
+        if (!cancel) {
+            pred = dut->i_pred; pred_valid = true;
+            dpred = dut->d_pred; dpv = dut->d_pred_v; dprw = dut->d_pred_rw;
+        }
 
         dut->clk = 1; dut->eval();
         clocks++;

@@ -26,6 +26,18 @@
 // byte invalidates the LINES that hold it (the slots' and the CAM's snoops),
 // never the scan's conclusions.
 //
+// THE SPLIT POINTER.  The walk only ever reads within 16-byte lines, so the
+// pointer lives as {ptr_hi, ptr_lo} - line tag and offset - and the walk beat
+// does 4-bit arithmetic only: a carry out of ptr_lo means "the next line",
+// answered from state registered a beat ahead (ptr_hi_p1, and the cur_in*/
+// nxt_in* slot memberships) instead of live 16-bit adds and 12-bit tag
+// compares.  The shadows self-heal every beat from registers; the one
+// crossing a step can cause leaves ptr_lo <= 2 (max instruction length 3), so
+// the next carry-consuming event needs ptr_lo >= 13 and is >= 4 beats away -
+// the memberships are never consumed stale.  vtag/v churn (rotation, snoop
+// kills, invalidation) can leave a membership one beat stale: one garbage
+// byte walked, a derailed trail at worst - wasteful, never wrong.
+//
 // THE LOOP BIT.  A transfer found FROM one held line INTO the other is the
 // shape of a loop held whole in the pair.  iline uses it to suppress the
 // crossing's rotation, pinning the pair so the backward branch stays the
@@ -34,22 +46,28 @@
 // THE ANCHOR.  Every program-stream opcode fetch offers its address.  The
 // scanner takes it when it has nothing (idle, or its trail left the held
 // window) or when execution diverged from the trail - the pointer no longer
-// within a short reach ahead of the program counter.  A tight loop re-anchors
-// every iteration and rescans; the last-issued filter keeps that from
-// hammering the engine with wants it has already made.
+// within a short reach ahead of the program counter.  The divergence verdict
+// is a beat old (diverged_q - the 16-bit subtract runs register-to-register,
+// off the walk's cone), which costs one extra re-anchor beat per genuine
+// divergence and nothing else; the idle-restart term stays live.  A tight
+// loop re-anchors every iteration and rescans; the last-issued filter keeps
+// that from hammering the engine with wants it has already made.
 //////////////////////////////////////////////////////////////////////////////////
 module iscan (
     input  wire        clk,
     input  wire        rst,
     input  wire        enable,        // turbo serving: the front's lines are live
+    input  wire        intc8rom,      // iline's registered latch: page $C3 is a target while set
 
     // The anchor: a program-stream opcode fetch completing this clock.
     input  wire        anchor_v,
     input  wire [15:0] anchor_addr,
 
-    // The window: a byte of either held line, through iline's mux.
-    output wire [15:0] rd_addr,
-    input  wire        rd_held,
+    // The window: a byte of either held line, through iline's mux.  The
+    // scanner resolves WHICH line itself (its registered memberships), so the
+    // seam is just a slot bit and an offset; iline only muxes ldata.
+    output wire        rd_slot,
+    output wire [3:0]  rd_off,
     input  wire [7:0]  rd_byte,
 
     // The slots' tags: the loop bit and the already-held filter.
@@ -115,42 +133,68 @@ module iscan (
     // computes the target, runs the filters and raises the want from those
     // registers alone.  One extra beat per TRANSFER found, never per byte
     // walked, so the sequential walk still outruns the turbo core.
+    //
+    // The 16-bit relative add below is S_TGT's alone and register-fed.  If it
+    // ever tops the depth audit, the relief is the part's own: split the add
+    // byte-wise and take a fix-up beat only when it crosses a 256-byte page -
+    // the exact case a real taken branch spends an extra cycle on, so the
+    // scan cannot fall behind an event the core itself pays for.
     localparam [2:0] S_IDLE = 3'd0, S_OP = 3'd1, S_O1 = 3'd2, S_O2 = 3'd3,
                      S_TGT = 3'd4;
     logic [2:0]  st;
-    logic [15:0] ptr;
+    logic [11:0] ptr_hi;              // the walk line's tag (old ptr[15:4])
+    logic [3:0]  ptr_lo;              // the offset within it (old ptr[3:0])
+    logic [11:0] ptr_hi_p1;           // shadow: ptr_hi + 1, the next line
+    logic        cur_in0, cur_in1;    // slot n holds line ptr_hi
+    logic        nxt_in0, nxt_in1;    // slot n holds line ptr_hi_p1
+    logic        diverged_q;          // last beat's divergence verdict
     logic [2:0]  cls_q;               // the transfer being decoded across beats
     logic [7:0]  o1_q;                // relative offset, or the abs target's low
     logic [7:0]  o2_q;                // the absolute target's high byte
 
-    assign rd_addr = (st == S_O1) ? ptr + 16'd1 :
-                     (st == S_O2) ? ptr + 16'd2 : ptr;
+    // The window read: a 4-bit add, and the carry picks the next line's
+    // registered answers.  At most one crossing per step (3 < 16), so the
+    // 5-bit sum is always enough.
+    wire [1:0] rd_inc  = (st == S_O2) ? 2'd2 : (st == S_O1) ? 2'd1 : 2'd0;
+    wire [4:0] rd_sum  = {1'b0, ptr_lo} + {3'b0, rd_inc};
+    wire       rin0    = rd_sum[4] ? nxt_in0 : cur_in0;
+    wire       rin1    = rd_sum[4] ? nxt_in1 : cur_in1;
+    wire       rd_held = rin0 || rin1;
+    assign rd_slot = !rin0;           // slot-0 priority, as the old serve mux
+    assign rd_off  = rd_sum[3:0];
 
     wire [4:0] dec     = opdec(rd_byte);
     wire [2:0] dec_cls = dec[4:2];
     wire [1:0] dec_len = dec[1:0];
 
+    // The step adds: 4-bit, carry answered from the shadows.  S_O1's write is
+    // +2 (its read was +1): the fall-through advance, as before.
+    wire [4:0] step_sum = {1'b0, ptr_lo} + {3'b0, dec_len};
+    wire [4:0] plus2    = {1'b0, ptr_lo} + 5'd2;
+
     // The target, from registers only.  A relative's ptr already advanced to
     // the fall-through in S_O1, so the target is ptr + the signed offset; an
     // absolute's is a plain concatenation, no arithmetic at all.
-    wire [15:0] tgt     = (cls_q == C_ABS) ? {o2_q, o1_q}
-                                           : ptr + {{8{o1_q[7]}}, o1_q};
-    wire [11:0] tgt_tag = tgt[15:4];
+    wire [15:0] tgt        = (cls_q == C_ABS) ? {o2_q, o1_q}
+                                              : {ptr_hi, ptr_lo} + {{8{o1_q[7]}}, o1_q};
+    wire [11:0] tgt_tag    = tgt[15:4];
+    wire [11:0] tgt_tag_p1 = tgt_tag + 12'd1;
 
     wire tgt_held0 = v0 && (tgt_tag == vtag0);
     wire tgt_held1 = v1 && (tgt_tag == vtag1);
-    wire ptr_in0   = v0 && (ptr[15:4] == vtag0);
-    wire ptr_in1   = v1 && (ptr[15:4] == vtag1);
-    // Pages a prefetch must never touch: the engine would refuse them too,
-    // but the filter is a clock and an engine slot saved.
-    wire tgt_excl  = (tgt_tag[11:4] == 8'hC0) || (tgt_tag[11:4] == 8'hC3) ||
+    // Pages a prefetch must never touch: the engine would refuse them too
+    // (rtl/iline.sv `excl`, the correctness gate), but the filter is a
+    // clock and an engine slot saved.  Page $C3 only while INTC8ROM is
+    // clear - set, it is an internal-ROM page like any other.
+    wire tgt_excl  = (tgt_tag[11:4] == 8'hC0) ||
+                     (tgt_tag[11:4] == 8'hC3 && !intc8rom) ||
                      (tgt_tag == 12'hCFF);
 
     // The transfer's OWN line, captured when it is first decoded - the loop
     // bit must name the line the branch LIVES in, and by S_TGT a relative's
     // ptr has already moved to the fall-through, which for an opcode in a
-    // line's last two bytes is the NEXT line.  Registering it here also keeps
-    // the ptr-vs-tag compare out of the decision beat.
+    // line's last two bytes is the NEXT line.  The capture reads the
+    // registered memberships, so it costs the decision beat nothing.
     logic src0, src1;
 
     wire issuing = (st == S_TGT);
@@ -161,20 +205,33 @@ module iscan (
     logic        last_v;
     logic [11:0] last_tag;
 
-    // Execution's reach: the anchor restarts the trail unless the pointer is
-    // within 64 bytes ahead of it.
-    wire [15:0] adiff = ptr - anchor_addr;
-    wire diverged = (adiff[15:6] != 10'd0);
+    wire [11:0] anchor_hi_p1 = anchor_addr[15:4] + 12'd1;
 
     always_ff @(posedge clk) begin
         lb_v <= 1'b0;
         if (rst || !enable) begin
             st <= S_IDLE; sw_v <= 1'b0; last_v <= 1'b0;
-            ptr <= 16'd0; cls_q <= C_SEQ; o1_q <= 8'd0; o2_q <= 8'd0;
+            ptr_hi <= 12'd0; ptr_lo <= 4'd0; ptr_hi_p1 <= 12'd1;
+            cur_in0 <= 1'b0; cur_in1 <= 1'b0;
+            nxt_in0 <= 1'b0; nxt_in1 <= 1'b0;
+            diverged_q <= 1'b0;
+            cls_q <= C_SEQ; o1_q <= 8'd0; o2_q <= 8'd0;
             sw_tag <= 12'd0; last_tag <= 12'd0; lb_slot <= 1'b0;
             src0 <= 1'b0; src1 <= 1'b0;
         end else begin
             if (sw_taken) sw_v <= 1'b0;
+
+            // The shadows, first: every beat recomputes them from registers -
+            // 12-bit compares and the 16-bit divergence subtract, all OUT of
+            // the walk's cone.  This is the self-heal path for vtag/v churn
+            // and for the beat after a crossing; the writes below override
+            // (last assignment wins) wherever they know better.
+            ptr_hi_p1  <= ptr_hi + 12'd1;
+            cur_in0    <= v0 && (ptr_hi    == vtag0);
+            cur_in1    <= v1 && (ptr_hi    == vtag1);
+            nxt_in0    <= v0 && (ptr_hi_p1 == vtag0);
+            nxt_in1    <= v1 && (ptr_hi_p1 == vtag1);
+            diverged_q <= ((({ptr_hi, ptr_lo} - anchor_addr) & 16'hFFC0) != 16'd0);
 
             case (st)
                 S_IDLE: ;
@@ -182,11 +239,19 @@ module iscan (
                     if (!rd_held) begin
                         st <= S_IDLE; last_v <= 1'b0;
                     end else case (dec_cls)
-                        C_SEQ: ptr <= ptr + {14'd0, dec_len};
+                        C_SEQ: begin
+                            ptr_lo <= step_sum[3:0];
+                            if (step_sum[4]) begin
+                                ptr_hi    <= ptr_hi_p1;
+                                ptr_hi_p1 <= ptr_hi_p1 + 12'd1;
+                                cur_in0   <= nxt_in0;
+                                cur_in1   <= nxt_in1;
+                            end
+                        end
                         C_END: begin st <= S_IDLE; last_v <= 1'b0; end
                         default: begin
                             cls_q <= dec_cls; st <= S_O1;
-                            src0 <= ptr_in0; src1 <= ptr_in1;
+                            src0 <= cur_in0; src1 <= cur_in1;
                         end
                     endcase
                 end
@@ -200,9 +265,15 @@ module iscan (
                         // advance happens now so S_TGT's add is ptr + offset
                         // for BOTH the conditional (which continues here) and
                         // BRA (which loads the sum).
-                        o1_q <= rd_byte;
-                        ptr  <= ptr + 16'd2;
-                        st   <= S_TGT;
+                        o1_q   <= rd_byte;
+                        ptr_lo <= plus2[3:0];
+                        if (plus2[4]) begin
+                            ptr_hi    <= ptr_hi_p1;
+                            ptr_hi_p1 <= ptr_hi_p1 + 12'd1;
+                            cur_in0   <= nxt_in0;
+                            cur_in1   <= nxt_in1;
+                        end
+                        st <= S_TGT;
                     end
                 end
                 S_O2: begin
@@ -214,9 +285,18 @@ module iscan (
                 end
                 // The granted beat: registers in, want out.  No window read
                 // happens here, so rd_held has no say - the operand beats
-                // already vouched for the bytes.
+                // already vouched for the bytes.  A followed transfer loads
+                // the whole split-pointer set from register-fed values.
                 S_TGT: begin
-                    if (cls_q != C_REL) ptr <= tgt;   // BRA and JMP/JSR followed
+                    if (cls_q != C_REL) begin     // BRA and JMP/JSR followed
+                        ptr_hi    <= tgt_tag;
+                        ptr_lo    <= tgt[3:0];
+                        ptr_hi_p1 <= tgt_tag_p1;
+                        cur_in0   <= tgt_held0;
+                        cur_in1   <= tgt_held1;
+                        nxt_in0   <= v0 && (tgt_tag_p1 == vtag0);
+                        nxt_in1   <= v1 && (tgt_tag_p1 == vtag1);
+                    end
                     st <= S_OP;
                 end
                 default: st <= S_IDLE;
@@ -234,9 +314,18 @@ module iscan (
                 end
             end
 
-            // The anchor, last: a restart beats the step above.
-            if (anchor_v && (st == S_IDLE || diverged)) begin
-                ptr <= anchor_addr;
+            // The anchor, last: a restart beats the step above.  The whole
+            // split set loads in-beat - anchor to S_OP is back-to-back, so
+            // the memberships must be exact for the very next read; the
+            // compares mirror iline's own hit cones off the same pc.
+            if (anchor_v && (st == S_IDLE || diverged_q)) begin
+                ptr_hi    <= anchor_addr[15:4];
+                ptr_lo    <= anchor_addr[3:0];
+                ptr_hi_p1 <= anchor_hi_p1;
+                cur_in0   <= v0 && (anchor_addr[15:4] == vtag0);
+                cur_in1   <= v1 && (anchor_addr[15:4] == vtag1);
+                nxt_in0   <= v0 && (anchor_hi_p1 == vtag0);
+                nxt_in1   <= v1 && (anchor_hi_p1 == vtag1);
                 st  <= S_OP;
             end
         end

@@ -145,6 +145,20 @@ module cpu65c02 #(
     output wire  [15:0] d_addr,     // = addr; the D view, meaningful when !cyc_is_i
     output wire         d_rw,       // = rw
     output wire  [7:0]  d_dout,     // = dout
+    // The data-stream prediction, i_pred's mirror (see d_pred_mux below): the
+    // address and direction of the NEXT cycle, valid when that cycle is a
+    // data cycle - driven a cycle ahead of it, which is what lets a data
+    // front have the byte already read when the cycle begins.  Not a guess:
+    // the next microinstruction's addr_sel is in the ROM's combinational read
+    // this cycle, and every data source it can pick is a register whose
+    // next-state value this cycle already computes.  It inherits din's timing
+    // (the ROM read descends from din at a sync), so it settles when din does
+    // and no earlier - the consumer REGISTERS it, always.  d_pred_v covers
+    // every data cycle but a next-cycle live-AGU address, which after the
+    // carry-gift work only the $5C NOP drives.
+    output wire  [15:0] d_pred,
+    output wire         d_pred_v,   // next cycle is a data cycle and d_pred names it
+    output wire         d_pred_rw,  // ... and will be a read (1) or a write (0)
     output wire  [7:0]  p_flags     // {N,V,1,0,D,I,Z,C} REGISTER-DIRECT: the
                                     // flags a branch will test, final from the
                                     // edge that begins its opcode fetch (the
@@ -164,9 +178,9 @@ module cpu65c02 #(
 
     // ---- microcode ROM ------------------------------------------------------
     // {opcode, ucycle} addressing, so there is no decode between the opcode
-    // arriving and the ROM being read.  2048 x 50 bits infers block RAM; the
-    // address register in front of it IS the pipeline stage that keeps decode
-    // out of the datapath's critical path.
+    // arriving and the ROM being read.  2048 x 51 bits; the `uc` register on
+    // the ROM's output IS the pipeline stage - the word for cycle N is fetched
+    // combinationally during N-1 and the datapath runs from the flop.
     localparam int UA_W = 8 + UC_SLOTS_LOG2;
 
     // Distributed, not block: the microcode is a CONSTANT ($readmemh at
@@ -175,11 +189,17 @@ module cpu65c02 #(
     // version's 3 RAMB36, the two tiles the page cache's banks needed back
     // on the XC7A35T (docs/PAGE_CACHE.md), and no SLICEM spent.  The fetch
     // stays a registered read; the one-clock contract is unchanged.
+    //
+    // The ROM is read TWICE, once per next-address arm (the dual-arm fetch at
+    // uaddr_taken/uaddr_alt below): both addresses are register-direct, so
+    // both cones start at the clock edge, and the late microcode-branch
+    // condition picks between two fetched WORDS - one LUT level - instead of
+    // steering the address into the whole tree.  The second cone's LUTs are
+    // the price of that late select.
     (* rom_style = "distributed" *) logic [UC_W-1:0] ucode [0:(1 << UA_W) - 1];
     initial $readmemh(UCODE_FILE, ucode);
 
     logic [UC_W-1:0] uc;            // the microinstruction driving THIS cycle
-    logic [UA_W-1:0] uaddr;         // combinational: the one driving the next
 
     // Field extraction.  Positions come from the generated header, so these
     // cannot drift from the assembler.
@@ -527,17 +547,43 @@ module cpu65c02 #(
     wire int_pc_hold = take_int |
                        (~in_rst & ~int_brk & (ir == 8'h00) & (ucyc == 3'd0));
 
+    // ---- microinstruction fetch: dual-arm read, late select -----------------
+    // Both candidate addresses are EARLY (registers and uc fields; din only
+    // under f_sync, never the critical path).  The one LATE term is cond_met -
+    // agu_co through the AGU carry chain - and it selects between two
+    // already-fetched words, one LUT level, instead of steering the address
+    // into the whole ROM tree.
+    wire [UA_W-1:0] uaddr_taken = {ir, ucyc + 3'd1};    // the fall-through arm
+
+    logic [UA_W-1:0] uaddr_alt;                         // every other arm
     always_comb begin
         if (f_sync) begin
             // The opcode is on din right now.  An interrupt hijacks the slot by
             // running BRK's microcode against the byte that was just discarded.
-            uaddr = take_int ? {8'h00, 3'd0} : {din, 3'd0};
+            // i_din, not din: a SYNC cycle is an instruction-stream cycle by
+            // definition (cyc_is_i = asel_is_pc), so the byte is i_din's and
+            // the mux is transparent - but written through `din` the data
+            // front's served byte (d_din) reached the microcode ROM address
+            // and, through it, the D-side prediction: a false path static
+            // timing charged at zero margin (docs/DLINE.md, the serve-byte
+            // cone).  Sourcing the opcode from the I byte cuts it.
+            uaddr_alt = take_int ? {8'h00, 3'd0} : {i_din, 3'd0};
         end else if (wai_wake) begin
-            uaddr = {ir, 3'd2};                     // WAI's exit slot
+            uaddr_alt = {ir, 3'd2};                     // WAI's exit slot
         end else begin
-            uaddr = {ir, ucyc_next};
+            uaddr_alt = {ir, f_alt};
         end
     end
+
+    wire [UC_W-1:0] uc_taken = ucode[uaddr_taken];
+    wire [UC_W-1:0] uc_alt   = ucode[uaddr_alt];
+
+    // f_sync wins over wai_wake wins over the condition - the old priority
+    // mux exactly: take_seq is 0 whenever an overriding arm fires, so uc_alt
+    // carries them regardless of what cond_met says.  ucyc_next above derives
+    // from the same cond_met, so sequencer and fetch cannot disagree.
+    wire take_seq = ~f_sync & ~wai_wake & cond_met;
+    wire [UC_W-1:0] uc_next = take_seq ? uc_taken : uc_alt;
 
     // ---- register file ------------------------------------------------------
     // `ld_if` gates the loads on the condition, which is how BBR/BBS branches
@@ -573,6 +619,82 @@ module cpu65c02 #(
     end
     assign i_pred = next_pc;
 
+    // ---- next data address --------------------------------------------------
+    // d_pred: the address of the NEXT cycle when that cycle is a data cycle -
+    // the D-side mirror of next_pc/i_pred, and like it, not a guess.  The
+    // microinstruction that will RUN next cycle is uc_next, the very word the
+    // uc register is about to load; its addr_sel
+    // names next cycle's source, and every data source is either a register
+    // this cycle's loads settle (adl/adh/s - the next-state values below are
+    // the same expressions the register file's edge applies), this cycle's own
+    // bus address (LAST re-reads it), or this cycle's carry-out (FIXUP,
+    // consumed next cycle as the saved carry).  A next-cycle live-AGU address
+    // is the one thing not named a cycle early; after the carry-gift work only
+    // the $5C NOP drives one, and d_pred_v is simply low there.
+    //
+    // Nothing here is new logic on any existing path: the fetch is the one
+    // uc already takes, and the next-state muxes parallel the register file.
+    // Like i_pred this settles with din; a consumer registers it and has the
+    // full data cycle to act on the registered copy (rtl/iline.sv's contract).
+    wire [3:0]      n_asel   = uc_next[UCP_ADDR_SEL +: 4];
+    wire            n_rw_bit = uc_next[UCP_RW];
+
+    // The registers as this cycle's edge will leave them - the same arms,
+    // gated the same way, as the clocked loads below.
+    logic [7:0] adl_n, adh_n, s_n;
+    always_comb begin
+        adl_n = adl; adh_n = adh; s_n = s;
+        if (ld_en) begin
+            case (f_ld_adl)
+                UC_LD_ADL_AGU: adl_n = agu_lo;
+                UC_LD_ADL_DIN: adl_n = din;
+                UC_LD_ADL_MD:  adl_n = md;
+                default: ;
+            endcase
+            case (f_ld_adh)
+                UC_LD_ADH_AGU: adh_n = agu_hi;
+                UC_LD_ADH_DIN: adh_n = din;
+                default: ;
+            endcase
+            case (f_ld_s)
+                UC_LD_S_INC: s_n = s + 8'd1;
+                UC_LD_S_DEC: s_n = s - 8'd1;
+                default: ;
+            endcase
+            if (f_wb == UC_WB_S) s_n = alu_res;   // TXS: S is the ALU's too
+        end
+    end
+
+    // Reset holds rw high next cycle as this one (`rw = f_rw | in_rst`); the
+    // vector fetch's PC load is what ends in_rst, on this cycle's edge.
+    wire in_rst_n = in_rst && !(cyc_en && f_ld_pc == UC_LD_PC_JMP);
+
+    logic [15:0] d_pred_mux;
+    logic        d_pred_known;
+    always_comb begin
+        d_pred_known = 1'b1;
+        case (n_asel)
+            UC_ADDR_ZP:    d_pred_mux = {8'h00, adl_n};
+            UC_ADDR_AD:    d_pred_mux = {adh_n, adl_n};
+            UC_ADDR_SP:    d_pred_mux = {8'h01, s_n};
+            UC_ADDR_VEC:   d_pred_mux = {8'hFF, vec_lo};
+            UC_ADDR_VEC1:  d_pred_mux = {8'hFF, vec_lo + 8'd1};
+            UC_ADDR_LAST:  d_pred_mux = addr_mux;
+            UC_ADDR_FIXUP: d_pred_mux = agu_co ? addr_mux : {adh_n, adl_n};
+            default: begin
+                // AGU: a live add next cycle ($5C only).  PC-sourced cycles
+                // are the I stream and d_pred_v is gated off below either way.
+                d_pred_mux   = 16'h0000;
+                d_pred_known = (n_asel != UC_ADDR_AGU);
+            end
+        endcase
+    end
+
+    assign d_pred    = d_pred_mux;
+    assign d_pred_v  = d_pred_known &&
+                       (n_asel != UC_ADDR_PC) && (n_asel != UC_ADDR_AGU);
+    assign d_pred_rw = n_rw_bit | in_rst_n;
+
     always_ff @(posedge clk) begin
         if (rst) begin
             a <= 8'h00; x <= 8'h00; y <= 8'h00; s <= 8'h00;
@@ -588,22 +710,24 @@ module cpu65c02 #(
             // reads, forced by `rw = f_rw | in_rst`), then the vector - so it is
             // the same microcode, not a special case.
             //
-            // 3'd7, not 3'd0, and the reason is the ROM's pipeline: `uaddr` is
-            // {ir, ucyc_NEXT}, so the slot fetched during a cycle is the one
-            // that RUNS in the following one.  The cycle out of reset runs the
-            // zeroed `uc` below, and what it fetches is slot ucyc+1.  Entering
-            // at 7 therefore makes that zeroed cycle stand in for a slot of its
-            // own and resumes at slot 0; entering at 1 - as this did - skipped
-            // slot 1 entirely, which cost reset a stack cycle and left S one
-            // byte high.  Both branches of ucyc_next give 0 from 7, so the
-            // entry does not depend on how a zeroed condition field evaluates.
+            // 3'd7, not 3'd0, and the reason is the ROM's pipeline: the fetch
+            // addresses hold ucyc_NEXT, so the slot fetched during a cycle is
+            // the one that RUNS in the following one.  The cycle out of reset
+            // runs the zeroed `uc` below, and what it fetches is slot ucyc+1.
+            // Entering at 7 therefore makes that zeroed cycle stand in for a
+            // slot of its own and resumes at slot 0; entering at 1 - as this
+            // did - skipped slot 1 entirely, which cost reset a stack cycle
+            // and left S one byte high.  From 7 the dual-arm fetch reads
+            // address 0 on BOTH arms (uaddr_taken wraps 7+1 to 0 and the
+            // zeroed f_alt is 0), so the entry does not depend on how a
+            // zeroed condition field evaluates.
             //
             // The count that results is the part's: two reads at PC (this cycle
             // and slot 0), three stack, two vector - seven.
             ucyc  <= 3'd7;
             uc    <= '0;
         end else if (cyc_en) begin
-            uc   <= ucode[uaddr];
+            uc   <= uc_next;
             ucyc <= f_sync ? 3'd0 : (wai_wake ? 3'd2 : ucyc_next);
 
             // The PC loads FROM next_pc - the same mux i_pred exports - so a
@@ -625,8 +749,8 @@ module cpu65c02 #(
                     int_nmi  <= nmi_pend;
                     nmi_pend <= 1'b0;
                 end else begin
-                    ir      <= din;
-                    int_brk <= (din == 8'h00);
+                    ir      <= i_din;               // the I byte: see uaddr_alt
+                    int_brk <= (i_din == 8'h00);
                     int_nmi <= 1'b0;
                 end
             end

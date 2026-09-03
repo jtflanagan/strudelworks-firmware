@@ -177,7 +177,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     ) u_write (
         .clk (clk), .rst (rst),
         .phi0_sync (phi0_sync), .data_sync (data_sync),
-        .master_active (master_active),
+        .master_active (master_active), .park_kbd (1'b0),
         // Without the sequencer: the bus owns every cycle, the core is always on offer.
         .bus_owns (1'b1), .core_valid (1'b1),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),
@@ -254,6 +254,9 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .rom_ok (1'b1), .intc8rom (), .q_rw (1'b1), .q_cls (),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (),
+        .cl_posted (), .cl_wdata (),
+        .pw_valid (1'b0), .pw_aux (1'b0), .pw_bank (8'd0), .pw_off (16'd0), .pw_data (8'd0),
+        .pw_ready (1'b0), .pw_take (),
         .sw_state (sw_state), .vid_sw (vid_sw), .rw_bank (),
         .q_addr (16'd0), .q_divert (),
         .p_addr (16'd0), .p_cls (), .p_aux (), .p_off (), .map_changed ()

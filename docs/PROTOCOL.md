@@ -130,12 +130,21 @@ protocol.
 | `0x8000_0080` | FB_LAST2 | RO | `{addr[7:0] of $C0xx, scanner address[15:0], mode[7:0]}` of the last mismatch |
 | `0x8000_0084` | FB_OTHER | RO | `[15:0]` mismatches on screen-hole cycles, `[31:16]` on 80-column cycles — counted apart, see FLOATING_BUS.md |
 | `0x8000_0088` | FB_PEEK | RW bits 14:0 | a byte of the side copy: `[14]` 0 = text (`[10:0]` from $0400), 1 = hi-res (`[13:0]` from $2000); `[23:16]` the byte |
-| `0x8000_008C` | ACCEL_CTRL | RW bits 1:0, 23:8, 24; W1 bit 31 | the accelerated core (ACCELERATION.md): `[1:0]` mode - 0 off (the core locked to the bus, the old machine to the clock), 1 reads served on the card and every write on the bus, 2 reads and writes on the card; `[23:8]` the target, ops per bus cycle, 8.8 fixed point, 0 = unlimited; W1 clear the ACCEL_* counters. What is slow is a matter of class alone: every `$Cxxx` access a slot answers rides the bus in every mode. Levels, safe under a running machine - except that leaving mode 2 for mode 0 or serving off runs the machine's stale RAM; the host refuses it |
+| `0x8000_008C` | ACCEL_CTRL | RW bits 1:0, 23:8, 28; W1 bit 31 | the accelerated core (ACCELERATION.md): `[1:0]` mode - 0 off (the core locked to the bus, the old machine to the clock), 1 reads served on the card and every write on the bus, 2 reads and writes on the card; `[23:8]` the target, ops per bus cycle, 8.8 fixed point, 0 = unlimited; `[28]` swint_dis - 1 keeps the keyboard on the bus and the dummy parked at `$0000` (ACCELERATION.md "The keyboard in the dummies"), a level; W1 clear the ACCEL_* counters. What is slow is a matter of class alone: every `$Cxxx` access a slot answers rides the bus in every mode. Levels, safe under a running machine - except that leaving mode 2 for mode 0 or serving off runs the machine's stale RAM; the host refuses it |
 | `0x8000_0090` | ACCEL_STAT | RO | `[0]` accelerating; `[1]` the core held by the governor; `[3]` the bus owns the op stream; `[7:4]` the sequencer's state; `[15:8]` event-merge overflows (must be 0); `[23:16]` fast ops decided twice; `[24]` the core's reset sequence has not yet reached `$FFFD` on the bus (every op rides the bus until it has - the IIe's MMU infers a reset from that sequence, not from RES′) |
 | `0x8000_0094` | ACCEL_FAST | RO | ops served on the card |
 | `0x8000_0098` | ACCEL_BUS | RO | the core's ops that rode a bus cycle; (FAST + BUS) / CYCLES is the ratio achieved |
 | `0x8000_009C` | ACCEL_CYCLES | RO | bus cycles while accelerating |
 | `0x8000_00A0` | ACCEL_WAIT | RO | clocks the core spent waiting to merge |
+| `0x8000_00A4` | ACCEL_TURBO | RO | the instruction front's one-clock ops (ISTREAM.md) |
+| `0x8000_00A8` | ACCEL_DLINE | RO | the data front's one-clock ops, reads and writes (DLINE.md). Every one of these paid the governor like any other op, so the ratio achieved is (TURBO + DLINE + FAST + BUS) / CYCLES - a display that leaves DLINE out reads a governed 8x as ~5x |
+| `0x8000_00AC` | ACCEL_FAST_I | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): instruction-stream fetches of any class - the front missed or declined. The seven sum to ACCEL_FAST |
+| `0x8000_00B0` | ACCEL_FAST_DRAM | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of RAM class - the data front missed. The seven sum to ACCEL_FAST |
+| `0x8000_00B4` | ACCEL_FAST_DLC | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of the language card. The seven sum to ACCEL_FAST |
+| `0x8000_00B8` | ACCEL_FAST_DROM | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of the system ROM ($D000-$FFFF). The seven sum to ACCEL_FAST |
+| `0x8000_00BC` | ACCEL_FAST_DCX | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of the internal ROM in $C100-$CFFF. The seven sum to ACCEL_FAST |
+| `0x8000_00C0` | ACCEL_FAST_WR | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): writes. The seven sum to ACCEL_FAST |
+| `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

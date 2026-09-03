@@ -79,9 +79,19 @@ retrain after it succeeds.
 ## What is never served here
 
 - BUS class ($C000-$C0FF, every slot's pages, the internal ROM unloaded).
-- Page $C3 and the $CFF0 line: any access there moves INTC8ROM, which the
-  MMU shadow learns at `op_present` on the unified stream - and a turbo
-  retire never reaches that stream.  These ride the sequencer, by rule.
+- The $CFF0 line, always; and page $C3 while the INTC8ROM latch is CLEAR:
+  an access there sets the latch, which the MMU shadow learns at
+  `op_present` on the unified stream - and a turbo retire never reaches
+  that stream - so the access that sets it rides the sequencer, by rule.
+  Once set (any $C3xx access with SLOTC3ROM clear, in either state of
+  INTCXROM), the page is an internal-ROM page like any other and is
+  served; the clear ($CFFF, a bus op; or reset) pulses `map_changed`,
+  which empties the front, and `kill_now` refuses a $C3 serve on the very
+  clock the registered latch reads clear, so the RTS after the 80-column
+  firmware's own `LDX $CFFF` ($C372) re-sets the latch through the
+  sequencer.  The scanner's own pre-filter (rtl/iscan.sv `tgt_excl`) says
+  the same; the engine's `excl` is the correctness gate.  This is what
+  puts AUXMOVE's copy loop ($C393-$C3AB) at one clock (docs/CXXX.md).
 - Any clock `turbo_ok` withholds: an op on the bus or in the cache
   pipeline (its trailing commit may flip switches under a held line's
   feet), an override engaging (the boot hold catching a SYNC cancels the

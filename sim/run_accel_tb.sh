@@ -32,11 +32,11 @@ for high in "${highs[@]}"; do
             -Paccel_tb.UCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
             -Paccel_tb.PROG="\"$work/accel.hex\"" \
             -Paccel_tb.PHI0_HIGH="$high" \
-            "$root/sim/accel_tb.sv" "$root/rtl/cpu65c02.sv" "$root/rtl/accel_seq.sv" "$root/rtl/iline.sv" "$root/rtl/iscan.sv" \
+            "$root/sim/accel_tb.sv" "$root/rtl/cpu65c02.sv" "$root/rtl/accel_seq.sv" "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv" \
             "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv" \
             "$root/rtl/boot_hold.sv" \
             "$root/rtl/apple_mmu.sv" "$root/rtl/apple_rom.sv" "$root/rtl/page_cache.sv" \
-            "$root/rtl/bank_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" \
+            "$root/rtl/bank_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" "$root/rtl/event_merge.sv" \
             > "$work/iverilog.log" 2>&1; then
         grep -vE "sorry: constant selects|cannot be synthesized" "$work/iverilog.log" >&2
         echo "compile failed" >&2

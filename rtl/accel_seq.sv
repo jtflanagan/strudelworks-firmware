@@ -118,6 +118,7 @@ module accel_seq (
     input  wire        cpu_rw,
     input  wire [7:0]  cpu_dout,
     input  wire        cpu_sync,
+    input  wire        cyc_is_i,       // the core's cycle is an instruction-stream fetch (the census)
     output wire        cyc_en,
     output wire [7:0]  cpu_din,
 
@@ -149,7 +150,27 @@ module accel_seq (
     output wire        turbo_en,       // steady: accelerating, serving, past the reset sequence
     output wire        turbo_ok,       // this clock: a turbo retire may happen
     input  wire        turbo_commit,   // one op retired on this edge (charge and count)
+    input  wire        d_commit,       // the data front's retire: charged the same,
+                                       // counted by the front itself (rtl/dline.sv)
     input  wire        turbo_claim,    // the front is clocks from answering: hold the dispatcher
+    output wire        turbo_wr,       // steady: turbo_en AND mode 2 - the data front may retire writes
+    input  wire        d_pending,      // the data front's posted writes are not all in the banks
+
+    // The internalized keyboard (docs/ACCELERATION.md, "The keyboard in the
+    // dummies"): a program's read of $C000-$C00F - BUS class, the IOU's -
+    // served from rtl/kbd_inject.sv's parked-dummy latch instead of riding
+    // a bus cycle.  It rides S_FAST like any fast op (the cache decides it
+    // with nothing served) and retires with a SYNTHETIC COMMIT on the
+    // unified stream, the one deliberate bend of "fast ops have a present
+    // and no commit", so every commit-gated consumer sees it as a bus op
+    // would have been.  swi_on is the closed-regime level (mode 2, serving,
+    // the chicken bit clear, the core not held); swi_ok says the latch
+    // holds a byte.  Decoded from the live address into dq_swi beside
+    // dq_cls - a 12-bit compare, nothing like the classifier's depth.
+    input  wire        swi_on,
+    input  wire        swi_ok,
+    input  wire [7:0]  swi_byte,        // the latch's answer (kbd_inject.int_byte)
+    output logic       swi_commit,      // one clock: an internalized read retired
 
     // Time.
     input  wire        bus_tick,
@@ -178,6 +199,16 @@ module accel_seq (
     output wire [3:0]   state_o,
     output wire         reset_seq_o,    // the reset sequence is still on the bus
     output logic [31:0] fast_ops,
+    // THE CENSUS of the dispatcher's fast ops (ACCEL_FAST_*): what the two
+    // fronts did NOT serve, so the next rung knows where to aim.  Seven
+    // exclusive buckets that sum to fast_ops: instruction-stream fetches
+    // of any class (the front missed or declined), data reads by class -
+    // RAM (the data front missed), LC, ROM at $D000+, the internal ROM in
+    // $Cxxx - writes, and the internalized keyboard.  Decided here, one
+    // clock behind the retirement; counted in rtl/fast_census.sv beside
+    // the register file, a clock region away from the fronts.
+    output logic        cen_v,          // one clock: a dispatcher op retired...
+    output logic [2:0]  cen_sel,        // ...into this bucket (rtl/fast_census.sv)
     output logic [31:0] turbo_ops,
     output logic [31:0] bus_ops,
     output logic [31:0] cycles,
@@ -186,7 +217,9 @@ module accel_seq (
 );
 
     localparam [1:0] CLS_BUS = 2'd0;
-    localparam [1:0] MODE_OFF = 2'd0, MODE_READS = 2'd1;
+    localparam [1:0] CLS_RAM = 2'd1;   // the census's buckets, apple_mmu's encoding
+    localparam [1:0] CLS_LC  = 2'd2;
+    localparam [1:0] MODE_OFF = 2'd0, MODE_READS = 2'd1, MODE_RW = 2'd2;
 
     typedef enum logic [2:0] {
         S_RST,      // the core is in reset, or this card is not the CPU
@@ -249,14 +282,16 @@ module accel_seq (
     //
     // dq_* are the registered copies the decision is made from; `settled`
     // says they describe the op the core has up now (see the header).
-    logic [1:0] dq_cls;
-    logic       dq_rw, dq_ovr, settled;
+    logic [1:0] dq_cls, fast_cls_q;
+    logic       dq_rw, dq_ovr, dq_swi, swi_q, fast_i_q, settled;
+    wire q_swi = swi_on && swi_ok && cpu_rw && (cpu_addr[15:4] == 12'hC00);
     always_ff @(posedge clk) begin
         dq_cls <= q_cls;
         dq_rw  <= cpu_rw;
         dq_ovr <= ovr_en;
+        dq_swi <= q_swi;
     end
-    wire needs_bus = off || (dq_cls == CLS_BUS) || (!dq_rw && mode == MODE_READS) ||
+    wire needs_bus = off || (dq_cls == CLS_BUS && !dq_swi) || (!dq_rw && mode == MODE_READS) ||
                      !mem_serve || reset_seq;
     // The core's read of $FFFD, over: the machine's MMU has seen its reset.
     wire vector_done = cyc_done && op_rw && !op_ovr && !op_dummy && (op_addr == 16'hFFFD);
@@ -273,28 +308,53 @@ module accel_seq (
     // cache pipeline, no override engaging (the boot hold catching a SYNC
     // cancels the retire through exactly this term), credit to pay, and never
     // on a fast op's event clock, so the two never collide at the merge.
-    logic turbo_en_q;
+    logic turbo_en_q, turbo_wr_q;
     always_ff @(posedge clk) begin
-        if (rst) turbo_en_q <= 1'b0;
-        else     turbo_en_q <= accel_on && mem_serve && !reset_seq;
+        if (rst) begin
+            turbo_en_q <= 1'b0;
+            turbo_wr_q <= 1'b0;
+        end else begin
+            turbo_en_q <= accel_on && mem_serve && !reset_seq;
+            turbo_wr_q <= accel_on && mem_serve && !reset_seq && (mode == MODE_RW);
+        end
     end
     assign turbo_en = turbo_en_q;
+    assign turbo_wr = turbo_wr_q;
     assign turbo_ok = turbo_en_q && (st == S_DECIDE) && !ovr_en && !op_inflight &&
                       !busy && mem_image_ready && can_pay && !fev_valid;
 
     // What the dispatcher will charge for on this edge, for the governor's
     // one writer: exactly the two dispatching branches below.
-    wire disp_pay = (st == S_DECIDE) && settled && !dq_ovr && !turbo_claim &&
+    wire disp_pay = (st == S_DECIDE) && settled && !d_pending && !dq_ovr && !turbo_claim &&
                     can_pay && (needs_bus || fast_ok) && !off &&
                     !cpu_rst && master_active;
 
-    // A fast op's decision: the byte is there, or it is not.
-    wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en);
-    wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en;
+    // A fast op's decision: the byte is there, or it is not.  An
+    // internalized keyboard read's byte is swi_byte, ready by construction -
+    // the cache's decided is only the pacing.
+    wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en || swi_q);
+    wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en && !swi_q;
+
+    // ---- the census, one clock behind the retirement -------------------------
+    // The bucket is decided on the retire clock into four flops; the
+    // counters (rtl/fast_census.sv) count from those a clock later still.
+    // fast_hit's fanout (it is the cyc_en and the din mux's select) gains
+    // one load, not 224 counter enables, and no adder lives here.
+    wire fast_retire = (st == S_FAST) && fast_hit;
+    always_ff @(posedge clk) begin
+        cen_v   <= fast_retire && !rst;
+        cen_sel <= swi_q                      ? 3'd6 :
+                   !fast_rw                   ? 3'd5 :
+                   fast_i_q                   ? 3'd0 :
+                   (fast_cls_q == CLS_RAM)    ? 3'd1 :
+                   (fast_cls_q == CLS_LC)     ? 3'd2 :
+                   (u_addr[15:12] == 4'hC)    ? 3'd4 : 3'd3;
+    end
 
     // ---- the core's side ----------------------------------------------------
     assign cyc_en     = off_q ? cyc_done : (st == S_BUS) ? cyc_done : fast_hit;
-    assign cpu_din    = (off_q || st == S_BUS) ? drv_din : mem_sub_data;
+    assign cpu_din    = (off_q || st == S_BUS) ? drv_din
+                      : swi_q ? swi_byte : mem_sub_data;
     assign bus_owns   = off_q || bus_owns_q;
     assign core_valid = off_q || core_valid_q;
 
@@ -305,18 +365,22 @@ module accel_seq (
     // Bus ops and overrides come from the driver a clock after its present;
     // fast ops from the core on the clock they are dispatched.
     wire  bus_op_present = op_present && !op_dummy;
-    assign u_commit = op_commit && !op_dummy;
+    // The synthetic commit rides beside the driver's: u_addr/u_rw/u_wdata
+    // still hold the retired op (the next present is at least two clocks
+    // out), so every commit-gated consumer reads the right op.
+    assign u_commit = (op_commit && !op_dummy) || swi_commit;
 
 
     always_ff @(posedge clk) begin
         u_present <= 1'b0;
         fev_valid <= 1'b0;
+        swi_commit <= (st == S_FAST) && fast_hit && swi_q && !cpu_rst;
 
         // The registers above describe the op the core has up once the
         // core has sat still for a clock: never on the clock of arrival -
         // and a turbo retire moves the core without this module's cyc_en,
         // so it resets the settling the same way.
-        settled <= (st == S_DECIDE) && !cyc_en && !turbo_commit;
+        settled <= (st == S_DECIDE) && !cyc_en && !turbo_commit && !d_commit;
 
         // From reset until $FFFD has ridden the bus (see the header).  Cleared
         // in mode 0 too, where it could not be observed but must not stick.
@@ -327,7 +391,7 @@ module accel_seq (
             st <= S_RST;
             reset_seq <= 1'b1;
             settled <= 1'b0;
-            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1;
+            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0;
             credit <= 20'd0; grant_q <= 1'b0; spent_q <= 1'b0;
             u_addr <= 16'd0; u_rw <= 1'b1; u_wdata <= 8'd0;
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
@@ -361,11 +425,11 @@ module accel_seq (
             // The token: consumption (and only consumption) takes it away;
             // the pool re-arms it when it covers a credit net of the debit
             // still in flight.  The verdict lands on two one-bit D inputs.
-            spent_q <= (disp_pay || turbo_commit) && !unlimited;
+            spent_q <= (disp_pay || turbo_commit || d_commit) && !unlimited;
             if (cpu_rst || !master_active || off || unlimited) begin
                 grant_q <= 1'b0;
                 spent_q <= 1'b0;
-            end else if (disp_pay || turbo_commit) begin
+            end else if (disp_pay || turbo_commit || d_commit) begin
                 grant_q <= 1'b0;
             end else if (!grant_q && credit >= (spent_q ? 20'd512 : 20'd256)) begin
                 grant_q <= 1'b1;
@@ -390,7 +454,16 @@ module accel_seq (
                     end
 
                     S_DECIDE: if (settled) begin
-                        if (dq_ovr) begin
+                        // THE POSTED WRITES FIRST (rtl/dline.sv, rung 3).
+                        // Nothing leaves this state while one is short of
+                        // the banks: a dispatched read of a line the front
+                        // does not hold would read the pre-write byte; a
+                        // map-changing bus op would classify what follows
+                        // under a map the posted stamp was not; a hold's
+                        // DMA would land under the write it should be
+                        // over.  Bounded by the drain - a few clocks.
+                        if (d_pending) begin
+                        end else if (dq_ovr) begin
                             st <= S_HELD;
                             bus_owns_q   <= 1'b1;
                             core_valid_q <= 1'b0;
@@ -408,6 +481,9 @@ module accel_seq (
                             bus_owns_q   <= 1'b0;
                             core_valid_q <= 1'b0;
                             fast_rw      <= cpu_rw;
+                            swi_q        <= dq_swi;
+                            fast_cls_q   <= dq_cls;
+                            fast_i_q     <= cyc_is_i;
                             // The op, onto the stream.
                             u_present <= 1'b1;
                             u_addr    <= cpu_addr;
@@ -426,7 +502,8 @@ module accel_seq (
                             fev_valid <= 1'b1;
                             fev_addr  <= u_addr;
                             fev_rw    <= u_rw;
-                            fev_data  <= u_rw ? mem_sub_data : u_wdata;
+                            fev_data  <= u_rw ? (swi_q ? swi_byte : mem_sub_data)
+                                              : u_wdata;
                             fev_sync  <= u_sync;
                         end else if (fast_miss) begin
                             // Decide it again.
@@ -446,7 +523,7 @@ module accel_seq (
                     end
 
                     S_HELD: begin
-                        if (!ovr_en && !op_inflight && !busy) st <= S_DECIDE;
+                        if (!ovr_en && !op_inflight && !busy && !d_pending) st <= S_DECIDE;
                     end
 
                     default: st <= S_RST;

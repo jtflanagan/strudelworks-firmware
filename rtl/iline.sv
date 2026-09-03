@@ -37,10 +37,14 @@
 // WHAT IS NEVER SERVED HERE, by rule:
 //   * anything the classifier calls BUS - so all of $C000-$C0FF, every
 //     slot's pages, and the internal ROM before it has loaded;
-//   * page $C3 and the $CFF0 line: an access there moves the IIe's INTC8ROM
-//     latch, which the MMU shadow learns from the unified op stream - a
-//     turbo retire never reaches that stream, so these ride the sequencer
-//     (rtl/apple_mmu.sv, "INTC8ROM");
+//   * the $CFF0 line, always, and page $C3 while the IIe's INTC8ROM latch
+//     is CLEAR: an access there moves the latch, which the MMU shadow
+//     learns from the unified op stream - a turbo retire never reaches
+//     that stream, so the access that sets it rides the sequencer
+//     (rtl/apple_mmu.sv, "INTC8ROM").  Once set, a $C3xx access changes
+//     nothing on the card or the machine and the page is served like any
+//     internal-ROM page; the clear ($CFFF, reset) pulses map_changed,
+//     which empties the front, and the exclusion resumes;
 //   * any cycle while an op is on the bus, an override is engaging, the
 //     reset sequence is riding the pins, or the sequencer lacks credit -
 //     all folded into turbo_ok (rtl/accel_seq.sv).
@@ -130,6 +134,7 @@ module iline (
     input  wire [15:0] p_off,
     input  wire [7:0]  rw_bank,
     input  wire        map_changed,
+    input  wire        intc8rom,      // apple_mmu's latch: page $C3 is servable while set
 
     // The page cache's line port (rtl/page_cache.sv).
     output wire         il_req,
@@ -146,10 +151,20 @@ module iline (
     input  wire [31:0] r2_data,
     input  wire        r2_busy,       // load traffic: ROM lines and fills die
 
-    // The write snoop: the MMU's classified op (P1).
+    // The write snoop: the MMU's classified op (P1)...
     input  wire        cl_valid,
     input  wire        cl_rw,
     input  wire        cl_wr_image,
+    // ...and the data front's POSTED write (rtl/dline.sv, rung 3), the
+    // clock after it retired: its stamped identity, register-rooted in the
+    // front.  The store into the very next opcode is one clock from its
+    // fetch, so this port cannot wait for the write to come round through
+    // the classified stream at its drain (where it snoops again, harmlessly:
+    // fills are held off while the write is in flight).
+    input  wire        ws_valid,
+    input  wire        ws_aux,
+    input  wire [7:0]  ws_bank,
+    input  wire [15:0] ws_off,
     input  wire        cl_aux,
     input  wire [7:0]  cl_bank,
     input  wire [15:0] cl_off,
@@ -353,6 +368,25 @@ module iline (
     wire tgt_here  = tgt_v && cyc_is_i && cpu_rw && (pc_addr == tgt_q);
     wire tgt_serve = tgt_here && tgt_lhit_q && !(lhit_q && (exp_q == pc_addr));
 
+    // ---- the INTC8ROM latch, registered once -------------------------------
+    // Pages a retire must never eat while the latch could still move: page
+    // $C3 until the latch is set (the first access rides the sequencer and
+    // sets it at op_present; map_changed pulses the clock after, before any
+    // $C3 line can even be wanted), and the $CFFx line always ($CFFF is the
+    // clear itself).  A clear pulses map_changed too, which kills every
+    // line and the CAM; kill_now below also refuses a $C3 serve on the
+    // clock the registered latch reads clear, so the RTS that follows the
+    // 80-column firmware's own `LDX $CFFF` ($C372) rides the sequencer and
+    // re-sets the latch whatever the driver's data/cyc_en spacing.  ONE
+    // register stage here (a second would still be safe - a want relaunched
+    // by f_restart re-evaluates at F_IDLE two clocks after the pulse - a
+    // third would not).
+    logic intc8rom_q;
+    always_ff @(posedge clk) intc8rom_q <= rst ? 1'b0 : intc8rom;
+    function automatic logic excl(input [11:0] tag);
+        excl = (tag[11:4] == 8'hC3 && !intc8rom_q) || (tag == 12'hCFF);
+    endfunction
+
     // A taken branch to a non-resident line asks the engine early (the
     // want travels while the branch's own dummies run); the engine filters
     // residency and class exactly as it does the scanner's wants.
@@ -365,8 +399,7 @@ module iline (
         end else begin
             if (ew_taken) ew_v <= 1'b0;
             if (resolving && res_taken &&
-                !(res_tgt[15:8] == 8'hC0) && !(res_tgt[15:8] == 8'hC3) &&
-                !(res_tgt[15:4] == 12'hCFF)) begin
+                !(res_tgt[15:8] == 8'hC0) && !excl(res_tgt[15:4])) begin
                 ew_v   <= 1'b1;
                 ew_tag <= res_tgt[15:4];
             end
@@ -431,30 +464,45 @@ module iline (
 
     // The snoop, combinational: an image write's folded identity against a
     // held line - and the same-clock race with a serve is a late cancel.
+    // Two sources, each its own compare set (a mux in front of the
+    // compares would sit in kill_now's cone; an OR behind them is free):
+    // the classified stream's write, and the data front's posted write.
     wire        snp = cl_valid && !cl_rw && cl_wr_image;
-    wire snp_kill0 = snp && v[0] && !t_rom[0] && (t_aux[0] == cl_aux) &&
-                     (!cl_aux || t_bank[0] == cl_bank) && (t_poff[0] == cl_off[15:4]);
-    wire snp_kill1 = snp && v[1] && !t_rom[1] && (t_aux[1] == cl_aux) &&
-                     (!cl_aux || t_bank[1] == cl_bank) && (t_poff[1] == cl_off[15:4]);
+    wire snp_kill0 = (snp && v[0] && !t_rom[0] && (t_aux[0] == cl_aux) &&
+                      (!cl_aux || t_bank[0] == cl_bank) && (t_poff[0] == cl_off[15:4])) ||
+                     (ws_valid && v[0] && !t_rom[0] && (t_aux[0] == ws_aux) &&
+                      (!ws_aux || t_bank[0] == ws_bank) && (t_poff[0] == ws_off[15:4]));
+    wire snp_kill1 = (snp && v[1] && !t_rom[1] && (t_aux[1] == cl_aux) &&
+                      (!cl_aux || t_bank[1] == cl_bank) && (t_poff[1] == cl_off[15:4])) ||
+                     (ws_valid && v[1] && !t_rom[1] && (t_aux[1] == ws_aux) &&
+                      (!ws_aux || t_bank[1] == ws_bank) && (t_poff[1] == ws_off[15:4]));
 
     // ...and against every CAM entry, the same terms: a retained line is a
     // held line for coherence purposes, however long it sits.
     wire [CAMN-1:0] cam_snp_kill;
     genvar gk;
     generate for (gk = 0; gk < CAMN; gk = gk + 1) begin : g_camsnp
-        assign cam_snp_kill[gk] = snp && cam_v[gk] && !cam_rom[gk] &&
-                                  (cam_aux[gk] == cl_aux) &&
-                                  (!cl_aux || cam_bank[gk] == cl_bank) &&
-                                  (cam_poff[gk] == cl_off[15:4]);
+        assign cam_snp_kill[gk] = (snp && cam_v[gk] && !cam_rom[gk] &&
+                                   (cam_aux[gk] == cl_aux) &&
+                                   (!cl_aux || cam_bank[gk] == cl_bank) &&
+                                   (cam_poff[gk] == cl_off[15:4])) ||
+                                  (ws_valid && cam_v[gk] && !cam_rom[gk] &&
+                                   (cam_aux[gk] == ws_aux) &&
+                                   (!ws_aux || cam_bank[gk] == ws_bank) &&
+                                   (cam_poff[gk] == ws_off[15:4]));
     end endgenerate
 
     // The scanner's seams (rtl/iscan.sv, instantiated below).
     wire        sw_v;
     wire [11:0] sw_tag;
     wire        lb_v, lb_slot;
-    wire [15:0] sc_addr;
+    wire        sc_slot;
+    wire [3:0]  sc_off;
 
     wire kill_now = map_changed || inval || !serve ||
+                    // The INTC8ROM latch read clear under a $C3 fetch: the
+                    // serve is refused before map_changed's kill lands.
+                    (pc_addr[15:8] == 8'hC3 && !intc8rom_q) ||
                     (hslot ? snp_kill1 : snp_kill0) ||
                     ((hslot ? t_rom[1] : t_rom[0]) && r2_busy) ||
                     // ...and a retained copy of THIS fetch's line dying on
@@ -493,11 +541,6 @@ module iline (
     logic [127:0] f_buf;
     wire f_active = (fst != F_IDLE);
 
-    // Pages a retire must never eat (the INTC8ROM latch's food).
-    function automatic logic excl(input [11:0] tag);
-        excl = (tag[11:4] == 8'hC3) || (tag == 12'hCFF);
-    endfunction
-
     // The engine's pick, and the classifier's answer for it.  The demand
     // preference compares against the REGISTERED miss tag, not the live
     // pc_addr: the AGU cone has no business in the fill launch's enables.
@@ -532,9 +575,14 @@ module iline (
             if (cam_m[k]) cam_idx = 3'(k);
     end
 
-    // The snoop against the fill in flight.
-    wire snp_fill = snp && f_active && !f_rom && (f_aux == cl_aux) &&
-                    (!cl_aux || f_bank == cl_bank) && (f_poff == cl_off[15:4]);
+    // The snoop against the fill in flight, both sources.  A posted
+    // write's grant-clock race is exactly this: a fill granted on the
+    // write's retire clock read the banks before the write could reach
+    // them, and the posted snoop a clock later restarts it.
+    wire snp_fill = (snp && f_active && !f_rom && (f_aux == cl_aux) &&
+                     (!cl_aux || f_bank == cl_bank) && (f_poff == cl_off[15:4])) ||
+                    (ws_valid && f_active && !f_rom && (f_aux == ws_aux) &&
+                     (!ws_aux || f_bank == ws_bank) && (f_poff == ws_off[15:4]));
     // Everything that restarts or kills a fill.  A restart keeps the want:
     // the relaunch re-classifies and re-reads.
     wire f_restart = f_active && (map_changed || inval || snp_fill ||
@@ -669,22 +717,22 @@ module iline (
     // ---- the branch scanner (rtl/iscan.sv) ----------------------------------
     // Reads the held lines a byte at a time through its own mux - the serve
     // path's registers are untouched - and anchors on every completed
-    // program-stream opcode fetch, turbo or slow.
-    wire        sc0 = v[0] && (sc_addr[15:4] == vtag[0]);
-    wire        sc1 = v[1] && (sc_addr[15:4] == vtag[1]);
-    wire        sc_held = sc0 || sc1;
-    wire [7:0]  sc_byte = sc0 ? ldata[0][8 * sc_addr[3:0] +: 8]
-                              : ldata[1][8 * sc_addr[3:0] +: 8];
+    // program-stream opcode fetch, turbo or slow.  The scanner resolves which
+    // slot holds its line from its own registered memberships, so the seam is
+    // a slot bit and an offset and this mux is all that remains here.
+    wire [7:0]  sc_byte = sc_slot ? ldata[1][8 * sc_off +: 8]
+                                  : ldata[0][8 * sc_off +: 8];
     wire        anchor_v = !cpu_rst && cyc_is_i && cpu_rw && cpu_sync &&
                            (retire || accel_cyc_en);
     iscan u_scan (
         .clk         (clk),
         .rst         (rst),
         .enable      (turbo_en && serve && !cpu_rst),
+        .intc8rom    (intc8rom_q),
         .anchor_v    (anchor_v),
         .anchor_addr (pc_addr),
-        .rd_addr     (sc_addr),
-        .rd_held     (sc_held),
+        .rd_slot     (sc_slot),
+        .rd_off      (sc_off),
         .rd_byte     (sc_byte),
         .v0          (v[0]),
         .v1          (v[1]),

@@ -140,7 +140,9 @@ if {$snoop || $master} {
         add_files -norecurse [list \
             [file join $root rtl apple_bus_write.sv] \
             [file join $root rtl accel_seq.sv] \
+            [file join $root rtl fast_census.sv] \
             [file join $root rtl iline.sv] \
+            [file join $root rtl dline.sv] \
             [file join $root rtl iscan.sv] \
             [file join $root rtl boot_hold.sv] \
             [file join $root rtl kbd_inject.sv] \

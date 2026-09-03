@@ -186,6 +186,7 @@ module wb_regfile #(
     // counters back.  A watching top ties the inputs to 0 and leaves the
     // outputs unconnected.
     output logic [1:0]     accel_mode,
+    output logic           accel_swint_dis, // [28]: no internalized keyboard, dummies at $0000
     output logic [15:0]    accel_target,
     output logic           accel_cnt_clr,   // pulses
     input  wire [31:0]     accel_stat,
@@ -194,6 +195,9 @@ module wb_regfile #(
     input  wire [31:0]     accel_cycles,
     input  wire [31:0]     accel_wait,
     input  wire [31:0]     accel_turbo,   // the front's one-clock ops (rtl/iline.sv)
+    input  wire [31:0]     accel_dline,   // the data front's one-clock ops, reads and writes (rtl/dline.sv)
+    input  wire            accel_cen_v,   // the census (rtl/fast_census.sv, below): a retired dispatcher op...
+    input  wire [2:0]      accel_cen_sel, // ...and its bucket
 
     // The floating-bus simulator (rtl/fb_sim.sv, docs/FLOATING_BUS.md):
     // FB_CTRL's serve level and its clear pulse, FB_PEEK's address; the mode
@@ -284,6 +288,14 @@ module wb_regfile #(
     localparam [13:0] R_ACCEL_CYCLES = 'd39; // 0x8000_009C, RO
     localparam [13:0] R_ACCEL_WAIT = 'd40;  // 0x8000_00A0, RO
     localparam [13:0] R_ACCEL_TURBO = 'd41; // 0x8000_00A4, RO
+    localparam [13:0] R_ACCEL_DLINE = 'd42; // 0x8000_00A8, RO
+    localparam [13:0] R_ACCEL_FAST_I = 'd43; // 0x8000_00AC, RO
+    localparam [13:0] R_ACCEL_FAST_DRAM = 'd44; // 0x8000_00B0, RO
+    localparam [13:0] R_ACCEL_FAST_DLC = 'd45; // 0x8000_00B4, RO
+    localparam [13:0] R_ACCEL_FAST_DROM = 'd46; // 0x8000_00B8, RO
+    localparam [13:0] R_ACCEL_FAST_DCX = 'd47; // 0x8000_00BC, RO
+    localparam [13:0] R_ACCEL_FAST_WR = 'd48; // 0x8000_00C0, RO
+    localparam [13:0] R_ACCEL_FAST_KBD = 'd49; // 0x8000_00C4, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -712,16 +724,31 @@ module wb_regfile #(
             accel_mode    <= 2'd0;
             accel_target  <= 16'd0;
             accel_cnt_clr <= 1'b0;
+            accel_swint_dis <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
                 accel_mode    <= wb_dat_w[1:0];
                 accel_target  <= wb_dat_w[23:8];
+                accel_swint_dis <= wb_dat_w[28];
             end
             accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
         end
     end
 
-    wire [31:0] accel_ctrl_rd = {8'd0, accel_target, 6'd0, accel_mode};
+    //   [28]     swint_dis  RW   1 = the keyboard is not internalized and the
+    //                           dummy parks at $0000: every $C00x read rides
+    //                           the bus, as before the closed regime
+    // The fast-op census counts here, beside the registers it is read through.
+    wire [31:0] accel_fast_i, accel_fast_dram, accel_fast_dlc, accel_fast_drom,
+                accel_fast_dcx, accel_fast_wr, accel_fast_kbd;
+    fast_census u_census (
+        .clk (clk), .rst (rst), .clr (accel_cnt_clr),
+        .v (accel_cen_v), .sel (accel_cen_sel),
+        .fast_i (accel_fast_i), .fast_dram (accel_fast_dram), .fast_dlc (accel_fast_dlc),
+        .fast_drom (accel_fast_drom), .fast_dcx (accel_fast_dcx), .fast_wr (accel_fast_wr),
+        .fast_kbd (accel_fast_kbd)
+    );
+    wire [31:0] accel_ctrl_rd = {3'd0, accel_swint_dis, 4'd0, accel_target, 6'd0, accel_mode};
 
     // ---- FB_CTRL ------------------------------------------------------------
     //
@@ -1000,6 +1027,14 @@ module wb_regfile #(
                         R_ACCEL_CYCLES: wb_dat_r <= accel_cycles;
                         R_ACCEL_WAIT: wb_dat_r <= accel_wait;
                         R_ACCEL_TURBO: wb_dat_r <= accel_turbo;
+                        R_ACCEL_DLINE: wb_dat_r <= accel_dline;
+                        R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
+                        R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
+                        R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;
+                        R_ACCEL_FAST_DROM: wb_dat_r <= accel_fast_drom;
+                        R_ACCEL_FAST_DCX: wb_dat_r <= accel_fast_dcx;
+                        R_ACCEL_FAST_WR: wb_dat_r <= accel_fast_wr;
+                        R_ACCEL_FAST_KBD: wb_dat_r <= accel_fast_kbd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end

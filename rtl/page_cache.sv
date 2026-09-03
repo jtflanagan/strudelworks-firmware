@@ -84,6 +84,20 @@ module page_cache (
     input  wire [15:0] cl_off,
     input  wire        cl_rw,
     input  wire        cl_wr_image,
+    // A POSTED WRITE draining (rtl/dline.sv, rung 3): the classified stage
+    // carries the data front's stamped write instead of an op.  It rides
+    // the ordinary write path below - P2 decision, P3 bank write, the aux
+    // miss engine when its page is not resident - but it is NOT an op:
+    // `busy` ignores it (the sequencer's turbo retires go on around it),
+    // `decided` never pulses for it, and it is taken only when the whole
+    // pipeline is clear (pw_ready), so it never shares a stage with an op
+    // or another posted write.
+    input  wire        cl_posted,
+    // The front's pending: a posted write not yet in the banks.  No line
+    // fill is granted meanwhile - the fill-port P+2 law generalized to the
+    // FIFO's depth (docs/DLINE.md, rung 3).
+    input  wire        pw_pending,
+    output wire        pw_ready,
     input  wire [15:0] pf_off,
 
     // The op itself, from apple_bus_write.
@@ -189,10 +203,33 @@ module page_cache (
     logic [127:0] fb_row;
     logic [3:0]   fb_lo_q;
 
+    // A write reaches the banks at P3 (mw_en/aw_en, which block il_ack
+    // below); its classification is at P2 (cl_valid) and the front snoops
+    // and restarts an IN-FLIGHT fill there.  But P3-minus-one - the write
+    // classified, not yet in the banks, the snoop pulse already gone - is a
+    // hole: a fill that reaches its read on THAT clock takes the pre-write
+    // byte and nothing restarts it, so self-modifying code fetches stale
+    // (the Moon Patrol icache corruption, found in a hardware trace).  Hold
+    // il_ack off that clock when the write in it is the fill's own physical
+    // line; the fill waits the write out and reads it whole.  Registered so
+    // only a same-line compare, not the classify cone, reaches il_ack.
+    logic        wr_blk_v, wr_blk_aux;
+    logic [7:0]  wr_blk_bank;
+    logic [11:0] wr_blk_off;
+    always_ff @(posedge clk) begin
+        wr_blk_v    <= !rst && cl_valid && cl_wr_image && !cl_rw;
+        wr_blk_aux  <= cl_aux;
+        wr_blk_bank <= cl_bank;
+        wr_blk_off  <= cl_off[15:4];
+    end
+    wire wr_block = wr_blk_v && (wr_blk_aux == il_aux) &&
+                    (!il_aux || wr_blk_bank == il_bank) && (wr_blk_off == il_line);
+
     // The front's grant: port A free of the op path this clock.  Aux asks
     // one more thing - the engine idle (the tags are its while it runs) and
     // the wanted bank resident.
-    assign il_ack = il_req && !op_present && !mw_en && !aw_en;
+    assign il_ack = il_req && !op_present && !mw_en && !aw_en && !wr_block &&
+                    !pw_pending;
     assign il_ok  = il_ack && (!il_aux ||
                     ((state == E_IDLE) && vld[il_line[11:4]] &&
                      tag_bank[il_line[11:4]] == il_bank));
@@ -248,7 +285,7 @@ module page_cache (
 
     // ---- the op, staged --------------------------------------------------------
     // P1: the classified op and the tag it indexes.
-    logic        g2;
+    logic        g2, s_posted;
     logic [1:0]  s_cls;
     logic        s_aux, s_rw, s_wr_image, s_machine;
     logic [7:0]  s_bank, s_tbank, s_wdata;
@@ -258,6 +295,7 @@ module page_cache (
     always_ff @(posedge clk) begin
         g2 <= cl_valid && !rst;
         if (cl_valid) begin
+            s_posted   <= cl_posted;
             s_cls      <= cl_cls;
             s_aux      <= cl_aux;
             s_bank     <= cl_bank;
@@ -287,7 +325,15 @@ module page_cache (
     // The op is in flight from its present to its decision, and the engine's
     // transaction extends that; rtl/accel_seq.sv starts a fast op only when
     // this is low.
-    assign busy = op_present || cl_valid || g2 || !eng_idle;
+    assign busy = op_present || (cl_valid && !cl_posted) || (g2 && !s_posted) ||
+                  !eng_idle;
+
+    // The posted drain's leave: nothing in any stage, nothing landing on
+    // port A, the engine idle (the tags are its while it runs).  One
+    // posted write in the pipeline at a time - a second cannot enter until
+    // the first has left P3, which keeps the aux decision's tag read and
+    // the engine start serial, exactly as ops are.
+    assign pw_ready = !op_present && !cl_valid && !g2 && eng_idle && !mw_en && !aw_en;
 
     // A read miss that starts the engine is the one decision that defers: its
     // outcome is the critical beat's serve.  Everything else - hit, claim,
@@ -367,6 +413,19 @@ module page_cache (
     logic [7:0] cmp_byte;
     logic [7:0] data_q;
 
+    // The books, for the bench (hierarchy-visible): posted writes drained,
+    // and those whose aux page was not resident and raised the engine.
+    logic [31:0] cnt_posted, cnt_posted_miss;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            cnt_posted <= 32'd0; cnt_posted_miss <= 32'd0;
+        end else begin
+            if (g2 && s_posted) cnt_posted <= cnt_posted + 32'd1;
+            if (dec_write && s_posted && s_aux && !aux_hit && !d_claim && !dec_aux_blocked)
+                cnt_posted_miss <= cnt_posted_miss + 32'd1;
+        end
+    end
+
     always_ff @(posedge clk) begin
         // Defaults: single-cycle strobes.
         mw_en  <= 1'b0;
@@ -374,7 +433,7 @@ module page_cache (
         data_q <= data_sync;
         // Decided on this edge: P2 unless a read miss is raising the engine,
         // or the miss's critical beat.
-        decided <= (g2 && !eng_read_start) ||
+        decided <= (g2 && !s_posted && !eng_read_start) ||
                    (state == E_FILL && pr_valid && resp_n == 5'd0 && e_rw);
 
         if (rst) begin
