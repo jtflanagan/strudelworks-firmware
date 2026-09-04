@@ -236,5 +236,10 @@ registers. And the hardware above.
 - **The 13-sector ROM**, and DOS 3.2's `D5 AA B5`.
 - **A neighbour prefetch** (the host filling T+-1 into spare buffers) and
   **DDR3 staging** - the two upgrades, if `fill_max` and `late` say so.
+  Under acceleration `late` said so (27 on a 45-second loader at ~90x),
+  and the answer there is not a faster fill but the core waiting for it:
+  `stall_o` holds the accelerated core while the selected drive's buffer
+  is stale (docs/VIRTUAL_TIME.md, "The floppy holds the core"); at the
+  bus's pace nothing changes.
 - **The latch hold extended by zero bits** (AppleWin's GH#662): 6&2
   nibbles always start with a 1, so it never applies to these images.

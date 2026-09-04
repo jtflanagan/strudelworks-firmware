@@ -118,5 +118,24 @@ the same reads; only their position source changed.
   then sits on its vapor-lock fill: the floppy reported 27 LATE TRACK
   FILLS against 0 at 8x - at that speed the RWTS's 37 ms wait is 0.4 ms of
   real time, under the host's fill - so the load is suspect, not the beam.
-  The next step is the floppy's: stall the accelerated core while a fill
-  is pending (docs/FLOPPY.md).
+  So the floppy now holds the core (below).
+
+## The floppy holds the core (2026-09-03)
+
+At ninety times speed the drive's virtual time - the nibble clock ticks on
+core cycles - outruns the host's track fills: the RWTS's 37 ms head wait
+is 0.4 ms of real time, the fill takes up to 0.5 ms, and the machine reads
+the noise the stale buffer serves.  So while the selected drive is turning
+with a disk in it and the buffer is not its track yet, `rtl/floppy_card.sv`
+raises `stall_o`, and `rtl/accel_seq.sv` treats it as one more NOT-READY
+condition on the core's next op - beside the memory's image-not-ready and
+invalidating - in the fast-op readiness, the dispatch and the fronts'
+turbo gate.  A credit the governor has already granted simply waits; the
+governor itself is not consulted and keeps issuing on real time, as it
+should.  No tick passes while the core waits, so in the program's virtual
+time the fill is instantaneous: the demo's cycle counts see nothing.
+
+This is confined to the accelerated regimes by construction: in mode 0 the
+driver runs the core from the real bus's cycles and this term is not on
+that path, so a 1x physical cycle - the timing a physical drive depends
+on - can never be stretched by it.

@@ -184,6 +184,16 @@ module accel_seq (
     output logic       fast_tick,
     output logic       fev_quiet,       // with fev_valid: a quiet internalized read
 
+    // A card whose data is not ready - the floppy with a track fill pending
+    // (rtl/floppy_card.sv stall_o) - holds the core's NEXT op, exactly as
+    // the memory's not-ready conditions do: a credit already granted waits,
+    // the governor is not consulted, and no tick passes, so the program's
+    // virtual time stands still.  Registered here, off the decision cone.
+    // Accelerated regimes only by construction: mode 0 runs the core from
+    // the driver's cycles (cyc_done) and never reads this - a 1x physical
+    // cycle cannot be stretched by it.
+    input  wire        stall,
+
     // Time.
     input  wire        bus_tick,
 
@@ -307,7 +317,9 @@ module accel_seq (
                      !mem_serve || reset_seq;
     // The core's read of $FFFD, over: the machine's MMU has seen its reset.
     wire vector_done = cyc_done && op_rw && !op_ovr && !op_dummy && (op_addr == 16'hFFFD);
-    wire fast_ok   = mem_image_ready && !mem_invalidating &&
+    logic stall_q;
+    always_ff @(posedge clk) stall_q <= stall && !rst;
+    wire fast_ok   = !stall_q && mem_image_ready && !mem_invalidating &&
                      !op_inflight && !busy && !mq_valid;
 
     // The instruction front's leash.  turbo_en is the steady half - the mode,
@@ -332,12 +344,12 @@ module accel_seq (
     end
     assign turbo_en = turbo_en_q;
     assign turbo_wr = turbo_wr_q;
-    assign turbo_ok = turbo_en_q && (st == S_DECIDE) && !ovr_en && !op_inflight &&
+    assign turbo_ok = turbo_en_q && !stall_q && (st == S_DECIDE) && !ovr_en && !op_inflight &&
                       !busy && mem_image_ready && can_pay && !fev_valid;
 
     // What the dispatcher will charge for on this edge, for the governor's
     // one writer: exactly the two dispatching branches below.
-    wire disp_pay = (st == S_DECIDE) && settled && !d_pending && !dq_ovr && !turbo_claim &&
+    wire disp_pay = (st == S_DECIDE) && settled && !d_pending && !dq_ovr && !turbo_claim && !stall_q &&
                     can_pay && (needs_bus || fast_ok) && !off &&
                     !cpu_rst && master_active;
 

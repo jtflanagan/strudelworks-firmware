@@ -233,6 +233,7 @@ module master_top #(
     wire [15:0] u_addr;
     wire [7:0]  u_wdata;
     wire        fev_valid, fev_rw, fev_sync;
+    wire        fd_stall;           // the floppy's fill pending: the accelerated core waits
     wire [15:0] fev_addr;
     wire [7:0]  fev_data;
     wire        core_valid, op_dummy, op_inflight, drv_cyc_done;
@@ -611,6 +612,7 @@ module master_top #(
         .turbo_claim   (turbo_claim | d_claim_w),
         .turbo_wr      (turbo_wr),
         .d_pending     (d_pending_w),
+        .stall         (fd_stall),
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
@@ -1234,7 +1236,8 @@ module master_top #(
         .q7_o          (fd_q7),
         .seeks         (fd_seeks),
         .late          (fd_late),
-        .fill_max      (fd_fill_max)
+        .fill_max      (fd_fill_max),
+        .stall_o       (fd_stall)
     );
 
     // ---- the VidHD ----------------------------------------------------------
