@@ -516,7 +516,10 @@ module iline (
     // live tags still agree - every term register-vs-register now that the
     // compares run on pc_addr.  The resolved branch target is the second
     // way in: its own registered lookup, its own address equality.
-    wire retire = !cpu_rst && ihit && turbo_ok && !kill_now &&
+    // ...and only into room on the stream: a retire without a word would
+    // be a core cycle the host cannot place (docs/VIRTUAL_TIME.md), so with
+    // the merge full the op falls to the dispatcher instead.
+    wire retire = !cpu_rst && ihit && turbo_ok && !kill_now && ev_room &&
                   ((lhit_q && (exp_q == pc_addr)) || tgt_serve);
     assign turbo_commit = retire;
     assign turbo_sync   = retire && cpu_sync;
@@ -748,7 +751,7 @@ module iline (
     integer s;
     always_ff @(posedge clk) begin
         tick_q    <= retire;
-        tev_valid <= retire && ev_room;
+        tev_valid <= retire;
         if (retire) begin
             tev_addr <= pc_addr;
             tev_data <= i_din;

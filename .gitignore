@@ -50,5 +50,6 @@ __pycache__/
 /sim/accel_work/
 /sim/boot_work/
 /sim/fb_work/
+/sim/vbeam_work/
 /sim/cpu_predict_work/
 /sim/tlb_work/

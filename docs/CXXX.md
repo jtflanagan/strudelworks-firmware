@@ -1,5 +1,11 @@
 # $Cxxx under acceleration: what to serve fast
 
+**STEP 3 BUILT AND SIMULATED (2026-09-03, branch `cxxx_work`, the Pt):**
+the switch READS in the closed regime - "The switch reads in the closed
+regime", below.  The banked list's item 1, read side only, taken up
+because the demos the user wants to run sync to the beam through exactly
+these reads, and the larger FPGA lifted the ban.
+
 Status: **STEP 1 PROVEN ON HARDWARE** (2026-09-02, fw 2db1baf, bit in
 SRAM) - page $C3 on the instruction front once the INTC8ROM latch is set.
 **STEPS BANKED 2026-09-02** (below, "The next steps, BANKED"): nothing
@@ -256,6 +262,80 @@ kinds are:
 
 Ranked by clocks on this screen: read misses ~16%, AUXMOVE's switches
 ~18% (two-cycle bus ops), LC writes ~9%, keyboard ~9%, I misses ~3%.
+
+## The switch reads in the closed regime (step 3, 2026-09-03)
+
+**What a demo watches.** A demo finds the beam one of two ways: it polls
+`$C019` for the IIe's VBL', or it vapor-locks on the floating bus through
+a video toggle (`$C054`, `$C050`...).  Under acceleration both were bus
+ops - right, but a bus cycle each, so a poll loop ran at the bus's pace -
+and the floating one was answered from the real bus, which in mode 2
+carries the machine's STALE RAM (fb_sim's serve substitutes the copy's
+byte there, and that part was already right).  This step serves both on
+the card, at the core's pace, with the values the real machine would give
+at that real moment.
+
+**The position was real time - and that was the one wrong decision of
+this step.** Served the real beam, a cycle-counting demo is right at a
+governed 1.00 and wrong at every other ratio: it counts its own cycles
+between reads, and the real beam moves a sixtieth of that at 60x.  The
+position is now `rtl/vbeam.sv`'s - the real counter passed through while
+the core keeps the bus's time, a counter stepped once per core cycle
+while it does not - and the stream and the host render in that time base:
+docs/VIRTUAL_TIME.md.  The reads served are the same; only where the
+position comes from changed.
+
+**The reads served, and by whom** (`rtl/apple_mmu.sv` q_swi, decided on
+the live address beside q_cls; `rtl/master_top.sv` picks the byte on the
+registered op):
+
+| read | byte | gate |
+|---|---|---|
+| `$C000-$C00F` | the parked-dummy latch (step 2, unchanged) | latch holds a byte |
+| `$C011-$C01F` except `$C019` | bit 7 from the shadow, over the latch's low bits (as the IOU serves them, AppleWin's `IORead_C01x`) | always |
+| `$C019` | bit 7 = the IIe's VBL' from the counter, ONE CYCLE AHEAD (VBL.md "What the machine said"): the level of the cycle after the one in flight | the VBL lock |
+| `$C050-$C057` | fb_sim's byte for the cycle in flight; the toggle lands in the shadow at the synthetic commit exactly as at a bus commit | fb_sim.int_ok: serving, locked, not 80 columns |
+| `$C080-$C08F` | the same floating byte; the language card's state machine steps at the synthetic commit | the same |
+
+Stays on the bus: `$C010` (the real strobe), `$C058-$C05F` (annunciators
+and DHIRES - the shadow does not carry them; DHIRES is the host's), the
+speaker and the rest of `$C02x-$C07x`, every slot, and **every write** -
+the write side of the banked item is still banked (AUXMOVE's RAMRD/RAMWRT
+dance keeps its four bus ops).  The regime is step 2's: mode 2, serving,
+`ACCEL_CTRL[28]` clear, the core not held; the one lever covers both.
+
+**The stream.** An internalized read retires with the synthetic commit
+(step 2's mechanism, one clock, `u_commit` high with the op still on
+`u_addr`), so the shadow, `map_changed`, the fronts' kills and the
+keyboard's bookkeeping all fire as for a bus op.  Its fast-op word is
+what tells the HOST: `pipeline.cpp` applies every word, fast or not, to
+the mirror and the display shadow before it decides the word is not a
+cycle - so a `$C055` served on the card flips the host's PAGE2 through
+its word.  Two rules keep that from flooding the link:
+
+- `rtl/bus_event_filter.sv` keeps a fast READ on a sparse stream only if
+  it is of `$C05x` or `$C08x` (the ones carrying state); `$C00x`/`$C01x`
+  polls stay off it as every fast read did.
+- `rtl/accel_seq.sv` puts NO word on the stream for a QUIET `$C050-$C057`
+  read - one whose switch already holds the value the address sets
+  (`apple_mmu.q_swi_quiet`).  A vapor-lock loop polling `$C054` at ten
+  million reads a second is all quiet reads; the one that flips a page is
+  not.  The language card's reads are never quiet (the prewrite state
+  moves on each); the host's LC follows them.  In FULL capture the same
+  rule holds - a quiet read is a no-op for every consumer of the stream,
+  the trace included - so the census counts it and the stream does not.
+
+**Proof.** At the bus's pace the monitor (`rtl/fb_sim.sv`) now compares
+`$C019` reads too - bit 7 against the bus, counted with the ordinary
+mismatches, `FB_LAST2`'s op address `$19` telling them apart - so
+`tools/fb_test.sh`-style runs and the VBL probe prove the served value
+before acceleration uses it.  `sim/fb_sim_tb.sv` case 6g probes a frame
+of `$C019` against a model that carries the lead: 0 mismatches.
+`sim/accel.s` phase 5c reads the status page back after every switch,
+flips PAGE2/MIXED/TEXT by reads (one of them quiet), and walks the LC
+pair; the bench's machine model moves its switches at the synthetic
+commit as the pins would, and the same program passes in every mode.
+Hardware: the demo the user named first is `megademo.dsk`.
 
 ## The next steps, BANKED (the user's decision, 2026-09-02)
 

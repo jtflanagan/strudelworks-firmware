@@ -56,6 +56,8 @@ run sync_fifo     rtl/sync_fifo.sv
 run synth_bus_events rtl/synth_bus_events.sv
 run bus_event_capture rtl/bus_event_capture.sv rtl/sync_fifo.sv
 run bus_event_filter rtl/bus_event_filter.sv
+# vbeam shares the scanner formula with vbl_lock and fb_sim.
+run vbeam         -Irtl rtl/vbeam.sv
 run event_merge   rtl/event_merge.sv
 run synchronizer  rtl/synchronizer.sv
 run wb_regfile    rtl/wb_regfile.sv rtl/fast_census.sv

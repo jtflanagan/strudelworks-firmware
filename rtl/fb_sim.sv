@@ -151,6 +151,13 @@ module fb_sim (
     output wire        sub_en,
     output wire [7:0]  sub_data,
 
+    // For the internalized reads (docs/CXXX.md): can this module answer a
+    // floating-value read right now - the serve terms less the per-op ones,
+    // sub_data being the byte either way - and the IIe's $C019 bit 7 for
+    // the cycle in flight.
+    output wire        int_ok,
+    output logic       vbl_bar,
+
     // For the registers.
     output wire [6:0]  mode,         // {store80, col80, page2_disp, hires, mixed, text, locked}
     output logic [31:0] compared,
@@ -248,6 +255,19 @@ module fb_sim (
     end
     assign peek_data = peek_addr[14] ? peek_hgr : peek_text;
 
+    // ---- the IIe's VBL', as a program reads it at $C019 -------------------------
+    // Bit 7 of $C019 is VBL', low in vertical blanking - and on the IIe it
+    // runs ONE CYCLE AHEAD of this counter (docs/VBL.md, "What the machine
+    // said": low from line 191 cycle 64 through line 261 cycle 63), so the
+    // bit for the cycle in flight is the level of the cycle after it.
+    // Registered: one clock behind the counter, which steps one clock
+    // after the data tick, so at a data phase it still describes the cycle
+    // being recorded.
+    wire [8:0]  last_line = pal ? SCAN_PAL_LINES - 9'd1 : SCAN_NTSC_LINES - 9'd1;
+    wire [8:0]  next_v    = (scan_h != 7'd64) ? scan_v
+                          : (scan_v == last_line) ? 9'd0 : scan_v + 9'd1;
+    always_ff @(posedge clk) vbl_bar <= !(next_v >= 9'd192);
+
     // ---- what floats -------------------------------------------------------------
     function automatic floats(input [15:0] a);
         begin
@@ -258,19 +278,26 @@ module fb_sim (
     endfunction
 
     // A read the floating bus answers, and nobody on the card does.
-    wire cand = op_rw && floats(op_addr) && !slot_rd_claim && !kbd_sub_en && !pb_sub_en;
+    wire cand   = op_rw && floats(op_addr) && !slot_rd_claim && !kbd_sub_en && !pb_sub_en;
+    // ...and a read of $C019, whose bit 7 the counter answers.
+    wire cand19 = op_rw && (op_addr == 16'hC019) && !slot_rd_claim && !kbd_sub_en && !pb_sub_en;
 
     // ---- serve --------------------------------------------------------------------
     assign sub_en   = serve && locked && master_active && !op_ovr && !col80 && cand;
     assign sub_data = pred;
+    assign int_ok   = serve && locked && master_active && !col80;
 
     assign mode = {store80, col80, page2_disp, hires, mixed, text, locked};
 
     // ---- the monitor, at the data phase -------------------------------------------
+    // A $C019 read is compared on bit 7 alone, and counted with the
+    // ordinary mismatches: FB_LAST2's op address ($19) tells it apart.
     logic [7:0] data_q;
-    wire        hole = (pred_addr[6:0] >= 7'h78);
-    wire        cmp  = op_commit && master_active && locked && cand;
-    wire        miss = (pred != data_q);
+    wire        hole  = (pred_addr[6:0] >= 7'h78);
+    wire        is19  = cand19;
+    wire        cmp   = op_commit && master_active && locked && (cand || cand19);
+    wire        miss  = is19 ? (vbl_bar != data_q[7]) : (pred != data_q);
+    wire [7:0]  shown = is19 ? {vbl_bar, 7'd0} : pred;
 
     always_ff @(posedge clk) begin
         data_q <= data_sync;
@@ -284,14 +311,14 @@ module fb_sim (
             if (cmp) begin
                 compared <= compared + 32'd1;
                 if (miss) begin
-                    if (col80)     other[31:16] <= other[31:16] + 16'd1;
-                    else if (hole) other[15:0]  <= other[15:0]  + 16'd1;
+                    if (col80 && !is19)     other[31:16] <= other[31:16] + 16'd1;
+                    else if (hole && !is19) other[15:0]  <= other[15:0]  + 16'd1;
                     else begin
                         // The position of the last ORDINARY mismatch: the
                         // holes and the 80-column cycles are counted, and
                         // must not overwrite the one worth reproducing.
                         mismatches <= mismatches + 32'd1;
-                        last  <= {pred, data_q, scan_v, scan_h};
+                        last  <= {shown, data_q, scan_v, scan_h};
                         last2 <= {op_addr[7:0], pred_addr,
                                   hole, col80, store80, page2_disp, hires_addr, text_addr, mixed, text};
                     end

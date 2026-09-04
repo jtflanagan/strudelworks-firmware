@@ -268,6 +268,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     reg         fb_serve = 1'b0, fb_cnt_clr = 1'b0;
     reg  [14:0] peek_addr = 15'd0;
     wire [6:0]  mode;
+    wire        vbl_bar;
     wire [31:0] compared, mismatches, last, last2, other;
     wire [7:0]  peek_data;
 
@@ -296,6 +297,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .slot_rd_claim (1'b0), .kbd_sub_en (1'b0), .pb_sub_en (1'b0),
         .serve (fb_serve), .cnt_clr (fb_cnt_clr), .peek_addr (peek_addr),
         .sub_en (sub_en), .sub_data (sub_data),
+        .int_ok (), .vbl_bar (vbl_bar),
         .mode (mode), .compared (compared), .mismatches (mismatches),
         .last (last), .last2 (last2), .other (other), .peek_data (peek_data)
     );
@@ -334,6 +336,10 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire [15:0] sc_now   = sc_addr(V, H, sc_hires, sc_page2);
     wire [7:0]  sc_real  = mem[sc_now];
     wire [7:0]  sc_byte  = bus_dead ? 8'h00 : sc_real;
+    // The IIe's VBL' at $C019: one cycle AHEAD of the scanner's counters
+    // (docs/VBL.md) - the level of the cycle after this one.
+    wire [8:0]  Vn        = (V == 9'h1FF) ? (pal ? 9'hC8 : 9'hFA) : V + 9'd1;
+    wire        vbl_n_iie = (H == 7'h7F) ? (sc_line(Vn, pal) < 192) : (sc_line(V, pal) < 192);
 
     // What the scanner showed for the op in flight.
     reg [7:0]  exp_byte;            // the picture's byte, dead bus or not
@@ -352,6 +358,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
             case (addr_drive)
                 16'hC000: data_pin <= {kbd_strobe, kbd_key};
                 16'hC010: begin data_pin <= 8'h00; kbd_strobe <= 1'b0; end
+                16'hC019: data_pin <= {vbl_n_iie, sc_byte[6:0]};
                 16'hC050: begin sw_text  <= 1'b0; data_pin <= sc_byte; end
                 16'hC051: begin sw_text  <= 1'b1; data_pin <= sc_byte; end
                 16'hC052: begin sw_mixed <= 1'b0; data_pin <= sc_byte; end
@@ -734,6 +741,20 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
                      err, compared - c0, mismatches - m0, sub_on_ovr); errors = errors + 1;
         end else $display("  ok: the probe's %0d reads are compared, none substituted, 0 mismatches", NTSC_CYC);
         @(negedge clk); fb_serve = 1'b0;
+        // (g) $C019 on every cycle of a frame: bit 7 against the IIe's VBL',
+        // which runs one cycle ahead of the counter - the value the
+        // internalized read serves under acceleration.
+        machine_reset(4);
+        cycles(30);
+        if (held !== 1'b1) fail("case 6g: not held");
+        c0 = compared; m0 = mismatches;
+        probe_addr = 16'hC019;
+        pulse_probe;
+        wait_idle(20_000);
+        if (err !== 4'd0 || compared != c0 + NTSC_CYC || mismatches != m0) begin
+            $display("FAIL: case 6g: err %0d, %0d compared over the $C019 probe, +%0d mismatches (last %08x %08x)",
+                     err, compared - c0, mismatches - m0, last, last2); errors = errors + 1;
+        end else $display("  ok: $C019's %0d reads compared on bit 7 against the IIe's VBL', 0 mismatches", NTSC_CYC);
 
         // --- case 7 / the counters clear -------------------------------------------
         pulse_clr;

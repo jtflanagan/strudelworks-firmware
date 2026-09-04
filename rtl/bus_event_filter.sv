@@ -93,6 +93,15 @@ module bus_event_filter #(
     input  wire        in_mark,
     input  wire [15:0] in_mark_free,
     input  wire        in_dummy,       // this cycle carried no op (see the header)
+    // The virtual base (docs/VIRTUAL_TIME.md): the core's cycles are the
+    // cycles.  A fast word that reaches here is kept - the merge's door
+    // decided it (rtl/event_merge.sv) - and is a cycle; a dummy is not
+    // (dropped, counted by nothing).  in_drop is the merge's in-order
+    // count of dropped core cycles before this entry, and a carrier entry
+    // is that count alone.
+    input  wire        virt,
+    input  wire [15:0] in_drop,
+    input  wire        in_carrier,
 
     output logic [31:0] out_data,
     output logic        out_valid,
@@ -104,6 +113,7 @@ module bus_event_filter #(
     localparam [3:0] T_FAST = 4'hC;
 
     wire in_fast = (in_data[31:28] == T_FAST);
+    wire in_word = in_valid && !in_carrier;
     wire in_vbl = in_data[19];
     wire in_res = in_data[17];
     wire in_rw  = in_data[16];
@@ -121,11 +131,19 @@ module bus_event_filter #(
     logic [15:0] hold_free  = '0;
 
     wire on_edge = first || in_mark || (in_vbl != prev_vbl) || (in_res != prev_res);
-    wire keep = in_fast  ? (!sparse || !in_rw) :
-                in_dummy ? on_edge :
+    // A fast word here was kept at the merge's door (a write, a switch
+    // read, a mark, an edge - never a dropped read).
+    wire keep = in_fast  ? 1'b1 :
+                in_dummy ? (!virt && on_edge) :
                            (!sparse || on_edge || in_io || !in_rw);
-    // A fast op is not a cycle: it neither counts nor moves the edge rule.
-    wire cycle = in_valid && !in_fast;
+    // What is a cycle: the bus's in the real base (a fast op neither counts
+    // nor moves the edge rule), the core's in the virtual (a dummy neither).
+    wire cycle = in_word && (virt ? !in_dummy : !in_fast);
+    // The pending count: the cycles not yet sent, with this clock's own
+    // contributions folded in - a shed core cycle (the virtual base only)
+    // and a cycle whose word is not kept.  One arithmetic for every path.
+    wire        this_unkept = in_word && cycle && !keep && !hold_valid;
+    wire [28:0] pend = {1'b0, cnt} + (in_valid ? {13'd0, in_drop} : 29'd0) + (this_unkept ? 29'd1 : 29'd0);
 
     always_ff @(posedge clk) begin
         out_valid <= 1'b0;
@@ -137,41 +155,49 @@ module bus_event_filter #(
             prev_res   <= 1'b1;
             hold_valid <= 1'b0;
         end else if (hold_valid) begin
-            // The clock after a SKIP: the event it counted up to.
+            // The clock after a SKIP: the event it counted up to.  (The merge
+            // spaces its words three clocks apart, so nothing arrives here.)
             out_data      <= hold_data;
             out_valid     <= 1'b1;
             out_mark      <= hold_mark;
             out_mark_free <= hold_free;
             hold_valid    <= 1'b0;
-        end else if (in_valid) begin
+            cnt           <= pend[27:0];
+        end else if (in_word && keep) begin
             if (cycle) begin
                 prev_vbl <= in_vbl;
                 prev_res <= in_res;
                 first    <= 1'b0;
             end
-            if (keep) begin
-                if (cnt != '0) begin
-                    out_data   <= {T_SKIP, cnt};
-                    out_valid  <= 1'b1;
-                    hold_data  <= in_data;
-                    hold_mark  <= in_mark;
-                    hold_free  <= in_mark_free;
-                    hold_valid <= 1'b1;
-                    cnt        <= '0;
-                end else begin
-                    out_data      <= in_data;
-                    out_valid     <= 1'b1;
-                    out_mark      <= in_mark;
-                    out_mark_free <= in_mark_free;
-                end
-            end else if (!cycle) begin
-                // A fast read nobody wants: gone, and not a cycle to count.
-            end else if (cnt == 28'(CAP - 1)) begin
+            if (pend != 29'd0) begin
+                out_data   <= {T_SKIP, pend[27:0]};
+                out_valid  <= 1'b1;
+                hold_data  <= in_data;
+                hold_mark  <= in_mark;
+                hold_free  <= in_mark_free;
+                hold_valid <= 1'b1;
+                cnt        <= '0;
+            end else begin
+                out_data      <= in_data;
+                out_valid     <= 1'b1;
+                out_mark      <= in_mark;
+                out_mark_free <= in_mark_free;
+            end
+        end else begin
+            // No word kept this clock: a cycle not sent, a fast read nobody
+            // wants, a dummy in the virtual base, or nothing at all - the
+            // count grows by what this clock added, and flushes at CAP.
+            if (cycle) begin
+                prev_vbl <= in_vbl;
+                prev_res <= in_res;
+                first    <= 1'b0;
+            end
+            if (pend >= 29'(CAP)) begin
                 out_data  <= {T_SKIP, 28'(CAP)};
                 out_valid <= 1'b1;
-                cnt       <= '0;
+                cnt       <= 28'(pend - 29'(CAP));
             end else begin
-                cnt <= cnt + 28'd1;
+                cnt <= pend[27:0];
             end
         end
     end

@@ -386,7 +386,10 @@ module dline #(
         end
     end
     wire addr_match = (cpu_addr == dq_addr) && (fc_q || claim_q);
-    wire r_retire = !cpu_rst && turbo_en && turbo_ok && serve_hit && d_cycle && addr_match;
+    // A read retires only into room on the stream (docs/VIRTUAL_TIME.md):
+    // with the merge full the op falls to the dispatcher rather than leave
+    // a cycle without a word.
+    wire r_retire = !cpu_rst && turbo_en && turbo_ok && serve_hit && d_cycle && addr_match && ev_room;
     wire w_retire = !cpu_rst && turbo_ok && w_serv && w_room && w_cycle && addr_match;
     wire retire   = r_retire || w_retire;
 
@@ -593,7 +596,7 @@ module dline #(
 
     always_ff @(posedge clk) begin
         tick_q    <= retire;
-        dev_valid <= (r_retire && ev_room) || w_retire;
+        dev_valid <= retire;
         if (retire) begin
             dev_addr <= dq_addr;
             dev_data <= cpu_rw ? serve_byte : cpu_dout;

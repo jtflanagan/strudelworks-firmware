@@ -323,6 +323,11 @@ this regime, commit 15c8444 there, is the reference): the status page
 `$C08x`, the RamWorks bank; a menu hotkey found by the parked dummies
 themselves, which would let Ctrl-6 work in a program that never polls.
 
+**Extended 2026-09-03** to the status page, `$C019` and the floating
+toggles - the same S_FAST ride and synthetic commit, the byte from
+whichever authority owns the address: docs/CXXX.md, "The switch reads in
+the closed regime".
+
 ## The census (2026-09-02)
 
 At 58x on hardware (Nox, moving about the map) the counters put 92% of

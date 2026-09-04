@@ -161,7 +161,12 @@ or not. Excluded, and why:
 - `$C100-$CFFF`: ROM, or a card's.
 
 A read a peripheral on the card claims (`slot_rd_claim`) or the keyboard or
-the buttons substitute is theirs and never compared. `$C020` is not
+the buttons substitute is theirs and never compared. **`$C019` is compared
+too, on bit 7 alone** (2026-09-03): the IIe's VBL', which the counter
+answers one cycle ahead of itself (VBL.md, "What the machine said";
+`vbl_bar` here), and which the accelerated core is served from the card
+(CXXX.md, "The switch reads in the closed regime"); a `$C019` mismatch is
+counted with the ordinary ones and `FB_LAST2`'s op address `$19` names it. `$C020` is not
 side-effect-free - it toggles the cassette output - though nothing notices
 with nothing plugged in; a read of `PAGE2 ? $C055 : $C054` is the genuinely
 idempotent probe, and the follow-up below wants it.
@@ -203,7 +208,9 @@ serving turns serve off and says so (`fbtrips=`), because a core being
 handed bytes the machine disagrees with is better off with the bus.
 
 This is the accelerated core's byte, proven on the real machine before there
-is one.
+is one. `int_ok` - the serve terms less the per-op ones - is what the
+accelerated core's internalized `$C05x`/`$C08x` reads are gated on
+(CXXX.md); `sub_data` is their byte.
 
 ## The card's interface
 

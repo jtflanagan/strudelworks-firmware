@@ -201,7 +201,14 @@ module master_top #(
     wire [31:0] vbl_stat, vbl_pos;
     wire        vbl_mark;
     wire [15:0] vbl_mark_free;
-    wire        vbl_level;      // the lock's counter in blanking: bit 19 of every event
+    wire        lock_vbl_level; // the lock's counter in blanking
+    wire [8:0]  lock_scan_v;
+    wire [6:0]  lock_scan_h;
+    // ...and the beam every consumer takes (rtl/vbeam.sv): the lock's, or
+    // the virtual one under acceleration.  vbl_level is bit 19 of every
+    // stream word.
+    wire        vbl_level, beam_locked, beam_mark_bus, beam_mark_fast, virt, fev_quiet;
+    wire [15:0] beam_mark_free;
     wire [8:0]  scan_v;         // ...and where it is, for the floating-bus simulator
     wire [6:0]  scan_h;
     wire [2:0]  vid_sw;         // the MMU shadow's video switches, for the same
@@ -233,7 +240,7 @@ module master_top #(
     wire        mem_decided, mem_busy, mem_intc8rom;
     wire [1:0]  q_cls;
     // The instruction front (rtl/iline.sv) and its seams.
-    wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim;
+    wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim, seq_fast_tick;
     // The data front, chained after the instruction front (rtl/dline.sv).
     wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
     wire        d_pending_w, turbo_wr, dq_rw_w, ev_fast_room_w;
@@ -285,8 +292,11 @@ module master_top #(
         .apple_clk (apple_clk), .apple_rst (apple_rst),
         .capture_on (capture_on), .capture_real (capture_real),
         .real_data (real_data), .real_valid (real_valid),
-        .real_mark (vbl_mark), .real_mark_free (vbl_mark_free),
+        .real_mark (beam_mark_bus), .real_mark_free (beam_mark_free),
         .real_dummy (op_dummy),
+        .virt (virt),
+        .fast_mark (beam_mark_fast), .fast_mark_free (beam_mark_free),
+        .fast_quiet (fev_valid && fev_quiet),
         // The fronts' events share the fast port: turbo_ok excludes fev's
         // clock, and an I and a D retire can never share an edge (one core,
         // one cycle), so no two of the three are ever valid together - the
@@ -507,8 +517,19 @@ module master_top #(
     // bookkeeping once, at the retirement.
     wire sw_int = accel_on && (accel_mode == 2'd2) && mem_serve &&
                   !accel_swint_dis && !boot_held;
-    wire        swi_commit, kbd_int_ok;
-    wire [7:0]  kbd_int_byte;
+    // ...and the rest of the internalized reads (docs/CXXX.md, "The switch
+    // reads in the closed regime"): apple_mmu asks q_swi of the live
+    // address; the serve byte comes from whichever authority owns the
+    // registered op's address - the keyboard latch ($C00x), the status
+    // shadow ($C01x, $C019's bit from the lock), or the floating-bus
+    // simulator ($C05x, $C08x).
+    wire        swi_commit, kbd_int_ok, fb_int_ok, fb_vbl_bar;
+    wire        q_swi, q_swi_quiet;
+    wire [7:0]  kbd_int_byte, mmu_swi_stat;
+    wire [6:0]  kbd_int_low;
+    wire [7:0]  swi_byte = (u_addr[7:4] == 4'h0) ? kbd_int_byte
+                         : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
+                         : fb_sub_data;
     wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
 
     apple_bus_write u_write (
@@ -564,10 +585,12 @@ module master_top #(
         .cpu_rst       (cpu_rst),
         .master_active (cpu_source_active),
         .mode          (accel_mode),
-        .swi_on        (sw_int),
-        .swi_ok        (kbd_int_ok),
-        .swi_byte      (kbd_int_byte),
+        .q_swi         (q_swi),
+        .q_swi_quiet   (q_swi_quiet),
+        .swi_byte      (swi_byte),
         .swi_commit    (swi_commit),
+        .fast_tick     (seq_fast_tick),
+        .fev_quiet     (fev_quiet),
         .target        (accel_target),
         .cnt_clr       (accel_cnt_clr),
         .mem_serve     (mem_serve),
@@ -827,9 +850,9 @@ module master_top #(
         .ovr_wdata     (vbl_ovr_wdata),
         .mark          (vbl_mark),
         .mark_free     (vbl_mark_free),
-        .vbl_level     (vbl_level),
-        .scan_v        (scan_v),
-        .scan_h        (scan_h),
+        .vbl_level     (lock_vbl_level),
+        .scan_v        (lock_scan_v),
+        .scan_h        (lock_scan_h),
         .state         (vbl_state),
         .locked        (vbl_locked),
         .pal           (vbl_pal),
@@ -857,7 +880,7 @@ module master_top #(
         .int_ok        (kbd_int_ok),
         .int_rd        (kbd_int_rd),
         .int_byte      (kbd_int_byte),
-        .int_low       (),
+        .int_low       (kbd_int_low),
         .press         (kbd_press),
         .press_key     (kbd_press_key),
         .drop          (kbd_drop),
@@ -953,6 +976,15 @@ module master_top #(
         .q_divert   (mmu_q_divert),
         .q_rw       (cpu_rw),
         .q_cls      (q_cls),
+        .swi_on     (sw_int),
+        .swi_kbd_ok (kbd_int_ok),
+        .swi_fb_ok  (fb_int_ok),
+        .swi_vbl_ok (beam_locked),
+        .swi_vbl_bar (fb_vbl_bar),
+        .swi_kbd_low (kbd_int_low),
+        .q_swi      (q_swi),
+        .q_swi_quiet (q_swi_quiet),
+        .swi_stat_byte (mmu_swi_stat),
         .p_addr     (p_addr_w),
         .p_cls      (p_cls),
         .p_aux      (p_aux_w),
@@ -1043,6 +1075,38 @@ module master_top #(
         .pr_valid (pr_valid), .pr_data (pr_data)
     );
 
+    // ---- the beam every consumer takes (docs/VIRTUAL_TIME.md) ---------------
+    // The lock's counter while the core keeps the bus's time; a virtual
+    // counter stepped once per core cycle while it does not - fb_sim's
+    // position, the internalized $C019, bit 19 of every word, the frame
+    // mark.  Every core cycle has a word at the merge's door (the fronts
+    // wait for room, the sequencer flags its quiet reads), so the door's
+    // in-order counts carry the cycles the host does not see.
+    assign virt = accel_on && !boot_held;
+    vbeam u_beam (
+        .clk            (apple_clk),
+        .rst            (apple_rst),
+        .virt           (virt),
+        .real_locked    (vbl_locked),
+        .real_v         (lock_scan_v),
+        .real_h         (lock_scan_h),
+        .pal            (vbl_pal),
+        .notify         (vbl_notify),
+        .real_mark      (vbl_mark),
+        .real_mark_free (vbl_mark_free),
+        .bus_tick       (bus_tick),
+        .op_dummy       (op_dummy),
+        .op_ovr         (op_ovr),
+        .fast_tick      (seq_fast_tick || turbo_tick || dline_tick),
+        .locked         (beam_locked),
+        .scan_v         (scan_v),
+        .scan_h         (scan_h),
+        .vbl_level      (vbl_level),
+        .mark_bus       (beam_mark_bus),
+        .mark_fast      (beam_mark_fast),
+        .mark_free      (beam_mark_free)
+    );
+
     // ---- the floating bus, simulated ----------------------------------------
     // A side copy of main memory's display pages, written on the clock the
     // page cache's main bank takes each byte, read at the video scanner's
@@ -1063,7 +1127,7 @@ module master_top #(
         .mw_byte       (fb_mw_byte),
         .sw_state      (mem_sw),
         .vid_sw        (vid_sw),
-        .locked        (vbl_locked),
+        .locked        (beam_locked),
         .scan_v        (scan_v),
         .scan_h        (scan_h),
         .pal           (vbl_pal),
@@ -1077,6 +1141,8 @@ module master_top #(
         .peek_addr     (fb_peek_addr),
         .sub_en        (fb_sub_en),
         .sub_data      (fb_sub_data),
+        .int_ok        (fb_int_ok),
+        .vbl_bar       (fb_vbl_bar),
         .mode          (fb_mode),
         .compared      (fb_compared),
         .mismatches    (fb_mismatch),
@@ -1139,7 +1205,7 @@ module master_top #(
         .op_commit     (op_commit),
         .op_ovr        (op_ovr),
         .op_dummy      (op_dummy),
-        .fast_tick     (fev_valid || turbo_tick || dline_tick),
+        .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
         .rd_claim      (fd_rd_claim),
         .rd_data       (fd_rd_data),
         .msg_valid     (app_msg_valid),
@@ -1213,7 +1279,7 @@ module master_top #(
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
-        .fast_tick     (fev_valid || turbo_tick || dline_tick),
+        .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
         .rd_claim      (mb_rd_claim),
         .rd_data       (mb_rd_data),
         .irq           (mb_irq)

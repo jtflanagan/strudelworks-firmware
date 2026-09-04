@@ -80,6 +80,13 @@ module card_link #(
     // happen, with the blanking level their word carries.  A watching top
     // ties them to 0.
     input  wire        real_dummy,
+    // The virtual base (rtl/vbeam.sv, docs/VIRTUAL_TIME.md): in force, a
+    // mark on a fast word, and the core cycles that never became a word.
+    // A watching top ties them to 0.
+    input  wire        virt,
+    input  wire        fast_mark,
+    input  wire [15:0] fast_mark_free,
+    input  wire        fast_quiet,
     input  wire        fast_valid,
     input  wire [15:0] fast_addr,
     input  wire        fast_rw,
@@ -760,10 +767,10 @@ module card_link #(
     // filter (rtl/event_merge.sv).  Fast ops and the dummy flag belong to the
     // real bus only.
     wire [31:0] mg_data;
-    wire        mg_valid, mg_mark, mg_dummy;
-    wire [15:0] mg_mark_free;
+    wire        mg_valid, mg_mark, mg_dummy, mg_carrier;
+    wire [15:0] mg_mark_free, mg_drop;
 
-    event_merge #(.DEPTH (8)) u_merge (
+    event_merge #(.DEPTH (32)) u_merge (
         .clk           (clk_ctrl),
         .rst           (rst),
         .enable        (capture_enable),
@@ -777,13 +784,20 @@ module card_link #(
         .fast_rw       (fast_rw),
         .fast_data     (fast_data),
         .fast_sync     (fast_sync),
+        .fast_mark     (source_real && fast_mark),
+        .fast_mark_free (fast_mark_free),
+        .fast_quiet    (fast_quiet),
         .vbl_level     (fast_vbl),
         .res_level     (apple_res_sync),
+        .sparse        (sparse_ctrl && source_real),
+        .virt          (virt && source_real),
         .out_valid     (mg_valid),
         .out_data      (mg_data),
         .out_mark      (mg_mark),
         .out_mark_free (mg_mark_free),
         .out_dummy     (mg_dummy),
+        .out_drop      (mg_drop),
+        .out_carrier   (mg_carrier),
         .overflows     (merge_overflows),
         .fast_room     (ev_fast_room),
         .fast_room_w   (ev_fast_room_w)
@@ -808,6 +822,9 @@ module card_link #(
         .in_mark       (mg_mark),
         .in_mark_free  (mg_mark_free),
         .in_dummy      (mg_dummy),
+        .virt          (virt && source_real),
+        .in_drop       (mg_drop),
+        .in_carrier    (mg_carrier),
         .out_data      (fev_data),
         .out_valid     (fev_valid),
         .out_mark      (fev_mark),

@@ -214,12 +214,22 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        swi_commit, kbd_int_ok;
     wire [7:0]  kbd_int_byte;
     wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+    // ...and the rest of the internalized reads (docs/CXXX.md), as
+    // master_top wires them.  No fb_sim here: the machine's floating byte
+    // is the model's constant (FLOAT, 8'hA5), and $C019 stays on the bus
+    // (no VBL lock in this bench).
+    wire        q_swi, q_swi_quiet;
+    wire [7:0]  mmu_swi_stat;
+    wire [6:0]  kbd_int_low;
+    wire [7:0]  swi_byte = (u_addr[7:4] == 4'h0) ? kbd_int_byte
+                         : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
+                         : 8'hA5;
     kbd_inject u_kbdi (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .master_active (master_active),
         .park_kbd (sw_int), .op_dummy (op_dummy),
         .int_rd (kbd_int_rd), .int_ok (kbd_int_ok),
-        .int_byte (kbd_int_byte), .int_low (),
+        .int_byte (kbd_int_byte), .int_low (kbd_int_low),
         .press (1'b0), .press_key (7'd0), .drop (1'b0), .lock (1'b0),
         .hotkey_en (1'b0), .hotkey (7'd0), .held (held),
         .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
@@ -233,7 +243,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
-        .swi_on (sw_int), .swi_ok (kbd_int_ok), .swi_byte (kbd_int_byte), .swi_commit (swi_commit),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (), .fev_quiet (),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
@@ -375,6 +385,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
+        .swi_on (sw_int), .swi_kbd_ok (kbd_int_ok), .swi_fb_ok (1'b1),
+        .swi_vbl_ok (1'b0), .swi_vbl_bar (1'b1), .swi_kbd_low (kbd_int_low),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_stat_byte (mmu_swi_stat),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .d_addr (dq_addr_w), .d_rw (dq_rw_w),
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
@@ -650,6 +663,18 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             end
         end
     endtask
+
+    // The machine's side of a synthetic commit: an internalized read of a
+    // switch moves the model's switches as the pins would have.
+    always @(posedge clk) if (swi_commit && u_rw) begin
+        c0_touch(u_addr[7:0]);
+        if (u_addr[7:4] == 4'h8) begin
+            m_bank2 <= !u_addr[3];
+            m_lcrd  <= (u_addr[1] == u_addr[0]);
+            if (!u_addr[0]) begin m_wren <= 0; m_pre <= 0; end
+            else begin if (m_pre) m_wren <= 1; m_pre <= 1; end
+        end
+    end
 
     function automatic [7:0] cx_byte(input [15:0] a);
         logic [3:0] page;

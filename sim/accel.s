@@ -27,6 +27,18 @@ IPTR    = $08            ; irqtest's roving pointer, distinct from PTR
 :
 .endmacro
 
+.macro  jpl target
+        bmi :+
+        jmp target
+:
+.endmacro
+
+.macro  jmi target
+        bpl :+
+        jmp target
+:
+.endmacro
+
 .macro  jcs target
         bcc :+
         jmp target
@@ -157,6 +169,50 @@ norw:
         bpl nokey
         lda $C010               ; a key waited: take it, clear the strobe
 nokey:
+
+        ; ---- 5c. the switch reads in the closed regime (docs/CXXX.md): the
+        ; status page read back through the program's own hands after each
+        ; switch, the floating-value toggles, the language card's pair.  In
+        ; the closed regime none of these READS ride a bus cycle (the STAs
+        ; still do); in every mode the answers are the same, because the
+        ; model's pins answer the status page too.  BIT tests bit 7 only.
+        lda $C083
+        lda $C083               ; bank 2, read RAM, write enabled
+        bit $C011
+        jpl fail                ; RDLCBNK2 must be set
+        bit $C012
+        jpl fail                ; RDLCRAM must be set
+        lda $C08B
+        lda $C08B               ; bank 1
+        bit $C011
+        jmi fail
+        lda $C082               ; ROM back, protected
+        bit $C012
+        jmi fail
+        lda $C055               ; PAGE2 on, by a read: a floating value comes back
+        bit $C01C
+        jpl fail
+        lda $C054               ; off
+        bit $C01C
+        jmi fail
+        lda $C054               ; again - quiet: no switch moves, no word
+        lda $C053               ; MIXED on
+        bit $C01B
+        jpl fail
+        lda $C052               ; off
+        bit $C01B
+        jmi fail
+        lda $C051               ; TEXT on (it is already: quiet)
+        bit $C01A
+        jpl fail
+        sta $C001               ; 80STORE on (a write: the bus)
+        bit $C018
+        jpl fail
+        sta $C000               ; off
+        bit $C018
+        jmi fail
+        bit $C013               ; RAMRD is off here
+        jmi fail
 
         ; ---- 6. self-modifying code: the operand and the opcode change
         ; under the icache's feet.  A stale line shows as the wrong A or X.

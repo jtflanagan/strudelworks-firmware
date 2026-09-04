@@ -233,6 +233,16 @@ module accel_tb #(parameter integer SWINT = 1,
     wire        swi_commit, kbd_int_ok;
     wire [7:0]  kbd_int_byte;
     wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+    // ...and the rest of the internalized reads (docs/CXXX.md), as
+    // master_top wires them.  No fb_sim here: the machine's floating byte
+    // is the model's constant (FLOAT, 8'hA5), and $C019 stays on the bus
+    // (no VBL lock in this bench).
+    wire        q_swi, q_swi_quiet;
+    wire [7:0]  mmu_swi_stat;
+    wire [6:0]  kbd_int_low;
+    wire [7:0]  swi_byte = (u_addr[7:4] == 4'h0) ? kbd_int_byte
+                         : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
+                         : 8'hA5;
     reg        kb_press = 1'b0, kb_drop = 1'b0, kb_lock = 1'b0;
     reg [6:0]  kb_key = 7'd0;
     wire       kb_strobe, kb_seen, kb_touched, kb_changed, kb_hot;
@@ -243,7 +253,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .master_active (master_active),
         .park_kbd (sw_int), .op_dummy (op_dummy),
         .int_rd (kbd_int_rd), .int_ok (kbd_int_ok),
-        .int_byte (kbd_int_byte), .int_low (),
+        .int_byte (kbd_int_byte), .int_low (kbd_int_low),
         .press (kb_press), .press_key (kb_key), .drop (kb_drop), .lock (kb_lock),
         .hotkey_en (1'b0), .hotkey (7'd0), .held (held),
         .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
@@ -268,7 +278,7 @@ module accel_tb #(parameter integer SWINT = 1,
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
-        .swi_on (sw_int), .swi_ok (kbd_int_ok), .swi_byte (kbd_int_byte), .swi_commit (swi_commit),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (), .fev_quiet (),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
@@ -374,13 +384,15 @@ module accel_tb #(parameter integer SWINT = 1,
         .clk (clk), .rst (rst), .enable (1'b1),
         .bus_valid (bus_tick), .bus_data (32'd0), .bus_mark (1'b0), .bus_mark_free (16'd0), .bus_dummy (1'b0),
         .fast_valid (mg_fast_valid), .fast_addr (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
-        .fast_rw (mg_fast_rw), .fast_data (8'd0), .fast_sync (1'b0), .vbl_level (1'b0), .res_level (1'b0),
+        .fast_rw (mg_fast_rw), .fast_data (8'd0), .fast_sync (1'b0), .fast_mark (1'b0), .fast_mark_free (16'd0),
+        .fast_quiet (1'b0), .vbl_level (1'b0), .res_level (1'b0), .sparse (1'b0), .virt (1'b0),
         .out_valid (mg_out_valid), .out_data (mg_out_data), .out_mark (), .out_mark_free (), .out_dummy (),
+        .out_drop (), .out_carrier (),
         .overflows (mg_overflows), .fast_room (mg_room), .fast_room_w (mg_room_w)
     );
     integer mg_write_in = 0, mg_write_out = 0, mg_write_drops = 0;
     always @(posedge clk) begin
-        if (u_merge.push_fast && !mg_fast_rw) begin
+        if (u_merge.want_fast && !mg_fast_rw) begin
             mg_write_in = mg_write_in + 1;
             if (!u_merge.fast_fits) mg_write_drops = mg_write_drops + 1;
         end
@@ -455,6 +467,9 @@ module accel_tb #(parameter integer SWINT = 1,
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
+        .swi_on (sw_int), .swi_kbd_ok (kbd_int_ok), .swi_fb_ok (1'b1),
+        .swi_vbl_ok (1'b0), .swi_vbl_bar (1'b1), .swi_kbd_low (kbd_int_low),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_stat_byte (mmu_swi_stat),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .d_addr (dq_addr_w), .d_rw (dq_rw_w),
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
@@ -588,6 +603,7 @@ module accel_tb #(parameter integer SWINT = 1,
     reg [7:0] ref_lcaux  [0:NRW*16384-1];
     reg [7:0] rom_img    [0:16383];
     reg m_store80, m_ramrd, m_ramwrt, m_altzp, m_page2, m_hires;
+    reg m_text, m_mixed, m_col80, m_altchar;
     reg m_bank2, m_lcrd, m_wren, m_pre;
     reg m_intcx, m_slotc3, m_intc8;
     reg [7:0] m_bank;
@@ -647,12 +663,30 @@ module accel_tb #(parameter integer SWINT = 1,
     function automatic [7:0] c0_exp(input [15:0] a);
         c0_exp = tb_kstrobe ? {1'b1, tb_kkey} : {1'b0, tb_klast};
     endfunction
+    // The machine's status page: bit 7 from its own switches over the
+    // keyboard latch's low bits, as the IOU serves them.  The pins answer
+    // with it and the card's shadow must agree ($C019 has no VBL here).
+    function automatic [7:0] c0_pin_stat(input [3:0] lo);
+        reg b;
+        begin
+            case (lo)
+                4'h1: b = m_bank2;   4'h2: b = m_lcrd;    4'h3: b = m_ramrd;
+                4'h4: b = m_ramwrt;  4'h5: b = m_intcx;   4'h6: b = m_altzp;
+                4'h7: b = m_slotc3;  4'h8: b = m_store80; 4'hA: b = m_text;
+                4'hB: b = m_mixed;   4'hC: b = m_page2;   4'hD: b = m_hires;
+                4'hE: b = m_altchar; 4'hF: b = m_col80;
+                default: b = 1'b0;
+            endcase
+            c0_pin_stat = {b, tb_kstrobe ? tb_kkey : tb_klast};
+        end
+    endfunction
 
     // What the core must read at `a`, from the reference: everything but
     // $C01x-$C0FF (the machine's), the keyboard from the model above.
     function automatic [7:0] exp_read(input [15:0] a);
         begin
             if (a[15:4] == 12'hC00) exp_read = c0_exp(a);
+            else if (a[15:4] == 12'hC01) exp_read = c0_pin_stat(a[3:0]);
             else if (a[15:12] == 4'hC) exp_read = cx_byte(a);
             else if (a >= 16'hD000) begin
                 if (m_lcrd) exp_read = m_altzp ? ref_lcaux[m_bank * 16384 + m_lcidx(a)] : ref_lc[m_lcidx(a)];
@@ -677,6 +711,7 @@ module accel_tb #(parameter integer SWINT = 1,
         else if (rw_drive && addr_drive == 16'hFFFD && m_saw_fffc) begin
             m_saw_fffc <= 1'b0; m_mmu_resets <= m_mmu_resets + 1;
             m_store80 <= 0; m_ramrd <= 0; m_ramwrt <= 0; m_altzp <= 0; m_page2 <= 0; m_hires <= 0;
+            m_text <= 1; m_mixed <= 0; m_col80 <= 0; m_altchar <= 0;
             m_bank2 <= 1; m_lcrd <= 0; m_wren <= 1; m_pre <= 0;
             m_intcx <= 0; m_slotc3 <= 0; m_intc8 <= 0;
             m_bank <= 0;
@@ -688,9 +723,13 @@ module accel_tb #(parameter integer SWINT = 1,
     always @(posedge clk) if (since_fall == BUS_AT && driving) begin
         if (rw_drive) begin
             if (addr_drive[15:8] == 8'hC0) begin
-                data_pin <= (addr_drive[7:4] == 4'h0 || addr_drive[7:4] == 4'h1) ? 8'h00 : FLOAT;
+                data_pin <= (addr_drive[7:4] == 4'h0) ? 8'h00
+                          : (addr_drive[7:4] == 4'h1) ? c0_pin_stat(addr_drive[3:0])
+                          : FLOAT;
                 if (addr_drive[7:4] == 4'h5) begin
                     if (addr_drive[3:1] == 3'd2) m_page2 <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd0) m_text  <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd1) m_mixed <= addr_drive[0];
                     if (addr_drive[3:1] == 3'd3) m_hires <= addr_drive[0];
                 end
                 if (addr_drive[7:4] == 4'h8) begin
@@ -712,6 +751,8 @@ module accel_tb #(parameter integer SWINT = 1,
                 if (addr_drive[7:4] == 4'h0) begin
                     case (addr_drive[3:1])
                         3'd0: m_store80 <= addr_drive[0];
+                        3'd6: m_col80   <= addr_drive[0];
+                        3'd7: m_altchar <= addr_drive[0];
                         3'd1: m_ramrd   <= addr_drive[0];
                         3'd2: m_ramwrt  <= addr_drive[0];
                         3'd3: m_intcx   <= addr_drive[0];
@@ -722,6 +763,8 @@ module accel_tb #(parameter integer SWINT = 1,
                 end
                 if (addr_drive[7:4] == 4'h5) begin
                     if (addr_drive[3:1] == 3'd2) m_page2 <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd0) m_text  <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd1) m_mixed <= addr_drive[0];
                     if (addr_drive[3:1] == 3'd3) m_hires <= addr_drive[0];
                 end
                 if (addr_drive[7:0] == 8'h71 || addr_drive[7:0] == 8'h73) begin
@@ -781,14 +824,32 @@ module accel_tb #(parameter integer SWINT = 1,
     integer dummies = 0, dummies_bad = 0, pin_ram_writes = 0;
     // The internalized keyboard: served reads, and reads that should have
     // been served but rode the bus (decoded as accel_seq decodes them).
-    integer swi_ops = 0, swi_bus_trips = 0;
+    integer swi_ops = 0, swi_bus_trips = 0, swi_sw_ops = 0, swi_quiet_ops = 0;
     always @(posedge clk) begin
         if (swi_commit) swi_ops = swi_ops + 1;
+        if (swi_commit && u_addr[7:4] != 4'h0) swi_sw_ops = swi_sw_ops + 1;
+        if (swi_commit && u_seq.quiet_q) swi_quiet_ops = swi_quiet_ops + 1;
         if (op_present && !op_dummy && !op_ovr && sw_int && op_rw &&
             (op_addr[15:4] == 12'hC00) && kbd_int_ok && !u_seq.reset_seq) begin
             swi_bus_trips = swi_bus_trips + 1;
             if (swi_bus_trips <= 5)
                 $display("[%0t] keyboard read on the bus with the latch full: $%04X", $time, op_addr);
+        end
+    end
+    // The machine's side of a synthetic commit: an internalized read of a
+    // switch moves the model's switches as the pins would have.
+    always @(posedge clk) if (swi_commit && u_rw) begin
+        if (u_addr[7:4] == 4'h5) begin
+            if (u_addr[3:1] == 3'd0) m_text  <= u_addr[0];
+            if (u_addr[3:1] == 3'd1) m_mixed <= u_addr[0];
+            if (u_addr[3:1] == 3'd2) m_page2 <= u_addr[0];
+            if (u_addr[3:1] == 3'd3) m_hires <= u_addr[0];
+        end
+        if (u_addr[7:4] == 4'h8) begin
+            m_bank2 <= !u_addr[3];
+            m_lcrd  <= (u_addr[1] == u_addr[0]);
+            if (!u_addr[0]) begin m_wren <= 0; m_pre <= 0; end
+            else begin if (m_pre) m_wren <= 1; m_pre <= 1; end
         end
     end
     integer fast_bus_cls = 0, bus_bus_cls = 0, u_core_ops = 0, cx_fast = 0, cx_bus = 0, cx_slot_fast = 0;
@@ -1225,6 +1286,8 @@ module accel_tb #(parameter integer SWINT = 1,
         // ---- 3b. the keyboard in the dummies --------------------------------
         if (swi_ops == 0) fail("mode 2: no keyboard read was served on the card");
         else ok($sformatf("mode 2: %0d keyboard reads served from the parked-dummy latch", swi_ops));
+        if (swi_sw_ops == 0) fail("mode 2: no status/floating read was served on the card");
+        else ok($sformatf("mode 2: %0d switch reads served on the card, %0d of them quiet (no word)", swi_sw_ops, swi_quiet_ops));
         if (swi_bus_trips != 0) fail($sformatf("mode 2: %0d keyboard reads rode the bus with the latch full", swi_bus_trips));
         else ok("mode 2: no keyboard read rode the bus once the latch had filled");
         // An injected key crosses the internal path end to end: pressed
