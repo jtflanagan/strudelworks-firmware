@@ -42,9 +42,14 @@ tighter, one or two ms. That is the budget a host has to deliver a track in.
 
 **What the host delivers.** The card's notice reaches the host in tens of
 microseconds (README.md's link measurements: 36 us p50, 118 us worst in
-production), a track pre-nibblized in host RAM is seven 1 KB messages, ~370
-us of wire at the Pi's ~19 MB/s, and the answer is written straight into
-the card's buffer as it arrives. Typically **0.5-1 ms** end to end; the tails
+production), a track pre-nibblized in host RAM is seven 1 KB messages down
+the same SuperSpeed link the stream comes up - the bytes themselves are
+tens of microseconds of wire; what a fill pays is seven per-message
+overheads and the notice's round trip (DERISK.md: the link is
+latency-bound, not per-byte-bound) - and the answer is written straight
+into the card's buffer as it arrives.  (An earlier revision put "~19 MB/s"
+here; that figure was the Pi's SD card in the host README's boot-time
+analysis, nothing to do with the FT601.) Typically **0.5-1 ms** end to end; the tails
 (the FT601's 0.5 ms dry spells, the ingest thread's 2 ms design deadline)
 are inside the DOS budget and outside a fast loader's.
 
