@@ -99,7 +99,7 @@ module page_cache_tb;
         .data_sync (data_sync),
         .rom_byte (rom_byte), .rom_loaded (rom_loaded),
         .sub_en (sub_en), .sub_data (sub_data),
-        .fb_addr (16'd0), .fb_byte (),
+        .mw_stb (), .mw_addr (), .mw_byte (),
         .il_req (1'b0), .il_aux (1'b0), .il_bank (8'd0), .il_line (12'd0),
         .il_ack (), .il_ok (), .il_row (),
         .serve (serve), .inval (inval), .cnt_clr (cnt_clr), .image_ready (image_ready),

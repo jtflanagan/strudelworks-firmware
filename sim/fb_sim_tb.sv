@@ -81,9 +81,11 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     reg       pal = 1'b0;
     reg [6:0] H = 7'h00;
     reg [8:0] V = 9'h100;
+    reg [8:0] Vp = 9'h0FF;          // the line before: the machine's mixed-mode lag needs it
     always @(posedge clk) if (fall) begin
         if (H == 7'h7F) begin
             H <= 7'h00;
+            Vp <= V;
             V <= (V == 9'h1FF) ? (pal ? 9'hC8 : 9'hFA) : V + 9'd1;
         end else if (H == 7'h00) begin
             H <= 7'h40;
@@ -269,18 +271,24 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire [31:0] compared, mismatches, last, last2, other;
     wire [7:0]  peek_data;
 
-    // The main bank's port B, stood in for: the card's main memory (cmem,
-    // written beside the machine's on every main write), one registered
-    // clock behind the address, as rtl/page_cache.sv serves it.
-    wire [15:0] mb_addr;
-    reg  [7:0]  mb_byte;
-    always @(posedge clk) mb_byte <= cmem[mb_addr];
+    // The main bank's write tap, stood in for: every main write the card's
+    // bank (cmem) takes, reported on the clock it takes it, as
+    // rtl/page_cache.sv does.  The condition is the cmem write's below.
+    reg         mw_stb  = 1'b0;
+    reg  [15:0] mw_addr = 16'd0;
+    reg  [7:0]  mw_byte = 8'd0;
+    always @(posedge clk) begin
+        mw_stb  <= (since_fall == BUS_AT) && driving && !rw_drive &&
+                   (addr_drive[15:12] != 4'hC) && !wr_aux(addr_drive);
+        mw_addr <= addr_drive;
+        mw_byte <= data_drive;
+    end
 
     fb_sim dut (
         .clk (clk), .rst (rst),
         .op_addr (op_addr), .op_rw (op_rw),
         .op_present (op_present), .op_commit (op_commit), .op_ovr (op_ovr),
-        .mb_addr (mb_addr), .mb_byte (mb_byte),
+        .mw_stb (mw_stb), .mw_addr (mw_addr), .mw_byte (mw_byte),
         .sw_state (sw_state), .vid_sw (vid_sw),
         .locked (locked), .scan_v (scan_v), .scan_h (scan_h), .pal (dpal),
         .master_active (master_active),
@@ -316,9 +324,11 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     endfunction
 
     // The byte the scanner read this cycle, and where it was: text
-    // addressing when TEXT, or MIXED on the lines V4 && V2; page 2 only
-    // when 80STORE is off.
-    wire        sc_text  = sw_text || (sw_mixed && V[7] && V[5]);
+    // addressing when TEXT, or MIXED on the lines V4 && V2 - one cycle
+    // late, as the machine does it: the FIRST cycle (H state $00) of a line
+    // still goes by the line before (measured 2026-09-03: rtl/scan_addr.vh);
+    // page 2 only when 80STORE is off.
+    wire        sc_text  = sw_text || (sw_mixed && (H == 7'h00 ? (Vp[7] && Vp[5]) : (V[7] && V[5])));
     wire        sc_hires = sw_hires && !sc_text;
     wire        sc_page2 = sw_page2 && !sw_store80;
     wire [15:0] sc_now   = sc_addr(V, H, sc_hires, sc_page2);

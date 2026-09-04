@@ -92,7 +92,7 @@ run floppy_card   rtl/floppy_card.sv rtl/fd_bank.sv rtl/slot_switches.sv \
                   -Wno-MULTIDRIVEN
 # vbl_lock and fb_sim share the scanner formula, an `include beside the RTL.
 run vbl_lock      -Irtl rtl/vbl_lock.sv
-run fb_sim        -Irtl rtl/fb_sim.sv
+run fb_sim        -Irtl rtl/fb_sim.sv rtl/fd_bank.sv -Wno-MULTIDRIVEN
 # via6522 is third-party (see its header) and linted only as a dependency of
 # the mockingboard, with the style warnings its 2011 idiom trips suppressed
 # rather than fixed - it ran real machines as-is, and diverging from the

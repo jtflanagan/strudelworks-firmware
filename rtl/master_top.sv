@@ -207,8 +207,9 @@ module master_top #(
     wire [2:0]  vid_sw;         // the MMU shadow's video switches, for the same
     wire        fb_serve, fb_cnt_clr;
     wire [14:0] fb_peek_addr;
-    wire [15:0] fb_mb_addr;         // the scanner's read of the main bank
-    wire [7:0]  fb_mb_byte;
+    wire        fb_mw_stb;          // the main bank's writes as they land, for the copy
+    wire [15:0] fb_mw_addr;
+    wire [7:0]  fb_mw_byte;
     wire [6:0]  fb_mode;
     wire [31:0] fb_compared, fb_mismatch, fb_last, fb_last2, fb_other;
     wire [7:0]  fb_peek_data;
@@ -1011,8 +1012,9 @@ module master_top #(
         .sub_data    (mem_sub_data),
         .decided     (mem_decided),
         .busy        (mem_busy),
-        .fb_addr     (fb_mb_addr),
-        .fb_byte     (fb_mb_byte),
+        .mw_stb      (fb_mw_stb),
+        .mw_addr     (fb_mw_addr),
+        .mw_byte     (fb_mw_byte),
         // The line-row port carries iline's request when it has one, else the
         // data front's - iline first, always: its fills serve the running
         // fetch stream, the shadow's claims can only be early.
@@ -1042,11 +1044,12 @@ module master_top #(
     );
 
     // ---- the floating bus, simulated ----------------------------------------
-    // The page cache's main bank, read at the video scanner's address for
-    // the cycle in flight: the byte a floating-bus read would return,
-    // without the bus and without a side copy to keep in sync.  Compared
-    // with the real byte on every such read; substituted for it when
-    // FB_CTRL says so.  See rtl/fb_sim.sv and docs/FLOATING_BUS.md.
+    // A side copy of main memory's display pages, written on the clock the
+    // page cache's main bank takes each byte, read at the video scanner's
+    // address for the cycle in flight: the byte a floating-bus read would
+    // return, without the bus.  Compared with the real byte on every such
+    // read; substituted for it when FB_CTRL says so.  See rtl/fb_sim.sv and
+    // docs/FLOATING_BUS.md.
     fb_sim u_fb (
         .clk           (apple_clk),
         .rst           (apple_rst),
@@ -1055,8 +1058,9 @@ module master_top #(
         .op_present    (u_present),
         .op_commit     (u_commit),
         .op_ovr        (u_ovr),
-        .mb_addr       (fb_mb_addr),
-        .mb_byte       (fb_mb_byte),
+        .mw_stb        (fb_mw_stb),
+        .mw_addr       (fb_mw_addr),
+        .mw_byte       (fb_mw_byte),
         .sw_state      (mem_sw),
         .vid_sw        (vid_sw),
         .locked        (vbl_locked),

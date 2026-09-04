@@ -130,12 +130,15 @@ module page_cache (
     output logic       decided,
     output wire        busy,
 
-    // The floating-bus simulator's read of main memory (rtl/fb_sim.sv): the
-    // main bank's port B is its alone - the page engine works the aux
-    // bank's - so no arbitration, just the byte the clock after the
-    // address.
-    input  wire [15:0] fb_addr,
-    output wire [7:0]  fb_byte,
+    // The main bank's writes as they land, for the floating-bus simulator's
+    // side copy of the display pages (rtl/fb_sim.sv): the strobe, the
+    // address and the byte on the clock port A takes them.  The main bank is
+    // bank 0 of the image and takes exactly one byte a write, so this is
+    // every main write and nothing else - after every switch that steers a
+    // write to aux has been applied.
+    output wire        mw_stb,
+    output wire [15:0] mw_addr,
+    output wire [7:0]  mw_byte,
 
     // The instruction front's line reads (rtl/iline.sv): granted onto the
     // banks' port A on any clock the op path is not using it - not an op's
@@ -187,10 +190,12 @@ module page_cache (
 
     // ---- the banks -------------------------------------------------------------
     logic [127:0] main_row, aux_row;
+    wire  [127:0] mb_unused;   // the main bank's idle port B
 
     // Port A: the op's read at P0, the decision's write at P3.
     logic         mw_en, aw_en;
     logic [11:0]  w_row;
+    logic [3:0]   w_lo;        // the byte's lane, for the tap
     logic [15:0]  w_be;
     logic [127:0] w_data;
 
@@ -200,8 +205,6 @@ module page_cache (
     logic [127:0] b_wdata;
     logic [127:0] b_rdata;
 
-    logic [127:0] fb_row;
-    logic [3:0]   fb_lo_q;
 
     // A write reaches the banks at P3 (mw_en/aw_en, which block il_ack
     // below); its classification is at P2 (cl_valid) and the front snoops
@@ -249,16 +252,19 @@ module page_cache (
         .a_addr  (mw_en ? w_row : il_main ? il_line : pf_off[15:4]),
         .a_wdata (w_data),
         .a_rdata (main_row),
-        // Port B is the floating-bus simulator's, every clock.
-        .b_en    (1'b1),
+        // Port B is free: the floating-bus simulator keeps its own copy
+        // now (docs/FLOATING_BUS.md), fed from the write tap below.
+        .b_en    (1'b0),
         .b_we    (16'd0),
-        .b_addr  (fb_addr[15:4]),
+        .b_addr  (12'd0),
         .b_wdata (128'd0),
-        .b_rdata (fb_row)
+        .b_rdata (mb_unused)
     );
 
-    always_ff @(posedge clk) fb_lo_q <= fb_addr[3:0];
-    assign fb_byte = fb_row[8 * fb_lo_q +: 8];
+    // The write tap: what port A takes this clock, byte-wide.
+    assign mw_stb  = mw_en;
+    assign mw_addr = {w_row, w_lo};
+    assign mw_byte = w_data[7:0];
 
     bank_ram u_aux (
         .clk     (clk),
@@ -447,7 +453,7 @@ module page_cache (
             e_crit <= 4'd0; e_boff <= 4'd0; e_wbyte <= 8'd0;
             e_dirty <= 1'b0; e_rw <= 1'b1; e_serve <= 1'b0; e_cmp <= 1'b0;
             snap_k <= 5'd0; req_n <= 4'd0; fl_k <= 4'd0; resp_n <= 5'd0;
-            w_row <= 12'd0; w_be <= 16'd0; w_data <= 128'd0;
+            w_row <= 12'd0; w_lo <= 4'd0; w_be <= 16'd0; w_data <= 128'd0;
             hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
             mismatches <= 32'd0; last_mismatch <= 32'd0; diverted <= 32'd0;
             late_fills <= 8'd0; fifo_drops <= 8'd0;
@@ -519,6 +525,7 @@ module page_cache (
                     late_fills <= late_fills + 8'd1;
                 end else if (!s_aux || aux_hit || d_claim) begin
                     w_row  <= s_off[15:4];
+                    w_lo   <= s_off[3:0];
                     w_be   <= 16'd1 << s_off[3:0];
                     w_data <= {16{s_wdata}};
                     if (s_aux) begin
