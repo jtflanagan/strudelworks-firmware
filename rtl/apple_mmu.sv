@@ -260,6 +260,11 @@ module apple_mmu (
     output wire        q_swi_quiet,
     output wire        q_slot,
     output wire [7:0]  swi_stat_byte,
+    // ...and the No-Slot Clock's (rtl/no_slot_clock.sv): is q_addr in a
+    // page the clock listens at - the internal ROM's $C3 while that page is
+    // the internal ROM's, or its $C8 while the internal ROM is there.  Every
+    // mode, serving or not: the clock is a part under the ROM, not a serve.
+    output wire        q_nsc,
 
     // ...and the instruction front's (rtl/iline.sv): classify a READ of
     // p_addr - a line about to be prefetched - into its class, its bank side
@@ -496,6 +501,8 @@ module apple_mmu (
                                slot_page(swi_hd_slot) || slot_page(swi_fd_slot) || slot_page(swi_mb_slot) ||
                                slot_page(swi_mouse_slot));
     assign q_swi = swi_on && ((qi_io && (q_rw ? qi_rd : qi_wr)) || q_slot);
+    assign q_nsc = ((q_addr[15:8] == 8'hC3) && (intcxrom || !slotc3rom)) ||
+                   ((q_addr[15:8] == 8'hC8) && (intcxrom || intc8rom));
     // Quiet: a $C050-$C057 op, or a $C00x write, whose switch already holds
     // the value the address sets.  The language card's ops are never quiet
     // (the prewrite state moves on every one), and the rest change nothing

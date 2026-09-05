@@ -95,6 +95,7 @@ sim/run_hd_card_tb.sh      # the hard disk: busy, polled, a block in, a block ou
 sim/run_floppy_card_tb.sh  # the Disk II: nibbles on the cycle, the head, seeks filled, a sector written, ~10 s
 sim/run_vidhd_card_tb.sh   # the VidHD: a slot ROM, the signature, slot 3's switches, ~1 s
 sim/run_mouse_card_tb.sh   # the AppleMouse card: the PIA, the 68705's commands, the interrupts, ~2 s
+sim/run_no_slot_clock_tb.sh # the No-Slot Clock: the key, the read-out, a set ignored, the lever, <1 s
 sim/run_kbd_inject_tb.sh   # a key from the host, read by the core and the capture alike, ~3 s
 sim/run_mmu_trace.sh TRACE # the IIe memory map shadow replayed against a real machine's capture, ~10 s
 sim/run_mem_cache_tb.sh    # the memory cache, its DDR3 client and the ROM against a Wishbone stub, ~35 s

@@ -162,6 +162,10 @@ module master_top #(
     wire [1:0]  mouse_buttons;
     wire [7:0]  mouse_moves;
     wire [15:0] mouse_x, mouse_y;
+    wire        nsc_enable, nsc_sub, nsc_bit, nsc_time_loaded, nsc_ring_en, nsc_wr_en;
+    wire [5:0]  nsc_cmp_idx, nsc_ring_idx;
+    wire [7:0]  nsc_unlocks;
+    wire [63:0] nsc_now;
     wire        kbd_press, kbd_drop, kbd_lock;
     wire [6:0]  kbd_press_key;
     wire        kbd_strobe, kbd_seen, kbd_touched, kbd_changed;
@@ -350,6 +354,10 @@ module master_top #(
         .mouse_rom_loaded (mouse_rom_loaded),
         .mouse_irq (mouse_irq), .mouse_mode (mouse_mode), .mouse_buttons (mouse_buttons),
         .mouse_moves (mouse_moves), .mouse_x (mouse_x), .mouse_y (mouse_y),
+        .nsc_enable (nsc_enable), .nsc_time_loaded (nsc_time_loaded),
+        .nsc_ring_en (nsc_ring_en), .nsc_wr_en (nsc_wr_en),
+        .nsc_cmp_idx (nsc_cmp_idx), .nsc_ring_idx (nsc_ring_idx),
+        .nsc_unlocks (nsc_unlocks), .nsc_now (nsc_now),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key),
         .kbd_drop (kbd_drop), .kbd_lock (kbd_lock),
         .kbd_flags ({kbd_touched, kbd_seen, kbd_strobe}),
@@ -568,7 +576,7 @@ module master_top #(
     // ...and the card's own slots (docs/CXXX.md, "The on-card slots"): a
     // slot op's byte is the peripheral's registered answer, keyed FIRST -
     // a slot ROM page's low nibble would otherwise read as the keyboard's.
-    wire        q_slot, seq_slot_q;
+    wire        q_slot, seq_slot_q, q_nsc;
     wire [7:0]  swi_byte = seq_slot_q             ? slot_rd_data
                          : (u_addr[7:4] == 4'h0) ? kbd_int_byte
                          : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
@@ -672,6 +680,12 @@ module master_top #(
     // ---- the sequencer ------------------------------------------------------
     // The core's ops, decided: served from the card, or handed to the driver
     // for a bus cycle.  See rtl/accel_seq.sv.
+    // The byte the core takes is the sequencer's - the bus's, a switch's or
+    // the cache's - with the No-Slot Clock's bit on D0 for a read of the
+    // clock (rtl/no_slot_clock.sv): one LUT on one bit, behind the clock's
+    // registered verdict, whichever path served the rest of the byte.
+    wire [7:0]  seq_din;
+    assign cpu_din = nsc_sub ? {seq_din[7:1], nsc_bit} : seq_din;
     accel_seq u_seq (
         .clk           (apple_clk),
         .rst           (apple_rst),
@@ -699,7 +713,7 @@ module master_top #(
         .cpu_sync      (cpu_sync),
         .cyc_is_i      (cpu_cyc_is_i),
         .cyc_en        (seq_cyc_en),
-        .cpu_din       (cpu_din),
+        .cpu_din       (seq_din),
         .turbo_en      (turbo_en),
         .turbo_ok      (turbo_ok),
         .turbo_commit  (turbo_commit),
@@ -1119,6 +1133,7 @@ module master_top #(
         .swi_mb_slot (mb_slot_active),
         .swi_mouse_slot (mouse_slot_active),
         .q_slot     (q_slot),
+        .q_nsc      (q_nsc),
         .q_swi      (q_swi),
         .q_swi_quiet (q_swi_quiet),
         .swi_stat_byte (mmu_swi_stat),
@@ -1458,6 +1473,40 @@ module master_top #(
         .mode_rd       (mouse_mode),
         .buttons_rd    (mouse_buttons),
         .moves_rd      (mouse_moves)
+    );
+
+    // ---- the No-Slot Clock --------------------------------------------------
+    // A DS1216 under the CD ROM, the host's time behind it.  It listens on
+    // the unified stream - the MMU's map says whether the core's address is
+    // in a page the part sees - and steps at the op's commit: the driver's
+    // for a bus op, the sequencer's tick for a fast one.  Its bit goes
+    // into cpu_din above, never onto the bus.  See docs/NSC.md.
+    no_slot_clock u_nsc (
+        .clk           (apple_clk),
+        .rst           (apple_rst || !cpu_source_active),
+        .enable        (nsc_enable),
+        .q_nsc         (q_nsc),
+        .q_rw          (cpu_rw),
+        .q_a2          (nxt_addr[2]),
+        .ovr_en        (ovr_en),
+        .u_present     (u_present),
+        .u_ovr         (u_ovr),
+        .u_addr_lo     (u_addr[2:0]),
+        .commit        (seq_fast_tick || (op_commit && !op_dummy && !op_ovr)),
+        .msg_valid     (app_msg_valid),
+        .msg_type      (app_msg_type),
+        .msg_len       (app_msg_len),
+        .pay_data      (app_pay_data),
+        .pay_valid     (app_pay_valid),
+        .sub           (nsc_sub),
+        .sub_bit       (nsc_bit),
+        .time_loaded   (nsc_time_loaded),
+        .ring_en_o     (nsc_ring_en),
+        .wr_en_o       (nsc_wr_en),
+        .cmp_idx_o     (nsc_cmp_idx),
+        .ring_idx_o    (nsc_ring_idx),
+        .unlocks_o     (nsc_unlocks),
+        .now_o         (nsc_now)
     );
 
     // ---- the pins -----------------------------------------------------------

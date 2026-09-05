@@ -165,6 +165,16 @@ module card_link #(
     input  wire [7:0]  mouse_moves,
     input  wire [15:0] mouse_x,
     input  wire [15:0] mouse_y,
+    // The No-Slot Clock (rtl/no_slot_clock.sv): its lever out, its state
+    // and the host's time in, for NSC_CTRL / NSC_TIME / NSC_DATE.
+    output wire        nsc_enable,
+    input  wire        nsc_time_loaded,
+    input  wire        nsc_ring_en,
+    input  wire        nsc_wr_en,
+    input  wire [5:0]  nsc_cmp_idx,
+    input  wire [5:0]  nsc_ring_idx,
+    input  wire [7:0]  nsc_unlocks,
+    input  wire [63:0] nsc_now,
 
     // Keyboard injection (rtl/kbd_inject.sv, in a mastering top): the
     // KBD_INJECT register's press and drop pulses and the key out, the
@@ -950,6 +960,10 @@ module card_link #(
         .mouse_rom_loaded  (mouse_rom_loaded),
         .mouse_irq (mouse_irq), .mouse_mode (mouse_mode), .mouse_buttons (mouse_buttons),
         .mouse_moves (mouse_moves), .mouse_x (mouse_x), .mouse_y (mouse_y),
+        .nsc_enable (nsc_enable), .nsc_time_loaded (nsc_time_loaded),
+        .nsc_ring_en (nsc_ring_en), .nsc_wr_en (nsc_wr_en),
+        .nsc_cmp_idx (nsc_cmp_idx), .nsc_ring_idx (nsc_ring_idx),
+        .nsc_unlocks (nsc_unlocks), .nsc_now (nsc_now),
         .kbd_press         (kbd_press),
         .kbd_press_key     (kbd_press_key),
         .kbd_drop          (kbd_drop),

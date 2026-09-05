@@ -136,6 +136,7 @@ module reg_map_tb;
     // The VidHD's side of VIDHD_SLOT: the tb plays the card.
     wire [2:0]  vidhd_slot_active;
     wire [2:0]  mouse_slot_active;
+    wire        nsc_enable;
     reg         vidhd_rom_loaded = 1'b0;
     always @(posedge clk) begin
         if (fd_flush[0]) fd_flush_pulses = fd_flush_pulses + 1;
@@ -211,6 +212,9 @@ module reg_map_tb;
         .vidhd_slot_active (vidhd_slot_active), .vidhd_rom_loaded (vidhd_rom_loaded),
         .mouse_slot_active (mouse_slot_active), .mouse_rom_loaded (1'b1), .mouse_irq (1'b0),
         .mouse_mode (4'd0), .mouse_buttons (2'd0), .mouse_moves (8'd0), .mouse_x (16'd0), .mouse_y (16'd0),
+        .nsc_enable (nsc_enable), .nsc_time_loaded (1'b1), .nsc_ring_en (1'b0), .nsc_wr_en (1'b1),
+        .nsc_cmp_idx (6'd5), .nsc_ring_idx (6'd9), .nsc_unlocks (8'h2A),
+        .nsc_now ({32'h2609_0507, 32'h1341_2599}),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key), .kbd_drop (kbd_drop),
         .kbd_lock (kbd_lock), .kbd_notify (kbd_notify),
         .kbd_flags (kbd_flags), .kbd_counts (kbd_counts),
@@ -1285,6 +1289,42 @@ module reg_map_tb;
         end else $display("  ok: MOUSE_STAT reads the position");
         do_write(32'h8000_00D0, 32'h0000_0000);
         pulse_reset_line;
+
+        $display("");
+        // ---- NSC_CTRL / NSC_TIME / NSC_DATE ------------------------------------
+        // The lever is 1 at reset (the clock answers nothing until a time
+        // arrives, so this is safe); the rest reads straight through from
+        // the tied-off state: loaded, wr, cmp=5, idx=9, unlocks=$2A.
+        if (nsc_enable !== 1'b1) begin
+            $display("FAIL: the No-Slot Clock's lever is not on at reset");
+            errors = errors + 1;
+        end else $display("  ok: NSC_CTRL enable is 1 at reset");
+        base = out_n;
+        do_read(32'h8000_00D8);
+        if (out_mem[base+2] !== 32'h2A09_050B) begin
+            $display("FAIL: NSC_CTRL reads %08x, expected 2A09050B", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: NSC_CTRL reads the state");
+        do_write(32'h8000_00D8, 32'h0000_0000);
+        base = out_n;
+        do_read(32'h8000_00D8);
+        if (nsc_enable !== 1'b0 || out_mem[base+2] !== 32'h2A09_050A) begin
+            $display("FAIL: NSC_CTRL write 0 - lever %b, readback %08x", nsc_enable, out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: NSC_CTRL enable clears and reads back");
+        do_write(32'h8000_00D8, 32'h0000_0001);
+        base = out_n;
+        do_read(32'h8000_00DC);
+        if (out_mem[base+2] !== 32'h1341_2599) begin
+            $display("FAIL: NSC_TIME reads %08x, expected 13412599", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: NSC_TIME reads the host's time");
+        base = out_n;
+        do_read(32'h8000_00E0);
+        if (out_mem[base+2] !== 32'h2609_0507) begin
+            $display("FAIL: NSC_DATE reads %08x, expected 26090507", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: NSC_DATE reads the host's date");
 
         $display("");
         // ---- MEM_CTRL / MEM_STAT and the counters -----------------------------

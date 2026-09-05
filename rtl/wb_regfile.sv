@@ -132,6 +132,16 @@ module wb_regfile #(
     input  wire [7:0]      mouse_moves,
     input  wire [15:0]     mouse_x,
     input  wire [15:0]     mouse_y,
+    // The No-Slot Clock (rtl/no_slot_clock.sv, docs/NSC.md): its lever,
+    // and its state and the host's time for NSC_CTRL / NSC_TIME / NSC_DATE.
+    output wire            nsc_enable,
+    input  wire            nsc_time_loaded,
+    input  wire            nsc_ring_en,
+    input  wire            nsc_wr_en,
+    input  wire [5:0]      nsc_cmp_idx,
+    input  wire [5:0]      nsc_ring_idx,
+    input  wire [7:0]      nsc_unlocks,
+    input  wire [63:0]     nsc_now,
 
     // Keyboard injection (rtl/kbd_inject.sv).  press and drop are one-cycle
     // pulses per write of their bits, press_key the key that write carried;
@@ -321,6 +331,9 @@ module wb_regfile #(
     localparam [13:0] R_GAME_STAT2     = 'd51; // 0x8000_00CC, RO
     localparam [13:0] R_MOUSE_SLOT     = 'd52; // 0x8000_00D0, RW in bits 2:0
     localparam [13:0] R_MOUSE_STAT     = 'd53; // 0x8000_00D4, RO
+    localparam [13:0] R_NSC_CTRL       = 'd54; // 0x8000_00D8, RW bit 0
+    localparam [13:0] R_NSC_TIME       = 'd55; // 0x8000_00DC, RO
+    localparam [13:0] R_NSC_DATE       = 'd56; // 0x8000_00E0, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -650,6 +663,29 @@ module wb_regfile #(
                                  5'd0, mouse_slot_active_q, 5'd0, mouse_slot_desired};
     // MOUSE_STAT: {y[15:0], x[15:0]}, the position as the card holds it.
     wire [31:0] mouse_stat_rd = {mouse_y, mouse_x};
+
+    // ---- NSC_CTRL -----------------------------------------------------------
+    //
+    //   [0]      enable    RW   the No-Slot Clock listens; 1 at reset - it
+    //                           answers nothing until the host has sent a time
+    //   [1]      loaded    RO   a time has arrived (NSC_TIME messages)
+    //   [2]      ring      RO   the clock register is being read out
+    //   [3]      wr        RO   writes are enabled (no key mismatch pending)
+    //   [13:8]   cmp       RO   the comparison register's bit index
+    //   [21:16]  idx       RO   the clock register's bit index
+    //   [31:24]  unlocks   RO   times the key matched and the register filled
+    //
+    // NSC_TIME: the host's time, low half - {hour, minute, second, centisecond}
+    // as BCD bytes, the centisecond lowest; NSC_DATE the high half - {year,
+    // month, date, day of week}.  docs/NSC.md.
+    logic nsc_enable_q;
+    always_ff @(posedge clk) begin
+        if (rst)              nsc_enable_q <= 1'b1;
+        else if (wr_nsc_ctrl) nsc_enable_q <= wb_dat_w[0];
+    end
+    assign nsc_enable = nsc_enable_q;
+    wire [31:0] nsc_ctrl_rd = {nsc_unlocks, 2'd0, nsc_ring_idx, 2'd0, nsc_cmp_idx,
+                               4'd0, nsc_wr_en, nsc_ring_en, nsc_time_loaded, nsc_enable_q};
 
     // ---- FD_DRIVE1 / FD_DRIVE2 ----------------------------------------------
     //
@@ -1092,6 +1128,9 @@ module wb_regfile #(
                         R_VIDHD_SLOT: wb_dat_r <= vidhd_slot_rd;
                         R_MOUSE_SLOT: wb_dat_r <= mouse_slot_rd;
                         R_MOUSE_STAT: wb_dat_r <= mouse_stat_rd;
+                        R_NSC_CTRL:   wb_dat_r <= nsc_ctrl_rd;
+                        R_NSC_TIME:   wb_dat_r <= nsc_now[31:0];
+                        R_NSC_DATE:   wb_dat_r <= nsc_now[63:32];
                         R_FB_CTRL:    wb_dat_r <= fb_ctrl_rd;
                         R_FB_COMPARED: wb_dat_r <= fb_compared;
                         R_FB_MISMATCH: wb_dat_r <= fb_mismatch;
@@ -1165,6 +1204,8 @@ module wb_regfile #(
                          (word == R_VIDHD_SLOT);
     wire wr_mouse_slot = access && !wb_ack && in_region && wb_we &&
                          (word == R_MOUSE_SLOT);
+    wire wr_nsc_ctrl   = access && !wb_ack && in_region && wb_we &&
+                         (word == R_NSC_CTRL);
     wire wr_fb_ctrl    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FB_CTRL);
     wire wr_fb_peek    = access && !wb_ack && in_region && wb_we &&

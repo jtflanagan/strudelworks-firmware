@@ -4,6 +4,11 @@
 speaker, `$C030-$C03F`, served on the card in the closed regime - "The
 speaker", below.
 
+**THE NO-SLOT CLOCK PROVEN ON HARDWARE (2026-09-05, branch `cxxx_work`, the Pt, SRAM):**
+a DS1216 under the CD ROM, hung on the unified stream and the MMU's map,
+its bit substituted into the core's byte in every mode - not a serve, not
+a slot, and nothing on the bus.  docs/NSC.md.
+
 **STEP 5 PROVEN ON HARDWARE (2026-09-04 evening, branch `cxxx_work`, the Pt, SRAM):** the
 card's OWN slots - the hard disk, the floppy, the Mockingboard - served on
 the card in the closed regime: "The on-card slots", below.  The user's

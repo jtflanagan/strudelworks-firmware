@@ -73,6 +73,7 @@ host reads; the receiver carries parser state across all of them.
 | `0x24` | UNKNOWN_TYPE | Card→host, **unsolicited**. Header only; `free[7:0]` = the type of a host→card message the card does not consume, `free[15:8]` = its length. The card skipped that message by its length - framing is intact - and this says so, so the host can log what it sent that the gateware lacks. One pending, the latest wins. |
 | `0x25` | MOUSE_MOVE | Host→card. `free[1:0]` = the mouse's buttons (levels, 0 = button 0); payload one word `{dy[15:0], dx[15:0]}`, signed deltas in the mouse's own counts. Applied to the card's position with the program's clamps and raises the movement/button interrupt if the mode asks. See MOUSE.md. |
 | `0x26` | MOUSE_ROM | Host→card. `free[2:0]` = chunk; payload 64 words: one 256-byte page of the AppleMouse card's 2 KB firmware ROM. Eight chunks make the ROM, in any order. See MOUSE.md. |
+| `0x27` | NSC_TIME | Host→card. Payload two words: the No-Slot Clock's 64-bit clock register in packed BCD, low word `{hour, minute, second, centisecond}` then high `{year, month, date, day of week}`. Taken whole at the second word; the card keeps no time of its own, the host sends one every centisecond. See NSC.md. |
 | `0x27`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
@@ -150,6 +151,9 @@ protocol.
 | `0x8000_00CC` | GAME_STAT2 | RO | `[11:0]` paddle 2's sample; `[23:12]` paddle 3's; `[31:24]` measurements completed, wrapping |
 | `0x8000_00D0` | MOUSE_SLOT | RW bits 2:0 | the mouse card's slot, 0 = off; latched at RES', never MB_SLOT's, HD_SLOT's, FD_SLOT's or VIDHD_SLOT's; `[16]` rom loaded, `[17]` IRQ asserted, `[19:18]` the buttons, `[23:20]` the mode byte, `[31:24]` MOUSE_MOVEs applied — see MOUSE.md |
 | `0x8000_00D4` | MOUSE_STAT | RO | `{y[15:0], x[15:0]}`: the position as the card holds it |
+| `0x8000_00D8` | NSC_CTRL | RW bit 0 | the No-Slot Clock's lever (1 at reset); `[1]` time loaded, `[2]` reading out, `[3]` writes enabled, `[13:8]` comparison bit, `[21:16]` read-out bit, `[31:24]` unlocks — see NSC.md |
+| `0x8000_00DC` | NSC_TIME | RO | the time the card holds, low half: `{hour, minute, second, centisecond}` BCD |
+| `0x8000_00E0` | NSC_DATE | RO | ...high half: `{year, month, date, day of week}` BCD |
 | `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
