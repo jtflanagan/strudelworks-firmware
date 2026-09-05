@@ -1,5 +1,11 @@
 # $Cxxx under acceleration: what to serve fast
 
+**STEP 4 PROVEN ON HARDWARE (2026-09-04, branch `cxxx_work`, the Pt, SRAM):**
+the switch WRITES in the closed regime - "The switch writes", below.  The
+banked list's item 1 is now complete on both sides; INTCXROM and SLOTC3ROM
+stay on the bus by design, and that section says why that is the right
+answer to "how do slot accesses still reach the slots".
+
 **STEP 3 BUILT AND SIMULATED (2026-09-03, branch `cxxx_work`, the Pt):**
 the switch READS in the closed regime - "The switch reads in the closed
 regime", below.  The banked list's item 1, read side only, taken up
@@ -337,6 +343,169 @@ pair; the bench's machine model moves its switches at the synthetic
 commit as the pins would, and the same program passes in every mode.
 Hardware: the demo the user named first is `megademo.dsk`.
 
+## The switch writes (step 4, 2026-09-04)
+
+**What was left.** After step 3 every switch READ the card could answer
+was answered on the card, and every WRITE still rode the bus - AUXMOVE's
+RAMRD/RAMWRT dance around every tile on the Nox map was four bus ops
+(18% of the clocks there, the census said), and the LC pair, 80STORE and
+the video toggles by STA were the rest of the bus traffic on that screen.
+This step serves those writes on the card, on the same path the reads
+took: `apple_mmu.q_swi` now answers for a write too, the op rides S_FAST
+(the page cache decides a BUS-class write with nothing written - a write
+outside the image lands nowhere, `cl_wr_image` clear), and it retires
+with the synthetic commit, so the shadow moves, `map_changed` fires, the
+fronts' kills fire, and the fast word carries the write to the host
+exactly as a bus commit would have.  A write wants no byte, so it needs
+no fb_sim.  The census counts it in WR beside every other write; KBD is
+now the internalized READS alone.
+
+**The writes served** (`rtl/apple_mmu.sv` qi_wr), and the quiet rule:
+
+| write | effect | quiet when |
+|---|---|---|
+| `$C000/1` 80STORE, `$C002/3` RAMRD, `$C004/5` RAMWRT, `$C008/9` ALTZP, `$C00C/D` 80COL, `$C00E/F` ALTCHAR | the shadow's switch, at the synthetic commit | the switch already holds the value |
+| `$C050-$C057` | TEXT/MIXED/PAGE2/HIRES, likewise | the same |
+| `$C080-$C08F` | the language card's state machine, WRITE semantics (A0 = 1 clears prewrite, leaves the enable alone) | never |
+
+A quiet write, like a quiet read, puts no word on the stream: the host's
+mirror and display shadow would apply it as a no-op.  The regime is the
+same lever as steps 2 and 3 - mode 2, serving, `ACCEL_CTRL[28]` clear,
+the core not held, past the reset sequence; the host's `swint` key and
+`accel swint on|off` - and outside it every one of these writes is a bus
+op as before.  In mode 1 RAM writes land on the motherboard, so the
+motherboard's switches must follow the program's: everything rides the
+bus there, by the rule.
+
+**What stays on the bus, and why that is the answer to the slot
+question.** The user's concern going in: if the card stops telling the
+motherboard about switch writes, will a slot access the card DOES put on
+the bus still reach the slot?  The IIe routes I/O SELECT' ($Cn00-$CnFF)
+and I/O STROBE' ($C800-$CFFF) to the slots on exactly three things:
+INTCXROM, SLOTC3ROM, and the INTC8ROM latch those two feed.  Nothing
+else - not 80STORE, RAMRD, RAMWRT, ALTZP, the IOU's pair, the toggles or
+the language card - touches slot routing, and DEVICE SELECT' ($C0n0-
+$C0nF) is never gated at all.  So:
+
+- **`$C006/7` INTCXROM and `$C00A/B` SLOTC3ROM stay bus ops in every
+  mode.**  The card's classifier (`classify`, "THE CX CLASS") only makes
+  a $Cnxx access a BUS op when its shadow says the slot owns the page,
+  and its shadow and the motherboard's MMU have then seen the same
+  writes to the same two switches - so the motherboard routes the cycle
+  the same way the card decided it.  The four on-card peripherals track
+  the same two writes from the driven stream (`rtl/slot_switches.sv`),
+  a second reason they must be there.
+- **INTC8ROM may diverge, in the harmless direction only.**  A $C3xx read
+  with SLOTC3ROM clear is ROM class, served on the card with no bus
+  cycle, so the card's latch sets and the motherboard's does not.  The
+  card then serves $C800-$CFFF itself and never externalizes it, so the
+  motherboard being MORE open to the slots than the card believes causes
+  no wrong cycle.  The dangerous direction - the motherboard more closed
+  than the card - would need it to have seen an INTCXROM/SLOTC3ROM write
+  the card did not, and there are none.
+- **A reset does not give an "all slots" state, and does not need to.**
+  The motherboard's inferred reset (ACCELERATION.md, "The reset sequence
+  rides the bus") leaves INTCXROM clear and SLOTC3ROM clear: slots 1, 2,
+  4-7 and $C800 routed to the slots, $C3xx to the internal ROM.  The
+  monitor ROM never writes SLOTC3ROM (the only `STA $C00A/B` in the
+  16 KB are the 80-column firmware's PR#3 disconnect at $C2E2/$C2EA), so
+  the machine stays there until a program asks otherwise - and when one
+  does, the write rides the bus.  The alternative considered and
+  rejected: forcing the motherboard to INTCXROM off / SLOTC3ROM on as a
+  fixed backplane and internalizing those two writes as well.  It would
+  buy a handful of cycles (the ROM toggles INTCXROM around its $C8xx
+  calls and at reset) and cost a synthetic `$C00B` write after every
+  reset sequence plus a permanent motherboard/shadow divergence to
+  re-sync on any move to mode 0.
+- Also on the bus, as before: `$C010` and every `$C01x` write (the
+  strobe), `$C058-$C05F`, the rest of `$C02x-$C07x`, `$CFFF`, every
+  slot.
+
+**The host** needed nothing: `pipeline.cpp` applies every word, fast or
+not, to the mirror and the display shadow before deciding whether it is
+a cycle, and the sparse filter keeps every fast write.  A `STA $C003`
+served on the card flips the host's RAMRD through its fast word, as the
+`$C055` read did in step 3.
+
+**Proof.** `sim/accel.s` phase 5d writes every served switch and reads
+it back through the status page (RAMRD excepted - the program runs from
+RAM at $6000, and the aux tests in ROM flip RAMRD already, now on this
+path), makes two quiet writes, drives the LC by writes, and writes both
+Cx-ROM switches; `sim/accel_tb.sv`'s machine model moves its switches at
+a synthetic-commit write with the pins' semantics, and mode 2 asserts:
+switch writes served (309, 27 quiet), NO memory-switch write on the pins
+in the closed regime, INTCXROM/SLOTC3ROM writes ON the pins (33), none
+of those served on the card.  Verilator, both sweeps: 81 checks, 0
+errors, 71.4x unlimited, governors 4.00 and 1.00 exact.  `sim/boot_tb.sv`'s
+machine model got the same synthetic-commit write (it had the read half
+only, and the first run showed exactly the divergence that predicts: the
+reference's LC and aux state falling behind the card's after ProDOS's
+first internalized `STA`); with it the ProDOS boot bench, 2M bus cycles
+mode 2 unlimited, is bit-for-bit step 2's - 137.2M ops, 68.6x at Bitsy
+Bye, 12.6k bus ops, 0 bad reads, image equal to the reference in every
+bank - which is expected: ProDOS idling in Bitsy Bye writes no switches,
+so that bench is a correctness proof here and not a speed one.  Build:
+WNS +0.008, bitstream 2026-09-04 17:24.
+
+**The hazard the hardware found, and the settle (2026-09-04, same day).**
+The first bit locked Nox Archaist up in its DHGR splash - with `accel
+swint off` (the config's `swint = off`; the socket command was found
+broken on the host and fixed, `pipeline.cpp drive_accel_ctrl` dropped the
+disable bits) it booted, so the fault was in the internalized switch ops.
+The stuck loop was the splash's speaker sample player at $1116-$115B,
+sitting in BOTH banks with RAMRD on, the machine looping in it forever
+because a byte it depended on was wrong.  The cause, found by instrumenting
+`sim/accel_tb.sv`: a bus op's commit lands mid-cycle and the driver holds
+the core for the rest of it, so the shadow, `map_changed`, the CAM
+flash-clears and everything derived from them have settled before the
+core's next op; a SYNTHETIC commit comes one clock AFTER the core moved
+(fast_hit is the cyc_en; swi_commit follows a clock later), the shadow
+flips the clock after that and `map_changed` the clock after THAT - and
+`turbo_ok` was free again two clocks after fast_hit.  The instruction
+front served the opcode right after `STA $C003` from a CAM line resident
+under the OLD map, one clock before map_changed killed it: one byte from
+the wrong bank.  Step 3's reads had the same window (an LC or PAGE2 read
+followed by an opcode from the switched region) and nothing ran into it
+before Nox.  The fix, `rtl/accel_seq.sv` swi_settling: a switch-CHANGING
+synthetic commit (not a quiet one) holds `turbo_ok` and the dispatcher's
+`settled` for four clocks - the commit's, the shadow's, map_changed's and
+one for anything derived from map_changed - so the next op sees the new
+map everywhere, exactly as after a bus op.  Cost: four clocks per switch
+flip, against the ~98 the bus cycle cost.  The reproducer is `sim/accel.s`
+bankfetch (phase 4b): four stubs at $1F00-$1F3F identical in both banks
+except for the byte under test, flipping RAMRD/RAMWRT and continuing; the
+first cut had `LDA #imm` differing in the OPERAND and passed on the broken
+RTL, because the one byte served early is the OPCODE - it now differs in
+the opcode (INX/DEX) and fails on the broken RTL (mode 2: 1 turbo read
+disagreed, the program's flag raised) and passes with the settle.  The
+first cut of the settle held on EVERY non-quiet internalized op and cost
+the ProDOS boot bench 12% (68.6x -> 60.1x: Bitsy Bye's `$C000` poll paid
+four clocks a read); narrowed to the ops that can move a switch ($C00x
+writes, $C05x/$C08x either way) it is back to 137.2M ops, 68.6x, 420 ops
+short of before.  Battery with the settle: accel_tb 81 checks 0 errors
+both sweeps (bankfetch included), mode 2 71.1x; boot bench 0 bad; build
+WNS +0.021 after the post-route phys_opt (the pre-opt figure read -0.010).
+**ON HARDWARE (2026-09-04 18:50, SRAM, host with the swint fix):** Nox
+Archaist boots through the DHGR splash into the HiRes title with swint
+ON, mode 2 governed 16 - the WR bucket climbing (its switch writes served)
+and the KBD bucket too; the runtime `accel swint off` now reads back
+"swint OFF".
+
+**On hardware (2026-09-04, SRAM, host 3978b05 unchanged).**  megademo.dsk
+at the governed 8.00 in mode 2: runs as before; a 5 s sparse trace
+(36.7 s of machine time) carries only the Mockingboard's VIA writes in
+slot 4 and 43 speaker reads - its toggles are reads, served since step 3.
+wave.dsk's STARTUP (the AUXMOVE workload), mode 2 unlimited: an 8 s sparse
+trace covering 321 s of machine time has **zero bus events**, and the
+fast-op mix shows `$C002 W` and `$C003 W` at 1026 each - RAMRD's dance
+served on the card; `accel status` twice around the trace: 892M ops over
+9.19M cycles, ~97x, the bus-op counter frozen at 1,692,197 across the
+whole run (the earlier 60-90x readings of this section included Bitsy Bye
+and the boot).  The first swhost restart on the test config hit the
+FT601 "device gone" startup race (stop and start back to back); a 5 s gap
+between them cleared it.  Test config: `swwr_test.conf` on the Pi (floppy
+1 = wave.dsk, hd off, accel all unlimited), written by `tools/pi.sh conf`.
+
 ## The next steps, BANKED (the user's decision, 2026-09-02)
 
 Written up so they can be picked up cold; not to be built now.  The
@@ -351,7 +520,8 @@ large reserves of LUTs, BRAM and placement space again.
 
 In the order the counters rank them on the animated map:
 
-1. **The closed-regime switch port** (~18% of clocks there).  The
+1. **The closed-regime switch port** (~18% of clocks there).  **DONE:
+   reads in step 3, writes in step 4 (above).**  The
    acceleration branch's 15c8444, minus what step 2 already carried.
    Gated exactly as the keyboard is - mode 2, serving, ACCEL_CTRL[28]
    clear, not held - which is the user's rule: internalizing a mapping

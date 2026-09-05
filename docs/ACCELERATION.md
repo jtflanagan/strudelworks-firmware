@@ -339,8 +339,11 @@ is WHICH reads those are.  A full trace would say but wedges the link at
 this speed, so the sequencer counts them: ACCEL_FAST_I (I-stream fetches
 the front missed or declined), ACCEL_FAST_DRAM (data reads the data
 front missed), ACCEL_FAST_DLC, ACCEL_FAST_DROM ($D000+), ACCEL_FAST_DCX
-(the internal ROM's tables in $Cxxx), ACCEL_FAST_WR, ACCEL_FAST_KBD -
-seven exclusive buckets that sum to ACCEL_FAST, cleared with the rest.
+(the internal ROM's tables in $Cxxx), ACCEL_FAST_WR (every write the
+dispatcher retired, an internalized switch write included - CXXX.md,
+"The switch writes"), ACCEL_FAST_KBD (every internalized READ: the
+keyboard, the status page, the floating toggles and the LC) - seven
+exclusive buckets that sum to ACCEL_FAST, cleared with the rest.
 The host polls them while accelerating and `swctl accel status` reports
 them after the ratio.
 
@@ -362,8 +365,9 @@ ACCEL_CYCLES  0x8000_009C   bus cycles while accelerating
 ACCEL_WAIT    0x8000_00A0   clocks the core spent waiting to merge
 ACCEL_FAST_I .. ACCEL_FAST_KBD  0x8000_00AC .. 0x8000_00C4   the census of
                             ACCEL_FAST: I-stream fetches, data reads of
-                            RAM / LC / ROM $D000+ / ROM $Cxxx, writes, the
-                            keyboard - seven buckets that sum to it
+                            RAM / LC / ROM $D000+ / ROM $Cxxx, writes
+                            (internalized switch writes included), the
+                            internalized reads - seven buckets that sum to it
 ```
 
 Levels, like MEM_CTRL's, safe under a running machine - with **one rule**:

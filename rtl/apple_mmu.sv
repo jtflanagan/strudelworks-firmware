@@ -225,15 +225,19 @@ module apple_mmu (
     // classifier below, combinational.  rtl/accel_seq.sv decides on it.
     input  wire        q_rw,
     output wire [1:0]  q_cls,
-    // ...and the internalized reads' question beside it (docs/CXXX.md, "The
-    // switch reads in the closed regime"): would a READ at q_addr be one the
-    // card answers itself - the status page from this shadow, the keyboard
-    // from the parked-dummy latch, $C019 from the VBL lock, a floating value
-    // from the floating-bus simulator?  swi_stat_byte is the status page's
-    // answer for the REGISTERED op (op_addr, stable through the fast
-    // sequence).  q_swi_quiet says the read would change no switch, so its
-    // word can stay off a sparse stream (a vapor-lock poll of $C054 at the
-    // core's pace would flood the link otherwise).
+    // ...and the internalized ops' question beside it (docs/CXXX.md, "The
+    // switch reads in the closed regime" and "The switch writes"): would an
+    // op at q_addr be one the card answers itself?  A READ: the status page
+    // from this shadow, the keyboard from the parked-dummy latch, $C019 from
+    // the VBL lock, a floating value from the floating-bus simulator.  A
+    // WRITE: a switch whose whole effect is this shadow's - the memory-
+    // mapping and IOU strobes of $C00x, the video toggles, the language
+    // card - and NOT INTCXROM/SLOTC3ROM, which the motherboard must keep
+    // seeing (they route I/O SELECT' to the slots; header).  swi_stat_byte
+    // is the status page's answer for the REGISTERED op (op_addr, stable
+    // through the fast sequence).  q_swi_quiet says the op would change no
+    // switch, so its word can stay off a sparse stream (a vapor-lock poll of
+    // $C054 at the core's pace would flood the link otherwise).
     input  wire        swi_on,        // the closed-regime level, chicken bit included
     input  wire        swi_kbd_ok,    // the keyboard latch holds a byte
     input  wire        swi_fb_ok,     // fb_sim can answer a floating read
@@ -406,43 +410,68 @@ module apple_mmu (
     wire [2:0] q_class = classify(q_addr, q_rw);
     assign q_cls = q_class[2:1];
 
-    // ---- the internalized reads' question, beside q_cls ------------------------
+    // ---- the internalized ops' question, beside q_cls --------------------------
     // A shallow decode of the live address - range matches ANDed with
     // registered levels, nothing like the classifier's depth - registered
-    // into the sequencer's dq_* set exactly as q_cls is.  Reads only, in
-    // this slice: the status page $C011-$C01F (bit 7 from the shadow over
-    // the keyboard latch's low bits, as the IOU serves them; $C019 only
-    // with the VBL lock), the keyboard $C00x (the parked-dummy latch), and
-    // the floating-value reads a program watches the beam through -
-    // $C050-$C057 (the video toggles, their effect on this shadow at the
-    // synthetic commit as at a bus commit) and $C080-$C08F (the language
-    // card, likewise) - when fb_sim can answer.  $C010 is the real strobe's
-    // and rides the bus; so do $C058-$C05F (annunciators, DHIRES - the
-    // shadow does not carry them) and every write.
+    // into the sequencer's dq_* set exactly as q_cls is.
+    //
+    // READS: the status page $C011-$C01F (bit 7 from the shadow over the
+    // keyboard latch's low bits, as the IOU serves them; $C019 only with
+    // the VBL lock), the keyboard $C00x (the parked-dummy latch), and the
+    // floating-value reads a program watches the beam through - $C050-$C057
+    // (the video toggles, their effect on this shadow at the synthetic
+    // commit as at a bus commit) and $C080-$C08F (the language card,
+    // likewise) - when fb_sim can answer.  $C010 is the real strobe's and
+    // rides the bus; so do $C058-$C05F (annunciators, DHIRES - the shadow
+    // does not carry them).
+    //
+    // WRITES: the strobes of $C00x whose whole effect is this shadow's -
+    // 80STORE, RAMRD, RAMWRT, ALTZP, 80COL, ALTCHAR - and the same $C050-
+    // $C057 and $C080-$C08F, their data irrelevant (the address is the
+    // switch).  A write returns no byte, so none needs fb_sim.  NOT
+    // internalized, by design: $C006/7 INTCXROM and $C00A/B SLOTC3ROM.
+    // They are the two switches that decide whether a $Cnxx bus cycle
+    // reaches a slot (I/O SELECT', I/O STROBE' via INTC8ROM), and the
+    // motherboard must see every write to them so that when this card DOES
+    // put a slot access on the bus - and it only does so when this shadow
+    // says the slot owns the page - the motherboard routes it the same
+    // way.  The four on-card peripherals track them from the driven stream
+    // too (rtl/slot_switches.sv).  $C010-$C01F writes are the strobe's.
     wire [3:0] qi_hi = q_addr[7:4];
     wire [3:0] qi_lo = q_addr[3:0];
     wire qi_io   = (q_addr[15:8] == 8'hC0);
     wire qi_c05x = (qi_hi == 4'h5) && !qi_lo[3];              // $C050-$C057
     wire qi_c08x = (qi_hi == 4'h8);
+    wire qi_c00w = (qi_hi == 4'h0) && (qi_lo[3:1] != 3'd3) && (qi_lo[3:1] != 3'd5);
     wire qi_rd   = (qi_hi == 4'h0) ? swi_kbd_ok
                  : (qi_hi == 4'h1) ? ((qi_lo != 4'h0) && (qi_lo != 4'h9 || swi_vbl_ok))
                  : (qi_c05x || qi_c08x) ? swi_fb_ok
                  : 1'b0;
-    assign q_swi = swi_on && q_rw && qi_io && qi_rd;
-    // Quiet: a $C050-$C057 read whose switch already holds the value the
-    // address sets.  The language card's reads are never quiet (the
-    // prewrite state moves on every one), and the rest change nothing on
-    // the host's side either way.
-    logic qi_same;
+    wire qi_wr   = qi_c00w || qi_c05x || qi_c08x;
+    assign q_swi = swi_on && qi_io && (q_rw ? qi_rd : qi_wr);
+    // Quiet: a $C050-$C057 op, or a $C00x write, whose switch already holds
+    // the value the address sets.  The language card's ops are never quiet
+    // (the prewrite state moves on every one), and the rest change nothing
+    // on the host's side either way.
+    logic qi_same5, qi_same0;
     always_comb begin
         case (qi_lo[2:1])
-            2'd0: qi_same = (text  == qi_lo[0]);
-            2'd1: qi_same = (mixed == qi_lo[0]);
-            2'd2: qi_same = (page2 == qi_lo[0]);
-            default: qi_same = (hires == qi_lo[0]);
+            2'd0: qi_same5 = (text  == qi_lo[0]);
+            2'd1: qi_same5 = (mixed == qi_lo[0]);
+            2'd2: qi_same5 = (page2 == qi_lo[0]);
+            default: qi_same5 = (hires == qi_lo[0]);
+        endcase
+        case (qi_lo[3:1])
+            3'd0: qi_same0 = (store80 == qi_lo[0]);
+            3'd1: qi_same0 = (ramrd   == qi_lo[0]);
+            3'd2: qi_same0 = (ramwrt  == qi_lo[0]);
+            3'd4: qi_same0 = (altzp   == qi_lo[0]);
+            3'd6: qi_same0 = (col80   == qi_lo[0]);
+            3'd7: qi_same0 = (altchar == qi_lo[0]);
+            default: qi_same0 = 1'b0;
         endcase
     end
-    assign q_swi_quiet = qi_c05x && qi_same;
+    assign q_swi_quiet = (qi_c05x && qi_same5) || (!q_rw && qi_c00w && qi_same0);
 
     // The status page's byte, for the REGISTERED op: the switch in bit 7 -
     // $C019 is the IIe's VBL', low while the beam is in blanking - over the

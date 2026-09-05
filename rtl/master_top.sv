@@ -518,12 +518,13 @@ module master_top #(
     // bookkeeping once, at the retirement.
     wire sw_int = accel_on && (accel_mode == 2'd2) && mem_serve &&
                   !accel_swint_dis && !boot_held;
-    // ...and the rest of the internalized reads (docs/CXXX.md, "The switch
-    // reads in the closed regime"): apple_mmu asks q_swi of the live
-    // address; the serve byte comes from whichever authority owns the
-    // registered op's address - the keyboard latch ($C00x), the status
-    // shadow ($C01x, $C019's bit from the lock), or the floating-bus
-    // simulator ($C05x, $C08x).
+    // ...and the rest of the internalized ops (docs/CXXX.md, "The switch
+    // reads in the closed regime", "The switch writes"): apple_mmu asks
+    // q_swi of the live address; for a read the serve byte comes from
+    // whichever authority owns the registered op's address - the keyboard
+    // latch ($C00x), the status shadow ($C01x, $C019's bit from the lock),
+    // or the floating-bus simulator ($C05x, $C08x); a write wants no byte,
+    // its whole effect is the shadow's at the synthetic commit.
     wire        swi_commit, kbd_int_ok, fb_int_ok, fb_vbl_bar;
     wire        q_swi, q_swi_quiet;
     wire [7:0]  kbd_int_byte, mmu_swi_stat;

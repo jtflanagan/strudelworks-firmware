@@ -156,28 +156,31 @@ module accel_seq (
     output wire        turbo_wr,       // steady: turbo_en AND mode 2 - the data front may retire writes
     input  wire        d_pending,      // the data front's posted writes are not all in the banks
 
-    // The internalized reads (docs/ACCELERATION.md, "The keyboard in the
-    // dummies"; docs/CXXX.md, "The switch reads in the closed regime"): a
-    // program's read of a $C0xx address the card can answer itself - the
-    // keyboard from rtl/kbd_inject.sv's parked-dummy latch, the status page
-    // from the MMU shadow, $C019 from the VBL lock, a floating value from
-    // rtl/fb_sim.sv - served instead of riding a bus cycle.  It rides
-    // S_FAST like any fast op (the cache decides it with nothing served)
-    // and retires with a SYNTHETIC COMMIT on the unified stream, the one
-    // deliberate bend of "fast ops have a present and no commit", so every
-    // commit-gated consumer (the shadow's switches above all) sees it as a
-    // bus op would have been.  q_swi is apple_mmu's answer for the live
-    // address, registered into dq_swi beside dq_cls; swi_byte is the
-    // serving authority's byte, selected on the registered op in
-    // master_top.  q_swi_quiet marks a read that changes no switch: its
-    // fast word goes out flagged quiet (fev_quiet) and the merge's door
-    // drops it, counting the cycle, so a poll at the core's pace cannot
-    // flood the link (the host applies switch reads from fast words, and
-    // a quiet one would be a no-op there).
+    // The internalized ops (docs/ACCELERATION.md, "The keyboard in the
+    // dummies"; docs/CXXX.md, "The switch reads in the closed regime" and
+    // "The switch writes"): a program's access to a $C0xx address the card
+    // can answer itself - a READ of the keyboard from rtl/kbd_inject.sv's
+    // parked-dummy latch, the status page from the MMU shadow, $C019 from
+    // the VBL lock, a floating value from rtl/fb_sim.sv; a WRITE of a
+    // switch whose whole effect is the shadow's (RAMRD and friends, the
+    // video toggles, the language card; never INTCXROM/SLOTC3ROM) - served
+    // instead of riding a bus cycle.  It rides S_FAST like any fast op
+    // (the cache decides it with nothing served or written: a BUS-class
+    // op lands in no image) and retires with a SYNTHETIC COMMIT on the
+    // unified stream, the one deliberate bend of "fast ops have a present
+    // and no commit", so every commit-gated consumer (the shadow's
+    // switches above all) sees it as a bus op would have been.  q_swi is
+    // apple_mmu's answer for the live address, registered into dq_swi
+    // beside dq_cls; swi_byte is the serving authority's byte for a read,
+    // selected on the registered op in master_top.  q_swi_quiet marks an
+    // op that changes no switch: its fast word goes out flagged quiet
+    // (fev_quiet) and the merge's door drops it, counting the cycle, so a
+    // poll at the core's pace cannot flood the link (the host applies
+    // switch ops from fast words, and a quiet one would be a no-op there).
     input  wire        q_swi,
     input  wire        q_swi_quiet,
     input  wire [7:0]  swi_byte,
-    output logic       swi_commit,      // one clock: an internalized read retired
+    output logic       swi_commit,      // one clock: an internalized op retired
     // Every fast op's retire, word or not: the tick the peripherals and the
     // virtual beam (rtl/vbeam.sv) keep the core's time by.  fev_valid is
     // the WORD, which a quiet internalized read does not put on the stream.
@@ -344,8 +347,35 @@ module accel_seq (
     end
     assign turbo_en = turbo_en_q;
     assign turbo_wr = turbo_wr_q;
+    // THE SETTLE AFTER A SWITCH SERVED ON THE CARD.  A bus op's commit lands
+    // in the middle of a bus cycle: the shadow flips, map_changed pulses,
+    // the CAMs flash-clear and every register derived from them settles
+    // long before the driver lets the core move again.  A synthetic commit
+    // (swi_commit) comes one clock AFTER the core moved - the op retired at
+    // fast_hit, cyc_en fired, and the fronts were free to serve the very
+    // next op on the clock the shadow was still flipping.  The instruction
+    // front did exactly that: after `STA $C003` (RAMRD aux) it served the
+    // next opcode from a CAM line resident under the OLD map, one clock
+    // before map_changed killed it - one byte from the wrong bank, and Nox
+    // Archaist's DHGR splash, whose player sits in both banks and flips
+    // RAMRD and keeps executing, hung on hardware (2026-09-04; docs/CXXX.md
+    // "The switch writes").  So a switch-changing synthetic commit holds
+    // turbo_ok and the dispatcher's `settled` for four clocks: the commit's
+    // own, the shadow's, map_changed's, and one more for anything derived
+    // from map_changed (rtl/dline.sv's zero-page shadow).  Only an op that
+    // can move a switch holds: a $C00x write, or a $C05x/$C08x read or
+    // write - and not a QUIET one.  A keyboard or status-page read ($C00x/
+    // $C01x, u_addr[7:5] clear) changes nothing and holds nothing; the
+    // first cut held on those too and cost the ProDOS boot bench 12% in
+    // Bitsy Bye's poll loop.  The cost is four clocks per switch flip,
+    // against the bus cycle each one used to be.
+    logic [2:0] swi_sq;
+    wire swi_change = swi_commit && !quiet_q && (!u_rw || (u_addr[7:5] != 3'd0));
+    always_ff @(posedge clk) swi_sq <= rst ? 3'd0 : {swi_sq[1:0], swi_change};
+    wire swi_settling = swi_change || (|swi_sq);
+
     assign turbo_ok = turbo_en_q && !stall_q && (st == S_DECIDE) && !ovr_en && !op_inflight &&
-                      !busy && mem_image_ready && can_pay && !fev_valid;
+                      !busy && mem_image_ready && can_pay && !fev_valid && !swi_settling;
 
     // What the dispatcher will charge for on this edge, for the governor's
     // one writer: exactly the two dispatching branches below.
@@ -354,8 +384,9 @@ module accel_seq (
                     !cpu_rst && master_active;
 
     // A fast op's decision: the byte is there, or it is not.  An
-    // internalized keyboard read's byte is swi_byte, ready by construction -
-    // the cache's decided is only the pacing.
+    // internalized read's byte is swi_byte, ready by construction, and an
+    // internalized write wants nothing - the cache's decided is only the
+    // pacing for both.
     wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en || swi_q);
     wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en && !swi_q;
 
@@ -367,8 +398,8 @@ module accel_seq (
     wire fast_retire = (st == S_FAST) && fast_hit;
     always_ff @(posedge clk) begin
         cen_v   <= fast_retire && !rst;
-        cen_sel <= swi_q                      ? 3'd6 :
-                   !fast_rw                   ? 3'd5 :
+        cen_sel <= (swi_q && fast_rw)         ? 3'd6 :   // an internalized read: KBD
+                   !fast_rw                   ? 3'd5 :   // every write, internalized switch included
                    fast_i_q                   ? 3'd0 :
                    (fast_cls_q == CLS_RAM)    ? 3'd1 :
                    (fast_cls_q == CLS_LC)     ? 3'd2 :
@@ -406,7 +437,7 @@ module accel_seq (
         // core has sat still for a clock: never on the clock of arrival -
         // and a turbo retire moves the core without this module's cyc_en,
         // so it resets the settling the same way.
-        settled <= (st == S_DECIDE) && !cyc_en && !turbo_commit && !d_commit;
+        settled <= (st == S_DECIDE) && !cyc_en && !turbo_commit && !d_commit && !swi_settling;
 
         // From reset until $FFFD has ridden the bus (see the header).  Cleared
         // in mode 0 too, where it could not be observed but must not stick.

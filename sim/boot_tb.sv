@@ -665,15 +665,30 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     endtask
 
-    // The machine's side of a synthetic commit: an internalized read of a
-    // switch moves the model's switches as the pins would have.
-    always @(posedge clk) if (swi_commit && u_rw) begin
+    // The machine's side of a synthetic commit: an internalized read or
+    // write of a switch moves the model's switches as the pins would have
+    // (docs/CXXX.md, "The switch writes"): a write's address is the
+    // switch; the language card's A0 = 1 on a WRITE clears prewrite and
+    // leaves the enable alone.  INTCXROM/SLOTC3ROM never come this way.
+    always @(posedge clk) if (swi_commit) begin
         c0_touch(u_addr[7:0]);
+        if (!u_rw && u_addr[7:4] == 4'h0) begin
+            case (u_addr[3:1])
+                3'd0: m_store80 <= u_addr[0];
+                3'd1: m_ramrd   <= u_addr[0];
+                3'd2: m_ramwrt  <= u_addr[0];
+                3'd4: m_altzp   <= u_addr[0];
+                3'd6: m_80col   <= u_addr[0];
+                3'd7: m_altchar <= u_addr[0];
+                default: ;
+            endcase
+        end
         if (u_addr[7:4] == 4'h8) begin
             m_bank2 <= !u_addr[3];
             m_lcrd  <= (u_addr[1] == u_addr[0]);
             if (!u_addr[0]) begin m_wren <= 0; m_pre <= 0; end
-            else begin if (m_pre) m_wren <= 1; m_pre <= 1; end
+            else if (u_rw) begin if (m_pre) m_wren <= 1; m_pre <= 1; end
+            else m_pre <= 0;
         end
     end
 
