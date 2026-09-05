@@ -187,6 +187,16 @@ module wb_regfile #(
     // outputs unconnected.
     output logic [1:0]     accel_mode,
     output logic           accel_swint_dis, // [28]: no internalized keyboard, dummies at $0000
+    output logic           accel_game_dis,  // [27]: no internalized game port, dummies at $C000 only
+    // The game port's samples, for GAME_STAT (rtl/game_port.sv).
+    input  wire [2:0]      game_pb,
+    input  wire            game_pb_ok,
+    input  wire            game_pdl_ok,
+    input  wire [11:0]     game_pdl0,
+    input  wire [11:0]     game_pdl1,
+    input  wire [11:0]     game_pdl2,
+    input  wire [11:0]     game_pdl3,
+    input  wire [7:0]      game_meas,
     output logic [15:0]    accel_target,
     output logic           accel_cnt_clr,   // pulses
     input  wire [31:0]     accel_stat,
@@ -296,6 +306,8 @@ module wb_regfile #(
     localparam [13:0] R_ACCEL_FAST_DCX = 'd47; // 0x8000_00BC, RO
     localparam [13:0] R_ACCEL_FAST_WR = 'd48; // 0x8000_00C0, RO
     localparam [13:0] R_ACCEL_FAST_KBD = 'd49; // 0x8000_00C4, RO
+    localparam [13:0] R_GAME_STAT      = 'd50; // 0x8000_00C8, RO
+    localparam [13:0] R_GAME_STAT2     = 'd51; // 0x8000_00CC, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -725,11 +737,13 @@ module wb_regfile #(
             accel_target  <= 16'd0;
             accel_cnt_clr <= 1'b0;
             accel_swint_dis <= 1'b0;
+            accel_game_dis  <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
                 accel_mode    <= wb_dat_w[1:0];
                 accel_target  <= wb_dat_w[23:8];
                 accel_swint_dis <= wb_dat_w[28];
+                accel_game_dis  <= wb_dat_w[27];
             end
             accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
         end
@@ -738,6 +752,9 @@ module wb_regfile #(
     //   [28]     swint_dis  RW   1 = the keyboard is not internalized and the
     //                           dummy parks at $0000: every $C00x read rides
     //                           the bus, as before the closed regime
+    //   [27]     game_dis   RW   1 = the game port is not internalized: the
+    //                           dummies stay at $C000 and every $C06x/$C07x
+    //                           access rides the bus (rtl/game_port.sv)
     // The fast-op census counts here, beside the registers it is read through.
     wire [31:0] accel_fast_i, accel_fast_dram, accel_fast_dlc, accel_fast_drom,
                 accel_fast_dcx, accel_fast_wr, accel_fast_kbd;
@@ -748,7 +765,15 @@ module wb_regfile #(
         .fast_drom (accel_fast_drom), .fast_dcx (accel_fast_dcx), .fast_wr (accel_fast_wr),
         .fast_kbd (accel_fast_kbd)
     );
-    wire [31:0] accel_ctrl_rd = {3'd0, accel_swint_dis, 4'd0, accel_target, 6'd0, accel_mode};
+    wire [31:0] accel_ctrl_rd = {3'd0, accel_swint_dis, accel_game_dis, 3'd0, accel_target, 6'd0, accel_mode};
+
+    // ---- GAME_STAT ----------------------------------------------------------
+    // The game port as the dummy loop last sampled it (rtl/game_port.sv):
+    //   GAME_STAT   [2:0] the buttons' levels PB0..PB2; [3] pb_ok; [4] pdl_ok;
+    //               [19:8] paddle 0's sample, bus cycles; [31:20] paddle 1's
+    //   GAME_STAT2  [11:0] paddle 2's; [23:12] paddle 3's; [31:24] measurements, wrapping
+    wire [31:0] game_stat_rd  = {game_pdl1, game_pdl0, 3'd0, game_pdl_ok, game_pb_ok, game_pb};
+    wire [31:0] game_stat2_rd = {game_meas, game_pdl3, game_pdl2};
 
     // ---- FB_CTRL ------------------------------------------------------------
     //
@@ -1035,6 +1060,8 @@ module wb_regfile #(
                         R_ACCEL_FAST_DCX: wb_dat_r <= accel_fast_dcx;
                         R_ACCEL_FAST_WR: wb_dat_r <= accel_fast_wr;
                         R_ACCEL_FAST_KBD: wb_dat_r <= accel_fast_kbd;
+                        R_GAME_STAT:      wb_dat_r <= game_stat_rd;
+                        R_GAME_STAT2:     wb_dat_r <= game_stat2_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end

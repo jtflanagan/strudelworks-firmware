@@ -128,6 +128,8 @@ module snoop_top #(
         .accel_on (1'b0), .accel_stat (32'd0), .accel_fast (32'd0), .accel_bus (32'd0),
         .accel_cycles (32'd0), .accel_wait (32'd0), .accel_turbo (32'd0),
         .accel_cen_v (1'b0), .accel_cen_sel (3'd0),
+        .accel_game_dis (), .game_pb (3'd0), .game_pb_ok (1'b0), .game_pdl_ok (1'b0),
+        .game_pdl0 (12'd0), .game_pdl1 (12'd0), .game_pdl2 (12'd0), .game_pdl3 (12'd0), .game_meas (8'd0),
         .ev_fast_room (),
         .fb_serve (), .fb_cnt_clr (), .fb_peek_addr (),   // nor simulate the floating bus
         .fb_mode (7'd0), .fb_compared (32'd0), .fb_mismatch (32'd0), .fb_last (32'd0),

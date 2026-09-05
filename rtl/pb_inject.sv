@@ -40,10 +40,13 @@ module pb_inject (
     //   00 hardware   01 up (bit 7 reads 0)   10 down (bit 7 reads 1)
     input  wire [5:0]  sel,
 
-    // The presented op, and the bus's byte as both consumers sample it.
+    // The presented op, and the bus's byte as both consumers sample it.  A
+    // dummy is a SAMPLE for rtl/game_port.sv: no override lands on it, so
+    // the capture's byte for one is the machine's own.
     input  wire [15:0] op_addr,
     input  wire        op_rw,
     input  wire        op_commit,
+    input  wire        op_dummy,
     input  wire [7:0]  data_sync,
 
     output wire        sub_en,
@@ -55,7 +58,7 @@ module pb_inject (
 );
 
     // $C061, $C062, $C063.
-    wire pb_read = master_active && op_rw && (op_addr[15:2] == 14'h3018) &&
+    wire pb_read = master_active && !op_dummy && op_rw && (op_addr[15:2] == 14'h3018) &&
                    (op_addr[1:0] != 2'b00);
     wire [1:0] idx = op_addr[1:0] - 2'd1;
     wire [1:0] want = sel[idx * 2 +: 2];

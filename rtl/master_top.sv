@@ -222,7 +222,14 @@ module master_top #(
     wire [7:0]  fb_peek_data;
     // The sequencer: ACCEL_CTRL in, its stream, status and counters out.
     wire [1:0]  accel_mode;
-    wire        accel_swint_dis;
+    wire        accel_swint_dis, accel_game_dis;
+    // The game port in the dummies (rtl/game_port.sv).
+    wire [15:0] game_park_addr;
+    wire        game_pb_ok, game_pdl_ok;
+    wire [7:0]  game_int_byte;
+    wire [2:0]  game_pb;
+    wire [11:0] game_pdl0, game_pdl1, game_pdl2, game_pdl3;
+    wire [7:0]  game_meas;
     wire [15:0] accel_target;
     wire        accel_cnt_clr, accel_on, accel_held;
     wire [3:0]  seq_state;
@@ -358,6 +365,10 @@ module master_top #(
         .mem_intc8rom (mem_intc8rom),
         .accel_mode (accel_mode), .accel_target (accel_target),
         .accel_swint_dis (accel_swint_dis),
+        .accel_game_dis (accel_game_dis),
+        .game_pb (game_pb), .game_pb_ok (game_pb_ok), .game_pdl_ok (game_pdl_ok),
+        .game_pdl0 (game_pdl0), .game_pdl1 (game_pdl1), .game_pdl2 (game_pdl2), .game_pdl3 (game_pdl3),
+        .game_meas (game_meas),
         .accel_cnt_clr (accel_cnt_clr),
         .accel_on (accel_on),
         .accel_stat ({7'd0, accel_reset_seq, accel_retries, merge_overflows, seq_state, bus_owns, 1'b0, accel_held, accel_on}),
@@ -527,6 +538,10 @@ module master_top #(
     // bookkeeping once, at the retirement.
     wire sw_int = accel_on && (accel_mode == 2'd2) && mem_serve &&
                   !accel_swint_dis && !boot_held;
+    // ...and the game port in the same dummies (rtl/game_port.sv; docs/
+    // CXXX.md "The game port"): the loop that visits the buttons and the
+    // paddles between the keyboard's samples, its own chicken bit on top.
+    wire sw_game = sw_int && !accel_game_dis;
     // ...and the rest of the internalized ops (docs/CXXX.md, "The switch
     // reads in the closed regime", "The switch writes"): apple_mmu asks
     // q_swi of the live address; for a read the serve byte comes from
@@ -545,7 +560,12 @@ module master_top #(
     wire [7:0]  swi_byte = seq_slot_q             ? slot_rd_data
                          : (u_addr[7:4] == 4'h0) ? kbd_int_byte
                          : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
+                         : (u_addr[7:4] == 4'h6) ? game_int_byte
                          : fb_sub_data;
+    // A $C07x access of the core's own - served (the synthetic commit) or
+    // a write on the bus - is the paddle strobe for the virtual timers.
+    wire        game_strobe = (swi_commit && !seq_slot_q && (u_addr[15:4] == 12'hC07)) ||
+                              (op_commit && !op_dummy && !op_ovr && !op_rw && (op_addr[15:4] == 12'hC07));
     wire        kbd_int_rd = swi_commit && u_rw && !seq_slot_q && (u_addr[15:4] == 12'hC00);
 
     // THE PERIPHERALS' VIEW OF THE OP STREAM.  The hard disk, the floppy and
@@ -599,6 +619,7 @@ module master_top #(
         .data_sync     (apple_data_sync),
         .master_active (cpu_source_active),
         .park_kbd      (sw_int),
+        .park_addr     (game_park_addr),
         .bus_owns      (bus_owns),
         .core_valid    (core_valid),
         .cpu_addr      (cpu_addr),
@@ -981,10 +1002,43 @@ module master_top #(
         .op_addr       (op_addr),
         .op_rw         (op_rw),
         .op_commit     (op_commit),
+        .op_dummy      (op_dummy),
         .data_sync     (apple_data_sync),
         .sub_en        (pb_sub_en),
         .sub_data      (pb_sub_data),
         .hw_level      (pb_hw)
+    );
+
+    // ---- the game port in the dummies ---------------------------------------
+    // The buttons and the paddle timers sampled by the driver's idle cycles
+    // in turn with the keyboard, and served to the core from the samples -
+    // the paddles as virtual timers at the core's pace.  See rtl/game_port.sv.
+    game_port u_game (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .master_active (cpu_source_active),
+        .park          (sw_game),
+        .op_addr       (op_addr),
+        .op_rw         (op_rw),
+        .op_commit     (op_commit),
+        .op_dummy      (op_dummy),
+        .data_sync     (apple_data_sync),
+        .bus_tick      (bus_tick),
+        .park_addr     (game_park_addr),
+        .pb_ok         (game_pb_ok),
+        .pdl_ok        (game_pdl_ok),
+        .pb_sel        (pb_override),
+        .core_tick     (seq_fast_tick || turbo_tick || dline_tick || (bus_tick && !op_dummy && !op_ovr)),
+        .strobe        (game_strobe),
+        .u_addr        (u_addr),
+        .low_bits      (kbd_int_low),
+        .int_byte      (game_int_byte),
+        .pb_level      (game_pb),
+        .pdl0          (game_pdl0),
+        .pdl1          (game_pdl1),
+        .pdl2          (game_pdl2),
+        .pdl3          (game_pdl3),
+        .measurements  (game_meas)
     );
 
     // ---- the memory image ---------------------------------------------------
@@ -1046,6 +1100,8 @@ module master_top #(
         .swi_vbl_ok (beam_locked),
         .swi_vbl_bar (fb_vbl_bar),
         .swi_kbd_low (kbd_int_low),
+        .swi_pb_ok  (sw_game && game_pb_ok),
+        .swi_pdl_ok (sw_game && game_pdl_ok),
         .swi_hd_slot (hd_slot_active),
         .swi_fd_slot (fd_slot_active),
         .swi_mb_slot (mb_slot_active),

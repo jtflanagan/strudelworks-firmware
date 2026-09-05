@@ -84,6 +84,7 @@ run boot_hold     rtl/boot_hold.sv
 run kbd_inject    rtl/kbd_inject.sv
 run kbd_notice    rtl/kbd_notice.sv
 run pb_inject     rtl/pb_inject.sv
+run game_port     rtl/game_port.sv
 run slot_switches rtl/slot_switches.sv
 run hd_card       rtl/hd_card.sv rtl/slot_switches.sv
 run vidhd_card    rtl/vidhd_card.sv rtl/slot_switches.sv

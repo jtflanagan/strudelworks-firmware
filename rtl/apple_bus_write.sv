@@ -165,6 +165,7 @@ module apple_bus_write #(
     // Dummies park at $C000 instead of $0000 (the closed regime's keyboard
     // sampling - see PARK_ADDR below).  Tie low without it.
     input  wire        park_kbd,
+    input  wire [15:0] park_addr,      // ...and where: the dummy loop's next address (rtl/game_port.sv)
 
     // From rtl/accel_seq.sv - see the header.  Tie both high without it.
     input  wire        bus_owns,
@@ -292,15 +293,16 @@ module apple_bus_write #(
     // arbitrary address either: $0000 is RAM on every Apple II, so a parked
     // read disturbs nothing even if something downstream decodes it.
     //
-    // ...unless park_kbd asks for $C000: in the closed regime every dummy
-    // becomes a keyboard read - side-effect-free on any Apple II - and the
-    // byte it brings back keeps rtl/kbd_inject.sv's latch fresh, so the
-    // program's own keyboard reads can be served on the card
-    // (docs/ACCELERATION.md).  Reset and a released bus still park at
-    // $0000: the latch is only worth feeding while the card is the CPU and
-    // the regime is on.
+    // ...unless park_kbd asks for the closed regime's loop: every dummy
+    // becomes a read of the machine - the keyboard, or the game port in
+    // turn (rtl/game_port.sv says which, park_addr) - side-effect-free on
+    // any Apple II but the paddle strobe, which the loop makes on purpose,
+    // and the byte it brings back keeps the latches fresh, so the program's
+    // own reads of them can be served on the card (docs/ACCELERATION.md).
+    // Reset and a released bus still park at $0000: the latches are only
+    // worth feeding while the card is the CPU and the regime is on.
     localparam logic [15:0] PARK_ADDR = 16'h0000;
-    wire [15:0] park_a = park_kbd ? 16'hC000 : PARK_ADDR;
+    wire [15:0] park_a = park_kbd ? park_addr : PARK_ADDR;
 
     assign drv_sync   = drv_sync_q;
     assign addr_drive = drv_addr;

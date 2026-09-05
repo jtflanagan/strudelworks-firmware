@@ -315,6 +315,12 @@ could never do the one thing Open-Apple is for. That is exactly how the
 boot menu cold-boots (BOOT_MENU.md): the host holds Open-Apple down across
 the release and the machine takes its own cold path.
 
+**In the closed regime** the buttons are sampled by the driver's dummy
+cycles and a program's `$C061`-`$C063` reads are served on the card from
+the sample, the override applied there too (CXXX.md "The game port");
+the substitution below is the bus's case, and a dummy is a sample it
+never lands on.
+
 **`BUTTONS`, `0x8000_0020`** in `rtl/wb_regfile.sv`:
 
 ```

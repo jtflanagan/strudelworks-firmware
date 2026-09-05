@@ -176,6 +176,7 @@ if {$snoop || $master} {
             [file join $root rtl kbd_inject.sv] \
             [file join $root rtl kbd_notice.sv] \
             [file join $root rtl pb_inject.sv] \
+            [file join $root rtl game_port.sv] \
             [file join $root rtl cpu65c02.sv] \
             [file join $root rtl via6522.v] \
             [file join $root rtl slot_switches.sv] \

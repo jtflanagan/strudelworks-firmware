@@ -718,6 +718,86 @@ carries nothing of a running program's in the closed regime unless it
 touches a socket's slot, INTCXROM/SLOTC3ROM, the strobe, or an
 annunciator.  **STEP 6 PROVEN ON HARDWARE.**
 
+## The game port (step 7, 2026-09-05)
+
+**What was left.** With the keyboard, the switches, the slots and the
+speaker served, a joystick game's input loop was the last thing on the
+bus in the closed regime: PREAD is a `$C070` strobe and then a read of
+`$C064` every eleven cycles until bit 7 falls, two bus cycles each, and
+the buttons a read of `$C061`-`$C063` a frame - and worse than slow, WRONG
+under acceleration: in mode 1 the reads ride the bus at two cycles each
+while the loop around them runs fast, so PREAD counts more loops per unit
+than eleven cycles' worth and reads every paddle high (the bench's mode 1
+reads a paddle at 40 as 88).  The user's design: a **dummy loop** in place
+of step 2's parked keyboard read, and the paddles **measured** by the card
+and **emulated** to the core at its own pace.
+
+**The dummy loop** (`rtl/game_port.sv`, `park_addr` into
+`rtl/apple_bus_write.sv`): every other dummy is still the keyboard's -
+a key must not wait - and the dummies between visit the game port in
+turn.  Between measurements they read the three buttons, `$C061`-`$C063`,
+a level each, into a latch; during one they probe the four paddle timers
+`$C064`-`$C067`.  A dummy is a SAMPLE, as before: `rtl/pb_inject.sv` now
+lets no override land on one, so the capture's byte for a dummy is the
+machine's own.
+
+**The measurement.** A paddle is a 558 one-shot: any access to
+`$C070`-`$C07F` triggers all four, and each timer's bit 7 stays high for
+eleven cycles a unit of its paddle's position (AppleWin's `PDL_CNTR_INTERVAL`,
+2816/255), then falls.  The loop strobes through a dummy READ of `$C070`,
+counts real bus cycles from it, and probes the four timers in turn until
+each has fallen or 4000 cycles have; the sample is the midpoint of the last
+probe that saw a timer high and the first that saw it low - within four
+cycles at the loop's pace, under half a PREAD unit.  Then it RESTS 1024
+cycles before the next strobe: a 558 retriggered while timing ignores the
+trigger (AppleWin GH#985), and the capacitor wants its settle after the
+fall.  Every few thousand cycles, then: a few hundred samples a second.
+
+**The core's side.** The port is emulated from the samples at the core's
+pace.  A `$C07x` access of the core's own - a READ served on the card
+(the synthetic commit), or a WRITE, which stays on the bus because the
+RamWorks bank register is two of those addresses - starts a virtual timer
+per paddle that is not already running, for as many CORE cycles as the
+sample counted bus cycles: the same unit, a 6502 cycle, the tick the
+floppy and the beam keep time by.  A served read of `$C064`-`$C067`
+returns bit 7 = that timer still running; of `$C061`-`$C063` the sampled
+button under the host's BUTTONS override; the low seven bits are the
+keyboard latch's, as the status page's are (fb_sim does not model $C06x,
+and no program reads them).  So PREAD at ninety times speed sees a timer that
+falls after the same number of its own cycles as the real one did, and
+reads the paddle the machine has, with no bus cycle for the strobe or any
+probe.  A write-strobe on the bus starts the virtual timers too and
+retriggers the real ones, which at worst spoils the measurement in flight.
+
+**Gates and the regime.** `apple_mmu.q_swi` answers for the buttons once
+all three are sampled (`pb_ok`) and for the paddles and the strobe once a
+measurement has completed (`pdl_ok`); until then the reads ride the bus,
+as before.  The buttons are resampled from scratch when the loop restarts
+after a hold (the user may have pressed one meanwhile); the paddle samples
+stand across it.  `$C060` (the cassette) and `$C068`-`$C06F` are nobody's
+and stay on the bus.  The regime is step 2's, under its own chicken bit:
+`ACCEL_CTRL[27] game_dis` keeps the dummies at `$C000` and every
+`$C06x`/`$C07x` access on the bus.  `GAME_STAT`/`GAME_STAT2` read the
+levels and the samples back (PROTOCOL.md).
+
+**Proof.** `sim/accel_tb.sv` models the port on the pins: three levels
+the bench sets and four 558 timers at eleven cycles a unit, triggered by
+any `$C07x` access on the pins.  `sim/accel.s` phase 5f reads the buttons
+and runs the monitor's PREAD on each paddle with Applesoft's rest between
+them, and stores the counts.  Mode 0 reads the positions exactly (40, 200,
+0, 255); mode 1 reads them inflated, as the real accelerator does; in
+mode 2, once the loop has two measurements and the buttons, a pass of
+the program reads a moved button and a moved paddle (101; 120) exactly,
+every read and strobe served on the card, none reaching the pins.  95
+checks at both bus phases.  **Hardware, 2026-09-05**, a joystick on the
+IIe, DOS 3.3's BASIC: mode 0 read PDL 121, 117, 255, 255 and PB2 high;
+mode all at 70x with the port served read 120, 116, 255, 255, the buttons
+the same, a forced Open-Apple (BUTTONS) showing through the served read;
+with the port put back on the bus (`accel game off`) the accelerated PREAD
+read every paddle as 255 - the fault this cures.  The loop's samples read
+back 1331 and 1285 bus cycles (121 and 117 units), 180 measurements in
+the minute.
+
 ## The next steps, BANKED (the user's decision, 2026-09-02)
 
 Written up so they can be picked up cold; not to be built now.  The
@@ -797,7 +877,7 @@ twice N seconds apart, deltas mod 2^32 (the turbo counter wraps every
 4. The keyboard ($C000/$C010): the kbd_inject latch model; a poll loop is
    the idle case and was measured at ~54x with swint - what is its status
    on the dcache lineage?
-5. Slot ROMs of the card's OWN slots (the SmartPort HDC, the floppy, the
+5. (The game port: DONE, step 7 above.)  Slot ROMs of the card's OWN slots (the SmartPort HDC, the floppy, the
    VidHD signature ROM): the card holds those bytes; the rule says slots
    are hardware and ride the bus.  A decision for the user, not the plan.
 6. Measurement: for every candidate, a trace with tools/swtrace_mix.py

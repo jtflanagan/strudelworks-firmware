@@ -358,7 +358,9 @@ ACCEL_CTRL    0x8000_008C   [1:0] mode: 0 off, 1 reads on the card / writes on
                             the bus, 2 reads and writes on the card; [23:8]
                             target, ops per bus cycle, 8.8, 0 = unlimited;
                             [28] swint_dis: the keyboard not internalized,
-                            dummies at $0000 (a level); [31] W1 clear counters
+                            dummies at $0000 (a level); [27] game_dis: the
+                            game port not internalized, dummies at $C000
+                            alone (CXXX.md "The game port"); [31] W1 clear counters
 ACCEL_STAT    0x8000_0090   [0] accelerating; [1] held by the governor;
                             [3] bus_owns; [7:4] state; [15:8] merge overflows
                             (must be 0); [23:16] fast ops decided twice;
@@ -367,6 +369,8 @@ ACCEL_FAST    0x8000_0094   fast ops
 ACCEL_BUS     0x8000_0098   the core's ops that rode a bus cycle
 ACCEL_CYCLES  0x8000_009C   bus cycles while accelerating
 ACCEL_WAIT    0x8000_00A0   clocks the core spent waiting to merge
+GAME_STAT/2   0x8000_00C8/CC  the game port's samples: the buttons' levels,
+                            the four paddles' timer counts (CXXX.md "The game port")
 ACCEL_FAST_I .. ACCEL_FAST_KBD  0x8000_00AC .. 0x8000_00C4   the census of
                             ACCEL_FAST: I-stream fetches, data reads of
                             RAM / LC / ROM $D000+ / ROM $Cxxx, writes

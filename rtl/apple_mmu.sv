@@ -244,6 +244,8 @@ module apple_mmu (
     input  wire        swi_vbl_ok,    // the VBL lock stands
     input  wire        swi_vbl_bar,   // ...and this is the IIe's $C019 bit 7 now
     input  wire [6:0]  swi_kbd_low,   // the keyboard latch's low bits, under bit 7
+    input  wire        swi_pb_ok,     // the game port's buttons are sampled (rtl/game_port.sv)
+    input  wire        swi_pdl_ok,    // ...and a paddle measurement has completed
     // The card's OWN slots (docs/CXXX.md, "The on-card slots"): the hard
     // disk's, the floppy's and the Mockingboard's slot numbers, 0 = none.
     // An access a peripheral on this card would answer - its DEVICE SELECT
@@ -435,6 +437,12 @@ module apple_mmu (
     // rides the bus; so do $C058-$C05F (annunciators, DHIRES - the shadow
     // does not carry them).
     //
+    // ...and the game port (rtl/game_port.sv): the buttons $C061-$C063
+    // once sampled, the paddle timers $C064-$C067 and the strobe $C070-
+    // $C07F by READ once a measurement stands.  $C060 (the cassette) and
+    // $C068-$C06F are nobody's; a $C07x WRITE stays on the bus, the
+    // RamWorks bank register being two of them.
+    //
     // WRITES: the strobes of $C00x whose whole effect is this shadow's -
     // 80STORE, RAMRD, RAMWRT, ALTZP, 80COL, ALTCHAR - and the same $C050-
     // $C057 and $C080-$C08F, their data irrelevant (the address is the
@@ -459,9 +467,14 @@ module apple_mmu (
     // the floating bus's, fb_sim's when it can answer; a write is served
     // regardless.  Never quiet: each access is a toggle.
     wire qi_c03x = (qi_hi == 4'h3);
+    wire qi_c06b = (qi_hi == 4'h6) && (qi_lo[3:2] == 2'b00) && (qi_lo[1:0] != 2'b00);   // $C061-$C063
+    wire qi_c06p = (qi_hi == 4'h6) && (qi_lo[3:2] == 2'b01);                             // $C064-$C067
+    wire qi_c07x = (qi_hi == 4'h7);
     wire qi_rd   = (qi_hi == 4'h0) ? swi_kbd_ok
                  : (qi_hi == 4'h1) ? ((qi_lo != 4'h0) && (qi_lo != 4'h9 || swi_vbl_ok))
                  : (qi_c05x || qi_c08x || qi_c03x) ? swi_fb_ok
+                 : qi_c06b ? swi_pb_ok
+                 : (qi_c06p || qi_c07x) ? swi_pdl_ok
                  : 1'b0;
     wire qi_wr   = qi_c00w || qi_c05x || qi_c08x || qi_c03x;
     // The on-card slots.  DEVICE SELECT' is never gated by a switch; I/O

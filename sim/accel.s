@@ -301,6 +301,30 @@ nokey:
         sta $C03F
         lda $C03F
 
+        ; ---- 5f. the game port (docs/CXXX.md "The game port"): the three
+        ; buttons, and PREAD on each of the four paddles - the strobe, then
+        ; the count of eleven-cycle loops until the timer's bit falls.  In
+        ; the closed regime the strobe is a served read and the timers are
+        ; the card's virtual ones, started from the dummy loop's samples;
+        ; in every mode the counts are the positions the testbench set.  A
+        ; rest between paddles, as Applesoft's PDL has one: a timer still
+        ; running from the last strobe ignores the next.
+        lda $C061
+        sta $0320
+        lda $C062
+        sta $0321
+        lda $C063
+        sta $0322
+        ldx #0
+pdlnext:
+        jsr pread
+        tya
+        sta $0324,x
+        jsr pdlrest
+        inx
+        cpx #4
+        bne pdlnext
+
         ; ---- 6. self-modifying code: the operand and the opcode change
         ; under the icache's feet.  A stale line shows as the wrong A or X.
         jsr smctest
@@ -613,6 +637,32 @@ dumfail:
 fail:   lda #$FF
         sta FAILF
 halt:   jmp halt
+
+; The monitor's PREAD: strobe, then count eleven-cycle loops until paddle
+; X's timer falls; Y is the count, 255 at most.
+pread:  lda $C070
+        ldy #0
+        nop
+        nop
+pread2: lda $C064,x
+        bpl pread3
+        iny
+        bne pread2
+        dey
+pread3: rts
+; ...and ~3300 cycles of rest, longer than any timer runs.
+pdlrest:
+        tya
+        pha
+        ldy #0
+prest1: nop
+        nop
+        nop
+        dey
+        bne prest1
+        pla
+        tay
+        rts
 
 ; The operand of an immediate is rewritten and at once executed; then an
 ; instruction's OPCODE is rewritten, both ways.  The compares read the
