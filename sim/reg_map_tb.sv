@@ -135,6 +135,7 @@ module reg_map_tb;
     integer     fd_flush_pulses = 0, fd_late_clrs = 0, fd_fill_clrs = 0;
     // The VidHD's side of VIDHD_SLOT: the tb plays the card.
     wire [2:0]  vidhd_slot_active;
+    wire [2:0]  mouse_slot_active;
     reg         vidhd_rom_loaded = 1'b0;
     always @(posedge clk) begin
         if (fd_flush[0]) fd_flush_pulses = fd_flush_pulses + 1;
@@ -208,6 +209,8 @@ module reg_map_tb;
         .fd_ctl (fd_ctl), .fd_late (fd_late), .fd_fill_max (fd_fill_max),
         .fd_late_clr (fd_late_clr), .fd_fill_clr (fd_fill_clr),
         .vidhd_slot_active (vidhd_slot_active), .vidhd_rom_loaded (vidhd_rom_loaded),
+        .mouse_slot_active (mouse_slot_active), .mouse_rom_loaded (1'b1), .mouse_irq (1'b0),
+        .mouse_mode (4'd0), .mouse_buttons (2'd0), .mouse_moves (8'd0), .mouse_x (16'd0), .mouse_y (16'd0),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key), .kbd_drop (kbd_drop),
         .kbd_lock (kbd_lock), .kbd_notify (kbd_notify),
         .kbd_flags (kbd_flags), .kbd_counts (kbd_counts),
@@ -1227,6 +1230,61 @@ module reg_map_tb;
             errors = errors + 1;
         end else $display("  ok: VIDHD_SLOT=3 latches at the reset; rom reads back");
         vidhd_rom_loaded = 1'b0;
+
+        $display("");
+        // ---- MOUSE_SLOT --------------------------------------------------------
+        // The mouse's slot latches like the VidHD's and yields to ALL FOUR of
+        // the others; the VidHD is still in 3 from above.
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse is enabled before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: MOUSE_SLOT starts disabled");
+        do_write(32'h8000_00D0, 32'h0000_0003);       // the VidHD's slot
+        pulse_reset_line;
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse took the VidHD's slot");
+            errors = errors + 1;
+        end else $display("  ok: the mouse yields the VidHD's slot");
+        do_write(32'h8000_00D0, 32'h0000_0006);       // the floppy's
+        pulse_reset_line;
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse took the floppy's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the floppy's");
+        do_write(32'h8000_00D0, 32'h0000_0007);       // the disk's
+        pulse_reset_line;
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse took the hard disk's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the hard disk's");
+        do_write(32'h8000_00D0, 32'h0000_0004);       // the Mockingboard's
+        pulse_reset_line;
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse took the Mockingboard's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the Mockingboard's");
+        do_write(32'h8000_00D0, 32'h0000_0005);
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the WRITE enabled the mouse - it must take a reset");
+            errors = errors + 1;
+        end
+        pulse_reset_line;
+        base = out_n;
+        do_read(32'h8000_00D0);
+        // rom is tied 1 in this bench; irq, buttons, mode and moves tied 0.
+        if (mouse_slot_active !== 3'd5 || out_mem[base+2] !== 32'h0001_0505) begin
+            $display("FAIL: MOUSE_SLOT readback %08x, expected desired=5 active=5 rom=1",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: MOUSE_SLOT=5 latches at the reset; rom reads back");
+        base = out_n;
+        do_read(32'h8000_00D4);
+        if (out_mem[base+2] !== 32'h0000_0000) begin
+            $display("FAIL: MOUSE_STAT reads %08x, expected the tied-off position 0,0", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: MOUSE_STAT reads the position");
+        do_write(32'h8000_00D0, 32'h0000_0000);
+        pulse_reset_line;
 
         $display("");
         // ---- MEM_CTRL / MEM_STAT and the counters -----------------------------

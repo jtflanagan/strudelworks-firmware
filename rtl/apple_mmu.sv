@@ -255,6 +255,7 @@ module apple_mmu (
     input  wire [2:0]  swi_hd_slot,
     input  wire [2:0]  swi_fd_slot,
     input  wire [2:0]  swi_mb_slot,
+    input  wire [2:0]  swi_mouse_slot,
     output wire        q_swi,
     output wire        q_swi_quiet,
     output wire        q_slot,
@@ -491,8 +492,9 @@ module apple_mmu (
     function automatic slot_dev(input [2:0] n);
         slot_dev = (n != 3'd0) && qi_io && q_addr[7] && (q_addr[6:4] == n);
     endfunction
-    assign q_slot = swi_on && (slot_dev(swi_hd_slot) || slot_dev(swi_fd_slot) ||
-                               slot_page(swi_hd_slot) || slot_page(swi_fd_slot) || slot_page(swi_mb_slot));
+    assign q_slot = swi_on && (slot_dev(swi_hd_slot) || slot_dev(swi_fd_slot) || slot_dev(swi_mouse_slot) ||
+                               slot_page(swi_hd_slot) || slot_page(swi_fd_slot) || slot_page(swi_mb_slot) ||
+                               slot_page(swi_mouse_slot));
     assign q_swi = swi_on && ((qi_io && (q_rw ? qi_rd : qi_wr)) || q_slot);
     // Quiet: a $C050-$C057 op, or a $C00x write, whose switch already holds
     // the value the address sets.  The language card's ops are never quiet

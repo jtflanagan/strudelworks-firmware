@@ -71,7 +71,9 @@ host reads; the receiver carries parser state across all of them.
 | `0x22` | MEM_ROM | Host→card. One chunk of the IIe's 16 KB system ROM for the card's copy: payload `[{chunk[4:0]}]` then 128 words; 32 chunks make the ROM, in any order. See MEMORY.md. |
 | `0x23` | VIDHD_ROM | Host→card. Payload 64 words: the VidHD's 256-byte slot ROM - the signature software scans for, synthesised by the host. See VIDHD.md. |
 | `0x24` | UNKNOWN_TYPE | Card→host, **unsolicited**. Header only; `free[7:0]` = the type of a host→card message the card does not consume, `free[15:8]` = its length. The card skipped that message by its length - framing is intact - and this says so, so the host can log what it sent that the gateware lacks. One pending, the latest wins. |
-| `0x25`–`0xFF` | — | Application, unassigned. |
+| `0x25` | MOUSE_MOVE | Host→card. `free[1:0]` = the mouse's buttons (levels, 0 = button 0); payload one word `{dy[15:0], dx[15:0]}`, signed deltas in the mouse's own counts. Applied to the card's position with the program's clamps and raises the movement/button interrupt if the mode asks. See MOUSE.md. |
+| `0x26` | MOUSE_ROM | Host→card. `free[2:0]` = chunk; payload 64 words: one 256-byte page of the AppleMouse card's 2 KB firmware ROM. Eight chunks make the ROM, in any order. See MOUSE.md. |
+| `0x27`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -146,6 +148,8 @@ protocol.
 | `0x8000_00C0` | ACCEL_FAST_WR | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): writes. The seven sum to ACCEL_FAST |
 | `0x8000_00C8` | GAME_STAT | RO | the game port as the dummy loop last sampled it (CXXX.md "The game port"): `[2:0]` the buttons PB0..PB2, a level each; `[3]` pb_ok, all three sampled; `[4]` pdl_ok, a paddle measurement has completed; `[19:8]` paddle 0's sample, bus cycles from the strobe to the timer's fall (eleven a unit); `[31:20]` paddle 1's |
 | `0x8000_00CC` | GAME_STAT2 | RO | `[11:0]` paddle 2's sample; `[23:12]` paddle 3's; `[31:24]` measurements completed, wrapping |
+| `0x8000_00D0` | MOUSE_SLOT | RW bits 2:0 | the mouse card's slot, 0 = off; latched at RES', never MB_SLOT's, HD_SLOT's, FD_SLOT's or VIDHD_SLOT's; `[16]` rom loaded, `[17]` IRQ asserted, `[19:18]` the buttons, `[23:20]` the mode byte, `[31:24]` MOUSE_MOVEs applied — see MOUSE.md |
+| `0x8000_00D4` | MOUSE_STAT | RO | `{y[15:0], x[15:0]}`: the position as the card holds it |
 | `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s

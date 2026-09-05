@@ -121,6 +121,17 @@ module wb_regfile #(
     // watching top ties the input to 0 and leaves the output unconnected.
     output wire [2:0]      vidhd_slot_active,
     input  wire            vidhd_rom_loaded,
+    // The mouse (rtl/mouse_card.sv, docs/MOUSE.md): its slot latched like
+    // the VidHD's, yielding to all four of the others; MOUSE_STAT reads
+    // the card's position and the rest for diagnosis.
+    output wire [2:0]      mouse_slot_active,
+    input  wire            mouse_rom_loaded,
+    input  wire            mouse_irq,
+    input  wire [3:0]      mouse_mode,
+    input  wire [1:0]      mouse_buttons,
+    input  wire [7:0]      mouse_moves,
+    input  wire [15:0]     mouse_x,
+    input  wire [15:0]     mouse_y,
 
     // Keyboard injection (rtl/kbd_inject.sv).  press and drop are one-cycle
     // pulses per write of their bits, press_key the key that write carried;
@@ -308,6 +319,8 @@ module wb_regfile #(
     localparam [13:0] R_ACCEL_FAST_KBD = 'd49; // 0x8000_00C4, RO
     localparam [13:0] R_GAME_STAT      = 'd50; // 0x8000_00C8, RO
     localparam [13:0] R_GAME_STAT2     = 'd51; // 0x8000_00CC, RO
+    localparam [13:0] R_MOUSE_SLOT     = 'd52; // 0x8000_00D0, RW in bits 2:0
+    localparam [13:0] R_MOUSE_STAT     = 'd53; // 0x8000_00D4, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -598,6 +611,45 @@ module wb_regfile #(
 
     wire [31:0] vidhd_slot_rd = {8'd0, 7'd0, vidhd_rom_loaded,
                                  5'd0, vidhd_slot_active_q, 5'd0, vidhd_slot_desired};
+
+    // ---- MOUSE_SLOT ---------------------------------------------------------
+    //
+    //   [2:0]    desired   RW   which slot the mouse card answers as; 0 = off
+    //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [16]     rom       RO   the 2 KB firmware ROM has been loaded (MOUSE_ROM)
+    //   [17]     irq       RO   the card's interrupt line is asserted
+    //   [19:18]  buttons   RO   the buttons as the host holds them
+    //   [23:20]  mode      RO   the mode byte SETMOUSE left
+    //   [31:24]  moves     RO   MOUSE_MOVE messages applied, wrapping
+    //
+    // VIDHD_SLOT's contract, the clash rule five-way: the mouse is the newest
+    // and yields to all four of the others.  See docs/MOUSE.md.
+    logic [2:0] mouse_slot_desired;
+    logic [2:0] mouse_slot_active_q;
+
+    assign mouse_slot_active = mouse_slot_active_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            mouse_slot_desired  <= 3'd0;   // no mouse until asked for
+            mouse_slot_active_q <= 3'd0;
+        end else begin
+            if (res_assert || boot_relatch) begin
+                mouse_slot_active_q <= (CAN_MASTER &&
+                                        mouse_slot_desired != mb_slot_desired &&
+                                        mouse_slot_desired != hd_slot_desired &&
+                                        mouse_slot_desired != fd_slot_desired &&
+                                        mouse_slot_desired != vidhd_slot_desired)
+                                       ? mouse_slot_desired : 3'd0;
+            end
+            if (wr_mouse_slot) mouse_slot_desired <= wb_dat_w[2:0];
+        end
+    end
+
+    wire [31:0] mouse_slot_rd = {mouse_moves, mouse_mode, mouse_buttons, mouse_irq, mouse_rom_loaded,
+                                 5'd0, mouse_slot_active_q, 5'd0, mouse_slot_desired};
+    // MOUSE_STAT: {y[15:0], x[15:0]}, the position as the card holds it.
+    wire [31:0] mouse_stat_rd = {mouse_y, mouse_x};
 
     // ---- FD_DRIVE1 / FD_DRIVE2 ----------------------------------------------
     //
@@ -1038,6 +1090,8 @@ module wb_regfile #(
                         R_MEM_LAST:   wb_dat_r <= mem_last;
                         R_MEM_DIVERTED: wb_dat_r <= mem_diverted;
                         R_VIDHD_SLOT: wb_dat_r <= vidhd_slot_rd;
+                        R_MOUSE_SLOT: wb_dat_r <= mouse_slot_rd;
+                        R_MOUSE_STAT: wb_dat_r <= mouse_stat_rd;
                         R_FB_CTRL:    wb_dat_r <= fb_ctrl_rd;
                         R_FB_COMPARED: wb_dat_r <= fb_compared;
                         R_FB_MISMATCH: wb_dat_r <= fb_mismatch;
@@ -1109,6 +1163,8 @@ module wb_regfile #(
                          (word == R_MEM_CTRL);
     wire wr_vidhd_slot = access && !wb_ack && in_region && wb_we &&
                          (word == R_VIDHD_SLOT);
+    wire wr_mouse_slot = access && !wb_ack && in_region && wb_we &&
+                         (word == R_MOUSE_SLOT);
     wire wr_fb_ctrl    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FB_CTRL);
     wire wr_fb_peek    = access && !wb_ack && in_region && wb_we &&

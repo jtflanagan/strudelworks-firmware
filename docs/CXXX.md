@@ -534,6 +534,11 @@ on the card, and a slot in a socket is what "slow" means from now on.
 The VidHD's slot is NOT included - its ROM is read once at boot and the
 user did not ask for it.
 
+*2026-09-05: the mouse card (MOUSE.md) joined the on-card slots - its
+PIA at `$C0n0-$C0n3` and its ROM page are fast ops, its interrupt takes
+the Mockingboard's short route, and its 60 Hz timer ticks on the core's
+clock like the VIAs.*
+
 **The decision.**  `rtl/apple_mmu.sv` q_slot: an access is an on-card
 slot's when its address is a peripheral's DEVICE SELECT range
 `$C0n0-$C0nF` (never gated by a switch) or its I/O SELECT page

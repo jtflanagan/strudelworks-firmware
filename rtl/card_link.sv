@@ -155,6 +155,16 @@ module card_link #(
     // input to 0.
     output wire [2:0]  vidhd_slot_active,
     input  wire        vidhd_rom_loaded,
+    // The mouse card (rtl/mouse_card.sv): its slot latched like the VidHD's,
+    // and its state for MOUSE_SLOT / MOUSE_STAT.
+    output wire [2:0]  mouse_slot_active,
+    input  wire        mouse_rom_loaded,
+    input  wire        mouse_irq,
+    input  wire [3:0]  mouse_mode,
+    input  wire [1:0]  mouse_buttons,
+    input  wire [7:0]  mouse_moves,
+    input  wire [15:0] mouse_x,
+    input  wire [15:0] mouse_y,
 
     // Keyboard injection (rtl/kbd_inject.sv, in a mastering top): the
     // KBD_INJECT register's press and drop pulses and the key out, the
@@ -936,6 +946,10 @@ module card_link #(
         .fd_fill_clr       (fd_fill_clr),
         .vidhd_slot_active (vidhd_slot_active),
         .vidhd_rom_loaded  (vidhd_rom_loaded),
+        .mouse_slot_active (mouse_slot_active),
+        .mouse_rom_loaded  (mouse_rom_loaded),
+        .mouse_irq (mouse_irq), .mouse_mode (mouse_mode), .mouse_buttons (mouse_buttons),
+        .mouse_moves (mouse_moves), .mouse_x (mouse_x), .mouse_y (mouse_y),
         .kbd_press         (kbd_press),
         .kbd_press_key     (kbd_press_key),
         .kbd_drop          (kbd_drop),

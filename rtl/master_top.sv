@@ -156,6 +156,12 @@ module master_top #(
     wire        fd_valid, fd_take;
     wire [2:0]  vidhd_slot_active;
     wire        vidhd_rom_loaded;
+    wire [2:0]  mouse_slot_active;
+    wire        mouse_rom_loaded, mouse_irq;
+    wire [3:0]  mouse_mode;
+    wire [1:0]  mouse_buttons;
+    wire [7:0]  mouse_moves;
+    wire [15:0] mouse_x, mouse_y;
     wire        kbd_press, kbd_drop, kbd_lock;
     wire [6:0]  kbd_press_key;
     wire        kbd_strobe, kbd_seen, kbd_touched, kbd_changed;
@@ -340,6 +346,10 @@ module master_top #(
         .fd_late_clr (fd_late_clr), .fd_fill_clr (fd_fill_clr),
         .vidhd_slot_active (vidhd_slot_active),
         .vidhd_rom_loaded (vidhd_rom_loaded),
+        .mouse_slot_active (mouse_slot_active),
+        .mouse_rom_loaded (mouse_rom_loaded),
+        .mouse_irq (mouse_irq), .mouse_mode (mouse_mode), .mouse_buttons (mouse_buttons),
+        .mouse_moves (mouse_moves), .mouse_x (mouse_x), .mouse_y (mouse_y),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key),
         .kbd_drop (kbd_drop), .kbd_lock (kbd_lock),
         .kbd_flags ({kbd_touched, kbd_seen, kbd_strobe}),
@@ -444,8 +454,9 @@ module master_top #(
     // The Mockingboard's IRQ takes the short route into the core, the same
     // route drv_sync takes out of it: a real card would pull the slot's IRQ'
     // line and this card's CPU is on the near side of that pin, so the VIA
-    // interrupts are folded in here instead.  Physical cards still interrupt
-    // through the pin, via apple_irq_sync, exactly as before.
+    // interrupts are folded in here instead - and the mouse card's with it.
+    // Physical cards still interrupt through the pin, via apple_irq_sync,
+    // exactly as before.
     wire mb_irq;
 
     cpu65c02 u_cpu (
@@ -468,7 +479,7 @@ module master_top #(
         .d_pred_v (cpu_d_pred_v),
         .d_pred_rw (cpu_d_pred_rw),
         .p_flags (cpu_p_flags),     // the front resolves branches on them
-        .irq_n  (apple_irq_sync && !mb_irq),
+        .irq_n  (apple_irq_sync && !mb_irq && !mouse_irq),
         .nmi_n  (1'b1),             // the slot brings out no NMI
         .sync   (cpu_sync),
         .halted ()                  // STP is not on the base part; see the RTL
@@ -484,8 +495,8 @@ module master_top #(
     wire        op_rw;
     wire [7:0]  op_wdata;
     wire        op_present, op_commit, op_ovr;
-    wire        mb_rd_claim, hd_rd_claim, fd_rd_claim, vidhd_rd_claim;
-    wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data, vidhd_rd_data;
+    wire        mb_rd_claim, hd_rd_claim, fd_rd_claim, vidhd_rd_claim, mouse_rd_claim;
+    wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data, vidhd_rd_data, mouse_rd_data;
     wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw, vbl_ovr_en, vbl_ovr_rw;
     wire [15:0] boot_ovr_addr, hd_ovr_addr, vbl_ovr_addr;
     wire [7:0]  hd_ovr_wdata, vbl_ovr_wdata;
@@ -523,10 +534,11 @@ module master_top #(
     wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_en ? vbl_ovr_addr  : boot_ovr_addr;
     wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_en ? vbl_ovr_rw    : 1'b1;
     wire [7:0]  ovr_wdata = hd_ovr_en ? hd_ovr_wdata : vbl_ovr_wdata;
-    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim | vidhd_rd_claim;
+    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim | vidhd_rd_claim | mouse_rd_claim;
     wire [7:0]  slot_rd_data  = hd_rd_claim    ? hd_rd_data    :
                                 fd_rd_claim    ? fd_rd_data    :
-                                vidhd_rd_claim ? vidhd_rd_data : mb_rd_data;
+                                vidhd_rd_claim ? vidhd_rd_data :
+                                mouse_rd_claim ? mouse_rd_data : mb_rd_data;
 
     // ---- the keyboard in the dummies (docs/ACCELERATION.md) ------------------
     // The closed regime: mode 2, serving, the chicken bit clear - and the
@@ -1105,6 +1117,7 @@ module master_top #(
         .swi_hd_slot (hd_slot_active),
         .swi_fd_slot (fd_slot_active),
         .swi_mb_slot (mb_slot_active),
+        .swi_mouse_slot (mouse_slot_active),
         .q_slot     (q_slot),
         .q_swi      (q_swi),
         .q_swi_quiet (q_swi_quiet),
@@ -1409,6 +1422,42 @@ module master_top #(
         .rd_claim      (mb_rd_claim),
         .rd_data       (mb_rd_data),
         .irq           (mb_irq)
+    );
+
+    // ---- the mouse ----------------------------------------------------------
+    // An AppleMouse II card: the PIA and the 68705's protocol on the card,
+    // the Pi's mouse arriving as MOUSE_MOVE messages.  On the peripherals'
+    // view like the Mockingboard, its interrupt on the short route.  See
+    // rtl/mouse_card.sv and docs/MOUSE.md.
+    mouse_card u_mouse (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .res_sync      (apple_res_sync),
+        .master_active (cpu_source_active),
+        .slot_assign   (mouse_slot_active),
+        .op_addr       (p_addr),
+        .op_rw         (p_rw),
+        .op_wdata      (p_wdata),
+        .op_present    (p_present),
+        .op_commit     (p_commit),
+        .op_dummy      (p_dummy),
+        .op_ovr        (p_ovr),
+        .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
+        .rd_claim      (mouse_rd_claim),
+        .rd_data       (mouse_rd_data),
+        .msg_valid     (app_msg_valid),
+        .msg_type      (app_msg_type),
+        .msg_free      (app_msg_free),
+        .msg_len       (app_msg_len),
+        .pay_data      (app_pay_data),
+        .pay_valid     (app_pay_valid),
+        .irq           (mouse_irq),
+        .rom_loaded    (mouse_rom_loaded),
+        .pos_x         (mouse_x),
+        .pos_y         (mouse_y),
+        .mode_rd       (mouse_mode),
+        .buttons_rd    (mouse_buttons),
+        .moves_rd      (mouse_moves)
     );
 
     // ---- the pins -----------------------------------------------------------
