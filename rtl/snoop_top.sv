@@ -107,6 +107,8 @@ module snoop_top #(
         .fd_stale (2'd0), .fd_dirty (2'd0), .fd_phase (14'd0), .fd_ctl (4'd0),
         .fd_late (8'd0), .fd_fill_max (16'd0), .fd_late_clr (), .fd_fill_clr (),
         .vidhd_slot_active (), .vidhd_rom_loaded (1'b0),   // nor for a VidHD
+        .u2_slot_active (), .u2_sock_open (4'd0), .u2_cmd_dropped (1'b0),   // nor an Uthernet II
+        .u2_cmds (8'd0), .u2_rx_chunks (8'd0), .u2_s0_rsr (16'd0), .u2_s0_fsr (16'd0),
         .kbd_press (), .kbd_press_key (), .kbd_drop (),   // nor type at it
         .kbd_lock (), .kbd_flags (3'd0), .kbd_counts (32'd0),
         .kbd_resolved_key (7'd0), .kbd_changed (1'b0),
@@ -139,6 +141,7 @@ module snoop_top #(
         .app_msg_len (), .app_pay_data (), .app_pay_valid (),
         .aux_word (32'd0), .aux_valid (1'b0), .aux_take (),
         .fd_word (32'd0), .fd_valid (1'b0), .fd_take (),
+        .u2_word (32'd0), .u2_valid (1'b0), .u2_take (),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),

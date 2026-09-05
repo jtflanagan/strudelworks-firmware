@@ -90,6 +90,7 @@ run hd_card       rtl/hd_card.sv rtl/slot_switches.sv
 run vidhd_card    rtl/vidhd_card.sv rtl/slot_switches.sv
 run mouse_card    rtl/mouse_card.sv rtl/slot_switches.sv
 run no_slot_clock rtl/no_slot_clock.sv
+run uthernet2_card rtl/uthernet2_card.sv rtl/fd_bank.sv -Wno-MULTIDRIVEN
 # fd_bank is the two-process true-dual-port RAM template Vivado infers block
 # RAM from (UG901); Verilator reads its two writers as a multi-driven array,
 # which is the shape, not a bug.

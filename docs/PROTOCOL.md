@@ -74,7 +74,11 @@ host reads; the receiver carries parser state across all of them.
 | `0x25` | MOUSE_MOVE | Host→card. `free[1:0]` = the mouse's buttons (levels, 0 = button 0); payload one word `{dy[15:0], dx[15:0]}`, signed deltas in the mouse's own counts. Applied to the card's position with the program's clamps and raises the movement/button interrupt if the mode asks. See MOUSE.md. |
 | `0x26` | MOUSE_ROM | Host→card. `free[2:0]` = chunk; payload 64 words: one 256-byte page of the AppleMouse card's 2 KB firmware ROM. Eight chunks make the ROM, in any order. See MOUSE.md. |
 | `0x27` | NSC_TIME | Host→card. Payload two words: the No-Slot Clock's 64-bit clock register in packed BCD, low word `{hour, minute, second, centisecond}` then high `{year, month, date, day of week}`. Taken whole at the second word; the card keeps no time of its own, the host sends one every centisecond. See NSC.md. |
-| `0x27`–`0xFF` | — | Application, unassigned. |
+| `0x28` | U2_CMD | Card→host, **unsolicited**. The Uthernet II: a write to a socket's command register, or a reset. `free[1:0]` the socket, `free[15:8]` the command byte (`$00` reset); payload 24 words: the W5100's common registers `$0000-$002F` then the socket's `$00-$2F`, as bytes, as the program would read them. See UTHERNET2.md. |
+| `0x29` | U2_TX | Card→host, **unsolicited**, after a SEND's U2_CMD: the bytes from `Sn_TX_RD` to `Sn_TX_WR`. `free` = `{bytes[11:0], last, first, sock[1:0]}`; payload the bytes packed four a word, up to 255 words a chunk. |
+| `0x2A` | U2_RX | Host→card. Bytes to append at a socket's RX write pointer, the W5100's header in front. `free` = `{bytes[11:0], 0, 0, sock[1:0]}`; payload the bytes packed four a word. The card moves `Sn_RX_WR` and adds to `Sn_RX_RSR` at the last word. |
+| `0x2B` | U2_STAT | Host→card. `free` = `{sr[7:0], 0, sock[1:0]}`: the socket's `Sn_SR`, at once; payload none, or two words `[DIPR][{MSSR, DPORT}]` (the socket's register words 3 and 4) for an accepted LISTEN's peer. |
+| `0x2C`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -154,6 +158,8 @@ protocol.
 | `0x8000_00D8` | NSC_CTRL | RW bit 0 | the No-Slot Clock's lever (1 at reset); `[1]` time loaded, `[2]` reading out, `[3]` writes enabled, `[13:8]` comparison bit, `[21:16]` read-out bit, `[31:24]` unlocks — see NSC.md |
 | `0x8000_00DC` | NSC_TIME | RO | the time the card holds, low half: `{hour, minute, second, centisecond}` BCD |
 | `0x8000_00E0` | NSC_DATE | RO | ...high half: `{year, month, date, day of week}` BCD |
+| `0x8000_00E4` | U2_SLOT | RW bits 2:0 | the Uthernet II's slot, 0 = off; latched at RES', never any of the five others'; `[11]` a command was dropped, `[15:12]` the sockets' `Sn_SR != 0`, `[23:16]` U2_CMDs sent, `[31:24]` U2_RX chunks landed — see UTHERNET2.md |
+| `0x8000_00E8` | U2_STAT | RO | `{Sn_RX_RSR[15:0], Sn_TX_FSR[15:0]}` of socket 0 |
 | `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s

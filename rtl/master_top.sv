@@ -162,6 +162,13 @@ module master_top #(
     wire [1:0]  mouse_buttons;
     wire [7:0]  mouse_moves;
     wire [15:0] mouse_x, mouse_y;
+    wire [2:0]  u2_slot_active;
+    wire [3:0]  u2_sock_open;
+    wire        u2_cmd_dropped, u2_stall;
+    wire [7:0]  u2_cmds, u2_rx_chunks;
+    wire [15:0] u2_s0_rsr, u2_s0_fsr;
+    wire [31:0] u2_word;
+    wire        u2_valid, u2_take;
     wire        nsc_enable, nsc_sub, nsc_bit, nsc_time_loaded, nsc_ring_en, nsc_wr_en;
     wire [5:0]  nsc_cmp_idx, nsc_ring_idx;
     wire [7:0]  nsc_unlocks;
@@ -354,6 +361,9 @@ module master_top #(
         .mouse_rom_loaded (mouse_rom_loaded),
         .mouse_irq (mouse_irq), .mouse_mode (mouse_mode), .mouse_buttons (mouse_buttons),
         .mouse_moves (mouse_moves), .mouse_x (mouse_x), .mouse_y (mouse_y),
+        .u2_slot_active (u2_slot_active), .u2_sock_open (u2_sock_open),
+        .u2_cmd_dropped (u2_cmd_dropped), .u2_cmds (u2_cmds), .u2_rx_chunks (u2_rx_chunks),
+        .u2_s0_rsr (u2_s0_rsr), .u2_s0_fsr (u2_s0_fsr),
         .nsc_enable (nsc_enable), .nsc_time_loaded (nsc_time_loaded),
         .nsc_ring_en (nsc_ring_en), .nsc_wr_en (nsc_wr_en),
         .nsc_cmp_idx (nsc_cmp_idx), .nsc_ring_idx (nsc_ring_idx),
@@ -405,6 +415,7 @@ module master_top #(
         .app_pay_data (app_pay_data), .app_pay_valid (app_pay_valid),
         .aux_word (aux_word), .aux_valid (aux_valid), .aux_take (aux_take),
         .fd_word (fd_word), .fd_valid (fd_valid), .fd_take (fd_take),
+        .u2_word (u2_word), .u2_valid (u2_valid), .u2_take (u2_take),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),
@@ -503,8 +514,8 @@ module master_top #(
     wire        op_rw;
     wire [7:0]  op_wdata;
     wire        op_present, op_commit, op_ovr;
-    wire        mb_rd_claim, hd_rd_claim, fd_rd_claim, vidhd_rd_claim, mouse_rd_claim;
-    wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data, vidhd_rd_data, mouse_rd_data;
+    wire        mb_rd_claim, hd_rd_claim, fd_rd_claim, vidhd_rd_claim, mouse_rd_claim, u2_rd_claim;
+    wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data, vidhd_rd_data, mouse_rd_data, u2_rd_data;
     wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw, vbl_ovr_en, vbl_ovr_rw;
     wire [15:0] boot_ovr_addr, hd_ovr_addr, vbl_ovr_addr;
     wire [7:0]  hd_ovr_wdata, vbl_ovr_wdata;
@@ -542,11 +553,12 @@ module master_top #(
     wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_en ? vbl_ovr_addr  : boot_ovr_addr;
     wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_en ? vbl_ovr_rw    : 1'b1;
     wire [7:0]  ovr_wdata = hd_ovr_en ? hd_ovr_wdata : vbl_ovr_wdata;
-    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim | vidhd_rd_claim | mouse_rd_claim;
+    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim | vidhd_rd_claim | mouse_rd_claim | u2_rd_claim;
     wire [7:0]  slot_rd_data  = hd_rd_claim    ? hd_rd_data    :
                                 fd_rd_claim    ? fd_rd_data    :
                                 vidhd_rd_claim ? vidhd_rd_data :
-                                mouse_rd_claim ? mouse_rd_data : mb_rd_data;
+                                mouse_rd_claim ? mouse_rd_data :
+                                u2_rd_claim    ? u2_rd_data    : mb_rd_data;
 
     // ---- the keyboard in the dummies (docs/ACCELERATION.md) ------------------
     // The closed regime: mode 2, serving, the chicken bit clear - and the
@@ -721,7 +733,7 @@ module master_top #(
         .turbo_claim   (turbo_claim | d_claim_w),
         .turbo_wr      (turbo_wr),
         .d_pending     (d_pending_w),
-        .stall         (fd_stall),
+        .stall         (fd_stall || u2_stall),
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
@@ -1132,6 +1144,7 @@ module master_top #(
         .swi_fd_slot (fd_slot_active),
         .swi_mb_slot (mb_slot_active),
         .swi_mouse_slot (mouse_slot_active),
+        .swi_u2_slot (u2_slot_active),
         .q_slot     (q_slot),
         .q_nsc      (q_nsc),
         .q_swi      (q_swi),
@@ -1473,6 +1486,45 @@ module master_top #(
         .mode_rd       (mouse_mode),
         .buttons_rd    (mouse_buttons),
         .moves_rd      (mouse_moves)
+    );
+
+    // ---- the Uthernet II ----------------------------------------------------
+    // A W5100 on the card - registers, rings, the socket machine - with the
+    // network on the host behind four messages.  On the peripherals' view
+    // like the mouse, DEVICE SELECT only; its U2_CMD/U2_TX stream is the
+    // message bus's seventh source; its stall holds the core's next op
+    // while a held ring word is missing.  See rtl/uthernet2_card.sv and
+    // docs/UTHERNET2.md.
+    uthernet2_card u_u2 (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .res_sync      (apple_res_sync),
+        .master_active (cpu_source_active),
+        .slot_assign   (u2_slot_active),
+        .op_addr       (p_addr),
+        .op_rw         (p_rw),
+        .op_wdata      (p_wdata),
+        .op_present    (p_present),
+        .op_commit     (p_commit),
+        .op_ovr        (p_ovr),
+        .rd_claim      (u2_rd_claim),
+        .rd_data       (u2_rd_data),
+        .msg_valid     (app_msg_valid),
+        .msg_type      (app_msg_type),
+        .msg_free      (app_msg_free),
+        .msg_len       (app_msg_len),
+        .pay_data      (app_pay_data),
+        .pay_valid     (app_pay_valid),
+        .tx_word       (u2_word),
+        .tx_valid      (u2_valid),
+        .tx_take       (u2_take),
+        .stall_o       (u2_stall),
+        .sock_open     (u2_sock_open),
+        .cmd_dropped   (u2_cmd_dropped),
+        .cmds_o        (u2_cmds),
+        .rx_chunks_o   (u2_rx_chunks),
+        .s0_rsr_o      (u2_s0_rsr),
+        .s0_fsr_o      (u2_s0_fsr)
     );
 
     // ---- the No-Slot Clock --------------------------------------------------

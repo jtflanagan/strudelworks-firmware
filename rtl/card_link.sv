@@ -165,6 +165,14 @@ module card_link #(
     input  wire [7:0]  mouse_moves,
     input  wire [15:0] mouse_x,
     input  wire [15:0] mouse_y,
+    // The Uthernet II (rtl/uthernet2_card.sv, docs/UTHERNET2.md), the same way.
+    output wire [2:0]  u2_slot_active,
+    input  wire [3:0]  u2_sock_open,
+    input  wire        u2_cmd_dropped,
+    input  wire [7:0]  u2_cmds,
+    input  wire [7:0]  u2_rx_chunks,
+    input  wire [15:0] u2_s0_rsr,
+    input  wire [15:0] u2_s0_fsr,
     // The No-Slot Clock (rtl/no_slot_clock.sv): its lever out, its state
     // and the host's time in, for NSC_CTRL / NSC_TIME / NSC_DATE.
     output wire        nsc_enable,
@@ -315,6 +323,12 @@ module card_link #(
     input  wire [31:0] fd_word,
     input  wire        fd_valid,
     output wire        fd_take,
+
+    // ...and a third, the Uthernet II's (U2_CMD, U2_TX), below the floppy's
+    // and above the capture.  A watching top ties u2_valid low.
+    input  wire [31:0] u2_word,
+    input  wire        u2_valid,
+    output wire        u2_take,
 
     // FT601 (constr/ft601.xdc)
     input  wire        ft_clk,
@@ -960,6 +974,9 @@ module card_link #(
         .mouse_rom_loaded  (mouse_rom_loaded),
         .mouse_irq (mouse_irq), .mouse_mode (mouse_mode), .mouse_buttons (mouse_buttons),
         .mouse_moves (mouse_moves), .mouse_x (mouse_x), .mouse_y (mouse_y),
+        .u2_slot_active (u2_slot_active), .u2_sock_open (u2_sock_open),
+        .u2_cmd_dropped (u2_cmd_dropped), .u2_cmds (u2_cmds), .u2_rx_chunks (u2_rx_chunks),
+        .u2_s0_rsr (u2_s0_rsr), .u2_s0_fsr (u2_s0_fsr),
         .nsc_enable (nsc_enable), .nsc_time_loaded (nsc_time_loaded),
         .nsc_ring_en (nsc_ring_en), .nsc_wr_en (nsc_wr_en),
         .nsc_cmp_idx (nsc_cmp_idx), .nsc_ring_idx (nsc_ring_idx),
@@ -1142,7 +1159,7 @@ module card_link #(
     // the floppy's by the machine's own head movements and writes; the
     // capture is the one continuous source and goes last.  See msg_arb for
     // why that order is load-bearing.
-    localparam integer N_SRC = 7;
+    localparam integer N_SRC = 8;
 
     wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
     wire [N_SRC*32-1:0] mb_adr, mb_dat;
@@ -1187,9 +1204,13 @@ module card_link #(
     assign ms_valid[5]         = fd_valid;
     assign fd_take             = ms_take[5];
 
-    assign ms_word[6*32 +: 32] = cap_word;
-    assign ms_valid[6]         = cap_valid;
-    assign cap_take            = ms_take[6];
+    assign ms_word[6*32 +: 32] = u2_word;
+    assign ms_valid[6]         = u2_valid;
+    assign u2_take             = ms_take[6];
+
+    assign ms_word[7*32 +: 32] = cap_word;
+    assign ms_valid[7]         = cap_valid;
+    assign cap_take            = ms_take[7];
 
     genvar gm;
     generate

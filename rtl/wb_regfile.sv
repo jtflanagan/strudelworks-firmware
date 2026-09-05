@@ -132,6 +132,16 @@ module wb_regfile #(
     input  wire [7:0]      mouse_moves,
     input  wire [15:0]     mouse_x,
     input  wire [15:0]     mouse_y,
+    // The Uthernet II (rtl/uthernet2_card.sv, docs/UTHERNET2.md): its slot
+    // latched like the mouse's, yielding to all five of the others; the
+    // card's counters for U2_SLOT and socket 0's two numbers for U2_STAT.
+    output wire [2:0]      u2_slot_active,
+    input  wire [3:0]      u2_sock_open,
+    input  wire            u2_cmd_dropped,
+    input  wire [7:0]      u2_cmds,
+    input  wire [7:0]      u2_rx_chunks,
+    input  wire [15:0]     u2_s0_rsr,
+    input  wire [15:0]     u2_s0_fsr,
     // The No-Slot Clock (rtl/no_slot_clock.sv, docs/NSC.md): its lever,
     // and its state and the host's time for NSC_CTRL / NSC_TIME / NSC_DATE.
     output wire            nsc_enable,
@@ -334,6 +344,8 @@ module wb_regfile #(
     localparam [13:0] R_NSC_CTRL       = 'd54; // 0x8000_00D8, RW bit 0
     localparam [13:0] R_NSC_TIME       = 'd55; // 0x8000_00DC, RO
     localparam [13:0] R_NSC_DATE       = 'd56; // 0x8000_00E0, RO
+    localparam [13:0] R_U2_SLOT        = 'd57; // 0x8000_00E4, RW in bits 2:0
+    localparam [13:0] R_U2_STAT        = 'd58; // 0x8000_00E8, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -663,6 +675,45 @@ module wb_regfile #(
                                  5'd0, mouse_slot_active_q, 5'd0, mouse_slot_desired};
     // MOUSE_STAT: {y[15:0], x[15:0]}, the position as the card holds it.
     wire [31:0] mouse_stat_rd = {mouse_y, mouse_x};
+
+    // ---- U2_SLOT ------------------------------------------------------------
+    //
+    //   [2:0]    desired   RW   which slot the Uthernet II answers as; 0 = off
+    //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [11]     dropped   RO   a command was dropped (the card's queue overflowed)
+    //   [15:12]  open      RO   the four sockets' Sn_SR != 0
+    //   [23:16]  cmds      RO   U2_CMD messages sent, wrapping
+    //   [31:24]  rx        RO   U2_RX chunks landed, wrapping
+    //
+    // MOUSE_SLOT's contract, the clash rule six-way: the Uthernet II is the
+    // newest and yields to all five of the others.  See docs/UTHERNET2.md.
+    logic [2:0] u2_slot_desired;
+    logic [2:0] u2_slot_active_q;
+
+    assign u2_slot_active = u2_slot_active_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            u2_slot_desired  <= 3'd0;   // no card until asked for
+            u2_slot_active_q <= 3'd0;
+        end else begin
+            if (res_assert || boot_relatch) begin
+                u2_slot_active_q <= (CAN_MASTER &&
+                                     u2_slot_desired != mb_slot_desired &&
+                                     u2_slot_desired != hd_slot_desired &&
+                                     u2_slot_desired != fd_slot_desired &&
+                                     u2_slot_desired != vidhd_slot_desired &&
+                                     u2_slot_desired != mouse_slot_desired)
+                                    ? u2_slot_desired : 3'd0;
+            end
+            if (wr_u2_slot) u2_slot_desired <= wb_dat_w[2:0];
+        end
+    end
+
+    wire [31:0] u2_slot_rd = {u2_rx_chunks, u2_cmds, u2_sock_open, u2_cmd_dropped,
+                              u2_slot_active_q, 5'd0, u2_slot_desired};
+    // U2_STAT: {Sn_RX_RSR, Sn_TX_FSR} of socket 0.
+    wire [31:0] u2_stat_rd = {u2_s0_rsr, u2_s0_fsr};
 
     // ---- NSC_CTRL -----------------------------------------------------------
     //
@@ -1131,6 +1182,8 @@ module wb_regfile #(
                         R_NSC_CTRL:   wb_dat_r <= nsc_ctrl_rd;
                         R_NSC_TIME:   wb_dat_r <= nsc_now[31:0];
                         R_NSC_DATE:   wb_dat_r <= nsc_now[63:32];
+                        R_U2_SLOT:    wb_dat_r <= u2_slot_rd;
+                        R_U2_STAT:    wb_dat_r <= u2_stat_rd;
                         R_FB_CTRL:    wb_dat_r <= fb_ctrl_rd;
                         R_FB_COMPARED: wb_dat_r <= fb_compared;
                         R_FB_MISMATCH: wb_dat_r <= fb_mismatch;
@@ -1206,6 +1259,8 @@ module wb_regfile #(
                          (word == R_MOUSE_SLOT);
     wire wr_nsc_ctrl   = access && !wb_ack && in_region && wb_we &&
                          (word == R_NSC_CTRL);
+    wire wr_u2_slot    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_U2_SLOT);
     wire wr_fb_ctrl    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FB_CTRL);
     wire wr_fb_peek    = access && !wb_ack && in_region && wb_we &&

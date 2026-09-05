@@ -136,6 +136,7 @@ module reg_map_tb;
     // The VidHD's side of VIDHD_SLOT: the tb plays the card.
     wire [2:0]  vidhd_slot_active;
     wire [2:0]  mouse_slot_active;
+    wire [2:0]  u2_slot_active;
     wire        nsc_enable;
     reg         vidhd_rom_loaded = 1'b0;
     always @(posedge clk) begin
@@ -212,6 +213,8 @@ module reg_map_tb;
         .vidhd_slot_active (vidhd_slot_active), .vidhd_rom_loaded (vidhd_rom_loaded),
         .mouse_slot_active (mouse_slot_active), .mouse_rom_loaded (1'b1), .mouse_irq (1'b0),
         .mouse_mode (4'd0), .mouse_buttons (2'd0), .mouse_moves (8'd0), .mouse_x (16'd0), .mouse_y (16'd0),
+        .u2_slot_active (u2_slot_active), .u2_sock_open (4'b0001), .u2_cmd_dropped (1'b0),
+        .u2_cmds (8'h07), .u2_rx_chunks (8'h21), .u2_s0_rsr (16'h0102), .u2_s0_fsr (16'h0FFE),
         .nsc_enable (nsc_enable), .nsc_time_loaded (1'b1), .nsc_ring_en (1'b0), .nsc_wr_en (1'b1),
         .nsc_cmp_idx (6'd5), .nsc_ring_idx (6'd9), .nsc_unlocks (8'h2A),
         .nsc_now ({32'h2609_0507, 32'h1341_2599}),
@@ -1287,6 +1290,70 @@ module reg_map_tb;
             $display("FAIL: MOUSE_STAT reads %08x, expected the tied-off position 0,0", out_mem[base+2]);
             errors = errors + 1;
         end else $display("  ok: MOUSE_STAT reads the position");
+        do_write(32'h8000_00D0, 32'h0000_0000);
+        pulse_reset_line;
+
+        $display("");
+        // ---- U2_SLOT / U2_STAT -------------------------------------------------
+        // The Uthernet II's slot latches like the mouse's and yields to ALL
+        // FIVE of the others; the VidHD is still in 3 from above, and the
+        // mouse is put in 5 for the clash.
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II is enabled before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: U2_SLOT starts disabled");
+        do_write(32'h8000_00D0, 32'h0000_0005);       // the mouse in 5
+        do_write(32'h8000_00E4, 32'h0000_0005);
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II took the mouse's slot");
+            errors = errors + 1;
+        end else $display("  ok: the Uthernet II yields the mouse's slot");
+        do_write(32'h8000_00E4, 32'h0000_0003);       // the VidHD's
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II took the VidHD's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the VidHD's");
+        do_write(32'h8000_00E4, 32'h0000_0006);       // the floppy's
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II took the floppy's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the floppy's");
+        do_write(32'h8000_00E4, 32'h0000_0007);       // the disk's
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II took the hard disk's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the hard disk's");
+        do_write(32'h8000_00E4, 32'h0000_0004);       // the Mockingboard's
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II took the Mockingboard's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the Mockingboard's");
+        do_write(32'h8000_00E4, 32'h0000_0001);
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the WRITE enabled the Uthernet II - it must take a reset");
+            errors = errors + 1;
+        end
+        pulse_reset_line;
+        base = out_n;
+        do_read(32'h8000_00E4);
+        // open=0001, dropped=0, cmds=$07, rx=$21 are tied in this bench.
+        if (u2_slot_active !== 3'd1 || out_mem[base+2] !== 32'h2107_1101) begin
+            $display("FAIL: U2_SLOT readback %08x, expected 21071101 (desired=1 active=1 open=1 cmds=7 rx=21)",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: U2_SLOT=1 latches at the reset; the counters read back");
+        base = out_n;
+        do_read(32'h8000_00E8);
+        if (out_mem[base+2] !== 32'h0102_0FFE) begin
+            $display("FAIL: U2_STAT reads %08x, expected the tied-off {RSR $0102, FSR $0FFE}", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: U2_STAT reads socket 0's numbers");
+        do_write(32'h8000_00E4, 32'h0000_0000);
         do_write(32'h8000_00D0, 32'h0000_0000);
         pulse_reset_line;
 
