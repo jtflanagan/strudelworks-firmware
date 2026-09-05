@@ -355,8 +355,11 @@ at exit.
   access; the machine's next `$C010` does it, and `touched` records that
   there was something to clear.
 - **The paddles and `PTRIG`.** Timers, a different problem.
-- **A scancode keymap.** `apple_keys` starts from characters; a USB keyboard
-  on the Pi will have to produce characters first, then feed the same rules.
+- **A scancode keymap.** `apple_keys` starts from characters. The USB
+  keyboard on the Pi (host `pi_keyboard.cpp` / `pi_keymap.cpp`, 2026-09-05)
+  maps its key codes to the Apple's bytes on the host and presses them
+  through the same register - as *live* keys, the newest pressed over an
+  unresolved one, which is what `replaced` is for. The card is unchanged.
 - **A ][+ strobe rule on the card.** See above: the IIe rule loses nothing
   on a ][+ except the rare case of a program clearing the strobe by reading
   `$C011-$C01F`, which then leaves an injected key visible at `$C000` until
