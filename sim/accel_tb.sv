@@ -834,8 +834,12 @@ module accel_tb #(parameter integer SWINT = 1,
     // the closed regime stood (must be 0); pin_cx_writes the INTCXROM/
     // SLOTC3ROM writes that did (must not be 0: the motherboard sees them).
     integer swi_wr_ops = 0, swi_wr_quiet = 0, swi_cx_bad = 0, pin_sw_writes = 0, pin_cx_writes = 0;
+    // The speaker (docs/CXXX.md "The speaker"): accesses served, and accesses
+    // that reached the pins under the closed regime (must be 0).
+    integer swi_spk_ops = 0, pin_spk = 0;
     always @(posedge clk) begin
         if (swi_commit) swi_ops = swi_ops + 1;
+        if (swi_commit && u_addr[15:4] == 12'hC03) swi_spk_ops = swi_spk_ops + 1;
         if (swi_commit && u_rw && u_addr[7:4] != 4'h0) swi_sw_ops = swi_sw_ops + 1;
         if (swi_commit && u_rw && u_seq.quiet_q) swi_quiet_ops = swi_quiet_ops + 1;
         if (swi_commit && !u_rw) swi_wr_ops = swi_wr_ops + 1;
@@ -1013,6 +1017,8 @@ module accel_tb #(parameter integer SWINT = 1,
             if (!rw_drive && data_oe && addr_drive[15:12] != 4'hC && !op_ovr) pin_ram_writes = pin_ram_writes + 1;
             // A switch write on the pins under the closed regime: the two
             // Cx-ROM switches must be there, the memory switches must not.
+            if (!op_dummy && !op_ovr && sw_int && !u_seq.reset_seq && addr_drive[15:4] == 12'hC03)
+                pin_spk = pin_spk + 1;
             if (!rw_drive && data_oe && !op_ovr && sw_int && !u_seq.reset_seq && addr_drive[15:8] == 8'hC0) begin
                 if (addr_drive[7:4] == 4'h0 && (addr_drive[3:1] == 3'd3 || addr_drive[3:1] == 3'd5))
                     pin_cx_writes = pin_cx_writes + 1;
@@ -1303,7 +1309,7 @@ module accel_tb #(parameter integer SWINT = 1,
 
         // ---- 3. mode 2: reads and writes on the card ------------------------------------
         clear_counters(); pin_ram_writes = 0; dummies = 0; cx_fast = 0;
-        pin_sw_writes = 0; pin_cx_writes = 0; swi_wr_ops = 0; swi_wr_quiet = 0;
+        pin_sw_writes = 0; pin_cx_writes = 0; swi_wr_ops = 0; swi_wr_quiet = 0; swi_spk_ops = 0; pin_spk = 0;
         n0 = pass_count; check_gaps = 1; merge_gaps = 0;
         bp_prom0 = u_iline.cnt_promotes;   bp_pin0  = u_iline.cnt_loop_hold;
         bp_scan0 = u_iline.cnt_scan_fills; bp_fill0 = u_iline.cnt_cam_fills;
@@ -1338,6 +1344,11 @@ module accel_tb #(parameter integer SWINT = 1,
         else ok($sformatf("mode 2: %0d INTCXROM/SLOTC3ROM writes rode the bus, as they must", pin_cx_writes));
         if (swi_cx_bad != 0) fail($sformatf("mode 2: %0d INTCXROM/SLOTC3ROM writes were served on the card", swi_cx_bad));
         else ok("mode 2: no INTCXROM/SLOTC3ROM write was served on the card");
+        // ---- 3d. the speaker in the closed regime ------------------------------
+        if (swi_spk_ops == 0) fail("mode 2: no speaker access was served on the card");
+        else ok($sformatf("mode 2: %0d speaker accesses served on the card", swi_spk_ops));
+        if (pin_spk != 0) fail($sformatf("mode 2: %0d speaker accesses reached the pins in the closed regime", pin_spk));
+        else ok("mode 2: no speaker access reached the pins in the closed regime");
         // An injected key crosses the internal path end to end: pressed
         // here, served to the program's poll from the card, taken with the
         // $C010 that rides the bus, and the byte the program stored is

@@ -453,11 +453,17 @@ module apple_mmu (
     wire qi_c05x = (qi_hi == 4'h5) && !qi_lo[3];              // $C050-$C057
     wire qi_c08x = (qi_hi == 4'h8);
     wire qi_c00w = (qi_hi == 4'h0) && (qi_lo[3:1] != 3'd3) && (qi_lo[3:1] != 3'd5);
+    // ...and the speaker, $C030-$C03F (docs/CXXX.md, "The speaker"): every
+    // access toggles the flip-flop, the host's sound follows the word, and
+    // the motherboard's own cone is silent for it - the byte a read gets is
+    // the floating bus's, fb_sim's when it can answer; a write is served
+    // regardless.  Never quiet: each access is a toggle.
+    wire qi_c03x = (qi_hi == 4'h3);
     wire qi_rd   = (qi_hi == 4'h0) ? swi_kbd_ok
                  : (qi_hi == 4'h1) ? ((qi_lo != 4'h0) && (qi_lo != 4'h9 || swi_vbl_ok))
-                 : (qi_c05x || qi_c08x) ? swi_fb_ok
+                 : (qi_c05x || qi_c08x || qi_c03x) ? swi_fb_ok
                  : 1'b0;
-    wire qi_wr   = qi_c00w || qi_c05x || qi_c08x;
+    wire qi_wr   = qi_c00w || qi_c05x || qi_c08x || qi_c03x;
     // The on-card slots.  DEVICE SELECT' is never gated by a switch; I/O
     // SELECT' is the slot's only while INTCXROM is clear and, for slot 3,
     // SLOTC3ROM set - the same rule the classifier and rtl/slot_switches.sv

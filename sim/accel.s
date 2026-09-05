@@ -292,6 +292,15 @@ nokey:
         bit $C017
         jmi fail
 
+        ; ---- 5e. the speaker (docs/CXXX.md "The speaker"): every access
+        ; toggles it, read or write, and in the closed regime none rides the
+        ; bus - the testbench counts them served and none on the pins.
+        lda $C030
+        sta $C030
+        bit $C030
+        sta $C03F
+        lda $C03F
+
         ; ---- 6. self-modifying code: the operand and the opcode change
         ; under the icache's feet.  A stale line shows as the wrong A or X.
         jsr smctest

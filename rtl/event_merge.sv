@@ -108,7 +108,10 @@ module event_merge #(
 
     // ---- the fast word's fate, at the door ---------------------------------------
     logic last_vbl = 1'b0;   // the level of the last word, kept or dropped
-    wire fast_sw   = (fast_addr[15:8] == 8'hC0) && (fast_addr[7:4] == 4'h5 || fast_addr[7:4] == 4'h8);
+    // A read carrying state the host needs: the toggles $C05x, the language
+    // card $C08x - and the speaker $C03x, where the read IS the click.
+    wire fast_sw   = (fast_addr[15:8] == 8'hC0) &&
+                     (fast_addr[7:4] == 4'h5 || fast_addr[7:4] == 4'h8 || fast_addr[7:4] == 4'h3);
     wire fast_edge = (vbl_level != last_vbl);
     wire fast_keep = fast_mark || fast_edge || fast_force ||
                      (!fast_quiet && (!sparse || !fast_rw || fast_sw));

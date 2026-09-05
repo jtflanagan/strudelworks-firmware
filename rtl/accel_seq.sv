@@ -388,7 +388,11 @@ module accel_seq (
     // Bitsy Bye's poll loop.  The cost is four clocks per switch flip,
     // against the bus cycle each one used to be.
     logic [2:0] swi_sq;
-    wire swi_change = swi_commit && !quiet_q && !slot_q && (!u_rw || (u_addr[7:5] != 3'd0));
+    // ...exactly the ops that can move a switch: a $C00x write, a $C05x or
+    // $C08x access.  Not the keyboard or status page, not the speaker ($C03x,
+    // a toggle and nothing of the map's), not a slot's.
+    wire swi_change = swi_commit && !quiet_q && !slot_q && (u_addr[15:8] == 8'hC0) &&
+                      ((!u_rw && u_addr[7:4] == 4'h0) || (u_addr[7:4] == 4'h5) || (u_addr[7:4] == 4'h8));
     always_ff @(posedge clk) swi_sq <= rst ? 3'd0 : {swi_sq[1:0], swi_change};
     wire swi_settling = swi_change || (|swi_sq);
 

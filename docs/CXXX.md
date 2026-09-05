@@ -1,5 +1,9 @@
 # $Cxxx under acceleration: what to serve fast
 
+**STEP 6 PROVEN ON HARDWARE (2026-09-04 night, branch `cxxx_work`, the Pt, SRAM):** the
+speaker, `$C030-$C03F`, served on the card in the closed regime - "The
+speaker", below.
+
 **STEP 5 PROVEN ON HARDWARE (2026-09-04 evening, branch `cxxx_work`, the Pt, SRAM):** the
 card's OWN slots - the hard disk, the floppy, the Mockingboard - served on
 the card in the closed regime: "The on-card slots", below.  The user's
@@ -674,6 +678,45 @@ record `$01FE: image 00, machine 80`.  That is the boot-menu hold: the
 held core's stack read is re-presented every bus cycle against the
 motherboard's RAM, stale in mode 2 by design, for as long as the menu is
 up - one count a cycle when the stale byte happens to differ.
+
+## The speaker (step 6, 2026-09-04)
+
+Every access to `$C030-$C03F`, read or write, toggles the IOU's speaker
+flip-flop, and a program that makes sound makes them in a tight loop:
+Nox Archaist's splash player put 1.5M `STA $C030` on the bus in 35 s of
+machine time, 99% of its bus ops and ~40% of its cycles, and the
+megademo's residue on the bus after step 5 was speaker reads and nothing
+else.  In the closed regime they are fast ops now (`rtl/apple_mmu.sv`
+qi_c03x): a write served regardless, a read served when fb_sim can give
+the floating byte (as `$C05x`), never quiet - each access is a toggle -
+and no settle (nothing of the map moves).  The motherboard's own speaker
+falls silent for them; the sound is the host's, as it is for everything
+else in mode 2.
+
+**The stream and the host.**  A speaker READ is a click, so the door
+keeps fast `$C03x` reads on a sparse stream beside `$C05x` and `$C08x`
+(`rtl/event_merge.sv` fast_sw); writes were kept already.
+`AppleAudio::apply_fast` toggles the flip-flop and re-arms the gate with
+NO time: the sample window advances on bus words alone, as before, so
+toggles closer together than a bus cycle collapse into the level the
+next cycle samples.  At acceleration that is what a click loop sounded
+like on the bus too (a toggle a cycle at the bus's pace, the tone 60x
+too high); the pacing that would make it right is the shelved decision
+(memory: audio-pacing-shelved) and is not re-raised here.
+
+**Proof.**  `sim/accel.s` phase 5e makes five speaker accesses of every
+kind; `sim/accel_tb.sv` asserts in mode 2 that they were served and that
+none reached the pins.  The bench's byte for a served read is the
+model's floating constant, so the compare holds.  accel_tb 83 checks 0
+errors both sweeps (15 speaker accesses served, none on the pins); boot
+bench 0 bad, 69.0x, bus ops 1,619 -> 1,425 (ProDOS's beep); build WNS
++0.020.  **ON HARDWARE (2026-09-04 20:20):** megademo from the on-card
+floppy, a 5 s trace covering 365 s of machine time: **zero bus events**;
+`$C030 R` 474 and the VIA writes as fast ops; 6,326 bus ops in total since
+the boot (the reset sequence, the Cx-ROM switches, `$C010`).  The bus now
+carries nothing of a running program's in the closed regime unless it
+touches a socket's slot, INTCXROM/SLOTC3ROM, the strobe, or an
+annunciator.  **STEP 6 PROVEN ON HARDWARE.**
 
 ## The next steps, BANKED (the user's decision, 2026-09-02)
 
