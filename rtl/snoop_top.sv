@@ -89,7 +89,7 @@ module snoop_top #(
         .real_data (real_data), .real_valid (real_valid),
         .real_mark (1'b0), .real_mark_free (16'd0),   // no scanner lock without a CPU
         // ...and no sequencer: no dummies, no fast ops.
-        .real_dummy (1'b0), .virt (1'b0), .fast_mark (1'b0), .fast_mark_free (16'd0), .fast_quiet (1'b0),
+        .real_dummy (1'b0), .virt (1'b0), .fast_mark (1'b0), .fast_mark_free (16'd0), .fast_quiet (1'b0), .fast_force (1'b0),
         .fast_valid (1'b0), .fast_addr (16'd0), .fast_rw (1'b1),
         .fast_data (8'd0), .fast_sync (1'b0), .fast_vbl (1'b0), .merge_overflows (),
         .phi0_live (phi0_live),

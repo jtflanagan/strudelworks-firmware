@@ -22,6 +22,14 @@ That splits exactly along the seam this project already has:
   resampled out through ALSA. Nothing on the card makes a sound; nothing on
   the host is guessed.
 
+**Served on the card under acceleration (2026-09-04).**  In the closed
+regime (CXXX.md "The on-card slots") the VIA accesses at `$Cn00-$CnFF`
+are fast ops the card answers itself, no bus cycle; the VIAs see them
+through master_top's peripheral view with a synthetic commit that does
+not tick the slow clock (fast_tick does, once).  The host's sound gets
+the register writes as fast words (`MbAudio::apply_fast`): the write
+alone, no time - the chips' cycles stay the bus words'.
+
 ## Only while mastering
 
 In AppleTini v5 the card sat in a slot impersonating a peripheral against a

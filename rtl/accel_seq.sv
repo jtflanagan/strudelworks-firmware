@@ -181,6 +181,15 @@ module accel_seq (
     input  wire        q_swi_quiet,
     input  wire [7:0]  swi_byte,
     output logic       swi_commit,      // one clock: an internalized op retired
+    // The on-card slots (docs/CXXX.md, "The on-card slots"): q_slot marks a
+    // q_swi op one of the card's own peripherals answers.  slot_q_o is the
+    // dispatched op's copy, held until the next dispatch; sl_win is high
+    // from the op's dispatch through its synthetic commit - the window in
+    // which master_top shows the peripherals the unified op instead of
+    // the driver's dummies.  A slot op moves no switch: no settle.
+    input  wire        q_slot,
+    output wire        slot_q_o,
+    output wire        sl_win,
     // Every fast op's retire, word or not: the tick the peripherals and the
     // virtual beam (rtl/vbeam.sv) keep the core's time by.  fev_valid is
     // the WORD, which a quiet internalized read does not put on the stream.
@@ -309,11 +318,15 @@ module accel_seq (
     // says they describe the op the core has up now (see the header).
     logic [1:0] dq_cls, fast_cls_q;
     logic       dq_rw, dq_ovr, dq_swi, dq_quiet, swi_q, quiet_q, fast_i_q, settled;
+    logic       dq_slot, slot_q;
+    assign slot_q_o = slot_q;
+    assign sl_win   = slot_q && ((st == S_FAST) || swi_commit);
     always_ff @(posedge clk) begin
         dq_cls   <= q_cls;
         dq_rw    <= cpu_rw;
         dq_ovr   <= ovr_en;
         dq_swi   <= q_swi;
+        dq_slot  <= q_slot;
         dq_quiet <= q_swi_quiet;
     end
     wire needs_bus = off || (dq_cls == CLS_BUS && !dq_swi) || (!dq_rw && mode == MODE_READS) ||
@@ -322,8 +335,13 @@ module accel_seq (
     wire vector_done = cyc_done && op_rw && !op_ovr && !op_dummy && (op_addr == 16'hFFFD);
     logic stall_q;
     always_ff @(posedge clk) stall_q <= stall && !rst;
+    // ...and never on a clock an override is live: a hold is coming, and a
+    // fast op dispatched under it - an on-card slot's above all - would open
+    // its window with the DMA's first present due (docs/CXXX.md, "The
+    // on-card slots": the driver's override enable is gated for the window,
+    // and this is the other half that makes the two never meet).
     wire fast_ok   = !stall_q && mem_image_ready && !mem_invalidating &&
-                     !op_inflight && !busy && !mq_valid;
+                     !op_inflight && !busy && !mq_valid && !ovr_en;
 
     // The instruction front's leash.  turbo_en is the steady half - the mode,
     // the serve, the reset sequence - and it is a REGISTER: its sources live
@@ -370,7 +388,7 @@ module accel_seq (
     // Bitsy Bye's poll loop.  The cost is four clocks per switch flip,
     // against the bus cycle each one used to be.
     logic [2:0] swi_sq;
-    wire swi_change = swi_commit && !quiet_q && (!u_rw || (u_addr[7:5] != 3'd0));
+    wire swi_change = swi_commit && !quiet_q && !slot_q && (!u_rw || (u_addr[7:5] != 3'd0));
     always_ff @(posedge clk) swi_sq <= rst ? 3'd0 : {swi_sq[1:0], swi_change};
     wire swi_settling = swi_change || (|swi_sq);
 
@@ -398,7 +416,8 @@ module accel_seq (
     wire fast_retire = (st == S_FAST) && fast_hit;
     always_ff @(posedge clk) begin
         cen_v   <= fast_retire && !rst;
-        cen_sel <= (swi_q && fast_rw)         ? 3'd6 :   // an internalized read: KBD
+        cen_sel <= (swi_q && fast_rw && slot_q) ? 3'd4 :  // an on-card slot's read: CX
+                   (swi_q && fast_rw)         ? 3'd6 :   // an internalized read: KBD
                    !fast_rw                   ? 3'd5 :   // every write, internalized switch included
                    fast_i_q                   ? 3'd0 :
                    (fast_cls_q == CLS_RAM)    ? 3'd1 :
@@ -448,7 +467,7 @@ module accel_seq (
             st <= S_RST;
             reset_seq <= 1'b1;
             settled <= 1'b0;
-            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0; quiet_q <= 1'b0;
+            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0; quiet_q <= 1'b0; slot_q <= 1'b0;
             credit <= 20'd0; grant_q <= 1'b0; spent_q <= 1'b0;
             u_addr <= 16'd0; u_rw <= 1'b1; u_wdata <= 8'd0;
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
@@ -539,6 +558,7 @@ module accel_seq (
                             core_valid_q <= 1'b0;
                             fast_rw      <= cpu_rw;
                             swi_q        <= dq_swi;
+                            slot_q       <= dq_slot;
                             quiet_q      <= dq_quiet;
                             fast_cls_q   <= dq_cls;
                             fast_i_q     <= cyc_is_i;

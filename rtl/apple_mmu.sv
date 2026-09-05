@@ -244,8 +244,18 @@ module apple_mmu (
     input  wire        swi_vbl_ok,    // the VBL lock stands
     input  wire        swi_vbl_bar,   // ...and this is the IIe's $C019 bit 7 now
     input  wire [6:0]  swi_kbd_low,   // the keyboard latch's low bits, under bit 7
+    // The card's OWN slots (docs/CXXX.md, "The on-card slots"): the hard
+    // disk's, the floppy's and the Mockingboard's slot numbers, 0 = none.
+    // An access a peripheral on this card would answer - its DEVICE SELECT
+    // range $C0n0-$C0nF, or its I/O SELECT page $Cn00-$CnFF while the slot
+    // owns it - is served on the card in the closed regime: q_slot marks
+    // it, and q_swi includes it.
+    input  wire [2:0]  swi_hd_slot,
+    input  wire [2:0]  swi_fd_slot,
+    input  wire [2:0]  swi_mb_slot,
     output wire        q_swi,
     output wire        q_swi_quiet,
+    output wire        q_slot,
     output wire [7:0]  swi_stat_byte,
 
     // ...and the instruction front's (rtl/iline.sv): classify a READ of
@@ -448,7 +458,23 @@ module apple_mmu (
                  : (qi_c05x || qi_c08x) ? swi_fb_ok
                  : 1'b0;
     wire qi_wr   = qi_c00w || qi_c05x || qi_c08x;
-    assign q_swi = swi_on && qi_io && (q_rw ? qi_rd : qi_wr);
+    // The on-card slots.  DEVICE SELECT' is never gated by a switch; I/O
+    // SELECT' is the slot's only while INTCXROM is clear and, for slot 3,
+    // SLOTC3ROM set - the same rule the classifier and rtl/slot_switches.sv
+    // apply, so an access this says is the slot's is one the classifier
+    // calls BUS.  Reads and writes alike: a write to a slot's ROM page
+    // lands nowhere on a real card too.  The VidHD's slot is NOT here (its
+    // signature ROM read rides the bus, as before).
+    function automatic slot_page(input [2:0] n);
+        slot_page = (n != 3'd0) && (q_addr[15:12] == 4'hC) && (q_addr[11:8] == {1'b0, n}) &&
+                    !intcxrom && !(n == 3'd3 && !slotc3rom);
+    endfunction
+    function automatic slot_dev(input [2:0] n);
+        slot_dev = (n != 3'd0) && qi_io && q_addr[7] && (q_addr[6:4] == n);
+    endfunction
+    assign q_slot = swi_on && (slot_dev(swi_hd_slot) || slot_dev(swi_fd_slot) ||
+                               slot_page(swi_hd_slot) || slot_page(swi_fd_slot) || slot_page(swi_mb_slot));
+    assign q_swi = swi_on && ((qi_io && (q_rw ? qi_rd : qi_wr)) || q_slot);
     // Quiet: a $C050-$C057 op, or a $C00x write, whose switch already holds
     // the value the address sets.  The language card's ops are never quiet
     // (the prewrite state moves on every one), and the rest change nothing
@@ -471,7 +497,12 @@ module apple_mmu (
             default: qi_same0 = 1'b0;
         endcase
     end
-    assign q_swi_quiet = (qi_c05x && qi_same5) || (!q_rw && qi_c00w && qi_same0);
+    // The I/O page only: qi_c05x/qi_c00w are low-byte decodes, and an on-card
+    // slot's I/O SELECT page shares them - a Mockingboard write to $C400 with
+    // 80STORE clear looked like a quiet 80STORE write and its word was
+    // dropped, starving the host's sound of VIA0 (found on hardware,
+    // megademo, 2026-09-04).
+    assign q_swi_quiet = qi_io && ((qi_c05x && qi_same5) || (!q_rw && qi_c00w && qi_same0));
 
     // The status page's byte, for the REGISTERED op: the switch in bit 7 -
     // $C019 is the IIe's VBL', low while the beam is in blanking - over the

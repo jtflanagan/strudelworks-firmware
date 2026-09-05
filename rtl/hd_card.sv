@@ -128,7 +128,12 @@ module hd_card #(
     // For the HD_SLOT register.
     output wire        rom_loaded,
     output wire        busy,
-    output logic [7:0] execs
+    output logic [7:0] execs,
+    // The presented op is an EXECUTE (an armed read of $C0n0), registered
+    // at present and held to the next: the stream's door keeps that read's
+    // word for the host in the closed regime, where the port's busy polls
+    // are fast ops and dropped (docs/CXXX.md, "The on-card slots").
+    output logic       exec_q
 );
 
     // ---- what this card answers as -----------------------------------------
@@ -178,6 +183,10 @@ module hd_card #(
     assign busy = (outstanding != 2'd0);
 
     wire take_exec = exec_read && armed;
+    always_ff @(posedge clk) begin
+        if (rst)             exec_q <= 1'b0;
+        else if (op_present) exec_q <= take_exec;
+    end
 
     // ---- host -> card messages ---------------------------------------------
     // Which message's payload is arriving, and where in it we are.

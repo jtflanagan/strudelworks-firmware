@@ -88,7 +88,11 @@ Nothing else sends an op to the bus. **What is slow is a matter of class
 alone**, the rule the user set: a `$Cxxx` access that is not the motherboard's
 own ROM - the I/O page, every slot's I/O and ROM pages, a slot's expansion
 ROM, on this card or in a socket - is BUS class and rides a real cycle, in
-every mode; a read the card's memory answers is fast. There is no hold-off
+every mode; a read the card's memory answers is fast.  (Revised
+2026-09-04, CXXX.md "The on-card slots": in the closed regime an access
+one of THIS card's peripherals answers - the hard disk's, the floppy's,
+the Mockingboard's - is served on the card; a slot in a socket still
+rides the bus.)  There is no hold-off
 after a slot access and no rule about a drive turning; a peripheral's code
 runs at the bus's pace exactly as far as it touches the bus.
 
@@ -480,7 +484,9 @@ design, its rules and its books: docs/ISTREAM.md.
 - **A hold-off after a slot access** (a TransWarp's "slot speed", or a
   Disk II's motor): the core at the bus's pace for a while around a slot's
   I/O. Not asked for; word 41 of the register map is left for it if it is.
-- **Any slot's ROM served from the card**: BUS, always, by the rule above.
+- **A socket's slot served from the card**: BUS, always, by the rule above.
+  (The card's OWN slots are served on the card since 2026-09-04, CXXX.md
+  "The on-card slots".)
 - **The periodic timestamp record** in the trace (DDR3_USAGE.md): a trace of
   an accelerated machine is not a cycle stream; the host flags it
   (`kFlagAccel`) and the replay tool refuses it, while the MMU check still

@@ -87,6 +87,7 @@ module card_link #(
     input  wire        fast_mark,
     input  wire [15:0] fast_mark_free,
     input  wire        fast_quiet,
+    input  wire        fast_force,      // keep this fast word whatever the rule (rtl/event_merge.sv)
     input  wire        fast_valid,
     input  wire [15:0] fast_addr,
     input  wire        fast_rw,
@@ -787,6 +788,7 @@ module card_link #(
         .fast_mark     (source_real && fast_mark),
         .fast_mark_free (fast_mark_free),
         .fast_quiet    (fast_quiet),
+        .fast_force    (fast_force),
         .vbl_level     (fast_vbl),
         .res_level     (apple_res_sync),
         .sparse        (sparse_ctrl && source_real),

@@ -279,6 +279,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
         .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (), .fev_quiet (),
+        .q_slot (1'b0), .slot_q_o (), .sl_win (),
         .stall (1'b0),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
@@ -470,6 +471,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
         .swi_on (sw_int), .swi_kbd_ok (kbd_int_ok), .swi_fb_ok (1'b1),
         .swi_vbl_ok (1'b0), .swi_vbl_bar (1'b1), .swi_kbd_low (kbd_int_low),
+        .swi_hd_slot (3'd0), .swi_fd_slot (3'd0), .swi_mb_slot (3'd0), .q_slot (),
         .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_stat_byte (mmu_swi_stat),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .d_addr (dq_addr_w), .d_rw (dq_rw_w),
@@ -852,7 +854,9 @@ module accel_tb #(parameter integer SWINT = 1,
     // a write's data is irrelevant, the address is the switch; the language
     // card's A0 = 1 on a WRITE clears prewrite and leaves the enable alone.
     // INTCXROM/SLOTC3ROM never come this way (swi_cx_bad counts it if one does).
-    always @(posedge clk) if (swi_commit) begin
+    // ...and only for the I/O page: an on-card slot's ROM page ($C78x, say)
+    // retires with a synthetic commit too, and its low byte is no switch.
+    always @(posedge clk) if (swi_commit && u_addr[15:8] == 8'hC0) begin
         if (!u_rw && u_addr[7:4] == 4'h0) begin
             case (u_addr[3:1])
                 3'd0: m_store80 <= u_addr[0];

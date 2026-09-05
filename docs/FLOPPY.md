@@ -66,6 +66,15 @@ on numbers: FD_STAT's `fill_max` is the longest fill, head movement to
 seventh chunk, in bus cycles; `late` counts the fills that landed after the
 machine had already tried to read. Read them after a session of seeking.
 
+**Served on the card under acceleration (2026-09-04).**  In the closed
+regime (CXXX.md "The on-card slots") the sixteen switches at `$C0Ex` and
+the P5A ROM at `$C6xx` are fast ops the card answers itself, no bus
+cycle; the controller sees them through master_top's peripheral view of
+the unified stream, with a synthetic commit that does not tick (fast_tick
+ticks once for the op, as for every fast op), so the bit-cell timing is
+the program's virtual time exactly as before.  The stall on a pending
+track fill is unchanged.
+
 ## What the card does
 
 ### The switches

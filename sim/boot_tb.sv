@@ -213,7 +213,12 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire sw_int = accel_on && (mode == 2'd2) && serve && !swint_dis && !held;
     wire        swi_commit, kbd_int_ok;
     wire [7:0]  kbd_int_byte;
-    wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+    // The on-card slot (the hard disk, docs/CXXX.md "The on-card slots"):
+    // master_top's peripheral view, wired the same way here.
+    wire        q_slot, seq_slot_q, sl_win, hd_exec_q;
+    wire        hd_rd_claim;
+    wire [7:0]  hd_rd_data;
+    wire        kbd_int_rd = swi_commit && u_rw && !seq_slot_q && (u_addr[15:4] == 12'hC00);
     // ...and the rest of the internalized reads (docs/CXXX.md), as
     // master_top wires them.  No fb_sim here: the machine's floating byte
     // is the model's constant (FLOAT, 8'hA5), and $C019 stays on the bus
@@ -221,9 +226,25 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        q_swi, q_swi_quiet;
     wire [7:0]  mmu_swi_stat;
     wire [6:0]  kbd_int_low;
-    wire [7:0]  swi_byte = (u_addr[7:4] == 4'h0) ? kbd_int_byte
+    wire [7:0]  swi_byte = seq_slot_q             ? hd_rd_data
+                         : (u_addr[7:4] == 4'h0) ? kbd_int_byte
                          : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
                          : 8'hA5;
+    wire        sl_present = u_present && seq_slot_q;
+    wire        sl_commit  = swi_commit && seq_slot_q;
+    wire        p_present  = sl_win ? sl_present : op_present;
+    wire        p_commit   = sl_win ? sl_commit  : op_commit;
+    wire        p_ovr      = sl_win ? 1'b0       : op_ovr;
+    wire [15:0] p_addr     = sl_win ? u_addr     : op_addr;
+    wire        p_rw       = sl_win ? u_rw       : op_rw;
+    wire [7:0]  p_wdata    = sl_win ? u_wdata    : op_wdata;
+    reg         sl_claim_fast = 1'b0;
+    always @(posedge clk) begin
+        if (rst)                          sl_claim_fast <= 1'b0;
+        else if (sl_present)              sl_claim_fast <= 1'b1;
+        else if (op_present && !sl_win)   sl_claim_fast <= 1'b0;
+    end
+    wire        hd_rd_claim_bus = hd_rd_claim && !sl_claim_fast;
     kbd_inject u_kbdi (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .master_active (master_active),
@@ -244,6 +265,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
         .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (), .fev_quiet (),
+        .q_slot (q_slot), .slot_q_o (seq_slot_q), .sl_win (sl_win),
         .stall (1'b0),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
@@ -329,9 +351,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .drv_sync (drv_sync), .cyc_en (drv_cyc_done), .cpu_din (drv_din),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
-        .slot_rd_claim (hd_rd_claim), .slot_rd_data (hd_rd_data),
+        .slot_rd_claim (hd_rd_claim_bus), .slot_rd_data (hd_rd_data),
         .din_sub_en (sub_en), .din_sub_data (sub_data),
-        .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw), .ovr_wdata (ovr_wdata),
+        .ovr_en (ovr_en && !sl_win), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw), .ovr_wdata (ovr_wdata),
         .op_ovr (op_ovr), .op_dummy (op_dummy), .op_inflight (op_inflight),
         .nxt_addr (nxt_addr), .divert (serve && q_divert), .op_divert (op_divert),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
@@ -388,6 +410,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
         .swi_on (sw_int), .swi_kbd_ok (kbd_int_ok), .swi_fb_ok (1'b1),
         .swi_vbl_ok (1'b0), .swi_vbl_bar (1'b1), .swi_kbd_low (kbd_int_low),
+        .swi_hd_slot (3'(HD_SLOT)), .swi_fd_slot (3'd0), .swi_mb_slot (3'd0), .q_slot (q_slot),
         .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_stat_byte (mmu_swi_stat),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .d_addr (dq_addr_w), .d_rw (dq_rw_w),
@@ -515,21 +538,19 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        hd_tx_valid;
     wire        hd_rom_loaded, hd_busy;
     wire [7:0]  hd_execs;
-    wire        hd_rd_claim;
-    wire [7:0]  hd_rd_data;
 
     hd_card u_hd (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .res_sync (res_sync),
         .master_active (master_active), .slot_assign (3'(HD_SLOT)),
-        .op_addr (op_addr), .op_rw (op_rw), .op_present (op_present),
-        .op_commit (op_commit), .op_ovr (op_ovr), .din (drv_din),
+        .op_addr (p_addr), .op_rw (p_rw), .op_present (p_present),
+        .op_commit (p_commit), .op_ovr (p_ovr), .din (drv_din),
         .ovr_en (hd_ovr_en), .ovr_addr (hd_ovr_addr), .ovr_rw (hd_ovr_rw),
         .ovr_wdata (hd_ovr_wdata),
         .rd_claim (hd_rd_claim), .rd_data (hd_rd_data),
         .msg_valid (hmsg_valid), .msg_type (hmsg_type), .msg_free (hmsg_free),
         .msg_len (hmsg_len), .pay_data (hpay_data), .pay_valid (hpay_valid),
         .tx_word (hd_tx_word), .tx_valid (hd_tx_valid), .tx_take (hd_tx_valid),
-        .rom_loaded (hd_rom_loaded), .busy (hd_busy), .execs (hd_execs)
+        .rom_loaded (hd_rom_loaded), .busy (hd_busy), .execs (hd_execs), .exec_q (hd_exec_q)
     );
 
     // ---- the DDR3 stub: the aux region, in order, twelve clocks late ----------------
@@ -670,7 +691,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // (docs/CXXX.md, "The switch writes"): a write's address is the
     // switch; the language card's A0 = 1 on a WRITE clears prewrite and
     // leaves the enable alone.  INTCXROM/SLOTC3ROM never come this way.
-    always @(posedge clk) if (swi_commit) begin
+    // ...and only for the I/O page: an on-card slot's ROM page ($C78x, say)
+    // retires with a synthetic commit too, and its low byte is no switch.
+    always @(posedge clk) if (swi_commit && u_addr[15:8] == 8'hC0) begin
         c0_touch(u_addr[7:0]);
         if (!u_rw && u_addr[7:4] == 4'h0) begin
             case (u_addr[3:1])
@@ -842,9 +865,14 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             end
         end
     end
+    // A fast read of the hard disk's port is the card's own answer (busy, a
+    // status, a size byte) - nothing in the reference models it, and the bus
+    // path never checked it either (the pins carried hd_card's byte back):
+    // the ROM page IS checked, through cx_byte's hd_rom.
+    wire fev_hd_port = (fev_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)});
     always @(posedge clk) if (fev_valid && fev_rw) begin
         reads = reads + 1; fast_reads = fast_reads + 1;
-        if (fev_data !== exp_read(fev_addr)) begin
+        if (!fev_hd_port && fev_data !== exp_read(fev_addr)) begin
             reads_bad = reads_bad + 1;
             if (reads_bad <= 20) $display("[%0t] BAD fast read $%04X: core got %02x, the reference says %02x",
                                           $time, fev_addr, fev_data, exp_read(fev_addr));
@@ -1011,12 +1039,14 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     endtask
 
-    // The mirror taps the driver's stream, as the real host taps the capture.
+    // The mirror taps the peripherals' view of the stream - the driver's
+    // ops, and the on-card slot ops served fast in the closed regime - as
+    // the real host taps the capture (bus words and fast words alike).
     always @(posedge clk) begin
-        if (op_present && !op_ovr && !op_rw && op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
-            hm_io_write(op_addr[3:0], op_wdata);
-        if (op_commit && !op_ovr && op_rw && op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
-            if (op_addr[3:0] == 4'h0) hm_io_read0();
+        if (p_present && !p_ovr && !p_rw && p_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
+            hm_io_write(p_addr[3:0], p_wdata);
+        if (p_commit && !p_ovr && p_rw && p_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
+            if (p_addr[3:0] == 4'h0) hm_io_read0();
     end
     // RES' drops what the card drops.
     reg res_prev = 1'b1;

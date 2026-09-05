@@ -298,6 +298,7 @@ module master_top #(
         .virt (virt),
         .fast_mark (beam_mark_fast), .fast_mark_free (beam_mark_free),
         .fast_quiet (fev_valid && fev_quiet),
+        .fast_force (fev_force),
         // The fronts' events share the fast port: turbo_ok excludes fev's
         // clock, and an I and a D retire can never share an edge (one core,
         // one cycle), so no two of the three are ever valid together - the
@@ -500,6 +501,14 @@ module master_top #(
     wire [15:0] nxt_addr;
 
     wire        ovr_en    = boot_ovr_en | hd_ovr_en | vbl_ovr_en;
+    // The DRIVER's override enable waits out an on-card slot op's window
+    // (accel_seq sl_win, declared below): the peripherals see the unified
+    // op for that window and nothing of the driver's, so no override may
+    // be presented in it - the hard disk's DMA starts a few clocks later
+    // instead (docs/CXXX.md, "The on-card slots").  The dispatcher takes
+    // the ungated level and holds as soon as it sees it.
+    wire        sl_win;
+    wire        drv_ovr_en = ovr_en && !sl_win;
     wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_en ? vbl_ovr_addr  : boot_ovr_addr;
     wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_en ? vbl_ovr_rw    : 1'b1;
     wire [7:0]  ovr_wdata = hd_ovr_en ? hd_ovr_wdata : vbl_ovr_wdata;
@@ -529,10 +538,59 @@ module master_top #(
     wire        q_swi, q_swi_quiet;
     wire [7:0]  kbd_int_byte, mmu_swi_stat;
     wire [6:0]  kbd_int_low;
-    wire [7:0]  swi_byte = (u_addr[7:4] == 4'h0) ? kbd_int_byte
+    // ...and the card's own slots (docs/CXXX.md, "The on-card slots"): a
+    // slot op's byte is the peripheral's registered answer, keyed FIRST -
+    // a slot ROM page's low nibble would otherwise read as the keyboard's.
+    wire        q_slot, seq_slot_q;
+    wire [7:0]  swi_byte = seq_slot_q             ? slot_rd_data
+                         : (u_addr[7:4] == 4'h0) ? kbd_int_byte
                          : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
                          : fb_sub_data;
-    wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+    wire        kbd_int_rd = swi_commit && u_rw && !seq_slot_q && (u_addr[15:4] == 12'hC00);
+
+    // THE PERIPHERALS' VIEW OF THE OP STREAM.  The hard disk, the floppy and
+    // the Mockingboard decode the driver's op (op_*) as they always did; in
+    // the closed regime an access to one of them is a fast op the driver
+    // never sees, so for its window - dispatch through synthetic commit
+    // (accel_seq sl_win) - they are shown the unified op instead: present
+    // on the dispatch clock, address/rw/data the core's, and the synthetic
+    // commit as their commit.  The driver's dummies are hidden for the
+    // window (a dummy is nobody's op), and the window's commit is flagged a
+    // dummy so the floppy's and the VIAs' core clocks do not tick on it -
+    // fast_tick ticks them once for the op, as for every fast op.  The
+    // peripheral's registered claim then answers the fast op (swi_byte);
+    // it must NOT reach the driver, which drives a claimed read's byte onto
+    // the bus during its data window - a leftover claim under a dummy's
+    // read of $C000 would fight the IOU - so the claim is masked from the
+    // dispatch until the driver's next visible present re-registers it.
+    wire        sl_present = u_present && seq_slot_q;
+    wire        sl_commit  = swi_commit && seq_slot_q;
+    wire        p_present  = sl_win ? sl_present : op_present;
+    wire        p_commit   = sl_win ? sl_commit  : op_commit;
+    wire        p_dummy    = sl_win ? 1'b1       : op_dummy;
+    wire        p_ovr      = sl_win ? 1'b0       : op_ovr;
+    wire [15:0] p_addr     = sl_win ? u_addr     : op_addr;
+    wire        p_rw       = sl_win ? u_rw       : op_rw;
+    wire [7:0]  p_wdata    = sl_win ? u_wdata    : op_wdata;
+    logic       sl_claim_fast;
+    always_ff @(posedge apple_clk) begin
+        if (apple_rst)                    sl_claim_fast <= 1'b0;
+        else if (sl_present)              sl_claim_fast <= 1'b1;
+        else if (op_present && !sl_win)   sl_claim_fast <= 1'b0;
+    end
+    wire        slot_rd_claim_bus = slot_rd_claim && !sl_claim_fast;
+
+    // The hard disk's EXECUTE and its completion must reach the host
+    // through the stream even as fast reads on a sparse capture (the door
+    // drops fast reads, rtl/event_merge.sv): the read that was an EXECUTE
+    // (hd_card exec_q, registered at its present), and any read of the
+    // port that did not answer busy ($80) - the first of those completes
+    // the command on the host's side.  The busy polls, the flood, are
+    // dropped as every other fast read.
+    wire        hd_exec_q;
+    wire        fev_hd    = fev_valid && fev_rw && (hd_slot_active != 3'd0) &&
+                            (fev_addr[15:4] == {8'hC0, 1'b1, hd_slot_active});
+    wire        fev_force = fev_hd && (hd_exec_q || (fev_data != 8'h80));
 
     apple_bus_write u_write (
         .clk           (apple_clk),
@@ -554,11 +612,11 @@ module master_top #(
         .op_wdata      (op_wdata),
         .op_present    (op_present),
         .op_commit     (op_commit),
-        .slot_rd_claim (slot_rd_claim),
+        .slot_rd_claim (slot_rd_claim_bus),
         .slot_rd_data  (slot_rd_data),
         .din_sub_en    (sub_en),
         .din_sub_data  (sub_data),
-        .ovr_en        (ovr_en),
+        .ovr_en        (drv_ovr_en),
         .ovr_addr      (ovr_addr),
         .ovr_rw        (ovr_rw),
         .ovr_wdata     (ovr_wdata),
@@ -591,6 +649,9 @@ module master_top #(
         .q_swi_quiet   (q_swi_quiet),
         .swi_byte      (swi_byte),
         .swi_commit    (swi_commit),
+        .q_slot        (q_slot),
+        .slot_q_o      (seq_slot_q),
+        .sl_win        (sl_win),
         .fast_tick     (seq_fast_tick),
         .fev_quiet     (fev_quiet),
         .target        (accel_target),
@@ -985,6 +1046,10 @@ module master_top #(
         .swi_vbl_ok (beam_locked),
         .swi_vbl_bar (fb_vbl_bar),
         .swi_kbd_low (kbd_int_low),
+        .swi_hd_slot (hd_slot_active),
+        .swi_fd_slot (fd_slot_active),
+        .swi_mb_slot (mb_slot_active),
+        .q_slot     (q_slot),
         .q_swi      (q_swi),
         .q_swi_quiet (q_swi_quiet),
         .swi_stat_byte (mmu_swi_stat),
@@ -1136,7 +1201,7 @@ module master_top #(
         .pal           (vbl_pal),
         .master_active (cpu_source_active),
         .data_sync     (apple_data_sync),
-        .slot_rd_claim (slot_rd_claim),
+        .slot_rd_claim (slot_rd_claim_bus),
         .kbd_sub_en    (kbd_sub_en),
         .pb_sub_en     (pb_sub_en),
         .serve         (fb_serve),
@@ -1165,11 +1230,11 @@ module master_top #(
         .res_sync      (apple_res_sync),
         .master_active (cpu_source_active),
         .slot_assign   (hd_slot_active),
-        .op_addr       (op_addr),
-        .op_rw         (op_rw),
-        .op_present    (op_present),
-        .op_commit     (op_commit),
-        .op_ovr        (op_ovr),
+        .op_addr       (p_addr),
+        .op_rw         (p_rw),
+        .op_present    (p_present),
+        .op_commit     (p_commit),
+        .op_ovr        (p_ovr),
         .din           (drv_din),
         .ovr_en        (hd_ovr_en),
         .ovr_addr      (hd_ovr_addr),
@@ -1188,7 +1253,8 @@ module master_top #(
         .tx_take       (aux_take),
         .rom_loaded    (hd_rom_loaded),
         .busy          (hd_busy),
-        .execs         (hd_execs)
+        .execs         (hd_execs),
+        .exec_q        (hd_exec_q)
     );
 
     // ---- the floppy ---------------------------------------------------------
@@ -1201,13 +1267,13 @@ module master_top #(
         .res_sync      (apple_res_sync),
         .master_active (cpu_source_active),
         .slot_assign   (fd_slot_active),
-        .op_addr       (op_addr),
-        .op_rw         (op_rw),
-        .op_wdata      (op_wdata),
-        .op_present    (op_present),
-        .op_commit     (op_commit),
-        .op_ovr        (op_ovr),
-        .op_dummy      (op_dummy),
+        .op_addr       (p_addr),
+        .op_rw         (p_rw),
+        .op_wdata      (p_wdata),
+        .op_present    (p_present),
+        .op_commit     (p_commit),
+        .op_ovr        (p_ovr),
+        .op_dummy      (p_dummy),
         .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
         .rd_claim      (fd_rd_claim),
         .rd_data       (fd_rd_data),
@@ -1277,12 +1343,12 @@ module master_top #(
         .res_sync      (apple_res_sync),
         .master_active (cpu_source_active),
         .slot_assign   (mb_slot_active),
-        .op_addr       (op_addr),
-        .op_rw         (op_rw),
-        .op_wdata      (op_wdata),
-        .op_present    (op_present),
-        .op_commit     (op_commit),
-        .op_dummy      (op_dummy),
+        .op_addr       (p_addr),
+        .op_rw         (p_rw),
+        .op_wdata      (p_wdata),
+        .op_present    (p_present),
+        .op_commit     (p_commit),
+        .op_dummy      (p_dummy),
         .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
         .rd_claim      (mb_rd_claim),
         .rd_data       (mb_rd_data),

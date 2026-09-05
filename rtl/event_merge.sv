@@ -71,6 +71,10 @@ module event_merge #(
     // A read that changes no switch (rtl/apple_mmu.sv q_swi_quiet): its
     // word is dropped whatever its address, its cycle counted.
     input  wire        fast_quiet,
+    // A read the host must have whatever the address rule says: the hard
+    // disk's EXECUTE and its completion, served on the card (docs/CXXX.md,
+    // "The on-card slots"); master_top decides it from the card's state.
+    input  wire        fast_force,
     input  wire        vbl_level,
     input  wire        res_level,       // RES', as the event carries it
     // The rules the door applies: sparse capture, and the virtual base.
@@ -106,7 +110,8 @@ module event_merge #(
     logic last_vbl = 1'b0;   // the level of the last word, kept or dropped
     wire fast_sw   = (fast_addr[15:8] == 8'hC0) && (fast_addr[7:4] == 4'h5 || fast_addr[7:4] == 4'h8);
     wire fast_edge = (vbl_level != last_vbl);
-    wire fast_keep = fast_mark || fast_edge || (!fast_quiet && (!sparse || !fast_rw || fast_sw));
+    wire fast_keep = fast_mark || fast_edge || fast_force ||
+                     (!fast_quiet && (!sparse || !fast_rw || fast_sw));
 
     logic [W-1:0] q [0:DEPTH-1];
     logic [AW:0]  wp = '0, rp = '0;
