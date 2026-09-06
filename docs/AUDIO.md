@@ -1,7 +1,7 @@
 # Sound on the card: the AYs and the speaker as gateware, samples to the host
 
-Status: **ON HARDWARE 2026-09-06** (branch `cxxx_work`, both repos, not yet
-committed).  Bit at WNS +0.008 / WHS +0.062 (2026-09-06 12:46, SRAM), the
+Status: **ON HARDWARE 2026-09-06**, COMMITTED (fw 96d227b / host b082bb6,
+SRAM).  Bit at WNS +0.008 / WHS +0.062 (2026-09-06 12:46, SRAM), the
 first DSP48 in the design, LUTs 43 %.  `sim/run_audio_vl.sh` PASS (the NCO,
 the speaker's box average, a 996 Hz tone at 50 periods in core time / 199
 with the core at 4x / 50 in real time, the framing, the drops); the
