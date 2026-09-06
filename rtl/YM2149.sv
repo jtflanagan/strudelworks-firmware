@@ -392,37 +392,38 @@ initial begin
     volTable[30] = 8'he0;
     volTable[31] = 8'hff;
 
-    // AY8910
+    // AY8910 - AppleWin's levels (strudelworks-host src/mb_audio.cpp kDac,
+    // 0..10000 scaled to 0..255), the ones tuned by ear; see docs/AUDIO.md.
     volTable[32] = 8'h00;
     volTable[33] = 8'h00;
-    volTable[34] = 8'h03;
-    volTable[35] = 8'h03;
-    volTable[36] = 8'h04;
-    volTable[37] = 8'h04;
-    volTable[38] = 8'h06;
-    volTable[39] = 8'h06;
-    volTable[40] = 8'h0a;
-    volTable[41] = 8'h0a;
-    volTable[42] = 8'h0f;
-    volTable[43] = 8'h0f;
-    volTable[44] = 8'h15;
-    volTable[45] = 8'h15;
-    volTable[46] = 8'h22;
-    volTable[47] = 8'h22;
-    volTable[48] = 8'h28;
-    volTable[49] = 8'h28;
-    volTable[50] = 8'h41;
-    volTable[51] = 8'h41;
-    volTable[52] = 8'h5b;
-    volTable[53] = 8'h5b;
-    volTable[54] = 8'h72;
-    volTable[55] = 8'h72;
-    volTable[56] = 8'h90;
-    volTable[57] = 8'h90;
-    volTable[58] = 8'hb5;
-    volTable[59] = 8'hb5;
-    volTable[60] = 8'hd7;
-    volTable[61] = 8'hd7;
+    volTable[34] = 8'h02;
+    volTable[35] = 8'h02;
+    volTable[36] = 8'h03;
+    volTable[37] = 8'h03;
+    volTable[38] = 8'h04;
+    volTable[39] = 8'h04;
+    volTable[40] = 8'h06;
+    volTable[41] = 8'h06;
+    volTable[42] = 8'h08;
+    volTable[43] = 8'h08;
+    volTable[44] = 8'h0b;
+    volTable[45] = 8'h0b;
+    volTable[46] = 8'h10;
+    volTable[47] = 8'h10;
+    volTable[48] = 8'h17;
+    volTable[49] = 8'h17;
+    volTable[50] = 8'h20;
+    volTable[51] = 8'h20;
+    volTable[52] = 8'h2d;
+    volTable[53] = 8'h2d;
+    volTable[54] = 8'h40;
+    volTable[55] = 8'h40;
+    volTable[56] = 8'h5a;
+    volTable[57] = 8'h5a;
+    volTable[58] = 8'h80;
+    volTable[59] = 8'h80;
+    volTable[60] = 8'hb4;
+    volTable[61] = 8'hb4;
     volTable[62] = 8'hff;
     volTable[63] = 8'hff;
 end

@@ -273,6 +273,13 @@ module wb_regfile #(
     // capture enabled, the link's last reset), so the UART is needed only
     // when no register answers at all.
     input  wire [31:0]     link_stat,
+    // The sound (docs/AUDIO.md): AUDIO_CTRL's bits as levels - the stream
+    // on, the AYs clocked in real time - the NCO increment, and the
+    // sampler's counters back for AUDIO_STAT.
+    output wire            audio_on,
+    output wire            audio_realtime,
+    output wire [31:0]     audio_rate,
+    input  wire [31:0]     audio_stat,
     input  wire            wb_cyc,
     input  wire            wb_stb,
     input  wire            wb_we,
@@ -355,6 +362,9 @@ module wb_regfile #(
     localparam [13:0] R_U2_SLOT        = 'd57; // 0x8000_00E4, RW in bits 2:0
     localparam [13:0] R_U2_STAT        = 'd58; // 0x8000_00E8, RO
     localparam [13:0] R_LINK_STAT      = 'd59; // 0x8000_00EC, RO
+    localparam [13:0] R_AUDIO_CTRL     = 'd60; // 0x8000_00F0, RW bits 1:0 (docs/AUDIO.md)
+    localparam [13:0] R_AUDIO_RATE     = 'd61; // 0x8000_00F4, RW
+    localparam [13:0] R_AUDIO_STAT     = 'd62; // 0x8000_00F8, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -758,6 +768,28 @@ module wb_regfile #(
     assign nsc_enable = nsc_enable_q;
     wire [31:0] nsc_ctrl_rd = {nsc_unlocks, 2'd0, nsc_ring_idx, 2'd0, nsc_cmp_idx,
                                4'd0, nsc_wr_en, nsc_ring_en, nsc_time_loaded, nsc_enable_q};
+
+    // ---- AUDIO_CTRL / AUDIO_RATE / AUDIO_STAT -------------------------------
+    // AUDIO_CTRL: [0] the sample stream on (silent until asked), [1] the AYs
+    // clocked by the real bus's phi0 rather than the core's clock; readback
+    // adds [16] = the stream on, as the sampler sees it.  AUDIO_RATE: the
+    // sampler's NCO increment, rate_hz * 2^32 / 1e8, 44 100 Hz at reset.
+    // AUDIO_STAT: rtl/audio_tx.sv's word.  docs/AUDIO.md.
+    logic [1:0]  audio_ctrl_q;
+    logic [31:0] audio_rate_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            audio_ctrl_q <= 2'd0;
+            audio_rate_q <= 32'd1894081;
+        end else begin
+            if (wr_audio_ctrl) audio_ctrl_q <= wb_dat_w[1:0];
+            if (wr_audio_rate) audio_rate_q <= wb_dat_w;
+        end
+    end
+    assign audio_on       = audio_ctrl_q[0];
+    assign audio_realtime = audio_ctrl_q[1];
+    assign audio_rate     = audio_rate_q;
+    wire [31:0] audio_ctrl_rd = {15'd0, audio_ctrl_q[0], 14'd0, audio_ctrl_q};
 
     // ---- FD_DRIVE1 / FD_DRIVE2 ----------------------------------------------
     //
@@ -1206,6 +1238,9 @@ module wb_regfile #(
                         R_U2_SLOT:    wb_dat_r <= u2_slot_rd;
                         R_U2_STAT:    wb_dat_r <= u2_stat_rd;
                         R_LINK_STAT:  wb_dat_r <= link_stat;
+                        R_AUDIO_CTRL: wb_dat_r <= audio_ctrl_rd;
+                        R_AUDIO_RATE: wb_dat_r <= audio_rate_q;
+                        R_AUDIO_STAT: wb_dat_r <= audio_stat;
                         R_FB_CTRL:    wb_dat_r <= fb_ctrl_rd;
                         R_FB_COMPARED: wb_dat_r <= fb_compared;
                         R_FB_MISMATCH: wb_dat_r <= fb_mismatch;
@@ -1281,6 +1316,10 @@ module wb_regfile #(
                          (word == R_MOUSE_SLOT);
     wire wr_nsc_ctrl   = access && !wb_ack && in_region && wb_we &&
                          (word == R_NSC_CTRL);
+    wire wr_audio_ctrl = access && !wb_ack && in_region && wb_we &&
+                         (word == R_AUDIO_CTRL);
+    wire wr_audio_rate = access && !wb_ack && in_region && wb_we &&
+                         (word == R_AUDIO_RATE);
     wire wr_u2_slot    = access && !wb_ack && in_region && wb_we &&
                          (word == R_U2_SLOT);
     wire wr_fb_ctrl    = access && !wb_ack && in_region && wb_we &&

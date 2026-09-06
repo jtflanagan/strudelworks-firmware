@@ -297,6 +297,14 @@ module card_link #(
     input  wire [31:0] fb_other,
     input  wire [7:0]  fb_peek_data,
 
+    // The sound (docs/AUDIO.md): AUDIO_CTRL/AUDIO_RATE out to the sampler,
+    // AUDIO_STAT back.  A watching top leaves the outputs open and ties the
+    // status to zero.
+    output wire        audio_on,
+    output wire        audio_realtime,
+    output wire [31:0] audio_rate,
+    input  wire [31:0] audio_stat,
+
     // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
     // mastering top wires it to the pin; a snooper leaves it unconnected.
     output wire        res_drive,
@@ -330,6 +338,13 @@ module card_link #(
     input  wire [31:0] u2_word,
     input  wire        u2_valid,
     output wire        u2_take,
+
+    // ...and a fourth, the sound's (AUDIO_FRAMES), below the Uthernet II's
+    // and above the capture: continuous, but bounded by the wall clock.  A
+    // watching top ties au_valid low.
+    input  wire [31:0] au_word,
+    input  wire        au_valid,
+    output wire        au_take,
 
     // FT601 (constr/ft601.xdc)
     input  wire        ft_clk,
@@ -1055,6 +1070,10 @@ module card_link #(
         .res_drive         (res_drive),
         .ring_status       (ring_status),
         .link_stat         (link_stat),
+        .audio_on          (audio_on),
+        .audio_realtime    (audio_realtime),
+        .audio_rate        (audio_rate),
+        .audio_stat        (audio_stat),
         .wb_cyc   (rwb_cyc),
         .wb_stb   (rwb_stb),
         .wb_we    (rwb_we),
@@ -1159,10 +1178,11 @@ module card_link #(
     // source is a stream, and msg_master makes it a master that holds CYC
     // across its message; msg_arb grants per CYC; tx_ring is the one slave.
     // Everything above the capture is rate-bounded by the host or the bus -
-    // the floppy's by the machine's own head movements and writes; the
-    // capture is the one continuous source and goes last.  See msg_arb for
+    // the floppy's by the machine's own head movements and writes, the
+    // sound's by the wall clock (docs/AUDIO.md); the capture is the one
+    // unbounded source and goes last.  See msg_arb for
     // why that order is load-bearing.
-    localparam integer N_SRC = 8;
+    localparam integer N_SRC = 9;
 
     wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
     wire [N_SRC*32-1:0] mb_adr, mb_dat;
@@ -1221,9 +1241,13 @@ module card_link #(
     assign ms_valid[6]         = u2_valid;
     assign u2_take             = ms_take[6];
 
-    assign ms_word[7*32 +: 32] = cap_word;
-    assign ms_valid[7]         = cap_valid;
-    assign cap_take            = ms_take[7];
+    assign ms_word[7*32 +: 32] = au_word;
+    assign ms_valid[7]         = au_valid;
+    assign au_take             = ms_take[7];
+
+    assign ms_word[8*32 +: 32] = cap_word;
+    assign ms_valid[8]         = cap_valid;
+    assign cap_take            = ms_take[8];
 
     genvar gm;
     generate

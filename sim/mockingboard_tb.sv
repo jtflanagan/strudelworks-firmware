@@ -134,6 +134,7 @@ module mockingboard_tb;
         .op_present (op_present), .op_commit (op_commit),
         // Without the sequencer: every cycle carries an op, no fast ops.
         .op_dummy (1'b0), .fast_tick (1'b0),
+        .bus_tick (1'b0), .ay_realtime (1'b0), .ay_out (),
         .rd_claim (rd_claim), .rd_data (rd_data),
         .irq (mb_irq)
     );

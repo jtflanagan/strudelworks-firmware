@@ -184,6 +184,9 @@ if {$snoop || $master} {
             [file join $root rtl ssi263.sv] \
             [file join $root rtl slot_switches.sv] \
             [file join $root rtl mockingboard.sv] \
+            [file join $root rtl speaker.sv] \
+            [file join $root rtl audio_sampler.sv] \
+            [file join $root rtl audio_tx.sv] \
             [file join $root rtl hd_card.sv] \
             [file join $root rtl fd_bank.sv] \
             [file join $root rtl floppy_card.sv] \

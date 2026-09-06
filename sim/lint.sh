@@ -83,6 +83,9 @@ run iscan         rtl/iscan.sv
 run boot_hold     rtl/boot_hold.sv
 run kbd_inject    rtl/kbd_inject.sv
 run kbd_notice    rtl/kbd_notice.sv
+run speaker       rtl/speaker.sv
+run audio_sampler rtl/audio_sampler.sv
+run audio_tx      rtl/audio_tx.sv rtl/sync_fifo.sv
 run pb_inject     rtl/pb_inject.sv
 run game_port     rtl/game_port.sv
 run slot_switches rtl/slot_switches.sv

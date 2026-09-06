@@ -57,3 +57,4 @@ __pycache__/
 # sim/suite.sh: its logs, and the local list of boot images (paths differ per machine)
 /sim/suite_work/
 /sim/images.local
+/sim/audio_work/

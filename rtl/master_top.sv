@@ -169,6 +169,15 @@ module master_top #(
     wire [7:0]  u2_cmds, u2_rx_chunks;
     wire [15:0] u2_s0_rsr, u2_s0_fsr;
     wire [31:0] u2_word;
+    wire        audio_on, audio_realtime;
+    wire [31:0] audio_rate, audio_stat;
+    wire [31:0] au_word;
+    wire        au_valid, au_take;
+    wire        spk_level, spk_toggle;
+    wire [39:0] mb_ay_out;
+    wire        smp_valid;
+    wire [15:0] smp_spk;
+    wire [63:0] smp_ay;
     wire        u2_valid, u2_take;
     wire        nsc_enable, nsc_sub, nsc_bit, nsc_time_loaded, nsc_ring_en, nsc_wr_en;
     wire [5:0]  nsc_cmp_idx, nsc_ring_idx;
@@ -418,6 +427,9 @@ module master_top #(
         .aux_word (aux_word), .aux_valid (aux_valid), .aux_take (aux_take),
         .fd_word (fd_word), .fd_valid (fd_valid), .fd_take (fd_take),
         .u2_word (u2_word), .u2_valid (u2_valid), .u2_take (u2_take),
+        .au_word (au_word), .au_valid (au_valid), .au_take (au_take),
+        .audio_on (audio_on), .audio_realtime (audio_realtime),
+        .audio_rate (audio_rate), .audio_stat (audio_stat),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),
@@ -1434,9 +1446,9 @@ module master_top #(
     );
 
     // ---- the Mockingboard ---------------------------------------------------
-    // Two VIAs answering for an empty slot; the sound itself is synthesised on
-    // the host from the captured VIA writes.  As a Phasor, the same two VIAs
-    // behind the Phasor's mode register.  See rtl/mockingboard.sv.
+    // Two VIAs answering for an empty slot, and since docs/AUDIO.md the AYs'
+    // sound too, sampled below.  As a Phasor, the same two VIAs behind the
+    // Phasor's mode register.  See rtl/mockingboard.sv.
     mockingboard u_mb (
         .clk           (apple_clk),
         .rst           (apple_rst),
@@ -1451,9 +1463,53 @@ module master_top #(
         .op_commit     (p_commit),
         .op_dummy      (p_dummy),
         .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
+        .bus_tick      (bus_tick),
+        .ay_realtime   (audio_realtime),
+        .ay_out        (mb_ay_out),
         .rd_claim      (mb_rd_claim),
         .rd_data       (mb_rd_data),
         .irq           (mb_irq)
+    );
+
+    // ---- the sound (docs/AUDIO.md) ---------------------------------------------
+    // The speaker flip-flop on the same two doors the host toggled on, the
+    // sampler's box average at the play rate, the frames to the host.
+    speaker u_spk (
+        .clk        (apple_clk),
+        .rst        (apple_rst),
+        .res_sync   (apple_res_sync),
+        .real_valid (real_valid),
+        .real_dummy (op_dummy),
+        .real_addr  (real_data[15:0]),
+        .fast_valid (fev_valid || tev_valid || dev_valid),
+        .fast_addr  (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
+        .level      (spk_level),
+        .toggle     (spk_toggle)
+    );
+
+    audio_sampler u_smp (
+        .clk       (apple_clk),
+        .rst       (apple_rst),
+        .enable    (audio_on),
+        .rate_inc  (audio_rate),
+        .spk       (spk_level),
+        .ay_out    (mb_ay_out),
+        .smp_valid (smp_valid),
+        .smp_spk   (smp_spk),
+        .smp_ay    (smp_ay)
+    );
+
+    audio_tx u_atx (
+        .clk       (apple_clk),
+        .rst       (apple_rst),
+        .enable    (audio_on),
+        .smp_valid (smp_valid),
+        .smp_spk   (smp_spk),
+        .smp_ay    (smp_ay),
+        .word      (au_word),
+        .valid     (au_valid),
+        .take      (au_take),
+        .stat      (audio_stat)
     );
 
     // ---- the mouse ----------------------------------------------------------

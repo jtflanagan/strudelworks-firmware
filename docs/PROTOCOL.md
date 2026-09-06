@@ -78,7 +78,8 @@ host reads; the receiver carries parser state across all of them.
 | `0x29` | U2_TX | Card→host, **unsolicited**, after a SEND's U2_CMD: the bytes from `Sn_TX_RD` to `Sn_TX_WR`. `free` = `{bytes[11:0], last, first, sock[1:0]}`; payload the bytes packed four a word, up to 255 words a chunk. |
 | `0x2A` | U2_RX | Host→card. Bytes to append at a socket's RX write pointer, the W5100's header in front. `free` = `{bytes[11:0], 0, 0, sock[1:0]}`; payload the bytes packed four a word. The card moves `Sn_RX_WR` and adds to `Sn_RX_RSR` at the last word. |
 | `0x2B` | U2_STAT | Host→card. `free` = `{sr[7:0], 0, sock[1:0]}`: the socket's `Sn_SR`, at once; payload none, or two words `[DIPR][{MSSR, DPORT}]` (the socket's register words 3 and 4) for an accepted LISTEN's peer. |
-| `0x2C`–`0xFF` | — | Application, unassigned. |
+| `0x2C` | AUDIO_FRAMES | Card→host, **unsolicited once asked** (AUDIO_CTRL on). The sound on the card (AUDIO.md): n samples at the play rate, three words each - `{ay0, spk}`, `{ay2, ay1}`, `{seq, ay3}` - the speaker's and each AY chip's box average over one sample window (0..32767) and a running sample count. `free` = `{drops[7:0], n[7:0]}`, n = 32; `len` = 3n. A gap in `seq` is that many samples the card's FIFO dropped. |
+| `0x2D`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -161,6 +162,9 @@ protocol.
 | `0x8000_00E4` | U2_SLOT | RW bits 2:0 | the Uthernet II's slot, 0 = off; latched at RES', never any of the five others'; `[11]` a command was dropped, `[15:12]` the sockets' `Sn_SR != 0`, `[23:16]` U2_CMDs sent, `[31:24]` U2_RX chunks landed — see UTHERNET2.md |
 | `0x8000_00E8` | U2_STAT | RO | `{Sn_RX_RSR[15:0], Sn_TX_FSR[15:0]}` of socket 0 |
 | `0x8000_00EC` | LINK_STAT | RO | the card's own view of the link, the UART status line's facts over USB3: `[0]` phi0 ticking (the card is in a powered machine), `[1]` capture enabled, `[4:2]` the link's last reset cause (`{0, watchdog, UART 'R'}`), `[15:8]` the chip-side snapshot `{txe, rxf, qcount, state}` taken as it fired, `[23:16]` resets so far, `[24]` DDR3 calibrated (RING_STATUS[25] again). One read answers "is there a link, and is it in a machine"; the UART is for the card that answers no register at all |
+| `0x8000_00F0` | AUDIO_CTRL | RW | the sound on the card (AUDIO.md): `[0]` the AUDIO_FRAMES stream on, `[1]` the AYs clocked by the real bus's phi0 rather than the core's time; readback adds `[16]` = the stream on |
+| `0x8000_00F4` | AUDIO_RATE | RW | the sampler's NCO increment, `rate_hz * 2^32 / 1e8`; resets to 1 894 081 (44.1 kHz); the host trims it by ppm to hold its buffer |
+| `0x8000_00F8` | AUDIO_STAT | RO | `[15:0]` samples sent, `[23:16]` samples dropped for a full FIFO, `[24]` the FIFO full now |
 | `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s

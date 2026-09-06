@@ -142,6 +142,8 @@ module snoop_top #(
         .aux_word (32'd0), .aux_valid (1'b0), .aux_take (),
         .fd_word (32'd0), .fd_valid (1'b0), .fd_take (),
         .u2_word (32'd0), .u2_valid (1'b0), .u2_take (),
+        .au_word (32'd0), .au_valid (1'b0), .au_take (),
+        .audio_on (), .audio_realtime (), .audio_rate (), .audio_stat (32'd0),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),

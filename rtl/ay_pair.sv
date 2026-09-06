@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
-// ay_pair - the two AY-3-8913s behind one VIA, on the card: the chips, with
-// their sound outputs left unconnected.
+// ay_pair - the two AY-3-8913s behind one VIA, on the card: the chips, and
+// since docs/AUDIO.md their sound too (`out_a`/`out_b`, clocked by `ce`).
 //
-// The AYs' sound is synthesised on the host from the VIA port writes in the
-// stream (strudelworks-host src/mb_audio.cpp); nothing here makes a sound.
-// But an AY's registers can be READ BACK through the VIA - port A set to
+// The AYs' sound was synthesised on the host from the VIA port writes in the
+// stream (strudelworks-host src/mb_audio.cpp); now the cores run here and
+// the host mixes what the card samples.  An AY's registers can be READ BACK through the VIA - port A set to
 // input, port B given the PSG READ function, and the chip drives its selected
 // register onto the port - and software that looks for a chip does exactly
 // that: mb-audit writes the tone registers and reads them back, and a chip
@@ -44,8 +44,16 @@ module ay_pair (
     input  wire        selects,      // PB4/PB3 select the chips (Phasor native or Echo+)
     input  wire        native,       // Phasor native mode: the GAL's cross-effects
 
+    // The PSG clock enable, from mockingboard (docs/AUDIO.md): one pulse per
+    // AY clock, whichever time base AUDIO_CTRL chose.
+    input  wire        ce,
+
     // What the VIA's port A inputs see.
-    output wire [7:0]  porta_in
+    output wire [7:0]  porta_in,
+
+    // The chips' sound: each one's three channels' DAC levels summed, 0..765.
+    output wire [9:0]  out_a,
+    output wire [9:0]  out_b
 );
 
     // The pins, as the chips see them.
@@ -87,20 +95,22 @@ module ay_pair (
 
     wire [7:0] do_a, do_b;
 
+    wire [7:0] a_ch_a, a_ch_b, a_ch_c, b_ch_a, b_ch_b, b_ch_c;
+
     YM2149 u_a (
-        .CLK (clk), .CE (1'b0), .RESET (rst || reset_func),
+        .CLK (clk), .CE (ce), .RESET (rst || reset_func),
         .BDIR (drive_a ? pins[1] : 1'b0), .BC (drive_a ? pins[0] : 1'b0),
         .DI (data), .DO (do_a),
-        .CHANNEL_A (), .CHANNEL_B (), .CHANNEL_C (),
+        .CHANNEL_A (a_ch_a), .CHANNEL_B (a_ch_b), .CHANNEL_C (a_ch_c),
         .SEL (1'b0), .MODE (1'b1), .ACTIVE (),
         .IOA_in (8'h00), .IOA_out (), .IOB_in (8'h00), .IOB_out ()
     );
 
     YM2149 u_b (
-        .CLK (clk), .CE (1'b0), .RESET (rst || reset_func),
+        .CLK (clk), .CE (ce), .RESET (rst || reset_func),
         .BDIR (drive_b ? pins[1] : 1'b0), .BC (drive_b ? pins[0] : 1'b0),
         .DI (data), .DO (do_b),
-        .CHANNEL_A (), .CHANNEL_B (), .CHANNEL_C (),
+        .CHANNEL_A (b_ch_a), .CHANNEL_B (b_ch_b), .CHANNEL_C (b_ch_c),
         .SEL (1'b0), .MODE (1'b1), .ACTIVE (),
         .IOA_in (8'h00), .IOA_out (), .IOB_in (8'h00), .IOB_out ()
     );
@@ -111,5 +121,10 @@ module ay_pair (
                     : drive_a              ? do_a
                     : drive_b              ? do_b
                     :                        8'hFF;
+
+    // SEL=0: the /8 prescaler, a tone flipping every 8 * period clocks;
+    // MODE=1: the AY half of the volume table, AppleWin's levels (docs/AUDIO.md).
+    assign out_a = {2'd0, a_ch_a} + {2'd0, a_ch_b} + {2'd0, a_ch_c};
+    assign out_b = {2'd0, b_ch_a} + {2'd0, b_ch_b} + {2'd0, b_ch_c};
 
 endmodule

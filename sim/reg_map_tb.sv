@@ -193,6 +193,8 @@ module reg_map_tb;
         if (mem_inval)   mem_invals = mem_invals + 1;
     end
 
+    wire        audio_on, audio_realtime;
+    wire [31:0] audio_rate;
     wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME),
                  .CAN_MASTER (1'b1)) u_regs (
         .clk (clk), .rst (rst),
@@ -244,6 +246,8 @@ module reg_map_tb;
         .fb_last (32'hA55A_C0A3), .fb_last2 (32'h5427_D8C2), .fb_other (32'h0002_0001),
         .fb_peek_data (fb_peek_addr[14] ? 8'hD5 : 8'h2A),
         .ring_status (32'h0200_1234), .link_stat (32'h0103_A50B),
+        .audio_on (audio_on), .audio_realtime (audio_realtime), .audio_rate (audio_rate),
+        .audio_stat (32'h0107_4242),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
@@ -465,6 +469,35 @@ module reg_map_tb;
             $display("FAIL: LINK_STAT read %08x, expected 0103A50B", out_mem[base+2]);
             errors = errors + 1;
         end else $display("  ok: LINK_STAT reads back the card's link word");
+
+        // --- case 5d / AUDIO_CTRL, AUDIO_RATE, AUDIO_STAT (docs/AUDIO.md) -----
+        base = out_n;
+        do_read(32'h8000_00F4);
+        if (out_mem[base+2] !== 32'd1894081) begin
+            $display("FAIL: AUDIO_RATE resets to %0d, expected 1894081 (44.1 kHz)", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: AUDIO_RATE resets to 44.1 kHz");
+        if (audio_on !== 1'b0 || audio_realtime !== 1'b0) begin
+            $display("FAIL: audio levels not clear at reset");
+            errors = errors + 1;
+        end
+        do_write(32'h8000_00F0, 32'hFFFF_FFFF);
+        do_write(32'h8000_00F4, 32'd1894250);
+        base = out_n;
+        do_read(32'h8000_00F0);
+        if (out_mem[base+2] !== 32'h0001_0003 || audio_on !== 1'b1 || audio_realtime !== 1'b1 ||
+            audio_rate !== 32'd1894250) begin
+            $display("FAIL: AUDIO_CTRL read %08x (on %b rt %b rate %0d), expected 00010003 1 1 1894250",
+                     out_mem[base+2], audio_on, audio_realtime, audio_rate);
+            errors = errors + 1;
+        end else $display("  ok: AUDIO_CTRL's two bits and AUDIO_RATE write and read back");
+        base = out_n;
+        do_read(32'h8000_00F8);
+        if (out_mem[base+2] !== 32'h0107_4242) begin
+            $display("FAIL: AUDIO_STAT read %08x, expected 01074242", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: AUDIO_STAT reads back the sampler's word");
+        do_write(32'h8000_00F0, 32'h0000_0000);
 
         // --- case 6 / a reply must not land inside another message -----------
         // The one this file exists for.  A BUS_EVENTS message is streamed while

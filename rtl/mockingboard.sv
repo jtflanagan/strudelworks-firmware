@@ -168,6 +168,16 @@ module mockingboard #(
     // time that the bus never saw.  Tied low without the sequencer.
     input  wire        fast_tick,
 
+    // The AYs' clock (docs/AUDIO.md): one phi0 cycle of the REAL bus
+    // (`bus_tick`) when `ay_realtime`, else the core's clock as the VIA
+    // timers count it.  Doubled in Phasor native mode either way.
+    input  wire        bus_tick,
+    input  wire        ay_realtime,
+    // The chips' sound, {chip3, chip2, chip1, chip0} at 10 bits: chip 0 is
+    // VIA 0's first AY, 1 VIA 1's first, 2 and 3 their seconds (the host's
+    // ay_[n*2 + via] order, strudelworks-host src/mb_audio.hpp).
+    output wire [39:0] ay_out,
+
     // Back to apple_bus_write: claim this read cycle and the byte to emit.
     // Registered at op_present, so they are stable long before the emit window
     // opens and do not move until the next cycle presents.
@@ -253,12 +263,23 @@ module mockingboard #(
     wire ay_selects = phasor && (mode == 3'd5 || mode == 3'd7);
     wire ay_native  = phasor && (mode == 3'd5);
 
+    // The AY clock: the chosen time base's tick, and in native mode a second
+    // pulse the clock after (the host's `div_` 4 for 8 - AppleWin's clock
+    // scale factor 2).  Under turbo the core's ticks can come every clock
+    // and the doubling saturates; that sound is not music in any case.
+    wire  ay_tick = enabled && (ay_realtime ? bus_tick : via_slow_clock);
+    logic ay_dbl_q = 1'b0;
+    always_ff @(posedge clk) ay_dbl_q <= ay_tick && ay_native;
+    wire  ay_ce = ay_tick || ay_dbl_q;
+
     ay_pair u_ay0 (
         .clk (clk), .rst (via_reset),
         .porta_out (via0_pa_out), .ddra (via0_ddra),
         .portb_out (via0_pb_out), .ddrb (via0_ddrb),
         .selects (ay_selects), .native (ay_native),
-        .porta_in (via0_pa_in)
+        .ce (ay_ce),
+        .porta_in (via0_pa_in),
+        .out_a (ay_out[9:0]), .out_b (ay_out[29:20])
     );
 
     ay_pair u_ay1 (
@@ -266,7 +287,9 @@ module mockingboard #(
         .porta_out (via1_pa_out), .ddra (via1_ddra),
         .portb_out (via1_pb_out), .ddrb (via1_ddrb),
         .selects (ay_selects), .native (ay_native),
-        .porta_in (via1_pa_in)
+        .ce (ay_ce),
+        .porta_in (via1_pa_in),
+        .out_a (ay_out[19:10]), .out_b (ay_out[39:30])
     );
 
     // The speech chips, one per socket: 0 the secondary ($Cn2x, VIA 0's
