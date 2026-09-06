@@ -10,6 +10,8 @@
 #     --mode=N         accel mode (default 2)
 #     --target=N       governor target in 8.8 fixed point, decimal (0 = unlimited)
 #     --swint-off      the keyboard not internalized: dummies at $0000, $C00x on the bus
+#     --press=ASCII    press this key once the text page's row 4 starts with SELECT (mb-audit)
+#     --mb-slot=N      the Phasor's slot (default 4; 0 = none)
 #     --slot=N         the hard disk's slot (default 7)
 #     --cycles=N       run length in BUS CYCLES (default 2000000: ~2 s at 1x)
 #     --clks=N         hard ceiling in 100 MHz clocks (default 400000000)
@@ -37,6 +39,8 @@ for a in "$@"; do
         --mode=*) mode="${a#*=}" ;;
         --target=*) target="${a#*=}" ;;
         --swint-off) swint=1 ;;
+        --press=*) press="${a#*=}" ;;
+        --mb-slot=*) mbslot="${a#*=}" ;;
         --slot=*) slot="${a#*=}" ;;
         --cycles=*) cyclim="${a#*=}" ;;
         --clks=*) clks="${a#*=}" ;;
@@ -70,6 +74,7 @@ srcs=(
     "$root/rtl/apple_mmu.sv" "$root/rtl/apple_rom.sv" "$root/rtl/page_cache.sv"
     "$root/rtl/bank_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv"
     "$root/rtl/hd_card.sv" "$root/rtl/slot_switches.sv"
+    "$root/rtl/mockingboard.sv" "$root/rtl/via6522.v" "$root/rtl/ay_pair.sv" "$root/rtl/YM2149.sv" "$root/rtl/ssi263.sv"
     "$root/rtl/ft601_msg_rx.sv"
 )
 echo "== boot_tb: $(basename "$hdv") mode=$mode target=$target slot=$slot cycles=$cyclim clks=$clks vl=$vl"
@@ -88,6 +93,8 @@ if [ "$vl" = 1 ]; then
         -GTARGET="$target" \
         -GSWINT_DIS="$swint" \
         -GHD_SLOT="$slot" \
+        -GMB_SLOT="${mbslot:-4}" \
+        -GPRESS_KEY="${press:-0}" \
         -GMAX_CYCLES="$cyclim" \
         -GMAX_CLKS="$clks" \
         -Mdir "$obj" "${srcs[@]}" \

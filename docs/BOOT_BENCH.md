@@ -1,6 +1,7 @@
 # The boot bench: the plan
 
-Status: **BUILT AND GREEN, 2026-09-02** (sim/boot_tb.sv,
+Status: **BUILT AND GREEN, 2026-09-02; a Phasor in slot 4 and a scripted
+key since 2026-09-06** (sim/boot_tb.sv,
 sim/run_boot_tb.sh, tools/trace_diff.py). All four proof runs pass at 2M
 bus cycles under Verilator (~2.5 min each, ~1.4M clk/s): the ProDOS 2.4.3
 .po and nox_los.HDV, each at mode 0 and mode 2 unlimited - zero bad
@@ -58,6 +59,17 @@ structure is proven and most of it transliterates:
   host decodes them, commands answered from the .hdv through the real
   ft601_msg_rx path, HOST_DELAY clocks after EXECUTE, block writes DMA'd
   out through HD_FETCH).
+- Since 2026-09-06 the bench also carries `mockingboard` as a Phasor in
+  slot 4 (MB_SLOT; `--mb-slot=0` for none), its IRQ into the core, and a
+  key it presses once: `--press=ASCII` presses that key when row 4 of the
+  text page starts with "SELECT" (PRESS_ROW/PRESS_AT) - mb-audit's menu.
+  `sim/run_boot_tb.sh sim/boot_work/mb-audit.po --mode=2 --target=256
+  --cycles=9000000 --clks=900000000 --verilator --press=65` runs the audit
+  under acceleration at 1x (~14 min); it reproduced the Mockingboard's
+  claim bug (docs/MOCKINGBOARD.md, "The claim is one commit's").  The
+  reference model does not know an injected key sits in the status page's
+  low bits, so `BAD fast read $c01f` lines and a `reads_bad` count are
+  expected on such a run.
 - `git show acceleration:sim/run_boot_tb.sh` - the runner: takes
   IMAGE.hdv, --mode/--target/--cycles, --verilator, --tag; hex-converts
   the ROM (../strudelworks-host/assets/Apple2e_Enhanced.rom), the slot ROM

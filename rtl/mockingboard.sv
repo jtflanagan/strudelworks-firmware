@@ -397,6 +397,21 @@ module mockingboard #(
             hit_q      <= 1'b0;
             dev_hit_q  <= 1'b0;
             ssi_wsel_q <= 2'b00;
+        end else if (op_commit) begin
+            // The claim is one commit's.  Under acceleration a fast op of
+            // ours presents and commits INSIDE a bus cycle the driver has
+            // already presented - a dummy, parked on the game port's
+            // $C061-$C067 - and that dummy's commit came here next with
+            // hit_q and cs_q still ours: a read of VIA register 1-7 by
+            // the dummy's low nibble, and reading T1C-L is what clears the
+            // T1 flag.  mb-audit failed a different timer or interrupt check
+            // on every run in mode 2 at 1x, and passed with the dummies at
+            // $0000 (swint off) - found by two full captures, accel off
+            // against mode 2, diverging at exactly that write (2026-09-06).
+            hit_q      <= 1'b0;
+            dev_hit_q  <= 1'b0;
+            cs_q       <= 2'b00;
+            ssi_wsel_q <= 2'b00;
         end
     end
 

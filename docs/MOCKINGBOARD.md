@@ -2,7 +2,8 @@
 
 Status: **✅ proven on hardware (Total Replay, megademo; the Phasor and its
 SSI-263 speech chips through mb-audit 2026-09-05, the Phasor-with-SSI263
-after-reset stages included).**
+after-reset stages included; mb-audit under acceleration - mode 2 at 1x,
+the switch lever on - since 2026-09-06, "The claim is one commit's").**
 
 A Mockingboard is two 6522 VIAs the CPU talks to at `$Cn00-$CnFF`, each wired
 to an AY-3-8913 sound chip the CPU cannot see: VIA port A is the AY's data
@@ -257,6 +258,38 @@ register.  The T1 and T2 latches now carry a power-on value only, and the
 controls (ACR, PCR, DDRs, IER, IFR) clear as before.  With the boot menu
 on, a Ctrl-Reset re-enters the hold and continuing forces a cold boot, so
 that stage is run with `boot_menu = off`.
+
+## The claim is one commit's (2026-09-06)
+
+`hit_q` and `cs_q` are registered at the presented op and qualify the VIA
+strobe at its commit.  Until 2026-09-06 they lived until the NEXT present,
+and under acceleration that was one present too long: a fast op of this
+card's own (docs/CXXX.md, "The on-card slots") presents and commits inside
+a bus cycle the driver has already presented - a dummy, parked by the
+game-port sampler on `$C061-$C067` (rtl/game_port.sv) - and the dummy's
+commit then reached the VIA with the fast op's claim and the dummy's low
+nibble: a READ of register 1-7, and reading T1C-L (register 4) clears the
+T1 flag.  Which register depended on where the sampler's loop stood, so
+mb-audit failed a different timer or interrupt check on every run in mode 2
+at 1x (6522 IFR.T1, the SSI-263's D7, a BRK storm out of the reset test
+through the ROM's `$C3FA` vector), and passed with the dummies at `$0000`
+(swint off) or the accelerator off.
+
+Found with two full captures on hardware (`sparse = off`), accelerator off
+against mode 2, aligned at mb-audit's entry (`$2000`, SYNC) and walked op
+for op: identical for 724 000 ops - every VIA access and value - and then
+`sta T1C-L` was followed by an IFR read of `$00` in mode 2 and `$40` with
+the accelerator off.  Now the claim is consumed at the commit that used it,
+and a commit with no present of ours behind it strobes nothing.  The boot
+bench carries a Phasor in slot 4 and presses mb-audit's `A` (`--press=65`,
+docs/BOOT_BENCH.md) and reproduced the failure before the fix and its
+absence after; on hardware mb-audit passes every test, the reset stages and
+the tone test in mode 2 at 1x (bit WNS +0.007, 2026-09-06 14:36).  What the
+same walk still shows, and why it is right: a read of an empty on-card
+slot's page (`$C10E`) gets the floating-bus simulator's byte in mode 2
+and the real bus's in mode 0; the SSI-263's sample accumulator keeps its
+phase from the boot, so a phoneme completes up to 46 cycles apart between
+two boots; T2 free-runs from RES', so it differs by the boots' lengths.
 
 ## What is deliberately not there
 
