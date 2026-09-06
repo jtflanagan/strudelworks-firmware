@@ -1343,8 +1343,9 @@ module reg_map_tb;
 
         $display("");
         // ---- U2_SLOT / U2_STAT -------------------------------------------------
-        // The Uthernet II's slot latches like the mouse's and yields to ALL
-        // FIVE of the others; the VidHD is still in 3 from above, and the
+        // The Uthernet II's slot latches like the mouse's and yields to four
+        // of the others - the VidHD, still in 3 from above, it SHARES with:
+        // a ROM page and a device-select range have no byte in common.  The
         // mouse is put in 5 for the clash.
         if (u2_slot_active !== 3'd0) begin
             $display("FAIL: the Uthernet II is enabled before anyone asked");
@@ -1357,12 +1358,13 @@ module reg_map_tb;
             $display("FAIL: the Uthernet II took the mouse's slot");
             errors = errors + 1;
         end else $display("  ok: the Uthernet II yields the mouse's slot");
-        do_write(32'h8000_00E4, 32'h0000_0003);       // the VidHD's
+        do_write(32'h8000_00E4, 32'h0000_0003);       // the VidHD's: shared
         pulse_reset_line;
-        if (u2_slot_active !== 3'd0) begin
-            $display("FAIL: the Uthernet II took the VidHD's slot");
+        if (u2_slot_active !== 3'd3 || vidhd_slot_active !== 3'd3) begin
+            $display("FAIL: the Uthernet II and the VidHD did not share slot 3 (u2 %0d, vidhd %0d)",
+                     u2_slot_active, vidhd_slot_active);
             errors = errors + 1;
-        end else $display("  ok: ...and the VidHD's");
+        end else $display("  ok: ...but shares the VidHD's: a page and a device-select range");
         do_write(32'h8000_00E4, 32'h0000_0006);       // the floppy's
         pulse_reset_line;
         if (u2_slot_active !== 3'd0) begin

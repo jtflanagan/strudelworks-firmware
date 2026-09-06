@@ -1,6 +1,6 @@
 # The Uthernet II: a W5100 on the card, the Pi's network behind it
 
-Status: **✅ on hardware, 2026-09-05.** `rtl/uthernet2_card.sv`
+Status: **✅ on hardware, 2026-09-05; shares slot 3 with the VidHD since 2026-09-06** (bit WNS +0.178, `$C0B5-7` and `$C300` both answering in 3 by BASIC probe; then the user's own configuration with `u2 = 3` beside the VidHD, tested by the user the same day). `rtl/uthernet2_card.sv`
 and the host's `src/uthernet2.cpp` / `src/net_backend.cpp` exist;
 `sim/run_uthernet2_tb.sh` passes; the host's `u2_test` passes on the Pi
 (ARP, DHCP, UDP, TCP connect and listen through the slirp backend); the
@@ -206,7 +206,9 @@ sockets, addresses, timeouts - on the side that has a kernel.
   page 10: it is not reset), and is zeroed at the card's own reset.
 - **`U2_SLOT`, `0x8000_00E4`**: `[2:0]` desired (RW, 0 off), `[10:8]` active
   (MOUSE_SLOT's contract, latched at RES' and at a boot release, yielding to
-  the five others), `[15:12]` the four sockets' open bits, `[23:16]` `U2_CMD`s
+  the Mockingboard, the disk, the floppy and the mouse - and SHARING with the
+  VidHD, a page-only card against this device-select-only one: 2026-09-06,
+  the user's call), `[15:12]` the four sockets' open bits, `[23:16]` `U2_CMD`s
   sent, `[31:24]` `U2_RX` chunks landed, both wrapping. **`U2_STAT`,
   `0x8000_00E8`**: `{sn0_rx_rsr[15:0], sn0_tx_free[15:0]}` - socket 0's two
   numbers, the ones a bring-up session watches.
@@ -347,9 +349,13 @@ control socket for the sockets' states, the counters and the backend.
 
 ## Open for the user
 
-1. Default slot when 3 is taken: with `vidhd = 3` in the user's config
-   today, `auto` would land the card in slot 1. The Contiki disk's config
-   records the slot; ETHCONFIG changes it.
+1. ~~Default slot when 3 is taken: with `vidhd = 3` in the user's config
+   today, `auto` would land the card in slot 1.~~ Settled 2026-09-06: the
+   VidHD claims only the `$Cn00-$CnFF` page and the Uthernet II only
+   `$C0n0-$C0nF`, so the two share slot 3 - the card's latch, the host's
+   config cross-checks, its start-up check and both menus all allow exactly
+   that pair, and `auto` lands in 3 with the VidHD there. The Contiki
+   disk's config records the slot; ETHCONFIG changes it.
 2. `slirp` as the default over `tap`. The design assumes it.
 3. Whether `U2_STAT`'s two numbers are the right ones to watch, or socket 0's
    `Sn_SR` and the command count would serve a bring-up better.

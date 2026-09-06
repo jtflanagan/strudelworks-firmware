@@ -181,7 +181,10 @@ same capture stream (strudelworks-host `src/boot_menu.cpp`). The items:
 - **Continue boot.**
 
 The two slots may not coincide - the card makes the disk yield, but the menu
-does not offer the clash: cycling a slot skips the one the other holds. Keys
+does not offer the clash: cycling a slot skips the one the other holds. (The
+one exception, 2026-09-06: the VidHD and the Uthernet II may share a slot,
+the one holding the ROM page and the other the device-select range; the
+menu lets those two rows coincide and nothing else.) Keys
 are the arrow keys where the machine has them and `WASD` where it does not
 (a ][+ has no up/down arrows), uppercased so caps lock is irrelevant; `Return`
 or `Escape` continues the boot from anywhere.

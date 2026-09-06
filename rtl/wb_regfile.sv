@@ -716,8 +716,13 @@ module wb_regfile #(
     //   [23:16]  cmds      RO   U2_CMD messages sent, wrapping
     //   [31:24]  rx        RO   U2_RX chunks landed, wrapping
     //
-    // MOUSE_SLOT's contract, the clash rule six-way: the Uthernet II is the
-    // newest and yields to all five of the others.  See docs/UTHERNET2.md.
+    // MOUSE_SLOT's contract, and the clash rule with a first exception: the
+    // Uthernet II is the newest and yields to the Mockingboard, the disk, the
+    // floppy and the mouse - but NOT to the VidHD.  The VidHD is a slot ROM
+    // page ($Cn00-$CnFF) and nothing else; the Uthernet II is DEVICE SELECT'
+    // ($C0n0-$C0nF) and nothing else; the two ranges are disjoint, so the two
+    // cards share a slot without a byte in common - and slot 3 is where both
+    // live by convention.  See docs/UTHERNET2.md.
     logic [2:0] u2_slot_desired;
     logic [2:0] u2_slot_active_q;
 
@@ -733,7 +738,6 @@ module wb_regfile #(
                                      u2_slot_desired != mb_slot_desired &&
                                      u2_slot_desired != hd_slot_desired &&
                                      u2_slot_desired != fd_slot_desired &&
-                                     u2_slot_desired != vidhd_slot_desired &&
                                      u2_slot_desired != mouse_slot_desired)
                                     ? u2_slot_desired : 3'd0;
             end
