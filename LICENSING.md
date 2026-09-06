@@ -104,6 +104,7 @@ is sold rather than after.
 |---|---|---|
 | UberDDR3 (`third_party/`) | GPL-3.0-or-later | Fetched at a pinned SHA, not vendored |
 | LeechCore-plugins | GPLv3 | Not vendored; `ft601_probe.c` derives protocol details from it |
+| `rtl/YM2149.sv` | BSD 3-clause (MikeJ 2005, Sorgelig 2016-2018; a2fpga_core, by way of aty) | Vendored 2026-09-05, header intact; three marked local edits (an iverilog-friendly reset, the AY-3-8913 read-back of registers 7, 14 and 15) |
 | `ref/mig_a.prj` | Xilinx MIG project file | See below |
 | `ref/mig_7series_0.generated.xdc` | Xilinx MIG output | See below |
 

@@ -179,6 +179,8 @@ if {$snoop || $master} {
             [file join $root rtl game_port.sv] \
             [file join $root rtl cpu65c02.sv] \
             [file join $root rtl via6522.v] \
+            [file join $root rtl YM2149.sv] \
+            [file join $root rtl ay_pair.sv] \
             [file join $root rtl slot_switches.sv] \
             [file join $root rtl mockingboard.sv] \
             [file join $root rtl hd_card.sv] \

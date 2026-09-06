@@ -64,7 +64,10 @@ module wb_regfile #(
 
     // Which slot the on-card Mockingboard answers as; 0 keeps it out of the
     // machine entirely.  Latched the same way CPU_SOURCE is - see below.
+    // mb_phasor_active: the card in that slot is a Phasor rather than a
+    // Mockingboard (rtl/mockingboard.sv), latched with the slot.
     output wire [2:0]      mb_slot_active,
+    output wire            mb_phasor_active,
 
     // The boot hold (rtl/boot_hold.sv).  arm is a level the host sets;
     // release is a one-cycle pulse per write of the release bit; held comes
@@ -410,7 +413,9 @@ module wb_regfile #(
     // ---- MB_SLOT ------------------------------------------------------------
     //
     //   [2:0]    desired   RW   which slot the Mockingboard answers as; 0 = off
+    //   [3]      phasor    RW   ...and as a Phasor rather than a Mockingboard
     //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [11]     phasor    RO   ...and whether it was a Phasor then
     //
     // The same reset-latched contract as CPU_SOURCE, for the same reason
     // scaled down: the slot scan happens at boot, and a card that appears (or
@@ -422,13 +427,18 @@ module wb_regfile #(
     // which is the register telling the truth rather than erring.
     logic [2:0] mb_slot_desired;
     logic [2:0] mb_slot_active_q;
+    logic       mb_phasor_desired;
+    logic       mb_phasor_active_q;
 
-    assign mb_slot_active = mb_slot_active_q;
+    assign mb_slot_active   = mb_slot_active_q;
+    assign mb_phasor_active = mb_phasor_active_q;
 
     always_ff @(posedge clk) begin
         if (rst) begin
             mb_slot_desired <= 3'd0;      // no Mockingboard until asked for
             mb_slot_active_q <= 3'd0;
+            mb_phasor_desired <= 1'b0;
+            mb_phasor_active_q <= 1'b0;
         end else begin
             // A reset assertion is the ordinary latch point; a boot-hold
             // RELEASE is the second one, so that a menu shown during a hold
@@ -437,13 +447,18 @@ module wb_regfile #(
             // docs/BOOT_MENU.md.  The write only ever sets `desired`; both
             // edges copy it into `active`.
             if (res_assert || boot_relatch) begin
-                mb_slot_active_q <= CAN_MASTER ? mb_slot_desired : 3'd0;
+                mb_slot_active_q   <= CAN_MASTER ? mb_slot_desired : 3'd0;
+                mb_phasor_active_q <= CAN_MASTER ? mb_phasor_desired : 1'b0;
             end
-            if (wr_mb_slot) mb_slot_desired <= wb_dat_w[2:0];
+            if (wr_mb_slot) begin
+                mb_slot_desired   <= wb_dat_w[2:0];
+                mb_phasor_desired <= wb_dat_w[3];
+            end
         end
     end
 
-    wire [31:0] mb_slot_rd = {21'd0, mb_slot_active_q, 5'd0, mb_slot_desired};
+    wire [31:0] mb_slot_rd = {20'd0, mb_phasor_active_q, mb_slot_active_q,
+                              4'd0, mb_phasor_desired, mb_slot_desired};
 
     // ---- BOOT_HOLD ----------------------------------------------------------
     //

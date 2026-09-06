@@ -14,5 +14,7 @@ iverilog -g2012 -o "$out" \
     "$root/rtl/apple_bus_write.sv" \
     "$root/rtl/mockingboard.sv" \
     "$root/rtl/via6522.v" \
+    "$root/rtl/ay_pair.sv" \
+    "$root/rtl/YM2149.sv" \
     "$root/rtl/slot_switches.sv"
 exec vvp "$out"

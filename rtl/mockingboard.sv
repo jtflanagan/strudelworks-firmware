@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
-// mockingboard - a Mockingboard's digital half, on the card that IS the CPU.
+// mockingboard - a Mockingboard's (or a Phasor's) digital half, on the card that IS the CPU.
 //
 // A real Mockingboard is two 6522 VIAs whose ports drive two AY-3-8913 sound
 // chips.  The 6502 only ever talks to the VIAs; the AYs hang off the VIA ports
@@ -41,10 +41,53 @@
 // anywhere in the claimed page return VIA data, which is also what the
 // undecoded hardware does.
 //
+// AS A PHASOR (phasor = 1, MB_SLOT bit 3): Applied Engineering's card is the
+// same two VIAs behind a mode register, plus a second AY on each VIA that the
+// host synthesises as it does the first (the chip-select bits ride on port B
+// and are the host's business, like everything else the ports carry).  The
+// mode register is set by ANY access, read or write, to the slot's DEVICE
+// SELECT' range $C0n0-$C0nF - AppleWin's PhasorIO, from measurements on the
+// real card: A3 set clears the mode, then A2-A0 are OR'd in.  RES' clears
+// it: a Phasor wakes up as a Mockingboard.  The mode picks the VIA decode
+// (AppleWin's IORead/IOWrite):
+//
+//   mode 0 (Mockingboard)   A7 picks the VIA, as above
+//   mode 5 (Phasor native)  A4 selects VIA 0, A7 selects VIA 1: neither,
+//                           either or BOTH, so a write can land in both and
+//                           a read is the OR of both; $Cn00-$Cn0F and the
+//                           SSI-263's $Cn2x/$Cn4x/$Cn6x select no VIA and
+//                           are not claimed (no speech chip here: they float)
+//   mode 7 (Echo+)          VIA 1 at every 16-byte offset of the page
+//   1-4, 6                  undefined on the real card; nothing answers
+//
+// The DEVICE SELECT' accesses are never gated by INTCXROM (the hardware's
+// rule too), and they are bus cycles in every acceleration mode - the
+// Mockingboard's $C0nX range is not among the on-card slot ops (CXXX.md) -
+// so the host sees each one in the stream and follows the mode from it,
+// exactly as it follows the VIA writes.
+//
 // IRQ takes the short route.  A real Mockingboard pulls the slot's IRQ' line;
 // this card's soft core takes its interrupt input directly, so the VIA IRQs
 // are OR'd into that instead (master_top).  Same signal, same polarity at the
 // core, no pin - the same argument as drv_sync in apple_bus_write.
+//
+// AY REGISTER READS (2026-09-05, mb-audit's finding).  The AYs' registers
+// can be read back through the VIA (port A as input, PSG READ on port B),
+// and software that looks for a chip does exactly that; the port A inputs
+// were tied low and every chip read as missing.  So the chips are here:
+// rtl/ay_pair.sv behind each VIA, two YM2149 cores with their sound outputs
+// open (the generators prune away; the register files and the bus protocol
+// stay) and the Phasor's GAL around them, driving port A during a READ.
+// Still no sound on the card - the host synthesises it from the same writes.
+//
+// THE TIMER FLAGS SET ON THE $0000 -> $FFFF TICK (2026-09-05, mb-audit test
+// 6522:F): a read of IFR on exactly the (N+2)th cycle after the T1C-H write
+// sees the T1 flag, on the (N+1)th not yet.  The VIA raised it a tick later,
+// on the reload.  And mb-audit test 6522:3 pins the counter itself: a read
+// on cycle W+k after the write sees N-(k-1) - the state at the END OF THE
+// PREVIOUS cycle - which is what registering the byte at the op's present,
+// before the cycle's own tick at its commit, gives.  So the tick stays at
+// commit; only the flag moved (rtl/via6522.v irq_t1_set, irq_t2_set).
 //
 // The VIA timers count the CORE's cycles, not the bus's: slow_clock ticks
 // once per op the core completes - a bus cycle that carried one of its ops,
@@ -76,6 +119,8 @@ module mockingboard (
     // Which slot this card answers as; 0 disables it entirely.  Latched by
     // wb_regfile at a RES' assertion, so it never moves mid-boot.
     input  wire [2:0]  slot_assign,
+    // ...and whether, in that slot, it is a Phasor.  Latched with the slot.
+    input  wire        phasor,
 
     // The presented op, from apple_bus_write: the address/RW/data the card is
     // driving this bus cycle, stable from op_present through op_commit.
@@ -120,20 +165,65 @@ module mockingboard (
 
     logic hit_q;        // this cycle's op is ours; qualifies the commit strobe
 
+    // ---- the Phasor's mode register -----------------------------------------
+    // See the header.  dev_hit: the op is in the slot's DEVICE SELECT' range;
+    // registered at present like hit_q, acted on at the commit of a real
+    // (non-dummy) cycle.  A Mockingboard has no such register and ignores
+    // the range, as the real card does.
+    logic [2:0] mode;
+    wire dev_hit = enabled && phasor &&
+                   op_addr[15:8] == 8'hC0 && op_addr[7] && op_addr[6:4] == slot_assign;
+    logic dev_hit_q;
+
+    // Which VIAs the presented address selects, by the mode: bit 0 VIA 0,
+    // bit 1 VIA 1.  Live off op_addr and mode, both stable across the cycle.
+    wire [1:0] cs = (!phasor || mode == 3'd0) ? {op_addr[7], !op_addr[7]}
+                  : (mode == 3'd5)            ? {op_addr[7],  op_addr[4]}
+                  : (mode == 3'd7)            ? 2'b10
+                  :                             2'b00;
+    logic [1:0] cs_q;
+
     // ---- the VIA pair -------------------------------------------------------
-    // Everything a real Mockingboard's VIAs have that this one does not comes
-    // down to the ports being wired to AY chips; here they go nowhere, and the
-    // AY state they would have carried is reconstructed on the host.  Port
-    // inputs are tied low exactly as v5_1_3 tied them.
+    // The ports go to the AYs (rtl/ay_pair.sv): port A out is the AYs' data
+    // bus and reads back the selected register during a PSG READ, port B out
+    // carries the control pins.  The AYs' sound is the host's.  Port B's
+    // input pins float high, as port A's do (AppleWin GH#1260; mb-audit's
+    // after-reset test reads IRB with DDRB clear and expects $FF).
     wire       via_reset = rst || !res_sync || !enabled;
     wire [7:0] via0_data_out, via1_data_out;
     wire       via0_irq, via1_irq;
+    wire [7:0] via0_pa_out, via0_pb_out, via0_ddra, via0_ddrb, via0_pa_in;
+    wire [7:0] via1_pa_out, via1_pb_out, via1_ddra, via1_ddrb, via1_pa_in;
 
     // The core's clock, see the header: a bus cycle that carried one of the
-    // core's ops, or a fast op; never a dummy.
+    // core's ops, ticked at its commit, or a fast op; never a dummy.
     wire via_slow_clock = enabled && ((op_commit && !op_dummy) || fast_tick);
-    wire via0_strobe    = op_commit && hit_q && !op_addr[7];
-    wire via1_strobe    = op_commit && hit_q &&  op_addr[7];
+    wire via0_strobe    = op_commit && hit_q && cs_q[0];
+    wire via1_strobe    = op_commit && hit_q && cs_q[1];
+
+    wire ay_selects = phasor && (mode == 3'd5 || mode == 3'd7);
+    wire ay_native  = phasor && (mode == 3'd5);
+
+    ay_pair u_ay0 (
+        .clk (clk), .rst (via_reset),
+        .porta_out (via0_pa_out), .ddra (via0_ddra),
+        .portb_out (via0_pb_out), .ddrb (via0_ddrb),
+        .selects (ay_selects), .native (ay_native),
+        .porta_in (via0_pa_in)
+    );
+
+    ay_pair u_ay1 (
+        .clk (clk), .rst (via_reset),
+        .porta_out (via1_pa_out), .ddra (via1_ddra),
+        .portb_out (via1_pb_out), .ddrb (via1_ddrb),
+        .selects (ay_selects), .native (ay_native),
+        .porta_in (via1_pa_in)
+    );
+
+    always_ff @(posedge clk) begin
+        if (via_reset)                                 mode <= 3'd0;
+        else if (op_commit && !op_dummy && dev_hit_q)  mode <= (op_addr[3] ? 3'd0 : mode) | op_addr[2:0];
+    end
 
     via6522 via0 (
         .clk        (clk),
@@ -145,14 +235,16 @@ module mockingboard (
         .data_out   (via0_data_out),
         .irq        (via0_irq),
         .slow_clock (via_slow_clock),
-        .porta_in   (8'd0),
-        .portb_in   (8'd0),
+        .porta_in   (via0_pa_in),
+        .portb_in   (8'hFF),        // input pins float high (AppleWin GH#1260)
         .ca1_in     (1'b0),
         .ca2_in     (1'b0),
         .cb1_in     (1'b0),
         .cb2_in     (1'b0),
-        .porta_out  (),
-        .portb_out  (),
+        .porta_out  (via0_pa_out),
+        .portb_out  (via0_pb_out),
+        .ddra_out   (via0_ddra),
+        .ddrb_out   (via0_ddrb),
         .ca2_out    (),
         .cb1_out    (),
         .cb2_out    ()
@@ -168,14 +260,16 @@ module mockingboard (
         .data_out   (via1_data_out),
         .irq        (via1_irq),
         .slow_clock (via_slow_clock),
-        .porta_in   (8'd0),
-        .portb_in   (8'd0),
+        .porta_in   (via1_pa_in),
+        .portb_in   (8'hFF),        // input pins float high (AppleWin GH#1260)
         .ca1_in     (1'b0),
         .ca2_in     (1'b0),
         .cb1_in     (1'b0),
         .cb2_in     (1'b0),
-        .porta_out  (),
-        .portb_out  (),
+        .porta_out  (via1_pa_out),
+        .portb_out  (via1_pb_out),
+        .ddra_out   (via1_ddra),
+        .ddrb_out   (via1_ddrb),
         .ca2_out    (),
         .cb1_out    (),
         .cb2_out    ()
@@ -189,19 +283,26 @@ module mockingboard (
     // VIA read mux is combinational off op_addr, which has been stable since
     // T_PRESENT, so sampling it one cycle later is sampling a settled value -
     // and the commit-time side effects of the PREVIOUS access (IFR clears and
-    // the like) landed tens of fabric cycles before this present.
+    // the like) landed tens of fabric cycles before this present.  A read
+    // that selects no VIA (a Phasor in native mode at $Cn00-$Cn0F or a
+    // speech chip's offsets, or in an undefined mode) is not claimed.
     always_ff @(posedge clk) begin
         if (rst) begin
-            rd_claim <= 1'b0;
-            rd_data  <= 8'd0;
-            hit_q    <= 1'b0;
+            rd_claim  <= 1'b0;
+            rd_data   <= 8'd0;
+            hit_q     <= 1'b0;
+            dev_hit_q <= 1'b0;
+            cs_q      <= 2'b00;
         end else if (op_present) begin
-            hit_q    <= slot_hit;
-            rd_claim <= slot_hit && op_rw;
-            rd_data  <= op_addr[7] ? via1_data_out : via0_data_out;
+            hit_q     <= slot_hit;
+            dev_hit_q <= dev_hit;
+            cs_q      <= cs;
+            rd_claim  <= slot_hit && op_rw && (cs != 2'b00);
+            rd_data   <= ({8{cs[0]}} & via0_data_out) | ({8{cs[1]}} & via1_data_out);
         end else if (!enabled) begin
-            rd_claim <= 1'b0;
-            hit_q    <= 1'b0;
+            rd_claim  <= 1'b0;
+            hit_q     <= 1'b0;
+            dev_hit_q <= 1'b0;
         end
     end
 

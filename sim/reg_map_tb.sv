@@ -99,6 +99,7 @@ module reg_map_tb;
     reg  apple_res_sync = 1'b1;      // active low, idle high
     wire cpu_source_active;
     wire [2:0] mb_slot_active;
+    wire       mb_phasor_active;
     // The boot hold's side of BOOT_HOLD: the tb plays the hold itself.
     wire boot_arm, boot_release;
     // The buttons' side of BUTTONS: the tb plays pb_inject.
@@ -196,7 +197,7 @@ module reg_map_tb;
                  .CAN_MASTER (1'b1)) u_regs (
         .clk (clk), .rst (rst),
         .apple_res_sync (apple_res_sync), .cpu_source_active (cpu_source_active),
-        .mb_slot_active (mb_slot_active),
+        .mb_slot_active (mb_slot_active), .mb_phasor_active (mb_phasor_active),
         .boot_arm (boot_arm), .boot_release (boot_release), .boot_held (boot_held),
         .hold_runtime (hold_runtime),
         .menu_en (menu_en), .menu_hotkey (menu_hotkey),
@@ -574,9 +575,9 @@ module reg_map_tb;
 
         push_word(hdr(T_REG_WRITE, 8'd2, 16'd0));
         push_word(32'h8000_000C);
-        push_word(32'h0000_0004);          // slot 4, the Mockingboard's home
+        push_word(32'h0000_000C);          // slot 4, the Mockingboard's home, as a Phasor
         repeat (40) @(posedge clk);
-        if (mb_slot_active !== 3'd0) begin
+        if (mb_slot_active !== 3'd0 || mb_phasor_active !== 1'b0) begin
             $display("FAIL: the WRITE enabled the Mockingboard - it must take a reset");
             errors = errors + 1;
         end else $display("  ok: writing MB_SLOT does not enable on its own");
@@ -586,6 +587,10 @@ module reg_map_tb;
             $display("FAIL: RES' asserted but MB_SLOT did not latch to 4");
             errors = errors + 1;
         end else $display("  ok: the reset assertion latches the slot");
+        if (mb_phasor_active !== 1'b1) begin
+            $display("FAIL: RES' asserted but the Phasor bit did not latch with the slot");
+            errors = errors + 1;
+        end else $display("  ok: and the Phasor bit with it");
 
         base = out_n;
         push_word(hdr(T_REG_READ, 8'd1, 16'd0));
@@ -595,13 +600,15 @@ module reg_map_tb;
             $display("FAIL: no MB_SLOT reply");
             errors = errors + 1;
         end else if (out_mem[base+2][2:0] !== 3'd4 ||
-                     out_mem[base+2][10:8] !== 3'd4) begin
-            $display("FAIL: MB_SLOT readback %08x, expected desired=4 active=4",
+                     out_mem[base+2][10:8] !== 3'd4 ||
+                     out_mem[base+2][3] !== 1'b1 || out_mem[base+2][11] !== 1'b1) begin
+            $display("FAIL: MB_SLOT readback %08x, expected desired=4 active=4, phasor both",
                      out_mem[base+2]);
             errors = errors + 1;
         end else begin
-            $display("  ok: readback desired=%0d active=%0d",
-                     out_mem[base+2][2:0], out_mem[base+2][10:8]);
+            $display("  ok: readback desired=%0d active=%0d, phasor %0d/%0d",
+                     out_mem[base+2][2:0], out_mem[base+2][10:8],
+                     out_mem[base+2][3], out_mem[base+2][11]);
         end
 
         // --- case 10 / BOOT_HOLD: arm is a level, release is a pulse ---------

@@ -138,6 +138,7 @@ module master_top #(
     wire [7:0]  apple_data_sync;
     wire        cpu_source_active;
     wire [2:0]  mb_slot_active, hd_slot_active;
+    wire        mb_phasor_active;
     wire        boot_arm, boot_release, boot_held, hold_runtime;
     wire        menu_en, menu_trigger, hotkey_hit;
     wire [6:0]  menu_hotkey;
@@ -340,6 +341,7 @@ module master_top #(
         .apple_res_sync (apple_res_sync),
         .cpu_source_active (cpu_source_active),
         .mb_slot_active (mb_slot_active),
+        .mb_phasor_active (mb_phasor_active),
         .boot_arm (boot_arm), .boot_release (boot_release),
         .boot_held (boot_held), .hold_runtime (hold_runtime),
         .menu_en (menu_en), .menu_hotkey (menu_hotkey),
@@ -1433,13 +1435,15 @@ module master_top #(
 
     // ---- the Mockingboard ---------------------------------------------------
     // Two VIAs answering for an empty slot; the sound itself is synthesised on
-    // the host from the captured VIA writes.  See rtl/mockingboard.sv.
+    // the host from the captured VIA writes.  As a Phasor, the same two VIAs
+    // behind the Phasor's mode register.  See rtl/mockingboard.sv.
     mockingboard u_mb (
         .clk           (apple_clk),
         .rst           (apple_rst),
         .res_sync      (apple_res_sync),
         .master_active (cpu_source_active),
         .slot_assign   (mb_slot_active),
+        .phasor        (mb_phasor_active),
         .op_addr       (p_addr),
         .op_rw         (p_rw),
         .op_wdata      (p_wdata),

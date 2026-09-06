@@ -105,6 +105,7 @@ module card_link #(
     // A watching top leaves it unconnected - a snoop build cannot answer for
     // a slot, and CAN_MASTER=0 holds this at zero anyway.
     output wire [2:0]  mb_slot_active,
+    output wire        mb_phasor_active,   // ...and as a Phasor (rtl/mockingboard.sv)
 
     // The boot hold (rtl/boot_hold.sv, in a mastering top).  arm and release
     // are the host's, from the BOOT_HOLD register; held comes back for the
@@ -941,6 +942,7 @@ module card_link #(
         .apple_res_sync    (apple_res_sync),
         .cpu_source_active (cpu_source_active),
         .mb_slot_active    (mb_slot_active),
+        .mb_phasor_active  (mb_phasor_active),
         .boot_arm          (boot_arm),
         .boot_release      (boot_release),
         .boot_held         (boot_held),

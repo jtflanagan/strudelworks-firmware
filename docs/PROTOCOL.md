@@ -105,7 +105,7 @@ protocol.
 | `0x8000_0000` | BUILD_DATE | RO | `YYYYMMDD` as a decimal integer |
 | `0x8000_0004` | BUILD_TIME | RO | `HHMMSS` as a decimal integer |
 | `0x8000_0008` | CPU_SOURCE | RW bit 0 | which CPU drives the Apple bus; latched at RES' — see BUS_MASTER.md |
-| `0x8000_000C` | MB_SLOT | RW bits 2:0 | the Mockingboard's slot, 0 = off; latched at RES' — see MOCKINGBOARD.md |
+| `0x8000_000C` | MB_SLOT | RW bits 3:0 | the Mockingboard's slot, 0 = off, bit 3 a Phasor in it; latched at RES' (`[10:8]`, `[11]`) — see MOCKINGBOARD.md |
 | `0x8000_0010` | BOOT_HOLD | RW bit 0, W1 bit 16 | hold the soft core at its reset vector; `arm`, `held`, `runtime`, `release`, `holds` — see BOOT_MENU.md; the release serves the runtime door too — see RUNTIME_MENU.md |
 | `0x8000_0014` | HD_SLOT | RW bits 2:0 | the hard disk's slot, 0 = off; latched at RES', never MB_SLOT's; `rom`, `busy`, `execs` — see HARDDISK.md |
 | `0x8000_0018` | RESET | W1 bit 0, W bits 31:16 | pulse the Apple's RES' low, for a programmatic Ctrl-Reset; `pulsing`, `pulses` — see BUS_MASTER.md |
