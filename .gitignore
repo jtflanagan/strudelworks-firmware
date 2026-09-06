@@ -53,3 +53,7 @@ __pycache__/
 /sim/vbeam_work/
 /sim/cpu_predict_work/
 /sim/tlb_work/
+
+# sim/suite.sh: its logs, and the local list of boot images (paths differ per machine)
+/sim/suite_work/
+/sim/images.local

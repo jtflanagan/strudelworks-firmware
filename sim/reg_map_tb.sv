@@ -243,7 +243,7 @@ module reg_map_tb;
         .fb_mode (7'b1010101), .fb_compared (32'h0004_2870), .fb_mismatch (32'h0000_0005),
         .fb_last (32'hA55A_C0A3), .fb_last2 (32'h5427_D8C2), .fb_other (32'h0002_0001),
         .fb_peek_data (fb_peek_addr[14] ? 8'hD5 : 8'h2A),
-        .ring_status (32'h0200_1234),
+        .ring_status (32'h0200_1234), .link_stat (32'h0103_A50B),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
@@ -457,6 +457,14 @@ module reg_map_tb;
             $display("FAIL: RING_STATUS read %08x, expected 02001234", out_mem[base+2]);
             errors = errors + 1;
         end else $display("  ok: RING_STATUS reads back tx_ring's word");
+
+        // --- case 5c / LINK_STAT reads back card_link's word ---------------
+        base = out_n;
+        do_read(32'h8000_00EC);
+        if (out_mem[base+2] !== 32'h0103_A50B) begin
+            $display("FAIL: LINK_STAT read %08x, expected 0103A50B", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: LINK_STAT reads back the card's link word");
 
         // --- case 6 / a reply must not land inside another message -----------
         // The one this file exists for.  A BUS_EVENTS message is streamed while

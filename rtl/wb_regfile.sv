@@ -268,6 +268,11 @@ module wb_regfile #(
     // RING_STATUS, straight from tx_ring: the DDR3 ring's occupancy in
     // lines, whether it is full, and whether the DDR3 has calibrated at all.
     input  wire [31:0]     ring_status,
+    // LINK_STAT, from card_link: the card's own view of the link - the UART
+    // status line's facts the host could not see over USB3 (phi0 ticking,
+    // capture enabled, the link's last reset), so the UART is needed only
+    // when no register answers at all.
+    input  wire [31:0]     link_stat,
     input  wire            wb_cyc,
     input  wire            wb_stb,
     input  wire            wb_we,
@@ -349,6 +354,7 @@ module wb_regfile #(
     localparam [13:0] R_NSC_DATE       = 'd56; // 0x8000_00E0, RO
     localparam [13:0] R_U2_SLOT        = 'd57; // 0x8000_00E4, RW in bits 2:0
     localparam [13:0] R_U2_STAT        = 'd58; // 0x8000_00E8, RO
+    localparam [13:0] R_LINK_STAT      = 'd59; // 0x8000_00EC, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -1199,6 +1205,7 @@ module wb_regfile #(
                         R_NSC_DATE:   wb_dat_r <= nsc_now[63:32];
                         R_U2_SLOT:    wb_dat_r <= u2_slot_rd;
                         R_U2_STAT:    wb_dat_r <= u2_stat_rd;
+                        R_LINK_STAT:  wb_dat_r <= link_stat;
                         R_FB_CTRL:    wb_dat_r <= fb_ctrl_rd;
                         R_FB_COMPARED: wb_dat_r <= fb_compared;
                         R_FB_MISMATCH: wb_dat_r <= fb_mismatch;

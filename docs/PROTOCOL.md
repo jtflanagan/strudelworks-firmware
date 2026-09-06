@@ -160,6 +160,7 @@ protocol.
 | `0x8000_00E0` | NSC_DATE | RO | ...high half: `{year, month, date, day of week}` BCD |
 | `0x8000_00E4` | U2_SLOT | RW bits 2:0 | the Uthernet II's slot, 0 = off; latched at RES', never any of the five others'; `[11]` a command was dropped, `[15:12]` the sockets' `Sn_SR != 0`, `[23:16]` U2_CMDs sent, `[31:24]` U2_RX chunks landed — see UTHERNET2.md |
 | `0x8000_00E8` | U2_STAT | RO | `{Sn_RX_RSR[15:0], Sn_TX_FSR[15:0]}` of socket 0 |
+| `0x8000_00EC` | LINK_STAT | RO | the card's own view of the link, the UART status line's facts over USB3: `[0]` phi0 ticking (the card is in a powered machine), `[1]` capture enabled, `[4:2]` the link's last reset cause (`{0, watchdog, UART 'R'}`), `[15:8]` the chip-side snapshot `{txe, rxf, qcount, state}` taken as it fired, `[23:16]` resets so far, `[24]` DDR3 calibrated (RING_STATUS[25] again). One read answers "is there a link, and is it in a machine"; the UART is for the card that answers no register at all |
 | `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s

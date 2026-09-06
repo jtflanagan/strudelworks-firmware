@@ -1054,6 +1054,7 @@ module card_link #(
         .fb_peek_data      (fb_peek_data),
         .res_drive         (res_drive),
         .ring_status       (ring_status),
+        .link_stat         (link_stat),
         .wb_cyc   (rwb_cyc),
         .wb_stb   (rwb_stb),
         .wb_we    (rwb_we),
@@ -1173,6 +1174,16 @@ module card_link #(
     wire [3:0]          sb_sel;
     wire                out_valid;
     wire [31:0]         ring_status;
+
+    // LINK_STAT (0x8000_00EC): the UART status line's facts, readable over
+    // USB3 - [0] phi0 ticking (the card is in a powered machine), [1] the
+    // capture enabled as the card sees it, [4:2] the link's last reset
+    // cause, [15:8] the chip-side snapshot taken as it fired, [23:16] how
+    // many resets, [24] the DDR3 calibrated (RING_STATUS[25] again, so one
+    // read answers "is there a link, and is it in a machine").  With this
+    // the UART is for the card that answers no register at all.
+    wire [31:0] link_stat = {7'd0, ring_status[25], link_resets, link_snap,
+                             3'd0, link_cause, capture_enable, phi0_live};
 
     reply_stream u_reply (
         .clk       (clk_ctrl),
