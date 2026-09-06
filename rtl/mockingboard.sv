@@ -54,11 +54,40 @@
 //   mode 0 (Mockingboard)   A7 picks the VIA, as above
 //   mode 5 (Phasor native)  A4 selects VIA 0, A7 selects VIA 1: neither,
 //                           either or BOTH, so a write can land in both and
-//                           a read is the OR of both; $Cn00-$Cn0F and the
-//                           SSI-263's $Cn2x/$Cn4x/$Cn6x select no VIA and
-//                           are not claimed (no speech chip here: they float)
+//                           a read is the OR of both; $Cn00-$Cn0F selects no
+//                           VIA and is not claimed, and $Cn2x/$Cn4x/$Cn6x
+//                           are the speech chips' (below)
 //   mode 7 (Echo+)          VIA 1 at every 16-byte offset of the page
 //   1-4, 6                  undefined on the real card; nothing answers
+//
+// THE SPEECH CHIPS (2026-09-05).  A Phasor's two SSI-263 sockets are
+// populated: rtl/ssi263.sv, one per socket, the bus-visible half of the
+// chip (its registers, D7, and above all the cycle-exact phoneme timer);
+// the speech itself is the host's, from the same writes.  AppleWin's
+// IOWrite/IORead, confirmed on the real card:
+//
+//   writes   in Mockingboard and native modes (not Echo+, not the undefined
+//            ones): A6 set writes the PRIMARY chip ($Cn4x, the socket
+//            behind VIA 1), A5 set the SECONDARY ($Cn2x, behind VIA 0),
+//            both at $Cn6x; register = A2-A0; A4 and A7 are not looked at,
+//            so in Mockingboard mode a write to $Cn4x lands in the primary
+//            chip AND VIA 0 (A7 clear, A4-A6 undecoded), as it does on the
+//            hardware
+//   reads    native mode only, at A4 = A7 = 0 with A5 or A6 set: the chip
+//            drives D7 (its request flag) and nothing else; the card claims
+//            the read and puts the rest of the byte low.  In Mockingboard
+//            mode D7 is not readable ($Cn4x reads VIA 0)
+//   A/!R     Mockingboard mode: to the socket's VIA's CA1 (the primary's
+//            to VIA 1, the secondary's to VIA 0), where PCR bit 0 = 0 makes
+//            the falling edge IFR bit 1, the speech interrupt every driver
+//            enables through IER; native mode: straight to the 6502's
+//            IRQ' - and not to CA1; Echo+ and the undefined modes: nowhere
+//
+// The VIAs' CA1 inputs are therefore no longer tied off: they idle high
+// and go low while a chip requests, which is also how a mode change into
+// Mockingboard mode with a request already up raises the flag (AppleWin's
+// SetCardMode does that by hand).  A Mockingboard - phasor = 0 - has no
+// sockets, and the chips sit in reset.
 //
 // The DEVICE SELECT' accesses are never gated by INTCXROM (the hardware's
 // rule too), and they are bus cycles in every acceleration mode - the
@@ -104,7 +133,12 @@
 // moves by a twelfth of that and the card is "not present" - the floppy's
 // lesson (rtl/floppy_card.sv) over again.
 //////////////////////////////////////////////////////////////////////////////////
-module mockingboard (
+module mockingboard #(
+    // The speech chips' sample clock: 22050 per 1020408 core cycles.  A
+    // bench shortens it.
+    parameter integer SSI_TICK_NUM = 22050,
+    parameter integer SSI_TICK_DEN = 1020408
+) (
     input  wire        clk,
     input  wire        rst,
 
@@ -183,6 +217,21 @@ module mockingboard (
                   :                             2'b00;
     logic [1:0] cs_q;
 
+    // The speech chips: which the presented op writes ({primary, secondary}
+    // by A6/A5, in Mockingboard and native modes), and whether it reads one
+    // (native mode, A4 = A7 = 0, A5 or A6).  Registered at present with cs.
+    wire       ssi_modes = phasor && (mode == 3'd0 || mode == 3'd5);
+    wire [1:0] ssi_wsel  = {2{ssi_modes && !op_rw}} & {op_addr[6], op_addr[5]};
+    wire       ssi_rd    = phasor && mode == 3'd5 && op_rw &&
+                           !op_addr[4] && !op_addr[7] && (op_addr[5] || op_addr[6]);
+    logic [1:0] ssi_wsel_q;
+    wire [1:0] ssi_d7, ssi_ar_n;
+    // The routing of A/!R, by the mode (see the header).
+    wire       ssi_to_via = phasor && (mode == 3'd0);
+    wire       ssi_to_cpu = phasor && (mode == 3'd5);
+    wire [1:0] ssi_ca1_n  = ssi_to_via ? ssi_ar_n : 2'b11;
+    wire       ssi_irq    = ssi_to_cpu && (!ssi_ar_n[0] || !ssi_ar_n[1]);
+
     // ---- the VIA pair -------------------------------------------------------
     // The ports go to the AYs (rtl/ay_pair.sv): port A out is the AYs' data
     // bus and reads back the selected register during a PSG READ, port B out
@@ -220,6 +269,23 @@ module mockingboard (
         .porta_in (via1_pa_in)
     );
 
+    // The speech chips, one per socket: 0 the secondary ($Cn2x, VIA 0's
+    // CA1), 1 the primary ($Cn4x, VIA 1's).  Their registers are written
+    // at the commit of the op that selected them; their sample clock is
+    // the VIAs'.
+    genvar g;
+    generate
+        for (g = 0; g < 2; g = g + 1) begin : g_ssi
+            ssi263 #(.TICK_NUM (SSI_TICK_NUM), .TICK_DEN (SSI_TICK_DEN)) u_ssi (
+                .clk (clk), .rst (via_reset || !phasor),
+                .slow_clock (via_slow_clock),
+                .wr_strobe (op_commit && hit_q && ssi_wsel_q[g]),
+                .wr_reg (op_addr[2:0]), .wr_data (op_wdata),
+                .d7 (ssi_d7[g]), .ar_n (ssi_ar_n[g]), .tick ()
+            );
+        end
+    endgenerate
+
     always_ff @(posedge clk) begin
         if (via_reset)                                 mode <= 3'd0;
         else if (op_commit && !op_dummy && dev_hit_q)  mode <= (op_addr[3] ? 3'd0 : mode) | op_addr[2:0];
@@ -237,7 +303,7 @@ module mockingboard (
         .slow_clock (via_slow_clock),
         .porta_in   (via0_pa_in),
         .portb_in   (8'hFF),        // input pins float high (AppleWin GH#1260)
-        .ca1_in     (1'b0),
+        .ca1_in     (ssi_ca1_n[0]), // the secondary speech chip's A/!R
         .ca2_in     (1'b0),
         .cb1_in     (1'b0),
         .cb2_in     (1'b0),
@@ -262,7 +328,7 @@ module mockingboard (
         .slow_clock (via_slow_clock),
         .porta_in   (via1_pa_in),
         .portb_in   (8'hFF),        // input pins float high (AppleWin GH#1260)
-        .ca1_in     (1'b0),
+        .ca1_in     (ssi_ca1_n[1]), // the primary speech chip's A/!R
         .ca2_in     (1'b0),
         .cb1_in     (1'b0),
         .cb2_in     (1'b0),
@@ -275,7 +341,7 @@ module mockingboard (
         .cb2_out    ()
     );
 
-    assign irq = enabled && (via0_irq || via1_irq);
+    assign irq = enabled && (via0_irq || via1_irq || ssi_irq);
 
     // ---- claim and read data ------------------------------------------------
     // Registered on op_present: one stable answer per bus cycle, decided in
@@ -284,25 +350,30 @@ module mockingboard (
     // T_PRESENT, so sampling it one cycle later is sampling a settled value -
     // and the commit-time side effects of the PREVIOUS access (IFR clears and
     // the like) landed tens of fabric cycles before this present.  A read
-    // that selects no VIA (a Phasor in native mode at $Cn00-$Cn0F or a
-    // speech chip's offsets, or in an undefined mode) is not claimed.
+    // that selects no VIA (a Phasor in native mode at $Cn00-$Cn0F, or in an
+    // undefined mode) is not claimed.  A speech chip's read (native mode,
+    // disjoint from every VIA address) is: D7 and seven zeros.
     always_ff @(posedge clk) begin
         if (rst) begin
-            rd_claim  <= 1'b0;
-            rd_data   <= 8'd0;
-            hit_q     <= 1'b0;
-            dev_hit_q <= 1'b0;
-            cs_q      <= 2'b00;
+            rd_claim   <= 1'b0;
+            rd_data    <= 8'd0;
+            hit_q      <= 1'b0;
+            dev_hit_q  <= 1'b0;
+            cs_q       <= 2'b00;
+            ssi_wsel_q <= 2'b00;
         end else if (op_present) begin
-            hit_q     <= slot_hit;
-            dev_hit_q <= dev_hit;
-            cs_q      <= cs;
-            rd_claim  <= slot_hit && op_rw && (cs != 2'b00);
-            rd_data   <= ({8{cs[0]}} & via0_data_out) | ({8{cs[1]}} & via1_data_out);
+            hit_q      <= slot_hit;
+            dev_hit_q  <= dev_hit;
+            cs_q       <= cs;
+            ssi_wsel_q <= ssi_wsel;
+            rd_claim   <= slot_hit && op_rw && (cs != 2'b00 || ssi_rd);
+            rd_data    <= ssi_rd ? {(op_addr[6] & ssi_d7[1]) | (op_addr[5] & ssi_d7[0]), 7'd0}
+                                 : ({8{cs[0]}} & via0_data_out) | ({8{cs[1]}} & via1_data_out);
         end else if (!enabled) begin
-            rd_claim  <= 1'b0;
-            hit_q     <= 1'b0;
-            dev_hit_q <= 1'b0;
+            rd_claim   <= 1'b0;
+            hit_q      <= 1'b0;
+            dev_hit_q  <= 1'b0;
+            ssi_wsel_q <= 2'b00;
         end
     end
 

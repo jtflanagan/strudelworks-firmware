@@ -122,7 +122,10 @@ module mockingboard_tb;
         .driving (driving)
     );
 
-    mockingboard u_mb (
+    // The speech chips' sample clock shortened to one sample per bus cycle
+    // (sim/ssi263_tb.sv has the real rate): phoneme $28 (880 samples) at
+    // DUR 3 completes in 220 cycles here, 10176 on the machine.
+    mockingboard #(.SSI_TICK_NUM (1), .SSI_TICK_DEN (1)) u_mb (
         .clk (clk), .rst (rst),
         .res_sync (res_sync),
         .master_active (master_active),
@@ -428,9 +431,9 @@ module mockingboard_tb;
         bus_read (16'hC483);
         if (cpu_din !== 8'h33) fail("native mode: a write to both missed VIA 1");
         else                   $display("  ok: ...and in VIA 1");
-        bus_read (16'hC443);                // the speech chip's offset: no VIA
-        if (cpu_din !== 8'hEE) fail("native mode: $C443 (SSI-263) selected a VIA");
-        else                   $display("  ok: the SSI-263's $C44x selects no VIA");
+        bus_read (16'hC443);                // the speech chip's offset: no VIA, the chip's D7
+        if (cpu_din !== 8'h00) fail("native mode: $C443 (SSI-263) selected a VIA");
+        else                   $display("  ok: the SSI-263's $C44x selects no VIA - the chip's D7, clear");
 
         // --- case 10a / the second AY reads back in native mode --------------
         // VIA 0 at $C41x, DDRB $1F; PB4/PB3 select: the second AY alone is
@@ -531,6 +534,179 @@ module mockingboard_tb;
         bus_read (VIA0 | ORA);
         if (cpu_din !== 8'hFF) fail("IRA with DDRA clear did not read $FF");
         else                   $display("  ok: IRA reads $FF with DDRA clear");
+
+        // --- the speech chips ------------------------------------------------
+        // A Phasor in Mockingboard mode after the RES' above.  mb-audit's
+        // KickSSI263 on the PRIMARY chip ($C44x; its A/!R is VIA 1's CA1):
+        // PCR $0C on VIA 1, IFR cleared, CA1's interrupt enabled, then CTL
+        // high, DUR 3 with phoneme $28, CTL low.  In this mode the $C44x
+        // writes also land in VIA 0 (A7 clear, A4-A6 undecoded), as on
+        // the real card - harmless here.
+        $display("\nthe speech chips\n");
+        bus_write(VIA1 | 16'h000C, 8'h0C);  // PCR: CA1 negative edge
+        bus_write(VIA1 | IFR,  8'h02);      // clear CA1's flag
+        bus_write(VIA1 | IER,  8'h82);      // enable CA1's interrupt
+        bus_write(16'hC443, 8'h80);         // CTL high
+        bus_write(16'hC440, 8'hE8);         // DUR 3, phoneme $28
+        t1_start = bus_cycles;
+        bus_write(16'hC443, 8'h00);         // CTL low: it plays
+        bus_read (VIA1 | IFR);
+        if (cpu_din[1] !== 1'b0) fail("CA1 flag set before the phoneme completed");
+        else                     $display("  ok: primary chip kicked - VIA 1 IFR CA1 clear");
+        irq_at = -1;
+        while (irq_at < 0 && (bus_cycles - t1_start) < 400) begin
+            bus_read(16'h1234);
+            if (mb_irq) irq_at = bus_cycles - t1_start;
+        end
+        if (irq_at < 0)                       fail("no speech interrupt through CA1");
+        else if (irq_at < 215 || irq_at > 235) begin
+            $display("  IRQ after %0d cycles", irq_at);
+            fail("speech interrupt at the wrong time");
+        end else $display("  ok: phoneme complete - IRQ through VIA 1's CA1 after %0d cycles (220 samples)", irq_at);
+        bus_read(VIA1 | IFR);
+        if (cpu_din[7] !== 1'b1 || cpu_din[1] !== 1'b1) fail("IFR does not show CA1");
+        else                                            $display("  ok: IFR reads %02x - CA1 the cause", cpu_din);
+        // The VIA's flag is the CPU's to clear; the chip's request is
+        // cleared by a write to register 0, 1 or 2.
+        bus_write(VIA1 | IFR, 8'h02);
+        bus_read (16'h1234);
+        if (mb_irq !== 1'b0) fail("IFR write did not clear the speech interrupt");
+        else                 $display("  ok: writing IFR clears it");
+        bus_write(16'hC441, 8'h00);         // reg 1: A/!R released
+        // ...and the phoneme repeats after its leadout (88), so the flag
+        // comes back: 88 + 220 cycles after the first completion.
+        irq_at = -1;
+        while (irq_at < 0 && (bus_cycles - t1_start) < 700) begin
+            bus_read(16'h1234);
+            if (mb_irq) irq_at = bus_cycles - t1_start;
+        end
+        if (irq_at < 0)                       fail("the phoneme did not repeat");
+        else if (irq_at < 520 || irq_at > 545) begin
+            $display("  second IRQ after %0d cycles", irq_at);
+            fail("the repeat came at the wrong time");
+        end else $display("  ok: the phoneme repeats - IRQ again %0d cycles after the kick (220 + 88 + 220)", irq_at);
+        bus_write(VIA1 | IFR, 8'h02);
+        // DisableSSI263: CTL high, DR1:0 = 00, CTL low - no more interrupts.
+        bus_write(16'hC443, 8'h80);
+        bus_write(16'hC440, 8'h00);
+        bus_write(16'hC443, 8'h00);
+        bus_read (16'h1234);
+        if (mb_irq !== 1'b0) fail("interrupt survived the disable");
+        else                 $display("  ok: DisableSSI263 - quiet");
+
+        // --- the secondary chip is VIA 0's ----------------------------------
+        bus_write(VIA0 | 16'h000C, 8'h0C);
+        bus_write(VIA0 | IFR,  8'h02);
+        bus_write(VIA0 | IER,  8'h82);
+        bus_write(16'hC423, 8'h80);
+        bus_write(16'hC420, 8'hE8);
+        t1_start = bus_cycles;
+        bus_write(16'hC423, 8'h00);
+        irq_at = -1;
+        while (irq_at < 0 && (bus_cycles - t1_start) < 400) begin
+            bus_read(16'h1234);
+            if (mb_irq) irq_at = bus_cycles - t1_start;
+        end
+        bus_read(VIA0 | IFR);
+        if (irq_at < 0 || cpu_din[1] !== 1'b1) fail("the secondary chip did not interrupt through VIA 0");
+        else                                   $display("  ok: secondary chip ($C42x) - IRQ through VIA 0's CA1 after %0d cycles", irq_at);
+        bus_write(VIA0 | IFR, 8'h02);
+        bus_write(16'hC423, 8'h80);         // power it down
+        bus_write(16'hC420, 8'h00);
+        bus_write(16'hC423, 8'h00);
+        bus_write(VIA0 | IER,  8'h02);      // and disable CA1 on VIA 0
+        bus_write(VIA1 | IER,  8'h02);      // and VIA 1
+
+        // --- native mode: D7 readable, A/!R straight to the CPU ------------
+        // mb-audit T263_2: kick with phoneme 0 at DUR 3 (664 samples),
+        // read D7 at $C440 - clear, then set - and the IRQ arrives with
+        // no VIA involved (IER has CA1 off).
+        bus_read (16'hC0C5);
+        bus_write(16'hC443, 8'h80);
+        bus_write(16'hC440, 8'hE8);
+        t1_start = bus_cycles;
+        bus_write(16'hC443, 8'h00);
+        bus_read (16'hC440);
+        if (cpu_din !== 8'h00) begin $display("  read %02x", cpu_din); fail("native mode: $C440 did not read D7 clear"); end
+        else                   $display("  ok: native mode - $C440 reads $00, D7 clear (claimed, the rest low)");
+        irq_at = -1;
+        while (irq_at < 0 && (bus_cycles - t1_start) < 400) begin
+            bus_read(16'h1234);
+            if (mb_irq) irq_at = bus_cycles - t1_start;
+        end
+        if (irq_at < 0 || irq_at < 215 || irq_at > 235) begin
+            $display("  IRQ after %0d cycles", irq_at);
+            fail("native mode: no direct interrupt at completion");
+        end else $display("  ok: native mode - the chip's A/!R interrupts the CPU directly after %0d cycles", irq_at);
+        bus_read (16'hC443);                // any register offset reads D7
+        if (cpu_din !== 8'h80) fail("native mode: D7 not readable at $C443");
+        else                   $display("  ok: $C443 reads $80 - D7 set");
+        bus_read (VIA1 | IFR);
+        if (cpu_din[1] !== 1'b0) fail("native mode: CA1 flag set - A/!R should not reach the VIA");
+        else                     $display("  ok: VIA 1's CA1 flag stays clear in native mode");
+        bus_read (16'hC420);                // the secondary: powered down, D7 clear
+        if (cpu_din !== 8'h00) fail("native mode: the secondary chip's D7 read set");
+        else                   $display("  ok: $C420 reads the secondary chip's D7, clear");
+        bus_write(16'hC444, 8'h55);         // reg 4: no effect on D7
+        bus_read (16'hC440);
+        if (cpu_din !== 8'h80) fail("a filter write cleared D7");
+        else                   $display("  ok: a write to reg 4 leaves D7 and the interrupt");
+        bus_write(16'hC442, 8'h00);         // reg 2: clears
+        bus_read (16'hC440);
+        if (cpu_din !== 8'h00 || mb_irq !== 1'b0) fail("a write to reg 2 did not clear D7/IRQ");
+        else                                      $display("  ok: a write to reg 2 clears D7 and the interrupt");
+
+        // --- the mode change carries the request -----------------------------
+        // mb-audit T263_8: complete in native mode, then switch to
+        // Mockingboard mode with D7 up - the flag appears in VIA 1's IFR;
+        // Echo+ takes it nowhere.
+        irq_at = -1;
+        t1_start = bus_cycles;
+        while (irq_at < 0 && (bus_cycles - t1_start) < 700) begin
+            bus_read(16'h1234);
+            if (mb_irq) irq_at = bus_cycles - t1_start;
+        end
+        if (irq_at < 0) fail("no repeat in native mode");
+        bus_read (16'hC0C8);                // Mockingboard mode
+        bus_read (16'h1234);
+        bus_read (VIA1 | IFR);
+        if (cpu_din[1] !== 1'b1) fail("entering Mockingboard mode with D7 up did not set CA1's flag");
+        else                     $display("  ok: back to Mockingboard mode with a request up - VIA 1's CA1 flag set");
+        bus_write(VIA1 | IFR, 8'h02);
+        bus_read (16'hC0C7);                // Echo+
+        bus_read (16'h1234);
+        bus_read (VIA1 | IFR);
+        if (cpu_din[1] !== 1'b0 || mb_irq !== 1'b0) fail("Echo+ mode routed the request somewhere");
+        else                                        $display("  ok: Echo+ - the request goes nowhere");
+        bus_write(16'hC441, 8'h00);         // Echo+: this write does NOT reach the chip
+        bus_read (16'hC0C8);
+        bus_read (16'hC0C5);                // native: D7 still up
+        bus_read (16'hC440);
+        if (cpu_din !== 8'h80) fail("an Echo+ write reached the speech chip");
+        else                   $display("  ok: a write in Echo+ mode did not reach the chip - D7 still set");
+        bus_write(16'hC441, 8'h00);
+        bus_write(16'hC443, 8'h80);         // power down
+        bus_read (16'hC0C8);
+
+        // --- RES' powers the chips down --------------------------------------
+        bus_write(16'hC443, 8'h80);
+        bus_write(16'hC440, 8'hE8);
+        bus_write(16'hC443, 8'h00);         // playing
+        res_sync = 1'b0;
+        repeat (300) @(posedge clk);
+        res_sync = 1'b1;
+        repeat (2) @(posedge cyc_en);
+        t1_start = bus_cycles;
+        irq_at = -1;
+        bus_read (16'hC0C5);
+        while (irq_at < 0 && (bus_cycles - t1_start) < 300) begin
+            bus_read(16'h1234);
+            if (mb_irq) irq_at = bus_cycles - t1_start;
+        end
+        bus_read (16'hC440);
+        if (irq_at >= 0 || cpu_din !== 8'h00) fail("a speech chip played on through RES'");
+        else                                  $display("  ok: RES' - the chip is powered down, nothing completes");
+        bus_read (16'hC0C8);
 
         // --- the standing invariant ------------------------------------------
         if (read_drive_unclaimed != 0)

@@ -106,7 +106,8 @@ run fb_sim        -Irtl rtl/fb_sim.sv rtl/fd_bank.sv -Wno-MULTIDRIVEN
 # YM2149.sv is third-party too (a2fpga's, via aty) and carries width idioms
 # Verilator dislikes; suppressed here, not edited there.
 run ay_pair       rtl/ay_pair.sv rtl/YM2149.sv -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND
-run mockingboard  rtl/mockingboard.sv rtl/via6522.v rtl/slot_switches.sv rtl/ay_pair.sv rtl/YM2149.sv -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND \
+run ssi263        rtl/ssi263.sv
+run mockingboard  rtl/mockingboard.sv rtl/via6522.v rtl/slot_switches.sv rtl/ay_pair.sv rtl/YM2149.sv rtl/ssi263.sv -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND \
                   -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY
 # -Irtl: the microcode field definitions are a generated `include, and they live
 # beside the RTL rather than in the simulator's working directory.

@@ -1,7 +1,8 @@
 # Mockingboard: the VIA pair on the card, the sound on the host
 
-Status: **✅ proven on hardware (Total Replay, megademo); the Phasor built and
-simulated 2026-09-05, awaiting the mb-audit run on hardware.**
+Status: **✅ proven on hardware (Total Replay, megademo; the Phasor and its
+SSI-263 speech chips through mb-audit 2026-09-05, the Phasor-with-SSI263
+after-reset stages included).**
 
 A Mockingboard is two 6522 VIAs the CPU talks to at `$Cn00-$CnFF`, each wired
 to an AY-3-8913 sound chip the CPU cannot see: VIA port A is the AY's data
@@ -57,7 +58,7 @@ and follows the mode from it, as it follows the VIA writes.
 | mode | name | VIA decode of `$Cnxx` |
 |---|---|---|
 | 0 | Mockingboard | A7 picks the VIA, as above |
-| 5 | Phasor native | A4 selects VIA 0, A7 selects VIA 1 - neither, either or both: a write lands in every selected VIA, a read is the OR of them; `$Cn00-$Cn0F` and the SSI-263's `$Cn2x/$Cn4x/$Cn6x` select none and are not claimed |
+| 5 | Phasor native | A4 selects VIA 0, A7 selects VIA 1 - neither, either or both: a write lands in every selected VIA, a read is the OR of them; `$Cn00-$Cn0F` selects none and is not claimed; `$Cn2x/$Cn4x/$Cn6x` are the speech chips' (below) |
 | 7 | Echo+ | VIA 1 at every 16-byte offset of the page |
 | 1-4, 6 | undefined | nothing answers |
 
@@ -82,10 +83,57 @@ was, as it is in AppleWin.  A Mockingboard ticks two chips, a Phasor four -
 the sound is the decoder's biggest per-cycle cost, so the extra pair is
 only paid for when asked.
 
-**Not there.**  The Phasor's two SSI-263 speech chips, for the reason the
-Mockingboard C's is not (below); their offsets select no VIA and float.
-AY register reads, as below.  The Echo+ disk's TMS5220 detection, which
-AppleWin also leaves out.
+**Not there.**  The Echo+ disk's TMS5220 detection, which AppleWin also
+leaves out.
+
+## The speech chips (2026-09-05)
+
+A Phasor has two sockets for the SSI-263, Silicon Systems' phoneme
+synthesiser, and both are populated here.  The split is the Mockingboard's
+again.  The card (`rtl/ssi263.sv`, one per socket, behind `mockingboard`)
+carries what the bus can see: the registers' effect on D7 and on A/!R, and
+above all WHEN a phoneme completes - software times it (Willy Byte's
+detection, mb-audit's speech tests, every speech ISR), and a completion
+that waited on the host would fail them.  The host (strudelworks-host
+`src/ssi263.cpp`) carries the sound: AppleWin's recorded phoneme samples,
+played from the same register writes in the stream, by the same engine on
+the same cycle count, so the sound and the interrupt agree.
+
+AppleWin's SSI263.cpp is the reference, and the timing is AppleWin's rather
+than the datasheet's: AppleWin does not model the chip's duration
+arithmetic (the RATE register), a phoneme lasts as long as its recorded
+sample, and since the host can play nothing else the card completes when
+that sample would run out.  A phoneme is a length in 22050 Hz samples
+(AppleWin's table, 62 entries, phoneme 1 playing as 2 and 0 a silent pause
+as long as 2), consumed one per output sample at DUR 0, one plus an extra
+every fourth at DUR 1, two at DUR 2, four at DUR 3 (always four in frame
+mode); then a leadout of a tenth of the length, then it plays again unless
+the chip was powered down meanwhile.  Output samples run at 22050 per
+1020408 core cycles - MACHINE time, as the VIA timers count it, so a
+detection routine that waits N cycles for D7 sees the same answer at any
+acceleration.
+
+| the bus | what happens |
+|---|---|
+| write `$Cn4x` / `$Cn2x` / `$Cn6x` (register A2-A0) | the primary chip / the secondary / both, in Mockingboard and native modes; not Echo+.  A4 and A7 are not looked at, so in Mockingboard mode `$Cn4x` also writes VIA 0, as on the real card |
+| read `$Cn2x`/`$Cn4x`/`$Cn6x` with A4 = A7 = 0 | native mode only: D7 (the chip's request flag), the other bits low; claimed.  In Mockingboard mode `$Cn4x` reads VIA 0 |
+| write reg 0, 1 or 2; CTL=1 | clears D7 and the request; CTL=0 and regs 4-7 do not |
+| CTL high-to-low | the function and interrupt enable from DR1:0 as it stands; the phoneme starts |
+| a phoneme completes | D7 set (unless powered down); A/!R asserted if DR1:0 was not 00 at the last CTL high-to-low |
+| A/!R in Mockingboard mode | the socket's VIA's CA1 - the primary's to VIA 1, the secondary's to VIA 0 - a negative edge, IFR bit 1 under PCR bit 0 = 0; IER bit 1 makes it the IRQ |
+| A/!R in native mode | straight to the 6502's IRQ' (the short route, with the VIAs'); not to CA1 |
+| A/!R in Echo+ or an undefined mode | nowhere; the chip plays on |
+| RES' | an SSI263AP: power-down, registers at power-on, nothing playing (the P variant that plays through a reset is not modelled) |
+
+The VIAs' CA1 inputs, tied low before, now idle high and follow the chips;
+so a mode change into Mockingboard mode with a request already up raises
+the flag by itself, which AppleWin's SetCardMode does by hand.  A plain
+Mockingboard (`phasor` clear) has no sockets and the chips sit in reset.
+
+The phoneme lengths are generated from AppleWin's SSI263Phonemes.h
+(strudelworks-host `tools/gen_ssi263_phonemes.py`, which also writes the
+host's sample asset) and baked into both halves; the host's loader checks
+the asset against them.
 
 ## Only while mastering
 
@@ -212,8 +260,9 @@ that stage is run with `boot_menu = off`.
 
 ## What is deliberately not there
 
-- **The SSI-263 speech chip** of a Mockingboard C (and the Phasor's two).
-  Different part, different protocol, its own module if ever wanted.
+- **A Mockingboard C's SSI-263.**  The speech chips come with the Phasor
+  only; the plain Mockingboard here is a Sound II.  Nor the SC-01 (Votrax)
+  AppleWin keeps on a Mockingboard's first VIA.
 - **Stereo beyond the board's own split.** Chip 0 is the left channel, chip 1
   the right, which is the Mockingboard's wiring (a Phasor's second pair
   follows its VIAs); there is no mixdown knob.
@@ -221,7 +270,8 @@ that stage is run with `boot_menu = off`.
 ## Verifying it
 
 ```
-sim/run_mockingboard_tb.sh    # card: VIAs behind the real driver, ~2 s
+sim/run_mockingboard_tb.sh    # card: VIAs behind the real driver, ~10 s
+sim/run_ssi263_tb.sh          # card: one speech chip at the real sample rate, ~2 s
 sim/run_reg_map_tb.sh         # card: MB_SLOT's latched contract
 ```
 
@@ -230,7 +280,15 @@ and writes of `$C0Cx`, the three decodes, the OR'd read, the unclaimed
 offsets, RES' clearing the mode - and the standing invariant over all of it.
 Between the two halves: the T1 flag cycle-exact at N+2, and the AY register
 read-backs (a Mockingboard's chip, an undriven port, the widths, register
-14, RESET'; the Phasor's second chip in native mode).
+14, RESET'; the Phasor's second chip in native mode).  Then the speech
+chips with their sample clock shortened to one per bus cycle: the primary
+through VIA 1's CA1 and the secondary through VIA 0's, the repeat, the
+disable, D7 readable in native mode with the direct interrupt, the writes
+that clear it and the ones that do not, the request carried into
+Mockingboard mode and dropped in Echo+, RES'.  `ssi263_tb` has the chip
+alone at the real rate: 22050 ticks in 1020408 cycles exactly, a phoneme's
+length under each DUR and in frame mode, the leadout and repeat, power-down
+mid-phoneme.
 
 and in strudelworks-host, `mb_test`: the VIA-to-AY protocol (latch above 15
 deselects, functions act only from inactive, DDRB gates the control pins),
@@ -239,7 +297,9 @@ tone programmed as period 284 must come out of the sample stream within 2% of
 the datasheet's `phi0 / (16 * 284)`; then the Phasor: the mode register, a
 Phasor in Mockingboard mode being a Mockingboard, the native decode, the two
 AYs per VIA with the GAL's cross-effects, Echo+, and the same tone at twice
-the pitch under the doubled clock.
+the pitch under the doubled clock; then the speech chips: the write decode,
+the engine's timing against the card's numbers, and the samples reaching
+the mix.
 
 **mb-audit** (`disks/mb-audit-v1.60.po` on the Pi), the reference test
 suite for the Mockingboard and its clones, is the hardware proof: it
