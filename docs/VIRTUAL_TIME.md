@@ -73,7 +73,9 @@ fault counted in `overflows`, dropped, and still counted as a cycle.
 counts.
 
 **The host** (`src/pipeline.cpp`): a fast word is a cycle to the beam
-while the last mark said virtual.  Frames then arrive at the core's rate -
+while the last mark said virtual - and to the sound (2026-09-05: the
+speaker's toggles are fast words in the closed regime, and a PWM sample
+player that lost those cycles played a semitone sharp at 1x).  Frames then arrive at the core's rate -
 sixty a real frame at 60x - and the display can show one in N, so the
 host DECIDES AT THE MARK whether the frame that starts there will be
 shown (the display's own period has elapsed since the last one it drew).

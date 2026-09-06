@@ -77,11 +77,11 @@ the first AY deselects the second, a LATCH to the second selects both and
 gives the first the same register, and a WRITE to the first also writes a
 selected second; RESET' low resets both of a VIA's AYs whatever the mode or
 the selects (GH#1197).  VIA 0's pair is the left channel, VIA 1's the right,
-each pair at AppleWin's 2/3 so six voices flat out stay in range; a Phasor
-in Mockingboard mode is therefore a shade quieter than the Mockingboard
-was, as it is in AppleWin.  A Mockingboard ticks two chips, a Phasor four -
-the sound is the decoder's biggest per-cycle cost, so the extra pair is
-only paid for when asked.
+each pair summed at full level - not AppleWin's 2/3, which made a Phasor in
+Mockingboard mode a third quieter than the Mockingboard and was heard as
+such on 2026-09-05; six voices flat out clip at the rail instead.  A
+Mockingboard ticks two chips, a Phasor four - the sound is the decoder's
+biggest per-cycle cost, so the extra pair is only paid for when asked.
 
 **Not there.**  The Echo+ disk's TMS5220 detection, which AppleWin also
 leaves out.
