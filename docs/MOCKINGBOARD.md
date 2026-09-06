@@ -3,7 +3,8 @@
 Status: **✅ proven on hardware (Total Replay, megademo; the Phasor and its
 SSI-263 speech chips through mb-audit 2026-09-05, the Phasor-with-SSI263
 after-reset stages included; mb-audit under acceleration - mode 2 at 1x,
-the switch lever on - since 2026-09-06, "The claim is one commit's").**
+the switch lever on - since 2026-09-06, "The claim is one commit's"; fw 53ee949 /
+host 1060668, SRAM).**
 
 A Mockingboard is two 6522 VIAs the CPU talks to at `$Cn00-$CnFF`, each wired
 to an AY-3-8913 sound chip the CPU cannot see: VIA port A is the AY's data
