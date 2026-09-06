@@ -315,6 +315,12 @@ could never do the one thing Open-Apple is for. That is exactly how the
 boot menu cold-boots (BOOT_MENU.md): the host holds Open-Apple down across
 the release and the machine takes its own cold path.
 
+**In the closed regime** the buttons are sampled by the driver's dummy
+cycles and a program's `$C061`-`$C063` reads are served on the card from
+the sample, the override applied there too (CXXX.md "The game port");
+the substitution below is the bus's case, and a dummy is a sample it
+never lands on.
+
 **`BUTTONS`, `0x8000_0020`** in `rtl/wb_regfile.sv`:
 
 ```
@@ -349,8 +355,11 @@ at exit.
   access; the machine's next `$C010` does it, and `touched` records that
   there was something to clear.
 - **The paddles and `PTRIG`.** Timers, a different problem.
-- **A scancode keymap.** `apple_keys` starts from characters; a USB keyboard
-  on the Pi will have to produce characters first, then feed the same rules.
+- **A scancode keymap.** `apple_keys` starts from characters. The USB
+  keyboard on the Pi (host `pi_keyboard.cpp` / `pi_keymap.cpp`, 2026-09-05)
+  maps its key codes to the Apple's bytes on the host and presses them
+  through the same register - as *live* keys, the newest pressed over an
+  unresolved one, which is what `replaced` is for. The card is unchanged.
 - **A ][+ strobe rule on the card.** See above: the IIe rule loses nothing
   on a ][+ except the rare case of a program clearing the strobe by reading
   `$C011-$C01F`, which then leaves an injected key visible at `$C000` until

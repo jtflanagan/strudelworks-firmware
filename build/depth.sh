@@ -34,7 +34,7 @@ if [ -z "$VIVADO" ]; then
 fi
 [ -n "$VIVADO" ] || { echo "No Vivado found - see build/build.sh" >&2; exit 1; }
 
-DCP="${DCP:-/mnt/c/temp/strudelworks-build-master/strudelworks.runs/impl_1/master_top_routed.dcp}"
+DCP="${DCP:-/mnt/c/temp/strudelworks-build-master-${BOARD:-pt_v2}/strudelworks.runs/impl_1/master_top_routed.dcp}"
 if [ ! -f "$DCP" ]; then
   echo "No routed checkpoint at $DCP - run build/build.sh --master first," >&2
   echo "or point at one with DCP=/mnt/c/... build/depth.sh" >&2

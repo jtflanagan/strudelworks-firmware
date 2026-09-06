@@ -225,6 +225,47 @@ module apple_mmu (
     // classifier below, combinational.  rtl/accel_seq.sv decides on it.
     input  wire        q_rw,
     output wire [1:0]  q_cls,
+    // ...and the internalized ops' question beside it (docs/CXXX.md, "The
+    // switch reads in the closed regime" and "The switch writes"): would an
+    // op at q_addr be one the card answers itself?  A READ: the status page
+    // from this shadow, the keyboard from the parked-dummy latch, $C019 from
+    // the VBL lock, a floating value from the floating-bus simulator.  A
+    // WRITE: a switch whose whole effect is this shadow's - the memory-
+    // mapping and IOU strobes of $C00x, the video toggles, the language
+    // card - and NOT INTCXROM/SLOTC3ROM, which the motherboard must keep
+    // seeing (they route I/O SELECT' to the slots; header).  swi_stat_byte
+    // is the status page's answer for the REGISTERED op (op_addr, stable
+    // through the fast sequence).  q_swi_quiet says the op would change no
+    // switch, so its word can stay off a sparse stream (a vapor-lock poll of
+    // $C054 at the core's pace would flood the link otherwise).
+    input  wire        swi_on,        // the closed-regime level, chicken bit included
+    input  wire        swi_kbd_ok,    // the keyboard latch holds a byte
+    input  wire        swi_fb_ok,     // fb_sim can answer a floating read
+    input  wire        swi_vbl_ok,    // the VBL lock stands
+    input  wire        swi_vbl_bar,   // ...and this is the IIe's $C019 bit 7 now
+    input  wire [6:0]  swi_kbd_low,   // the keyboard latch's low bits, under bit 7
+    input  wire        swi_pb_ok,     // the game port's buttons are sampled (rtl/game_port.sv)
+    input  wire        swi_pdl_ok,    // ...and a paddle measurement has completed
+    // The card's OWN slots (docs/CXXX.md, "The on-card slots"): the hard
+    // disk's, the floppy's and the Mockingboard's slot numbers, 0 = none.
+    // An access a peripheral on this card would answer - its DEVICE SELECT
+    // range $C0n0-$C0nF, or its I/O SELECT page $Cn00-$CnFF while the slot
+    // owns it - is served on the card in the closed regime: q_slot marks
+    // it, and q_swi includes it.
+    input  wire [2:0]  swi_hd_slot,
+    input  wire [2:0]  swi_fd_slot,
+    input  wire [2:0]  swi_mb_slot,
+    input  wire [2:0]  swi_mouse_slot,
+    input  wire [2:0]  swi_u2_slot,    // the Uthernet II: DEVICE SELECT only, it has no ROM
+    output wire        q_swi,
+    output wire        q_swi_quiet,
+    output wire        q_slot,
+    output wire [7:0]  swi_stat_byte,
+    // ...and the No-Slot Clock's (rtl/no_slot_clock.sv): is q_addr in a
+    // page the clock listens at - the internal ROM's $C3 while that page is
+    // the internal ROM's, or its $C8 while the internal ROM is there.  Every
+    // mode, serving or not: the clock is a part under the ROM, not a serve.
+    output wire        q_nsc,
 
     // ...and the instruction front's (rtl/iline.sv): classify a READ of
     // p_addr - a line about to be prefetched - into its class, its bank side
@@ -264,7 +305,7 @@ module apple_mmu (
     // ---- the switches ----------------------------------------------------------
     logic store80, ramrd, ramwrt, intcxrom, altzp, slotc3rom;
     logic page2, hires;
-    logic text, mixed, col80;
+    logic text, mixed, col80, altchar;
     logic lc_bank2, lc_ramrd, lc_wren, lc_prewrite;
 
     assign sw_state = {lc_prewrite, lc_wren, lc_ramrd, lc_bank2,
@@ -293,6 +334,7 @@ module apple_mmu (
             text        <= 1'b1;       // the IOU's reset state: 40-column text
             mixed       <= 1'b0;
             col80       <= 1'b0;
+            altchar     <= 1'b0;
             lc_bank2    <= 1'b1;
             lc_ramrd    <= 1'b0;
             lc_wren     <= 1'b1;
@@ -310,7 +352,7 @@ module apple_mmu (
                     3'd4: altzp     <= op_addr[0];
                     3'd5: slotc3rom <= op_addr[0];
                     3'd6: col80     <= op_addr[0];
-                    default: ;
+                    3'd7: altchar   <= op_addr[0];
                 endcase
             end
             // $C071/$C073: the RamWorks bank, if it exists.
@@ -386,6 +428,137 @@ module apple_mmu (
 
     wire [2:0] q_class = classify(q_addr, q_rw);
     assign q_cls = q_class[2:1];
+
+    // ---- the internalized ops' question, beside q_cls --------------------------
+    // A shallow decode of the live address - range matches ANDed with
+    // registered levels, nothing like the classifier's depth - registered
+    // into the sequencer's dq_* set exactly as q_cls is.
+    //
+    // READS: the status page $C011-$C01F (bit 7 from the shadow over the
+    // keyboard latch's low bits, as the IOU serves them; $C019 only with
+    // the VBL lock), the keyboard $C00x (the parked-dummy latch), and the
+    // floating-value reads a program watches the beam through - $C050-$C057
+    // (the video toggles, their effect on this shadow at the synthetic
+    // commit as at a bus commit) and $C080-$C08F (the language card,
+    // likewise) - when fb_sim can answer.  $C010 is the real strobe's and
+    // rides the bus; so do $C058-$C05F (annunciators, DHIRES - the shadow
+    // does not carry them).
+    //
+    // ...and the game port (rtl/game_port.sv): the buttons $C061-$C063
+    // once sampled, the paddle timers $C064-$C067 and the strobe $C070-
+    // $C07F by READ once a measurement stands.  $C060 (the cassette) and
+    // $C068-$C06F are nobody's; a $C07x WRITE stays on the bus, the
+    // RamWorks bank register being two of them.
+    //
+    // WRITES: the strobes of $C00x whose whole effect is this shadow's -
+    // 80STORE, RAMRD, RAMWRT, ALTZP, 80COL, ALTCHAR - and the same $C050-
+    // $C057 and $C080-$C08F, their data irrelevant (the address is the
+    // switch).  A write returns no byte, so none needs fb_sim.  NOT
+    // internalized, by design: $C006/7 INTCXROM and $C00A/B SLOTC3ROM.
+    // They are the two switches that decide whether a $Cnxx bus cycle
+    // reaches a slot (I/O SELECT', I/O STROBE' via INTC8ROM), and the
+    // motherboard must see every write to them so that when this card DOES
+    // put a slot access on the bus - and it only does so when this shadow
+    // says the slot owns the page - the motherboard routes it the same
+    // way.  The four on-card peripherals track them from the driven stream
+    // too (rtl/slot_switches.sv).  $C010-$C01F writes are the strobe's.
+    wire [3:0] qi_hi = q_addr[7:4];
+    wire [3:0] qi_lo = q_addr[3:0];
+    wire qi_io   = (q_addr[15:8] == 8'hC0);
+    wire qi_c05x = (qi_hi == 4'h5) && !qi_lo[3];              // $C050-$C057
+    wire qi_c08x = (qi_hi == 4'h8);
+    wire qi_c00w = (qi_hi == 4'h0) && (qi_lo[3:1] != 3'd3) && (qi_lo[3:1] != 3'd5);
+    // ...and the speaker, $C030-$C03F (docs/CXXX.md, "The speaker"): every
+    // access toggles the flip-flop, the host's sound follows the word, and
+    // the motherboard's own cone is silent for it - the byte a read gets is
+    // the floating bus's, fb_sim's when it can answer; a write is served
+    // regardless.  Never quiet: each access is a toggle.
+    wire qi_c03x = (qi_hi == 4'h3);
+    wire qi_c06b = (qi_hi == 4'h6) && (qi_lo[3:2] == 2'b00) && (qi_lo[1:0] != 2'b00);   // $C061-$C063
+    wire qi_c06p = (qi_hi == 4'h6) && (qi_lo[3:2] == 2'b01);                             // $C064-$C067
+    wire qi_c07x = (qi_hi == 4'h7);
+    wire qi_rd   = (qi_hi == 4'h0) ? swi_kbd_ok
+                 : (qi_hi == 4'h1) ? ((qi_lo != 4'h0) && (qi_lo != 4'h9 || swi_vbl_ok))
+                 : (qi_c05x || qi_c08x || qi_c03x) ? swi_fb_ok
+                 : qi_c06b ? swi_pb_ok
+                 : (qi_c06p || qi_c07x) ? swi_pdl_ok
+                 : 1'b0;
+    wire qi_wr   = qi_c00w || qi_c05x || qi_c08x || qi_c03x;
+    // The on-card slots.  DEVICE SELECT' is never gated by a switch; I/O
+    // SELECT' is the slot's only while INTCXROM is clear and, for slot 3,
+    // SLOTC3ROM set - the same rule the classifier and rtl/slot_switches.sv
+    // apply, so an access this says is the slot's is one the classifier
+    // calls BUS.  Reads and writes alike: a write to a slot's ROM page
+    // lands nowhere on a real card too.  The VidHD's slot is NOT here (its
+    // signature ROM read rides the bus, as before).
+    function automatic slot_page(input [2:0] n);
+        slot_page = (n != 3'd0) && (q_addr[15:12] == 4'hC) && (q_addr[11:8] == {1'b0, n}) &&
+                    !intcxrom && !(n == 3'd3 && !slotc3rom);
+    endfunction
+    function automatic slot_dev(input [2:0] n);
+        slot_dev = (n != 3'd0) && qi_io && q_addr[7] && (q_addr[6:4] == n);
+    endfunction
+    assign q_slot = swi_on && (slot_dev(swi_hd_slot) || slot_dev(swi_fd_slot) || slot_dev(swi_mouse_slot) ||
+                               slot_dev(swi_u2_slot) ||
+                               slot_page(swi_hd_slot) || slot_page(swi_fd_slot) || slot_page(swi_mb_slot) ||
+                               slot_page(swi_mouse_slot));
+    assign q_swi = swi_on && ((qi_io && (q_rw ? qi_rd : qi_wr)) || q_slot);
+    assign q_nsc = ((q_addr[15:8] == 8'hC3) && (intcxrom || !slotc3rom)) ||
+                   ((q_addr[15:8] == 8'hC8) && (intcxrom || intc8rom));
+    // Quiet: a $C050-$C057 op, or a $C00x write, whose switch already holds
+    // the value the address sets.  The language card's ops are never quiet
+    // (the prewrite state moves on every one), and the rest change nothing
+    // on the host's side either way.
+    logic qi_same5, qi_same0;
+    always_comb begin
+        case (qi_lo[2:1])
+            2'd0: qi_same5 = (text  == qi_lo[0]);
+            2'd1: qi_same5 = (mixed == qi_lo[0]);
+            2'd2: qi_same5 = (page2 == qi_lo[0]);
+            default: qi_same5 = (hires == qi_lo[0]);
+        endcase
+        case (qi_lo[3:1])
+            3'd0: qi_same0 = (store80 == qi_lo[0]);
+            3'd1: qi_same0 = (ramrd   == qi_lo[0]);
+            3'd2: qi_same0 = (ramwrt  == qi_lo[0]);
+            3'd4: qi_same0 = (altzp   == qi_lo[0]);
+            3'd6: qi_same0 = (col80   == qi_lo[0]);
+            3'd7: qi_same0 = (altchar == qi_lo[0]);
+            default: qi_same0 = 1'b0;
+        endcase
+    end
+    // The I/O page only: qi_c05x/qi_c00w are low-byte decodes, and an on-card
+    // slot's I/O SELECT page shares them - a Mockingboard write to $C400 with
+    // 80STORE clear looked like a quiet 80STORE write and its word was
+    // dropped, starving the host's sound of VIA0 (found on hardware,
+    // megademo, 2026-09-04).
+    assign q_swi_quiet = qi_io && ((qi_c05x && qi_same5) || (!q_rw && qi_c00w && qi_same0));
+
+    // The status page's byte, for the REGISTERED op: the switch in bit 7 -
+    // $C019 is the IIe's VBL', low while the beam is in blanking - over the
+    // keyboard latch's low bits.
+    logic swi_stat_bit;
+    always_comb begin
+        case (op_addr[3:0])
+            4'h1: swi_stat_bit = lc_bank2;
+            4'h2: swi_stat_bit = lc_ramrd;
+            4'h3: swi_stat_bit = ramrd;
+            4'h4: swi_stat_bit = ramwrt;
+            4'h5: swi_stat_bit = intcxrom;
+            4'h6: swi_stat_bit = altzp;
+            4'h7: swi_stat_bit = slotc3rom;
+            4'h8: swi_stat_bit = store80;
+            4'h9: swi_stat_bit = swi_vbl_bar;
+            4'hA: swi_stat_bit = text;
+            4'hB: swi_stat_bit = mixed;
+            4'hC: swi_stat_bit = page2;
+            4'hD: swi_stat_bit = hires;
+            4'hE: swi_stat_bit = altchar;
+            4'hF: swi_stat_bit = col80;
+            default: swi_stat_bit = 1'b0;
+        endcase
+    end
+    assign swi_stat_byte = {swi_stat_bit, swi_kbd_low};
 
     // ---- the instruction front's query ------------------------------------------
     // A read's classification and steering for a line address: the same

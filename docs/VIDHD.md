@@ -38,6 +38,8 @@ while SLOTC3ROM is set and INTCXROM clear. VIDHD_SLOT (`0x8000_006C`) names
 the slot with HD_SLOT's contract: written any time, latched at the next RES'
 (or a boot-hold release), and it yields to the Mockingboard, the hard disk and
 the floppy alike - a clash latches 0, and the host checks the readback.
+One card may share its slot: the Uthernet II (UTHERNET2.md), which claims
+only the device-select range `$C0n0-$C0nF` that a VidHD never answers.
 
 The card never takes a cycle and never drives one it did not claim. Master
 builds only, like every peripheral here: a watching build has nothing to

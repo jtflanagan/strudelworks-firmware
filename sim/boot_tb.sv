@@ -53,6 +53,10 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                  parameter integer SWINT_DIS = 0,
                  parameter integer HOST_DELAY = 2000,   // clks, EXECUTE->answer
                  parameter integer MAX_CYCLES = 2_000_000,  // bus-cycle advances
+                 parameter integer MB_SLOT = 4,            // a Phasor there (0 = none)
+                 parameter integer PRESS_KEY = 0,          // a key to press when...
+                 parameter integer PRESS_ROW = 4,          // ...this text-page row...
+                 parameter string  PRESS_AT = "SELECT",    // ...starts with this
                  parameter integer MAX_CLKS = 400_000_000,
                  parameter integer PHI0_HIGH = 49);
 
@@ -142,7 +146,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cyc_is_i (cpu_cyc_is_i), .i_addr (), .pc_addr (cpu_pc_addr), .i_pred (), .d_addr (), .d_rw (), .d_dout (),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .p_flags (cpu_p_flags),
-        .irq_n (1'b1), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
+        .irq_n (!mb_irq), .nmi_n (1'b1), .sync (cpu_sync), .halted ()
     );
 
     // ACCEL_CTRL, as the host's configuration would set it.
@@ -213,14 +217,54 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire sw_int = accel_on && (mode == 2'd2) && serve && !swint_dis && !held;
     wire        swi_commit, kbd_int_ok;
     wire [7:0]  kbd_int_byte;
-    wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+    // The on-card slot (the hard disk, docs/CXXX.md "The on-card slots"):
+    // master_top's peripheral view, wired the same way here.
+    wire        q_slot, seq_slot_q, sl_win, hd_exec_q;
+    wire        hd_rd_claim;
+    wire [7:0]  hd_rd_data;
+    // ...and a Phasor in slot 4 (MB_SLOT), for mb-audit: the same view.
+    wire        mb_rd_claim, mb_irq, seq_fast_tick_w;
+    wire [7:0]  mb_rd_data;
+    wire [39:0] mb_ay_out;
+    wire [7:0]  slot_rd_data = hd_rd_claim ? hd_rd_data : mb_rd_data;
+    // A key the bench presses (PRESS_KEY when the text page shows PRESS_AT).
+    reg         press = 1'b0;
+    reg  [6:0]  press_key = 7'd0;
+    wire        kbd_int_rd = swi_commit && u_rw && !seq_slot_q && (u_addr[15:4] == 12'hC00);
+    // ...and the rest of the internalized reads (docs/CXXX.md), as
+    // master_top wires them.  No fb_sim here: the machine's floating byte
+    // is the model's constant (FLOAT, 8'hA5), and $C019 stays on the bus
+    // (no VBL lock in this bench).
+    wire        q_swi, q_swi_quiet;
+    wire [7:0]  mmu_swi_stat;
+    wire [6:0]  kbd_int_low;
+    wire [7:0]  swi_byte = seq_slot_q             ? slot_rd_data
+                         : (u_addr[7:4] == 4'h0) ? kbd_int_byte
+                         : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
+                         : 8'hA5;
+    wire        sl_present = u_present && seq_slot_q;
+    wire        sl_commit  = swi_commit && seq_slot_q;
+    wire        p_present  = sl_win ? sl_present : op_present;
+    wire        p_commit   = sl_win ? sl_commit  : op_commit;
+    wire        p_ovr      = sl_win ? 1'b0       : op_ovr;
+    wire [15:0] p_addr     = sl_win ? u_addr     : op_addr;
+    wire        p_rw       = sl_win ? u_rw       : op_rw;
+    wire [7:0]  p_wdata    = sl_win ? u_wdata    : op_wdata;
+    reg         sl_claim_fast = 1'b0;
+    always @(posedge clk) begin
+        if (rst)                          sl_claim_fast <= 1'b0;
+        else if (sl_present)              sl_claim_fast <= 1'b1;
+        else if (op_present && !sl_win)   sl_claim_fast <= 1'b0;
+    end
+    wire        hd_rd_claim_bus = (hd_rd_claim || mb_rd_claim) && !sl_claim_fast;
+    wire        p_dummy    = sl_win ? 1'b1       : op_dummy;
     kbd_inject u_kbdi (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .master_active (master_active),
         .park_kbd (sw_int), .op_dummy (op_dummy),
         .int_rd (kbd_int_rd), .int_ok (kbd_int_ok),
-        .int_byte (kbd_int_byte), .int_low (),
-        .press (1'b0), .press_key (7'd0), .drop (1'b0), .lock (1'b0),
+        .int_byte (kbd_int_byte), .int_low (kbd_int_low),
+        .press (press), .press_key (press_key), .drop (1'b0), .lock (1'b0),
         .hotkey_en (1'b0), .hotkey (7'd0), .held (held),
         .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
         .data_sync (data_sync),
@@ -233,7 +277,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
-        .swi_on (sw_int), .swi_ok (kbd_int_ok), .swi_byte (kbd_int_byte), .swi_commit (swi_commit),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (seq_fast_tick_w), .fev_quiet (),
+        .q_slot (q_slot), .slot_q_o (seq_slot_q), .sl_win (sl_win),
+        .stall (1'b0),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
@@ -312,15 +358,15 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
-        .master_active (master_active), .park_kbd (sw_int),
+        .master_active (master_active), .park_kbd (sw_int), .park_addr (16'hC000),
         .bus_owns (bus_owns), .core_valid (core_valid),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
         .drv_sync (drv_sync), .cyc_en (drv_cyc_done), .cpu_din (drv_din),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
-        .slot_rd_claim (hd_rd_claim), .slot_rd_data (hd_rd_data),
+        .slot_rd_claim (hd_rd_claim_bus), .slot_rd_data (slot_rd_data),
         .din_sub_en (sub_en), .din_sub_data (sub_data),
-        .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw), .ovr_wdata (ovr_wdata),
+        .ovr_en (ovr_en && !sl_win), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw), .ovr_wdata (ovr_wdata),
         .op_ovr (op_ovr), .op_dummy (op_dummy), .op_inflight (op_inflight),
         .nxt_addr (nxt_addr), .divert (serve && q_divert), .op_divert (op_divert),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
@@ -375,6 +421,11 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
+        .swi_on (sw_int), .swi_kbd_ok (kbd_int_ok), .swi_fb_ok (1'b1),
+        .swi_vbl_ok (1'b0), .swi_vbl_bar (1'b1), .swi_kbd_low (kbd_int_low),
+        .swi_pb_ok (1'b0), .swi_pdl_ok (1'b0),
+        .swi_hd_slot (3'(HD_SLOT)), .swi_fd_slot (3'd0), .swi_mb_slot (3'(MB_SLOT)), .swi_mouse_slot (3'd0), .swi_u2_slot (3'd0), .q_nsc (), .q_slot (q_slot),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_stat_byte (mmu_swi_stat),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .d_addr (dq_addr_w), .d_rw (dq_rw_w),
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
@@ -397,7 +448,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .rom_byte (rom_byte), .rom_loaded (1'b1),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
-        .fb_addr (16'd0), .fb_byte (),
+        .mw_stb (), .mw_addr (), .mw_byte (),
         .il_req (il_req | dl_req_w), .il_aux (il_req ? il_aux_w : dl_aux_w),
         .il_bank (il_req ? il_bank_w : dl_bank_w), .il_line (il_req ? il_line_w : dl_line_w),
         .il_ack (il_ack), .il_ok (il_ok), .il_row (il_row),
@@ -501,22 +552,59 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        hd_tx_valid;
     wire        hd_rom_loaded, hd_busy;
     wire [7:0]  hd_execs;
-    wire        hd_rd_claim;
-    wire [7:0]  hd_rd_data;
 
     hd_card u_hd (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .res_sync (res_sync),
         .master_active (master_active), .slot_assign (3'(HD_SLOT)),
-        .op_addr (op_addr), .op_rw (op_rw), .op_present (op_present),
-        .op_commit (op_commit), .op_ovr (op_ovr), .din (drv_din),
+        .op_addr (p_addr), .op_rw (p_rw), .op_present (p_present),
+        .op_commit (p_commit), .op_ovr (p_ovr), .din (drv_din),
         .ovr_en (hd_ovr_en), .ovr_addr (hd_ovr_addr), .ovr_rw (hd_ovr_rw),
         .ovr_wdata (hd_ovr_wdata),
         .rd_claim (hd_rd_claim), .rd_data (hd_rd_data),
         .msg_valid (hmsg_valid), .msg_type (hmsg_type), .msg_free (hmsg_free),
         .msg_len (hmsg_len), .pay_data (hpay_data), .pay_valid (hpay_valid),
         .tx_word (hd_tx_word), .tx_valid (hd_tx_valid), .tx_take (hd_tx_valid),
-        .rom_loaded (hd_rom_loaded), .busy (hd_busy), .execs (hd_execs)
+        .rom_loaded (hd_rom_loaded), .busy (hd_busy), .execs (hd_execs), .exec_q (hd_exec_q)
     );
+
+    // ---- the Mockingboard/Phasor, as master_top wires it --------------------------
+    mockingboard u_mb (
+        .clk (clk), .rst (rst), .res_sync (res_sync), .master_active (master_active),
+        .slot_assign (3'(MB_SLOT)), .phasor (1'b1),
+        .op_addr (p_addr), .op_rw (p_rw), .op_wdata (p_wdata),
+        .op_present (p_present), .op_commit (p_commit), .op_dummy (p_dummy),
+        .fast_tick (seq_fast_tick_w || turbo_tick || dline_tick),
+        .bus_tick (bus_tick), .ay_realtime (1'b0), .ay_out (mb_ay_out),
+        .rd_claim (mb_rd_claim), .rd_data (mb_rd_data), .irq (mb_irq)
+    );
+
+    // ---- the key the bench presses -----------------------------------------------
+    // When row PRESS_ROW of the text page (the reference) starts with the
+    // string PRESS_AT, press PRESS_KEY once - mb-audit's menu wants an A.
+    reg pressed_once = 1'b0;
+    always @(posedge clk) begin
+        press <= 1'b0;
+        if (PRESS_KEY != 0 && !pressed_once && bus_cycles > 100000 && (bus_cycles % 20000) == 0 && fall) begin
+            if (screen_row_starts(PRESS_ROW, PRESS_AT)) begin
+                press <= 1'b1;
+                press_key <= 7'(PRESS_KEY);
+                pressed_once <= 1'b1;
+                $display("boot_tb: pressing %c at %0d bus cycles", PRESS_KEY, bus_cycles);
+            end
+        end
+    end
+    function automatic screen_row_starts(input integer r, input string what);
+        integer base, c;
+        reg [7:0] ch;
+        begin
+            base = 'h400 + (r % 8) * 'h80 + (r / 8) * 'h28;
+            screen_row_starts = 1'b1;
+            for (c = 0; c < what.len(); c = c + 1) begin
+                ch = ref_main[base + c] & 8'h7F;
+                if (ch != what[c]) screen_row_starts = 1'b0;
+            end
+        end
+    endfunction
 
     // ---- the DDR3 stub: the aux region, in order, twelve clocks late ----------------
     // RamWorks banks 0-3, and nothing else: main memory lives in the card's
@@ -650,6 +738,35 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             end
         end
     endtask
+
+    // The machine's side of a synthetic commit: an internalized read or
+    // write of a switch moves the model's switches as the pins would have
+    // (docs/CXXX.md, "The switch writes"): a write's address is the
+    // switch; the language card's A0 = 1 on a WRITE clears prewrite and
+    // leaves the enable alone.  INTCXROM/SLOTC3ROM never come this way.
+    // ...and only for the I/O page: an on-card slot's ROM page ($C78x, say)
+    // retires with a synthetic commit too, and its low byte is no switch.
+    always @(posedge clk) if (swi_commit && u_addr[15:8] == 8'hC0) begin
+        c0_touch(u_addr[7:0]);
+        if (!u_rw && u_addr[7:4] == 4'h0) begin
+            case (u_addr[3:1])
+                3'd0: m_store80 <= u_addr[0];
+                3'd1: m_ramrd   <= u_addr[0];
+                3'd2: m_ramwrt  <= u_addr[0];
+                3'd4: m_altzp   <= u_addr[0];
+                3'd6: m_80col   <= u_addr[0];
+                3'd7: m_altchar <= u_addr[0];
+                default: ;
+            endcase
+        end
+        if (u_addr[7:4] == 4'h8) begin
+            m_bank2 <= !u_addr[3];
+            m_lcrd  <= (u_addr[1] == u_addr[0]);
+            if (!u_addr[0]) begin m_wren <= 0; m_pre <= 0; end
+            else if (u_rw) begin if (m_pre) m_wren <= 1; m_pre <= 1; end
+            else m_pre <= 0;
+        end
+    end
 
     function automatic [7:0] cx_byte(input [15:0] a);
         logic [3:0] page;
@@ -801,9 +918,14 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             end
         end
     end
+    // A fast read of the hard disk's port is the card's own answer (busy, a
+    // status, a size byte) - nothing in the reference models it, and the bus
+    // path never checked it either (the pins carried hd_card's byte back):
+    // the ROM page IS checked, through cx_byte's hd_rom.
+    wire fev_hd_port = (fev_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)});
     always @(posedge clk) if (fev_valid && fev_rw) begin
         reads = reads + 1; fast_reads = fast_reads + 1;
-        if (fev_data !== exp_read(fev_addr)) begin
+        if (!fev_hd_port && fev_data !== exp_read(fev_addr)) begin
             reads_bad = reads_bad + 1;
             if (reads_bad <= 20) $display("[%0t] BAD fast read $%04X: core got %02x, the reference says %02x",
                                           $time, fev_addr, fev_data, exp_read(fev_addr));
@@ -970,12 +1092,14 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     endtask
 
-    // The mirror taps the driver's stream, as the real host taps the capture.
+    // The mirror taps the peripherals' view of the stream - the driver's
+    // ops, and the on-card slot ops served fast in the closed regime - as
+    // the real host taps the capture (bus words and fast words alike).
     always @(posedge clk) begin
-        if (op_present && !op_ovr && !op_rw && op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
-            hm_io_write(op_addr[3:0], op_wdata);
-        if (op_commit && !op_ovr && op_rw && op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
-            if (op_addr[3:0] == 4'h0) hm_io_read0();
+        if (p_present && !p_ovr && !p_rw && p_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
+            hm_io_write(p_addr[3:0], p_wdata);
+        if (p_commit && !p_ovr && p_rw && p_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
+            if (p_addr[3:0] == 4'h0) hm_io_read0();
     end
     // RES' drops what the card drops.
     reg res_prev = 1'b1;

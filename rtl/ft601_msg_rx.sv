@@ -66,6 +66,11 @@ module ft601_msg_rx (
     localparam [7:0] T_FD_TRACK   = 8'h1F;
     localparam [7:0] T_MEM_ROM    = 8'h22;   // rtl/apple_rom.sv
     localparam [7:0] T_VIDHD_ROM  = 8'h23;   // rtl/vidhd_card.sv
+    localparam [7:0] T_MOUSE_MOVE = 8'h25;   // rtl/mouse_card.sv
+    localparam [7:0] T_MOUSE_ROM  = 8'h26;
+    localparam [7:0] T_NSC_TIME   = 8'h27;   // rtl/no_slot_clock.sv
+    localparam [7:0] T_U2_RX      = 8'h2A;   // rtl/uthernet2_card.sv
+    localparam [7:0] T_U2_STAT    = 8'h2B;
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -86,7 +91,9 @@ module ft601_msg_rx (
                      (hdr_type == T_HD_ROM)    || (hdr_type == T_HD_DONE)    ||
                      (hdr_type == T_HD_FETCH)  || (hdr_type == T_FD_ROM)     ||
                      (hdr_type == T_FD_TRACK)  || (hdr_type == T_MEM_ROM)    ||
-                     (hdr_type == T_VIDHD_ROM);
+                     (hdr_type == T_VIDHD_ROM) || (hdr_type == T_MOUSE_MOVE) ||
+                     (hdr_type == T_MOUSE_ROM)  || (hdr_type == T_NSC_TIME)   ||
+                     (hdr_type == T_U2_RX)      || (hdr_type == T_U2_STAT);
 
     always_ff @(posedge clk) begin
         if (rst) begin

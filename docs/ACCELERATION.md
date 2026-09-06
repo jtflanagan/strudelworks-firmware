@@ -88,7 +88,11 @@ Nothing else sends an op to the bus. **What is slow is a matter of class
 alone**, the rule the user set: a `$Cxxx` access that is not the motherboard's
 own ROM - the I/O page, every slot's I/O and ROM pages, a slot's expansion
 ROM, on this card or in a socket - is BUS class and rides a real cycle, in
-every mode; a read the card's memory answers is fast. There is no hold-off
+every mode; a read the card's memory answers is fast.  (Revised
+2026-09-04, CXXX.md "The on-card slots": in the closed regime an access
+one of THIS card's peripherals answers - the hard disk's, the floppy's,
+the Mockingboard's - is served on the card; a slot in a socket still
+rides the bus.)  There is no hold-off
 after a slot access and no rule about a drive turning; a peripheral's code
 runs at the bus's pace exactly as far as it touches the bus.
 
@@ -323,6 +327,11 @@ this regime, commit 15c8444 there, is the reference): the status page
 `$C08x`, the RamWorks bank; a menu hotkey found by the parked dummies
 themselves, which would let Ctrl-6 work in a program that never polls.
 
+**Extended 2026-09-03** to the status page, `$C019` and the floating
+toggles - the same S_FAST ride and synthetic commit, the byte from
+whichever authority owns the address: docs/CXXX.md, "The switch reads in
+the closed regime".
+
 ## The census (2026-09-02)
 
 At 58x on hardware (Nox, moving about the map) the counters put 92% of
@@ -334,8 +343,11 @@ is WHICH reads those are.  A full trace would say but wedges the link at
 this speed, so the sequencer counts them: ACCEL_FAST_I (I-stream fetches
 the front missed or declined), ACCEL_FAST_DRAM (data reads the data
 front missed), ACCEL_FAST_DLC, ACCEL_FAST_DROM ($D000+), ACCEL_FAST_DCX
-(the internal ROM's tables in $Cxxx), ACCEL_FAST_WR, ACCEL_FAST_KBD -
-seven exclusive buckets that sum to ACCEL_FAST, cleared with the rest.
+(the internal ROM's tables in $Cxxx), ACCEL_FAST_WR (every write the
+dispatcher retired, an internalized switch write included - CXXX.md,
+"The switch writes"), ACCEL_FAST_KBD (every internalized READ: the
+keyboard, the status page, the floating toggles and the LC) - seven
+exclusive buckets that sum to ACCEL_FAST, cleared with the rest.
 The host polls them while accelerating and `swctl accel status` reports
 them after the ratio.
 
@@ -346,7 +358,9 @@ ACCEL_CTRL    0x8000_008C   [1:0] mode: 0 off, 1 reads on the card / writes on
                             the bus, 2 reads and writes on the card; [23:8]
                             target, ops per bus cycle, 8.8, 0 = unlimited;
                             [28] swint_dis: the keyboard not internalized,
-                            dummies at $0000 (a level); [31] W1 clear counters
+                            dummies at $0000 (a level); [27] game_dis: the
+                            game port not internalized, dummies at $C000
+                            alone (CXXX.md "The game port"); [31] W1 clear counters
 ACCEL_STAT    0x8000_0090   [0] accelerating; [1] held by the governor;
                             [3] bus_owns; [7:4] state; [15:8] merge overflows
                             (must be 0); [23:16] fast ops decided twice;
@@ -355,10 +369,13 @@ ACCEL_FAST    0x8000_0094   fast ops
 ACCEL_BUS     0x8000_0098   the core's ops that rode a bus cycle
 ACCEL_CYCLES  0x8000_009C   bus cycles while accelerating
 ACCEL_WAIT    0x8000_00A0   clocks the core spent waiting to merge
+GAME_STAT/2   0x8000_00C8/CC  the game port's samples: the buttons' levels,
+                            the four paddles' timer counts (CXXX.md "The game port")
 ACCEL_FAST_I .. ACCEL_FAST_KBD  0x8000_00AC .. 0x8000_00C4   the census of
                             ACCEL_FAST: I-stream fetches, data reads of
-                            RAM / LC / ROM $D000+ / ROM $Cxxx, writes, the
-                            keyboard - seven buckets that sum to it
+                            RAM / LC / ROM $D000+ / ROM $Cxxx, writes
+                            (internalized switch writes included), the
+                            internalized reads - seven buckets that sum to it
 ```
 
 Levels, like MEM_CTRL's, safe under a running machine - with **one rule**:
@@ -471,7 +488,9 @@ design, its rules and its books: docs/ISTREAM.md.
 - **A hold-off after a slot access** (a TransWarp's "slot speed", or a
   Disk II's motor): the core at the bus's pace for a while around a slot's
   I/O. Not asked for; word 41 of the register map is left for it if it is.
-- **Any slot's ROM served from the card**: BUS, always, by the rule above.
+- **A socket's slot served from the card**: BUS, always, by the rule above.
+  (The card's OWN slots are served on the card since 2026-09-04, CXXX.md
+  "The on-card slots".)
 - **The periodic timestamp record** in the trace (DDR3_USAGE.md): a trace of
   an accelerated machine is not a cycle stream; the host flags it
   (`kFlagAccel`) and the replay tool refuses it, while the MMU check still

@@ -17,9 +17,14 @@
 // both ports.  1664 x 8 is one RAMB18; the buffer is two RAMB36 per drive.
 // The floating-bus simulator (rtl/fb_sim.sv) keeps its side copy of the
 // text and hi-res pages in two of these, deeper: AW is the address width.
-// A collision - both ports at one index, one of them writing - returns
-// stale data on the reader's port for that one access, and the bus side
-// refreshes its copy a few clocks later anyway.
+// A collision - both ports at one index, one of them writing - is the
+// defined case for a read-first writer (UG473, synchronous clocking): the
+// reader gets the byte as it was BEFORE the write, valid on hardware and
+// in the simulators alike.  The floppy's bus side refreshes its copy a few
+// clocks later anyway; the floating-bus copy WANTS the old byte, because
+// that is what the machine's scanner fetched (phi0-low comes before the
+// 6502's write at the end of phi0-high).  Two ports writing one index on
+// one clock is undefined, and nothing here does it.
 //////////////////////////////////////////////////////////////////////////////////
 module fd_bank #(
     parameter integer DEPTH = 1664,

@@ -187,7 +187,12 @@ module floppy_card #(
     output wire        q7_o,
     output logic [7:0] seeks,
     output logic [7:0] late,
-    output logic [15:0] fill_max
+    output logic [15:0] fill_max,
+    // The selected drive is turning with a disk in it and the buffer is not
+    // its track yet: the accelerated core must wait for the fill rather
+    // than read noise (rtl/accel_seq.sv stall; docs/VIRTUAL_TIME.md).  Not
+    // a bus-cycle matter: mode 0 never sees it.
+    output wire        stall_o
 );
 
     // ---- geometry ------------------------------------------------------------
@@ -298,6 +303,7 @@ module floppy_card #(
     wire spinning = (spin[s] != 20'd0);
     // The buffer is the selected drive's and holds the track under its head.
     wire usable   = drv_inserted[s] && !stale && (buf_drive == s);
+    assign stall_o = enabled && motor && drv_inserted[s] && !usable;
     // A fill is expected: the host owes the buffer a track.
     wire filling  = stale && drv_inserted[buf_drive] && (buf_track < tracks[buf_drive]);
 

@@ -30,9 +30,18 @@
 // signal is off: MIXED && V4 && V2 (AppleWin Video.cpp, UTAIIe 5-7 P3) -
 // V-state bits 7 and 5 both set.  That is lines 160-191 and 224-261 on NTSC
 // and NOT 192-223, which a "line >= 160" rule gets wrong; a program that
-// reads the floating bus during blanking in mixed hi-res cares.  The IIe
-// does not add $1000 during blanking in text mode as the ][ and ][+ do
-// (AppleWin's "HBL bug"); the card serves a IIe.
+// reads the floating bus during blanking in mixed hi-res cares.  AND ONE
+// CYCLE LATE: on the real IIe the choice changes one cycle after the line
+// does - cycle 0 of a line (the H state $00 cycle) still fetches with the
+// PREVIOUS line's choice, so cycle 0 of lines 192 and 0 reads the text page
+// and cycle 0 of lines 160 and 224 reads hi-res.  Measured on the machine
+// 2026-09-03: a nine-cycle LDA $C054 sweep of 65,536 reads (every phase of
+// the frame, ~35 frames) mismatched only at those cycles, ~8 per pass,
+// exactly one sampled cycle in nine of two per frame; with the rule in,
+// none.  AppleWin switches on the line boundary exactly and does not model
+// it.  scan_mixed_text_at carries the rule with the cycle; scan_mixed_text
+// is the per-line half.  The IIe does not add $1000 during blanking in text
+// mode as the ][ and ][+ do (AppleWin's "HBL bug"); the card serves a IIe.
 //
 // sim/vbl_lock_tb.sv and sim/fb_sim_tb.sv derive the same addresses from
 // Sather's counters themselves, independently, and the two agreeing on every
@@ -56,6 +65,18 @@ function automatic scan_mixed_text(input [8:0] line, input is_pal);
     begin
         vs = scan_vstate(line, is_pal);
         scan_mixed_text = vs[7] && vs[5];
+    end
+endfunction
+
+// The same, at a cycle: cycle 0 of any line still uses the line before
+// it (the line before line 0 is the frame's last).
+function automatic scan_mixed_text_at(input [8:0] line, input [6:0] hc, input is_pal);
+    logic [8:0] prev;
+    begin
+        prev = (line == 9'd0) ? ((is_pal ? SCAN_PAL_LINES : SCAN_NTSC_LINES) - 9'd1)
+                              : (line - 9'd1);
+        scan_mixed_text_at = (hc == 7'd0) ? scan_mixed_text(prev, is_pal)
+                                          : scan_mixed_text(line, is_pal);
     end
 endfunction
 

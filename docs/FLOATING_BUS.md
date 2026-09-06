@@ -1,14 +1,20 @@
 # The floating bus, simulated
 
-> **On branch `page_cache` the side copy is GONE**: main memory lives whole
-> in the page cache's main bank (docs/PAGE_CACHE.md), and `rtl/fb_sim.sv`
-> reads the scanner's byte straight from that bank's port B, alternating
-> clocks with the host's peek — same three-clock latency, no copy to keep
-> in sync, 4.5 BRAM tiles returned (docs/PAGE_CACHE.md carries the full
-> budget).  The prediction, the monitor's three
-> counts, serve's rules and FB_PEEK's address packing are all unchanged and
-> this file remains their reference; the side-copy mechanics are historical
-> here.
+> **On branch `cxxx_work` (2026-09-03) the side copy is BACK.** Branch
+> `page_cache` had deleted it to fit the XC7A35T and read the scanner's byte
+> from the main bank's port B, alternating clocks with the peek; the Pt's
+> 100T lifts that limit, and the accelerated core wants a byte that is
+> cycle-correct and never waits on a bank the op path, the line fills and
+> the page engine are using.  The copy is fed by a **write tap on the page
+> cache's main bank** (`page_cache.mw_stb/mw_addr/mw_byte`: the strobe,
+> address and byte of every write port A takes, on the clock it takes it)
+> rather than the old `cl_pa` tap on `apple_mmu` - same bank-0-only rule,
+> now by construction, since the main bank *is* bank 0.  Both copy RAMs are
+> read-first, so a write and the scanner's read of the same byte in one
+> clock hand the scanner the byte as it was before the write, which is what
+> the machine's scanner fetched too (phi0-low precedes the 6502's write).
+> The main bank's port B is tied off, free for docs/CXXX.md.  Everything
+> below stands, with "the tap" read as above.
 
 Status: **✅ on hardware, 2026-08-29.** Master build of 19:5x (WNS +0.336 ns,
 35.5 of 50 tiles) on a IIe, headless from the Pi: locked at the boot menu
@@ -38,18 +44,19 @@ real floating bus on every floating read, every cycle, in every video mode.
 ## What is where
 
 ```
-  op_addr/op_wdata ─► apple_mmu ──cl_pa──► fb_sim: side copy ◄── scan_addr(v, h, mode)
-  (every write)        (bank 0 only)         2 KB text, 16 KB hi-res      ▲
-                                                   │ the byte           vbl_lock's counter,
-                                      monitor ◄────┴────► din_sub       apple_mmu's switches
-                                   (vs the bus)          (serve)
+  op ─► apple_mmu ─► page_cache main bank ──mw_*──► fb_sim: side copy ◄── scan_addr(v, h, mode)
+  (every write)      (bank 0, port A's write)        2 KB text, 16 KB hi-res      ▲
+                                                           │ the byte           vbl_lock's counter,
+                                              monitor ◄────┴────► din_sub       apple_mmu's switches
+                                           (vs the bus)          (serve)
 ```
 
 | piece | file | what it holds |
 |---|---|---|
 | the scanner formula | `rtl/scan_addr.vh` | Sather's, as AppleWin writes it, for every mode; `include`d by the lock and the simulator |
 | the simulator | `rtl/fb_sim.sv` | the side copy, the prediction, the monitor, serve, peek |
-| the copy's RAMs | `rtl/fd_bank.sv` | the floppy's true-dual-port template, now with an address width |
+| the copy's RAMs | `rtl/fd_bank.sv` | the floppy's true-dual-port template, read-first both ports, with an address width |
+| the tap | `rtl/page_cache.sv` | `mw_stb`, `mw_addr`, `mw_byte`: the main bank's write, the clock port A takes it |
 | the video switches | `rtl/apple_mmu.sv` | TEXT, MIXED and 80COL shadowed beside the memory switches, on `vid_sw` |
 | the position | `rtl/vbl_lock.sv` | the counter's line and cycle, exported as `scan_v`/`scan_h` |
 | the registers | `rtl/wb_regfile.sv` | `FB_CTRL`, the counters, `FB_PEEK` (PROTOCOL.md) |
@@ -58,24 +65,30 @@ real floating bus on every floating read, every cycle, in every video mode.
 
 Every write that lands in **main memory's** text pages (`$0400-$0BFF`) or
 hi-res pages (`$2000-$5FFF`) is copied into two block RAMs - 2 KB and 16 KB,
-one RAMB18 and four RAMB36 - on the same clock the cache takes it. Both pages
-of both regions, because a double-buffered game flips to page 2 and reads
-the floating bus there.
+one RAMB18 and four RAMB36 - on the same clock the main bank takes it. Both
+pages of both regions, because a double-buffered game flips to page 2 and
+reads the floating bus there.
 
-**The tap is the translated address, never the raw one.** `apple_mmu`
-classifies every op and gives its physical address in the image, `cl_pa`,
-one clock after it is presented; that address is the write *after* every
-soft switch that can redirect it has been applied - 80STORE+PAGE2 steering a
-page-1 write to the auxiliary bank (and the hi-res page with HIRES), RAMWRT
-sending everything else there, a RamWorks bank register choosing which
-auxiliary bank. On a IIe that is the whole set: no switch moves a page-1
-write to main's page-2 region, so the 16 address bits are unchanged whenever
-the write is in main at all, and the image bank in `cl_pa[23:16]` is the
-entire decision. The copy keeps bank 0 and nothing else. A `$0400` write
-under 80STORE+PAGE2 goes to aux, which the scanner's main-bank fetch never
-shows, and stays out; the same write with 80STORE off goes in. Overrides -
-a disk DMA, the lock's fill - are ops too and are copied like any other
-(MEMORY.md, "Overrides are ops").
+**The tap is the main bank's own write, never the raw address.** The page
+cache's main bank is bank 0 of the image, and a write reaches its port A
+only after `apple_mmu` has applied every soft switch that can redirect it -
+80STORE+PAGE2 steering a page-1 write to the auxiliary bank (and the hi-res
+page with HIRES), RAMWRT sending everything else there, a RamWorks bank
+register choosing which auxiliary bank - and after the page cache has
+decided the write is main's and not aux's. On a IIe that is the whole set:
+no switch moves a page-1 write to main's page-2 region, so the 16 address
+bits are unchanged whenever the write is in main at all. `page_cache`
+exports the strobe, the address and the byte on the clock port A takes them
+(`mw_stb`, `mw_addr`, `mw_byte`), and the copy writes on the same edge. A
+`$0400` write under 80STORE+PAGE2 goes to aux, which the scanner's main-bank
+fetch never shows, and stays out; the same write with 80STORE off goes in.
+Overrides - a disk DMA, the lock's fill - are ops too and are copied like
+any other; so are the accelerated core's fast writes and the posted writes
+draining behind it, which land on arbitrary clocks. A write and the
+scanner's read of the same byte on one clock is the read-first RAM's
+defined case: the scanner gets the byte as it was before the write - the
+machine's answer too, since its scanner fetches during phi0-low and the
+6502's write lands at the end of phi0-high.
 
 **Main memory only, by decision.** The auxiliary bank's byte goes to the
 80-column card's own latch and never onto the main data bus; AppleWin's
@@ -148,7 +161,12 @@ or not. Excluded, and why:
 - `$C100-$CFFF`: ROM, or a card's.
 
 A read a peripheral on the card claims (`slot_rd_claim`) or the keyboard or
-the buttons substitute is theirs and never compared. `$C020` is not
+the buttons substitute is theirs and never compared. **`$C019` is compared
+too, on bit 7 alone** (2026-09-03): the IIe's VBL', which the counter
+answers one cycle ahead of itself (VBL.md, "What the machine said";
+`vbl_bar` here), and which the accelerated core is served from the card
+(CXXX.md, "The switch reads in the closed regime"); a `$C019` mismatch is
+counted with the ordinary ones and `FB_LAST2`'s op address `$19` names it. `$C020` is not
 side-effect-free - it toggles the cassette output - though nothing notices
 with nothing plugged in; a read of `PAGE2 ? $C055 : $C054` is the genuinely
 idempotent probe, and the follow-up below wants it.
@@ -190,7 +208,9 @@ serving turns serve off and says so (`fbtrips=`), because a core being
 handed bytes the machine disagrees with is better off with the bus.
 
 This is the accelerated core's byte, proven on the real machine before there
-is one.
+is one. `int_ok` - the serve terms less the per-op ones - is what the
+accelerated core's internalized `$C05x`/`$C08x` reads are gated on
+(CXXX.md); `sub_data` is their byte.
 
 ## The card's interface
 
@@ -241,11 +261,19 @@ displayed byte, and deserves its own number.
 two-process true-dual-port shape is what Vivado infers a TDP block RAM from
 and what `sim/lint.sh` already knows to lint with `-Wno-MULTIDRIVEN`.
 
+**A copy, not the main bank (reversed 2026-09-03).** Reading the scanner's
+byte from the main bank's port B worked at the bus's pace and fit the small
+part, but an accelerated core needs the byte on every clock from a port
+nothing else schedules: the main bank's ports carry the op path, the line
+fills and the page engine, and the shared port B gave the scanner every
+other clock at best. The copy has one writer and one reader, is always one
+clock behind the write, and never stalls. 4.5 tiles on the 100T.
+
 ## What proves it
 
 | | what it settles |
 |---|---|
-| `sim/run_fb_sim_tb.sh` | the real reader, driver, core, hold, lock and MMU shadow around `fb_sim`, against an Apple whose scanner is Sather's counters and whose floating bus is that scanner's byte in **every** mode, with the IIe's write steering: nothing compared before the lock; both text and both hi-res pages written through the bus and read back byte for byte through the peek; a frame of floating reads in text and hi-res on both pages, mixed hi-res on both, and page 2 under 80STORE, on NTSC and PAL, every cycle compared and none wrong; a byte changed behind the copy counted exactly as often as the scanner fetches it - an ordinary byte in `FB_MISMATCH`, a hole in `FB_OTHER`'s low half, anything in 80 columns in its high half, nowhere else; writes steered to aux by 80STORE+PAGE2, +HIRES, RAMWRT and a RamWorks bank never entering the copy while the same writes to main do; serving: the core's reads substituted, the events carrying the byte, the bus still the machine's - shown with the machine's floating bus dead, where the core still sees the picture and the monitor counts every read; nothing substituted on the probe's overrides or in 80 columns; the counters clearing |
+| `sim/run_fb_sim_vl.sh` (Verilator, ~20 s) / `sim/run_fb_sim_tb.sh` (iverilog, minutes) | the real reader, driver, core, hold, lock and MMU shadow around `fb_sim`, against an Apple whose scanner is Sather's counters and whose floating bus is that scanner's byte in **every** mode, with the IIe's write steering: nothing compared before the lock; both text and both hi-res pages written through the bus and read back byte for byte through the peek; a frame of floating reads in text and hi-res on both pages, mixed hi-res on both, and page 2 under 80STORE, on NTSC and PAL, every cycle compared and none wrong; a byte changed behind the copy counted exactly as often as the scanner fetches it - an ordinary byte in `FB_MISMATCH`, a hole in `FB_OTHER`'s low half, anything in 80 columns in its high half, nowhere else; writes steered to aux by 80STORE+PAGE2, +HIRES, RAMWRT and a RamWorks bank never entering the copy while the same writes to main do; serving: the core's reads substituted, the events carrying the byte, the bus still the machine's - shown with the machine's floating bus dead, where the core still sees the picture and the monitor counts every read; nothing substituted on the probe's overrides or in 80 columns; the counters clearing |
 | `sim/run_vbl_lock_tb.sh` | the lock unchanged with the shared formula: the same 25 checks |
 | `sim/run_reg_map_tb.sh` | the seven registers end to end from a REG_WRITE: the level, the pulse, the readback, the peek's address and byte |
 | `sim/lint.sh` | every module, `fb_sim` included |
@@ -279,6 +307,27 @@ screen it is reading has been written since the load.
 `FB_LAST` first latched hole mismatches too, and showed a screen hole every
 time something interesting had happened; it now describes the last
 ordinary mismatch only, which is what found the above in one read.
+
+**The mixed-mode choice is a cycle late (2026-09-03, the rebuilt copy's
+first run).** `tools/fb_test.sh` on the Pt build was clean everywhere but
+mixed hi-res page 1: one mismatch in 2,105 compares. Fourteen repeat runs
+of the same loop gave thirteen, every decoded one at **cycle 0 of line
+192** (once line 0), predicted hi-res, the bus carrying the text byte. A
+first rule - "text lasts a cycle into the next line" - fixed those and
+moved the mismatches to cycle 0 of line 224, predicted text, the bus
+carrying hi-res; BASIC's sampling lattice had simply never landed there. A
+nine-cycle `LDA $C054` sweep of 65,536 reads (every phase of the frame,
+~35 frames) then gave 9, 7 and 8 mismatches a pass, all at cycle 0 of lines
+160 or 224 - one sampled cycle in nine of two lagging cycles a frame. So
+the IIe applies the text-or-hires choice one cycle after the line changes,
+in both directions: **cycle 0 of a line goes by the line before it.**
+AppleWin switches on the line boundary exactly. `rtl/scan_addr.vh` carries
+it as `scan_mixed_text_at(line, cycle)`, the bench's reference scanner the
+same, and the sweep on the machine reads 0. August's run passed the same
+check by chance: four cycles a frame against a few thousand samples. The
+hi-res peeks were all equal to the mirror; a text page peek that differed
+in the loop variables' bytes was the loop still running when the peek was
+taken, and the machine's own dump agreed with both once it had stopped.
 
 ## Not here, deliberately
 

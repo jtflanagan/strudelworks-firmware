@@ -80,6 +80,14 @@ module card_link #(
     // happen, with the blanking level their word carries.  A watching top
     // ties them to 0.
     input  wire        real_dummy,
+    // The virtual base (rtl/vbeam.sv, docs/VIRTUAL_TIME.md): in force, a
+    // mark on a fast word, and the core cycles that never became a word.
+    // A watching top ties them to 0.
+    input  wire        virt,
+    input  wire        fast_mark,
+    input  wire [15:0] fast_mark_free,
+    input  wire        fast_quiet,
+    input  wire        fast_force,      // keep this fast word whatever the rule (rtl/event_merge.sv)
     input  wire        fast_valid,
     input  wire [15:0] fast_addr,
     input  wire        fast_rw,
@@ -97,6 +105,7 @@ module card_link #(
     // A watching top leaves it unconnected - a snoop build cannot answer for
     // a slot, and CAN_MASTER=0 holds this at zero anyway.
     output wire [2:0]  mb_slot_active,
+    output wire        mb_phasor_active,   // ...and as a Phasor (rtl/mockingboard.sv)
 
     // The boot hold (rtl/boot_hold.sv, in a mastering top).  arm and release
     // are the host's, from the BOOT_HOLD register; held comes back for the
@@ -147,6 +156,34 @@ module card_link #(
     // input to 0.
     output wire [2:0]  vidhd_slot_active,
     input  wire        vidhd_rom_loaded,
+    // The mouse card (rtl/mouse_card.sv): its slot latched like the VidHD's,
+    // and its state for MOUSE_SLOT / MOUSE_STAT.
+    output wire [2:0]  mouse_slot_active,
+    input  wire        mouse_rom_loaded,
+    input  wire        mouse_irq,
+    input  wire [3:0]  mouse_mode,
+    input  wire [1:0]  mouse_buttons,
+    input  wire [7:0]  mouse_moves,
+    input  wire [15:0] mouse_x,
+    input  wire [15:0] mouse_y,
+    // The Uthernet II (rtl/uthernet2_card.sv, docs/UTHERNET2.md), the same way.
+    output wire [2:0]  u2_slot_active,
+    input  wire [3:0]  u2_sock_open,
+    input  wire        u2_cmd_dropped,
+    input  wire [7:0]  u2_cmds,
+    input  wire [7:0]  u2_rx_chunks,
+    input  wire [15:0] u2_s0_rsr,
+    input  wire [15:0] u2_s0_fsr,
+    // The No-Slot Clock (rtl/no_slot_clock.sv): its lever out, its state
+    // and the host's time in, for NSC_CTRL / NSC_TIME / NSC_DATE.
+    output wire        nsc_enable,
+    input  wire        nsc_time_loaded,
+    input  wire        nsc_ring_en,
+    input  wire        nsc_wr_en,
+    input  wire [5:0]  nsc_cmp_idx,
+    input  wire [5:0]  nsc_ring_idx,
+    input  wire [7:0]  nsc_unlocks,
+    input  wire [63:0] nsc_now,
 
     // Keyboard injection (rtl/kbd_inject.sv, in a mastering top): the
     // KBD_INJECT register's press and drop pulses and the key out, the
@@ -220,6 +257,7 @@ module card_link #(
     // memory client's windows.  A watching top ties the inputs to 0.
     output wire [1:0]   accel_mode,
     output wire         accel_swint_dis,
+    output wire         accel_game_dis,
     output wire [15:0]  accel_target,
     output wire         accel_cnt_clr,
     input  wire         accel_on,
@@ -232,6 +270,16 @@ module card_link #(
     input  wire [31:0]  accel_dline,
     input  wire         accel_cen_v,
     input  wire [2:0]   accel_cen_sel,
+    // The game port's samples, for GAME_STAT (rtl/game_port.sv); a
+    // watching top ties them to 0.
+    input  wire [2:0]   game_pb,
+    input  wire         game_pb_ok,
+    input  wire         game_pdl_ok,
+    input  wire [11:0]  game_pdl0,
+    input  wire [11:0]  game_pdl1,
+    input  wire [11:0]  game_pdl2,
+    input  wire [11:0]  game_pdl3,
+    input  wire [7:0]   game_meas,
     // The merge's shed-at-source level, for the instruction front.
     output wire         ev_fast_room,
     output wire         ev_fast_room_w,
@@ -248,6 +296,14 @@ module card_link #(
     input  wire [31:0] fb_last2,
     input  wire [31:0] fb_other,
     input  wire [7:0]  fb_peek_data,
+
+    // The sound (docs/AUDIO.md): AUDIO_CTRL/AUDIO_RATE out to the sampler,
+    // AUDIO_STAT back.  A watching top leaves the outputs open and ties the
+    // status to zero.
+    output wire        audio_on,
+    output wire        audio_realtime,
+    output wire [31:0] audio_rate,
+    input  wire [31:0] audio_stat,
 
     // Programmatic Ctrl-Reset: drive the Apple's RES' low while high.  Only a
     // mastering top wires it to the pin; a snooper leaves it unconnected.
@@ -276,6 +332,19 @@ module card_link #(
     input  wire [31:0] fd_word,
     input  wire        fd_valid,
     output wire        fd_take,
+
+    // ...and a third, the Uthernet II's (U2_CMD, U2_TX), below the floppy's
+    // and above the capture.  A watching top ties u2_valid low.
+    input  wire [31:0] u2_word,
+    input  wire        u2_valid,
+    output wire        u2_take,
+
+    // ...and a fourth, the sound's (AUDIO_FRAMES), below the Uthernet II's
+    // and above the capture: continuous, but bounded by the wall clock.  A
+    // watching top ties au_valid low.
+    input  wire [31:0] au_word,
+    input  wire        au_valid,
+    output wire        au_take,
 
     // FT601 (constr/ft601.xdc)
     input  wire        ft_clk,
@@ -760,10 +829,10 @@ module card_link #(
     // filter (rtl/event_merge.sv).  Fast ops and the dummy flag belong to the
     // real bus only.
     wire [31:0] mg_data;
-    wire        mg_valid, mg_mark, mg_dummy;
-    wire [15:0] mg_mark_free;
+    wire        mg_valid, mg_mark, mg_dummy, mg_carrier;
+    wire [15:0] mg_mark_free, mg_drop;
 
-    event_merge #(.DEPTH (8)) u_merge (
+    event_merge #(.DEPTH (32)) u_merge (
         .clk           (clk_ctrl),
         .rst           (rst),
         .enable        (capture_enable),
@@ -777,13 +846,21 @@ module card_link #(
         .fast_rw       (fast_rw),
         .fast_data     (fast_data),
         .fast_sync     (fast_sync),
+        .fast_mark     (source_real && fast_mark),
+        .fast_mark_free (fast_mark_free),
+        .fast_quiet    (fast_quiet),
+        .fast_force    (fast_force),
         .vbl_level     (fast_vbl),
         .res_level     (apple_res_sync),
+        .sparse        (sparse_ctrl && source_real),
+        .virt          (virt && source_real),
         .out_valid     (mg_valid),
         .out_data      (mg_data),
         .out_mark      (mg_mark),
         .out_mark_free (mg_mark_free),
         .out_dummy     (mg_dummy),
+        .out_drop      (mg_drop),
+        .out_carrier   (mg_carrier),
         .overflows     (merge_overflows),
         .fast_room     (ev_fast_room),
         .fast_room_w   (ev_fast_room_w)
@@ -808,6 +885,9 @@ module card_link #(
         .in_mark       (mg_mark),
         .in_mark_free  (mg_mark_free),
         .in_dummy      (mg_dummy),
+        .virt          (virt && source_real),
+        .in_drop       (mg_drop),
+        .in_carrier    (mg_carrier),
         .out_data      (fev_data),
         .out_valid     (fev_valid),
         .out_mark      (fev_mark),
@@ -877,6 +957,7 @@ module card_link #(
         .apple_res_sync    (apple_res_sync),
         .cpu_source_active (cpu_source_active),
         .mb_slot_active    (mb_slot_active),
+        .mb_phasor_active  (mb_phasor_active),
         .boot_arm          (boot_arm),
         .boot_release      (boot_release),
         .boot_held         (boot_held),
@@ -906,6 +987,17 @@ module card_link #(
         .fd_fill_clr       (fd_fill_clr),
         .vidhd_slot_active (vidhd_slot_active),
         .vidhd_rom_loaded  (vidhd_rom_loaded),
+        .mouse_slot_active (mouse_slot_active),
+        .mouse_rom_loaded  (mouse_rom_loaded),
+        .mouse_irq (mouse_irq), .mouse_mode (mouse_mode), .mouse_buttons (mouse_buttons),
+        .mouse_moves (mouse_moves), .mouse_x (mouse_x), .mouse_y (mouse_y),
+        .u2_slot_active (u2_slot_active), .u2_sock_open (u2_sock_open),
+        .u2_cmd_dropped (u2_cmd_dropped), .u2_cmds (u2_cmds), .u2_rx_chunks (u2_rx_chunks),
+        .u2_s0_rsr (u2_s0_rsr), .u2_s0_fsr (u2_s0_fsr),
+        .nsc_enable (nsc_enable), .nsc_time_loaded (nsc_time_loaded),
+        .nsc_ring_en (nsc_ring_en), .nsc_wr_en (nsc_wr_en),
+        .nsc_cmp_idx (nsc_cmp_idx), .nsc_ring_idx (nsc_ring_idx),
+        .nsc_unlocks (nsc_unlocks), .nsc_now (nsc_now),
         .kbd_press         (kbd_press),
         .kbd_press_key     (kbd_press_key),
         .kbd_drop          (kbd_drop),
@@ -945,6 +1037,7 @@ module card_link #(
         .mem_intc8rom      (mem_intc8rom),
         .accel_mode        (accel_mode),
         .accel_swint_dis   (accel_swint_dis),
+        .accel_game_dis    (accel_game_dis),
         .accel_target      (accel_target),
         .accel_cnt_clr     (accel_cnt_clr),
         .accel_stat        (accel_stat),
@@ -956,6 +1049,14 @@ module card_link #(
         .accel_dline       (accel_dline),
         .accel_cen_v       (accel_cen_v),
         .accel_cen_sel     (accel_cen_sel),
+        .game_pb           (game_pb),
+        .game_pb_ok        (game_pb_ok),
+        .game_pdl_ok       (game_pdl_ok),
+        .game_pdl0         (game_pdl0),
+        .game_pdl1         (game_pdl1),
+        .game_pdl2         (game_pdl2),
+        .game_pdl3         (game_pdl3),
+        .game_meas         (game_meas),
         .fb_serve          (fb_serve),
         .fb_cnt_clr        (fb_cnt_clr),
         .fb_peek_addr      (fb_peek_addr),
@@ -968,6 +1069,11 @@ module card_link #(
         .fb_peek_data      (fb_peek_data),
         .res_drive         (res_drive),
         .ring_status       (ring_status),
+        .link_stat         (link_stat),
+        .audio_on          (audio_on),
+        .audio_realtime    (audio_realtime),
+        .audio_rate        (audio_rate),
+        .audio_stat        (audio_stat),
         .wb_cyc   (rwb_cyc),
         .wb_stb   (rwb_stb),
         .wb_we    (rwb_we),
@@ -1072,10 +1178,11 @@ module card_link #(
     // source is a stream, and msg_master makes it a master that holds CYC
     // across its message; msg_arb grants per CYC; tx_ring is the one slave.
     // Everything above the capture is rate-bounded by the host or the bus -
-    // the floppy's by the machine's own head movements and writes; the
-    // capture is the one continuous source and goes last.  See msg_arb for
+    // the floppy's by the machine's own head movements and writes, the
+    // sound's by the wall clock (docs/AUDIO.md); the capture is the one
+    // unbounded source and goes last.  See msg_arb for
     // why that order is load-bearing.
-    localparam integer N_SRC = 7;
+    localparam integer N_SRC = 9;
 
     wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
     wire [N_SRC*32-1:0] mb_adr, mb_dat;
@@ -1087,6 +1194,16 @@ module card_link #(
     wire [3:0]          sb_sel;
     wire                out_valid;
     wire [31:0]         ring_status;
+
+    // LINK_STAT (0x8000_00EC): the UART status line's facts, readable over
+    // USB3 - [0] phi0 ticking (the card is in a powered machine), [1] the
+    // capture enabled as the card sees it, [4:2] the link's last reset
+    // cause, [15:8] the chip-side snapshot taken as it fired, [23:16] how
+    // many resets, [24] the DDR3 calibrated (RING_STATUS[25] again, so one
+    // read answers "is there a link, and is it in a machine").  With this
+    // the UART is for the card that answers no register at all.
+    wire [31:0] link_stat = {7'd0, ring_status[25], link_resets, link_snap,
+                             3'd0, link_cause, capture_enable, phi0_live};
 
     reply_stream u_reply (
         .clk       (clk_ctrl),
@@ -1120,9 +1237,17 @@ module card_link #(
     assign ms_valid[5]         = fd_valid;
     assign fd_take             = ms_take[5];
 
-    assign ms_word[6*32 +: 32] = cap_word;
-    assign ms_valid[6]         = cap_valid;
-    assign cap_take            = ms_take[6];
+    assign ms_word[6*32 +: 32] = u2_word;
+    assign ms_valid[6]         = u2_valid;
+    assign u2_take             = ms_take[6];
+
+    assign ms_word[7*32 +: 32] = au_word;
+    assign ms_valid[7]         = au_valid;
+    assign au_take             = ms_take[7];
+
+    assign ms_word[8*32 +: 32] = cap_word;
+    assign ms_valid[8]         = cap_valid;
+    assign cap_take            = ms_take[8];
 
     genvar gm;
     generate

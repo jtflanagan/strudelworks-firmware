@@ -233,6 +233,45 @@ module accel_tb #(parameter integer SWINT = 1,
     wire        swi_commit, kbd_int_ok;
     wire [7:0]  kbd_int_byte;
     wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+    // ...and the rest of the internalized reads (docs/CXXX.md), as
+    // master_top wires them.  No fb_sim here: the machine's floating byte
+    // is the model's constant (FLOAT, 8'hA5), and $C019 stays on the bus
+    // (no VBL lock in this bench).
+    wire        q_swi, q_swi_quiet;
+    wire [7:0]  mmu_swi_stat;
+    wire [6:0]  kbd_int_low;
+    wire [7:0]  swi_byte = (u_addr[7:4] == 4'h0) ? kbd_int_byte
+                         : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
+                         : (u_addr[7:4] == 4'h6) ? game_int_byte
+                         : 8'hA5;
+    // ---- the game port in the dummies, as master_top wires it ----------------
+    // The loop rides the same level as the keyboard's (no chicken bit of its
+    // own here); the core's clock is every tick the beam keeps time by; a
+    // $C07x access of the core's own - served, or a write on the bus - is
+    // the strobe for the virtual timers.  The low bits of a served byte are
+    // the model's floating constant, as fb_sim's would be.
+    wire        seq_fast_tick;
+    wire [15:0] game_park_addr;
+    wire        game_pb_ok, game_pdl_ok;
+    wire [7:0]  game_int_byte;
+    wire [2:0]  game_pb;
+    wire [11:0] game_pdl0, game_pdl1, game_pdl2, game_pdl3;
+    wire [7:0]  game_meas;
+    wire        game_strobe = (swi_commit && (u_addr[15:4] == 12'hC07)) ||
+                              (op_commit && !op_dummy && !op_ovr && !op_rw && (op_addr[15:4] == 12'hC07));
+    game_port u_game (
+        .clk (clk), .rst (rst), .master_active (master_active),
+        .park (sw_int),
+        .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit), .op_dummy (op_dummy),
+        .data_sync (data_sync), .bus_tick (bus_tick),
+        .park_addr (game_park_addr),
+        .pb_ok (game_pb_ok), .pdl_ok (game_pdl_ok), .pb_sel (6'd0),
+        .core_tick (seq_fast_tick || turbo_tick || dline_tick || (bus_tick && !op_dummy && !op_ovr)),
+        .strobe (game_strobe), .u_addr (u_addr), .low_bits (7'h25),
+        .int_byte (game_int_byte),
+        .pb_level (game_pb), .pdl0 (game_pdl0), .pdl1 (game_pdl1), .pdl2 (game_pdl2), .pdl3 (game_pdl3),
+        .measurements (game_meas)
+    );
     reg        kb_press = 1'b0, kb_drop = 1'b0, kb_lock = 1'b0;
     reg [6:0]  kb_key = 7'd0;
     wire       kb_strobe, kb_seen, kb_touched, kb_changed, kb_hot;
@@ -243,7 +282,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .master_active (master_active),
         .park_kbd (sw_int), .op_dummy (op_dummy),
         .int_rd (kbd_int_rd), .int_ok (kbd_int_ok),
-        .int_byte (kbd_int_byte), .int_low (),
+        .int_byte (kbd_int_byte), .int_low (kbd_int_low),
         .press (kb_press), .press_key (kb_key), .drop (kb_drop), .lock (kb_lock),
         .hotkey_en (1'b0), .hotkey (7'd0), .held (held),
         .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
@@ -268,7 +307,9 @@ module accel_tb #(parameter integer SWINT = 1,
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
-        .swi_on (sw_int), .swi_ok (kbd_int_ok), .swi_byte (kbd_int_byte), .swi_commit (swi_commit),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (seq_fast_tick), .fev_quiet (),
+        .q_slot (1'b0), .slot_q_o (), .sl_win (),
+        .stall (1'b0),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
@@ -374,13 +415,15 @@ module accel_tb #(parameter integer SWINT = 1,
         .clk (clk), .rst (rst), .enable (1'b1),
         .bus_valid (bus_tick), .bus_data (32'd0), .bus_mark (1'b0), .bus_mark_free (16'd0), .bus_dummy (1'b0),
         .fast_valid (mg_fast_valid), .fast_addr (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
-        .fast_rw (mg_fast_rw), .fast_data (8'd0), .fast_sync (1'b0), .vbl_level (1'b0), .res_level (1'b0),
+        .fast_rw (mg_fast_rw), .fast_data (8'd0), .fast_sync (1'b0), .fast_mark (1'b0), .fast_mark_free (16'd0),
+        .fast_quiet (1'b0), .vbl_level (1'b0), .res_level (1'b0), .sparse (1'b0), .virt (1'b0),
         .out_valid (mg_out_valid), .out_data (mg_out_data), .out_mark (), .out_mark_free (), .out_dummy (),
+        .out_drop (), .out_carrier (),
         .overflows (mg_overflows), .fast_room (mg_room), .fast_room_w (mg_room_w)
     );
     integer mg_write_in = 0, mg_write_out = 0, mg_write_drops = 0;
     always @(posedge clk) begin
-        if (u_merge.push_fast && !mg_fast_rw) begin
+        if (u_merge.want_fast && !mg_fast_rw) begin
             mg_write_in = mg_write_in + 1;
             if (!u_merge.fast_fits) mg_write_drops = mg_write_drops + 1;
         end
@@ -389,7 +432,7 @@ module accel_tb #(parameter integer SWINT = 1,
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
-        .master_active (master_active), .park_kbd (sw_int),
+        .master_active (master_active), .park_kbd (sw_int), .park_addr (game_park_addr),
         .bus_owns (bus_owns), .core_valid (core_valid),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
         .drv_sync (drv_sync), .cyc_en (drv_cyc_done), .cpu_din (drv_din),
@@ -455,6 +498,11 @@ module accel_tb #(parameter integer SWINT = 1,
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
+        .swi_on (sw_int), .swi_kbd_ok (kbd_int_ok), .swi_fb_ok (1'b1),
+        .swi_vbl_ok (1'b0), .swi_vbl_bar (1'b1), .swi_kbd_low (kbd_int_low),
+        .swi_pb_ok (game_pb_ok), .swi_pdl_ok (game_pdl_ok),
+        .swi_hd_slot (3'd0), .swi_fd_slot (3'd0), .swi_mb_slot (3'd0), .swi_mouse_slot (3'd0), .swi_u2_slot (3'd0), .q_nsc (), .q_slot (),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_stat_byte (mmu_swi_stat),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .d_addr (dq_addr_w), .d_rw (dq_rw_w),
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
@@ -477,7 +525,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .rom_byte (rom_byte), .rom_loaded (1'b1),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
-        .fb_addr (16'd0), .fb_byte (),
+        .mw_stb (), .mw_addr (), .mw_byte (),
         .il_req (il_req | dl_req_w), .il_aux (il_req ? il_aux_w : dl_aux_w),
         .il_bank (il_req ? il_bank_w : dl_bank_w), .il_line (il_req ? il_line_w : dl_line_w),
         .il_ack (il_ack), .il_ok (il_ok), .il_row (il_row),
@@ -588,6 +636,7 @@ module accel_tb #(parameter integer SWINT = 1,
     reg [7:0] ref_lcaux  [0:NRW*16384-1];
     reg [7:0] rom_img    [0:16383];
     reg m_store80, m_ramrd, m_ramwrt, m_altzp, m_page2, m_hires;
+    reg m_text, m_mixed, m_col80, m_altchar;
     reg m_bank2, m_lcrd, m_wren, m_pre;
     reg m_intcx, m_slotc3, m_intc8;
     reg [7:0] m_bank;
@@ -647,12 +696,61 @@ module accel_tb #(parameter integer SWINT = 1,
     function automatic [7:0] c0_exp(input [15:0] a);
         c0_exp = tb_kstrobe ? {1'b1, tb_kkey} : {1'b0, tb_klast};
     endfunction
+    // The machine's status page: bit 7 from its own switches over the
+    // keyboard latch's low bits, as the IOU serves them.  The pins answer
+    // with it and the card's shadow must agree ($C019 has no VBL here).
+    function automatic [7:0] c0_pin_stat(input [3:0] lo);
+        reg b;
+        begin
+            case (lo)
+                4'h1: b = m_bank2;   4'h2: b = m_lcrd;    4'h3: b = m_ramrd;
+                4'h4: b = m_ramwrt;  4'h5: b = m_intcx;   4'h6: b = m_altzp;
+                4'h7: b = m_slotc3;  4'h8: b = m_store80; 4'hA: b = m_text;
+                4'hB: b = m_mixed;   4'hC: b = m_page2;   4'hD: b = m_hires;
+                4'hE: b = m_altchar; 4'hF: b = m_col80;
+                default: b = 1'b0;
+            endcase
+            c0_pin_stat = {b, tb_kstrobe ? tb_kkey : tb_klast};
+        end
+    endfunction
+
+    // The machine's game port: the three pushbuttons as the bench holds
+    // them, and four 558 timers - any access to $C07x, read or write, on
+    // the PINS triggers every timer that is not running, and a timer runs
+    // eleven bus cycles a unit of its paddle's position (AppleWin's
+    // 2816/255).  tb_cyc counts the bus's cycles.
+    reg  [2:0]   tb_pb = 3'b000;
+    reg  [7:0]   tb_pos [4];
+    reg  [31:0]  tb_pdl_end [4];
+    reg  [31:0]  tb_cyc = 0;
+    initial begin
+        tb_pos[0] = 8'd40; tb_pos[1] = 8'd200; tb_pos[2] = 8'd0; tb_pos[3] = 8'd255;
+        for (int p = 0; p < 4; p++) tb_pdl_end[p] = 0;
+    end
+    function automatic pdl_active(input [1:0] p);
+        pdl_active = (tb_cyc <= tb_pdl_end[p]);
+    endfunction
+    always @(posedge clk) if (since_fall == BUS_AT && driving) begin
+        tb_cyc <= tb_cyc + 1;
+        if (addr_drive[15:4] == 12'hC07) begin
+            for (int p = 0; p < 4; p++)
+                if (!(tb_cyc <= tb_pdl_end[p])) tb_pdl_end[p] <= tb_cyc + 11 * tb_pos[p];
+        end
+    end
+    // ...and what a read of the port returns on the pins.
+    function automatic [7:0] c06_pin(input [3:0] lo);
+        if (lo[3:2] == 2'b00 && lo[1:0] != 2'b00) c06_pin = {tb_pb[lo[1:0] - 2'd1], FLOAT[6:0]};
+        else if (lo[3:2] == 2'b01)                c06_pin = {pdl_active(lo[1:0]), FLOAT[6:0]};
+        else                                       c06_pin = FLOAT;
+    endfunction
 
     // What the core must read at `a`, from the reference: everything but
     // $C01x-$C0FF (the machine's), the keyboard from the model above.
     function automatic [7:0] exp_read(input [15:0] a);
         begin
             if (a[15:4] == 12'hC00) exp_read = c0_exp(a);
+            else if (a[15:4] == 12'hC01) exp_read = c0_pin_stat(a[3:0]);
+            else if (a[15:4] == 12'hC06) exp_read = c06_pin(a[3:0]);
             else if (a[15:12] == 4'hC) exp_read = cx_byte(a);
             else if (a >= 16'hD000) begin
                 if (m_lcrd) exp_read = m_altzp ? ref_lcaux[m_bank * 16384 + m_lcidx(a)] : ref_lc[m_lcidx(a)];
@@ -677,6 +775,7 @@ module accel_tb #(parameter integer SWINT = 1,
         else if (rw_drive && addr_drive == 16'hFFFD && m_saw_fffc) begin
             m_saw_fffc <= 1'b0; m_mmu_resets <= m_mmu_resets + 1;
             m_store80 <= 0; m_ramrd <= 0; m_ramwrt <= 0; m_altzp <= 0; m_page2 <= 0; m_hires <= 0;
+            m_text <= 1; m_mixed <= 0; m_col80 <= 0; m_altchar <= 0;
             m_bank2 <= 1; m_lcrd <= 0; m_wren <= 1; m_pre <= 0;
             m_intcx <= 0; m_slotc3 <= 0; m_intc8 <= 0;
             m_bank <= 0;
@@ -688,9 +787,14 @@ module accel_tb #(parameter integer SWINT = 1,
     always @(posedge clk) if (since_fall == BUS_AT && driving) begin
         if (rw_drive) begin
             if (addr_drive[15:8] == 8'hC0) begin
-                data_pin <= (addr_drive[7:4] == 4'h0 || addr_drive[7:4] == 4'h1) ? 8'h00 : FLOAT;
+                data_pin <= (addr_drive[7:4] == 4'h0) ? 8'h00
+                          : (addr_drive[7:4] == 4'h1) ? c0_pin_stat(addr_drive[3:0])
+                          : (addr_drive[7:4] == 4'h6) ? c06_pin(addr_drive[3:0])
+                          : FLOAT;
                 if (addr_drive[7:4] == 4'h5) begin
                     if (addr_drive[3:1] == 3'd2) m_page2 <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd0) m_text  <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd1) m_mixed <= addr_drive[0];
                     if (addr_drive[3:1] == 3'd3) m_hires <= addr_drive[0];
                 end
                 if (addr_drive[7:4] == 4'h8) begin
@@ -712,6 +816,8 @@ module accel_tb #(parameter integer SWINT = 1,
                 if (addr_drive[7:4] == 4'h0) begin
                     case (addr_drive[3:1])
                         3'd0: m_store80 <= addr_drive[0];
+                        3'd6: m_col80   <= addr_drive[0];
+                        3'd7: m_altchar <= addr_drive[0];
                         3'd1: m_ramrd   <= addr_drive[0];
                         3'd2: m_ramwrt  <= addr_drive[0];
                         3'd3: m_intcx   <= addr_drive[0];
@@ -722,6 +828,8 @@ module accel_tb #(parameter integer SWINT = 1,
                 end
                 if (addr_drive[7:4] == 4'h5) begin
                     if (addr_drive[3:1] == 3'd2) m_page2 <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd0) m_text  <= addr_drive[0];
+                    if (addr_drive[3:1] == 3'd1) m_mixed <= addr_drive[0];
                     if (addr_drive[3:1] == 3'd3) m_hires <= addr_drive[0];
                 end
                 if (addr_drive[7:0] == 8'h71 || addr_drive[7:0] == 8'h73) begin
@@ -781,14 +889,67 @@ module accel_tb #(parameter integer SWINT = 1,
     integer dummies = 0, dummies_bad = 0, pin_ram_writes = 0;
     // The internalized keyboard: served reads, and reads that should have
     // been served but rode the bus (decoded as accel_seq decodes them).
-    integer swi_ops = 0, swi_bus_trips = 0;
+    integer swi_ops = 0, swi_bus_trips = 0, swi_sw_ops = 0, swi_quiet_ops = 0;
+    integer swi_game_ops = 0, swi_pdl_strobes = 0, pin_game = 0;
+
+    // The internalized switch WRITES (docs/CXXX.md, "The switch writes"):
+    // served, quiet, and the ones that must never be - INTCXROM/SLOTC3ROM.
+    // pin_sw_writes counts memory-switch writes that reached the pins while
+    // the closed regime stood (must be 0); pin_cx_writes the INTCXROM/
+    // SLOTC3ROM writes that did (must not be 0: the motherboard sees them).
+    integer swi_wr_ops = 0, swi_wr_quiet = 0, swi_cx_bad = 0, pin_sw_writes = 0, pin_cx_writes = 0;
+    // The speaker (docs/CXXX.md "The speaker"): accesses served, and accesses
+    // that reached the pins under the closed regime (must be 0).
+    integer swi_spk_ops = 0, pin_spk = 0;
     always @(posedge clk) begin
         if (swi_commit) swi_ops = swi_ops + 1;
+        if (swi_commit && u_addr[15:4] == 12'hC03) swi_spk_ops = swi_spk_ops + 1;
+        if (swi_commit && u_rw && u_addr[15:4] == 12'hC06) swi_game_ops = swi_game_ops + 1;
+        if (swi_commit && u_rw && u_addr[15:4] == 12'hC07) swi_pdl_strobes = swi_pdl_strobes + 1;
+        if (swi_commit && u_rw && u_addr[7:4] != 4'h0) swi_sw_ops = swi_sw_ops + 1;
+        if (swi_commit && u_rw && u_seq.quiet_q) swi_quiet_ops = swi_quiet_ops + 1;
+        if (swi_commit && !u_rw) swi_wr_ops = swi_wr_ops + 1;
+        if (swi_commit && !u_rw && u_seq.quiet_q) swi_wr_quiet = swi_wr_quiet + 1;
+        if (swi_commit && !u_rw && u_addr[7:4] == 4'h0 && (u_addr[3:1] == 3'd3 || u_addr[3:1] == 3'd5))
+            swi_cx_bad = swi_cx_bad + 1;
         if (op_present && !op_dummy && !op_ovr && sw_int && op_rw &&
             (op_addr[15:4] == 12'hC00) && kbd_int_ok && !u_seq.reset_seq) begin
             swi_bus_trips = swi_bus_trips + 1;
             if (swi_bus_trips <= 5)
                 $display("[%0t] keyboard read on the bus with the latch full: $%04X", $time, op_addr);
+        end
+    end
+    // The machine's side of a synthetic commit: an internalized read or
+    // write of a switch moves the model's switches as the pins would have -
+    // a write's data is irrelevant, the address is the switch; the language
+    // card's A0 = 1 on a WRITE clears prewrite and leaves the enable alone.
+    // INTCXROM/SLOTC3ROM never come this way (swi_cx_bad counts it if one does).
+    // ...and only for the I/O page: an on-card slot's ROM page ($C78x, say)
+    // retires with a synthetic commit too, and its low byte is no switch.
+    always @(posedge clk) if (swi_commit && u_addr[15:8] == 8'hC0) begin
+        if (!u_rw && u_addr[7:4] == 4'h0) begin
+            case (u_addr[3:1])
+                3'd0: m_store80 <= u_addr[0];
+                3'd1: m_ramrd   <= u_addr[0];
+                3'd2: m_ramwrt  <= u_addr[0];
+                3'd4: m_altzp   <= u_addr[0];
+                3'd6: m_col80   <= u_addr[0];
+                3'd7: m_altchar <= u_addr[0];
+                default: ;
+            endcase
+        end
+        if (u_addr[7:4] == 4'h5) begin
+            if (u_addr[3:1] == 3'd0) m_text  <= u_addr[0];
+            if (u_addr[3:1] == 3'd1) m_mixed <= u_addr[0];
+            if (u_addr[3:1] == 3'd2) m_page2 <= u_addr[0];
+            if (u_addr[3:1] == 3'd3) m_hires <= u_addr[0];
+        end
+        if (u_addr[7:4] == 4'h8) begin
+            m_bank2 <= !u_addr[3];
+            m_lcrd  <= (u_addr[1] == u_addr[0]);
+            if (!u_addr[0]) begin m_wren <= 0; m_pre <= 0; end
+            else if (u_rw) begin if (m_pre) m_wren <= 1; m_pre <= 1; end
+            else m_pre <= 0;
         end
     end
     integer fast_bus_cls = 0, bus_bus_cls = 0, u_core_ops = 0, cx_fast = 0, cx_bus = 0, cx_slot_fast = 0;
@@ -823,7 +984,7 @@ module accel_tb #(parameter integer SWINT = 1,
                     reads_bad = reads_bad + 1;
                     if (reads_bad <= 5) $display("    bus read $%04X: core got %02x, the machine said %02x", u_addr, cpu_din, mach_byte);
                 end
-            end else if (!u_ovr && cpu_din !== exp_read(u_addr)) begin
+            end else if (!u_ovr && cpu_din !== exp_read(u_addr) && !(u_addr[15:2] == 14'h3019)) begin
                 reads_bad = reads_bad + 1;
                 if (reads_bad <= 5) $display("    bus read $%04X: core got %02x, the reference says %02x (machine %02x, cls %0d)",
                                              u_addr, cpu_din, exp_read(u_addr), mach_byte, cl_cls);
@@ -839,7 +1000,11 @@ module accel_tb #(parameter integer SWINT = 1,
         if (fev_rw) begin
             reads = reads + 1; fast_reads = fast_reads + 1;
             if (fev_addr[15:8] == 8'hC3) fast_c3 = fast_c3 + 1;
-            if (fev_data !== exp_read(fev_addr)) begin
+            // A served game-port read is the loop's sample, a few dummies
+            // behind the pins - a level the bench just moved shows late,
+            // and a paddle's bit is the virtual timer's in the core's time:
+            // the program's own results are what check_game holds to.
+            if (fev_data !== exp_read(fev_addr) && !(fev_addr[15:3] == 13'h180C)) begin
                 reads_bad = reads_bad + 1;
                 if (reads_bad <= 5) $display("    fast read $%04X: core got %02x, the reference says %02x", fev_addr, fev_data, exp_read(fev_addr));
             end
@@ -917,9 +1082,26 @@ module accel_tb #(parameter integer SWINT = 1,
             else if (!u_seq.swi_q) fast_bus_cls = fast_bus_cls + 1;
         end
         if (since_fall == BUS_AT && driving) begin
-            if (op_dummy && !(addr_drive == (sw_int ? 16'hC000 : 16'h0000) && rw_drive))
+            if (op_dummy && !(rw_drive && (sw_int ? (addr_drive == 16'hC000 || addr_drive == 16'hC070 ||
+                                                     (addr_drive[15:4] == 12'hC06 && addr_drive[3] == 1'b0 && addr_drive[2:0] != 3'd0))
+                                                  : addr_drive == 16'h0000)))
                 dummies_bad = dummies_bad + 1;
+            // The program's own game-port accesses on the pins under the
+            // closed regime, once the port is being served.
+            if (!op_dummy && !op_ovr && sw_int && game_pb_ok && game_pdl_ok && !u_seq.reset_seq &&
+                (addr_drive[15:4] == 12'hC06 || (rw_drive && addr_drive[15:4] == 12'hC07)))
+                pin_game = pin_game + 1;
             if (!rw_drive && data_oe && addr_drive[15:12] != 4'hC && !op_ovr) pin_ram_writes = pin_ram_writes + 1;
+            // A switch write on the pins under the closed regime: the two
+            // Cx-ROM switches must be there, the memory switches must not.
+            if (!op_dummy && !op_ovr && sw_int && !u_seq.reset_seq && addr_drive[15:4] == 12'hC03)
+                pin_spk = pin_spk + 1;
+            if (!rw_drive && data_oe && !op_ovr && sw_int && !u_seq.reset_seq && addr_drive[15:8] == 8'hC0) begin
+                if (addr_drive[7:4] == 4'h0 && (addr_drive[3:1] == 3'd3 || addr_drive[3:1] == 3'd5))
+                    pin_cx_writes = pin_cx_writes + 1;
+                else if (addr_drive[7:4] == 4'h0 || (addr_drive[7:4] == 4'h5 && !addr_drive[3]) || addr_drive[7:4] == 4'h8)
+                    pin_sw_writes = pin_sw_writes + 1;
+            end
         end
         if (drv_cyc_done) drv_cycen = drv_cycen + 1;
         if (cpu_cyc_en)   seq_cycen = seq_cycen + 1;
@@ -970,6 +1152,34 @@ module accel_tb #(parameter integer SWINT = 1,
     task clear_counters;
         begin
             @(negedge clk); cnt_clr <= 1'b1; @(negedge clk); cnt_clr <= 1'b0;
+        end
+    endtask
+
+    // The program's game-port phase (sim/accel.s 5f) stored the three
+    // buttons at $0320-$0322 and PREAD's count for each paddle at $0324-
+    // $0327: the levels exactly, the counts within two of the positions.
+    task check_game(input string what, input bit timed);
+        integer d;
+        begin
+            for (int b = 0; b < 3; b++) begin
+                if (ref_main[16'h0320 + b][7] !== tb_pb[b])
+                    fail($sformatf("%0s: button %0d read as %b, wanted %b", what, b, ref_main[16'h0320 + b][7], tb_pb[b]));
+            end
+            ok($sformatf("%0s: the three buttons read as the machine holds them (%b)", what, tb_pb));
+            // Mode 1 is the case the port's serving exists to cure: the
+            // paddle reads ride the bus at two cycles each while the loop
+            // around them runs fast, so PREAD counts more loops per unit
+            // than eleven cycles' worth and reads high.  Only the stopped
+            // paddle is exact there.
+            for (int p = 0; p < 4; p++) begin
+                d = int'(ref_main[16'h0324 + p]) - int'(tb_pos[p]);
+                if ((timed || tb_pos[p] == 8'd0) && (d > 2 || d < -2))
+                    fail($sformatf("%0s: paddle %0d read as %0d, wanted %0d", what, p, ref_main[16'h0324 + p], tb_pos[p]));
+            end
+            ok($sformatf("%0s: PREAD's counts %0d %0d %0d %0d for paddles at %0d %0d %0d %0d%0s", what,
+                         ref_main[16'h0324], ref_main[16'h0325], ref_main[16'h0326], ref_main[16'h0327],
+                         tb_pos[0], tb_pos[1], tb_pos[2], tb_pos[3],
+                         timed ? "" : " (the bus's reads under a fast loop: inflated, as expected)"));
         end
     endtask
 
@@ -1168,6 +1378,7 @@ module accel_tb #(parameter integer SWINT = 1,
         else ok("mode 0: no dummy, no fast op, every cyc_en the driver's");
         if (cx_bus == 0) fail("mode 0: the program never read $C100-$CFFF on the bus");
         else ok($sformatf("mode 0: %0d reads of $C100-$CFFF rode the bus and matched the model", cx_bus));
+        check_game("mode 0", 1'b1);
         if (phys_diff(1) != 0) fail("mode 0: the machine's memory differs from the reference");
         else ok("mode 0: the machine's memory equals the reference");
 
@@ -1194,9 +1405,10 @@ module accel_tb #(parameter integer SWINT = 1,
         else ok("mode 1: consecutive bus ops rode consecutive cycles");
         if (cx_fast == 0) fail("mode 1: no internal-ROM read of $C100-$CFFF was served fast");
         else ok($sformatf("mode 1: %0d internal-ROM reads of $C100-$CFFF served from the card, every one the model's byte", cx_fast));
+        check_game("mode 1", 1'b0);
         if (cx_slot_fast != 0) fail($sformatf("mode 1: %0d slot reads were served fast", cx_slot_fast));
         else ok("mode 1: every slot read - the slot-5 ROM, the empty slots - rode the bus");
-        if (swi_ops != 0) fail("mode 1: a keyboard read was served on the card outside the closed regime");
+        if (swi_ops != 0) fail("mode 1: a keyboard read or switch op was served on the card outside the closed regime");
         else ok("mode 1: every keyboard read rode the bus (the regime is mode 2's)");
         if (turbo_c3 == 0) fail("mode 1: no $C3xx fetch was served in one clock");
         else ok($sformatf("mode 1: %0d $C3xx fetches served in one clock once INTC8ROM was set (%0d rode the sequencer: the latch's food)", turbo_c3, fast_c3));
@@ -1204,6 +1416,7 @@ module accel_tb #(parameter integer SWINT = 1,
 
         // ---- 3. mode 2: reads and writes on the card ------------------------------------
         clear_counters(); pin_ram_writes = 0; dummies = 0; cx_fast = 0;
+        pin_sw_writes = 0; pin_cx_writes = 0; swi_wr_ops = 0; swi_wr_quiet = 0; swi_spk_ops = 0; pin_spk = 0;
         n0 = pass_count; check_gaps = 1; merge_gaps = 0;
         bp_prom0 = u_iline.cnt_promotes;   bp_pin0  = u_iline.cnt_loop_hold;
         bp_scan0 = u_iline.cnt_scan_fills; bp_fill0 = u_iline.cnt_cam_fills;
@@ -1225,8 +1438,48 @@ module accel_tb #(parameter integer SWINT = 1,
         // ---- 3b. the keyboard in the dummies --------------------------------
         if (swi_ops == 0) fail("mode 2: no keyboard read was served on the card");
         else ok($sformatf("mode 2: %0d keyboard reads served from the parked-dummy latch", swi_ops));
+        if (swi_sw_ops == 0) fail("mode 2: no status/floating read was served on the card");
+        else ok($sformatf("mode 2: %0d switch reads served on the card, %0d of them quiet (no word)", swi_sw_ops, swi_quiet_ops));
         if (swi_bus_trips != 0) fail($sformatf("mode 2: %0d keyboard reads rode the bus with the latch full", swi_bus_trips));
         else ok("mode 2: no keyboard read rode the bus once the latch had filled");
+        // ---- 3c. the switch writes in the closed regime ------------------------
+        if (swi_wr_ops == 0) fail("mode 2: no switch write was served on the card");
+        else ok($sformatf("mode 2: %0d switch writes served on the card, %0d of them quiet (no word)", swi_wr_ops, swi_wr_quiet));
+        if (pin_sw_writes != 0) fail($sformatf("mode 2: %0d memory-switch writes reached the pins in the closed regime", pin_sw_writes));
+        else ok("mode 2: no memory-switch write reached the pins in the closed regime");
+        if (pin_cx_writes == 0) fail("mode 2: no INTCXROM/SLOTC3ROM write reached the pins - the motherboard must see them");
+        else ok($sformatf("mode 2: %0d INTCXROM/SLOTC3ROM writes rode the bus, as they must", pin_cx_writes));
+        if (swi_cx_bad != 0) fail($sformatf("mode 2: %0d INTCXROM/SLOTC3ROM writes were served on the card", swi_cx_bad));
+        else ok("mode 2: no INTCXROM/SLOTC3ROM write was served on the card");
+        // ---- 3d. the speaker in the closed regime ------------------------------
+        if (swi_spk_ops == 0) fail("mode 2: no speaker access was served on the card");
+        else ok($sformatf("mode 2: %0d speaker accesses served on the card", swi_spk_ops));
+        if (pin_spk != 0) fail($sformatf("mode 2: %0d speaker accesses reached the pins in the closed regime", pin_spk));
+        else ok("mode 2: no speaker access reached the pins in the closed regime");
+        // ---- 3e. the game port in the dummies (docs/CXXX.md "The game port") ---
+        // The loop has been strobing and probing since the regime came on;
+        // once two measurements stand and the buttons are sampled, a pass
+        // of the program reads the port entirely on the card - the strobe
+        // as a served read, the timers as virtual ones - and stores what
+        // PREAD counted.  The bench moves a button and a paddle first, so
+        // the samples proven are ones taken by the loop, not the reset's.
+        tb_pb <= 3'b101; tb_pos[1] <= 8'd120;
+        c = 0;
+        while ((game_meas < 8'd2 || !game_pb_ok) && c < 30_000_000) begin @(posedge clk); c = c + 1; end
+        if (game_meas < 8'd2) fail("mode 2: the dummy loop completed no paddle measurement");
+        else ok($sformatf("mode 2: the dummy loop completed %0d paddle measurements; samples %0d %0d %0d %0d bus cycles",
+                          game_meas, game_pdl0, game_pdl1, game_pdl2, game_pdl3));
+        if (!game_pb_ok) fail("mode 2: the dummy loop never sampled the three buttons");
+        else ok($sformatf("mode 2: the buttons sampled by the loop read %b", game_pb));
+        n0 = swi_game_ops; c = swi_pdl_strobes; pin_game = 0;
+        wait_passes(pass_count + 2, "mode 2, the game port served");
+        check_game("mode 2", 1'b1);
+        if (swi_game_ops == n0) fail("mode 2: no button or paddle read was served on the card");
+        else ok($sformatf("mode 2: %0d button and paddle reads served on the card", swi_game_ops - n0));
+        if (swi_pdl_strobes == c) fail("mode 2: no paddle strobe was served on the card");
+        else ok($sformatf("mode 2: %0d paddle strobes served on the card, the virtual timers started", swi_pdl_strobes - c));
+        if (pin_game != 0) fail($sformatf("mode 2: %0d game-port accesses of the program's reached the pins with the port served", pin_game));
+        else ok("mode 2: no game-port access of the program's reached the pins with the port served");
         // An injected key crosses the internal path end to end: pressed
         // here, served to the program's poll from the card, taken with the
         // $C010 that rides the bus, and the byte the program stored is

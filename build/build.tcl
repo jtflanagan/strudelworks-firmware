@@ -176,15 +176,26 @@ if {$snoop || $master} {
             [file join $root rtl kbd_inject.sv] \
             [file join $root rtl kbd_notice.sv] \
             [file join $root rtl pb_inject.sv] \
+            [file join $root rtl game_port.sv] \
             [file join $root rtl cpu65c02.sv] \
             [file join $root rtl via6522.v] \
+            [file join $root rtl YM2149.sv] \
+            [file join $root rtl ay_pair.sv] \
+            [file join $root rtl ssi263.sv] \
             [file join $root rtl slot_switches.sv] \
             [file join $root rtl mockingboard.sv] \
+            [file join $root rtl speaker.sv] \
+            [file join $root rtl audio_sampler.sv] \
+            [file join $root rtl audio_tx.sv] \
             [file join $root rtl hd_card.sv] \
             [file join $root rtl fd_bank.sv] \
             [file join $root rtl floppy_card.sv] \
             [file join $root rtl vidhd_card.sv] \
+            [file join $root rtl mouse_card.sv] \
+            [file join $root rtl uthernet2_card.sv] \
+            [file join $root rtl no_slot_clock.sv] \
             [file join $root rtl vbl_lock.sv] \
+            [file join $root rtl vbeam.sv] \
             [file join $root rtl fb_sim.sv] \
             [file join $root rtl master_top.sv] \
         ]

@@ -19,6 +19,16 @@ The one thing neither side can do alone is move a block between the Apple's
 memory and an image file, and that is where the soft core being the CPU pays
 off: the card stops it and does the transfer over the bus itself.
 
+**Served on the card under acceleration (2026-09-04).**  In the closed
+regime (CXXX.md "The on-card slots") every access to this slot - the ROM
+page, the port's register writes, the EXECUTE, the busy polls, the
+completion - is a fast op the card answers itself, with no bus cycle;
+the ROM's poll loop runs at three clocks a poll.  The host still follows
+the port from the stream: the card keeps the EXECUTE's word and every
+non-busy read of the port (`fast_force`, rtl/event_merge.sv) and drops
+the `$80` polls.  The DMA is unchanged: the block lands by the override
+path with the core held.
+
 ## What the ROM does
 
 AppleWin's, ported to ca65 with the code left alone (strudelworks-host

@@ -303,7 +303,10 @@ The origin stays where the floating bus puts it. That is the observable
 this method rests on and the one every Apple II shares; VBL′ is a IIe
 reading, kept here as a calibration: **the IIe's VBL′ = card lines 192-261,
 one cycle early.** A feature that wants to reproduce the IIe's switch to
-the cycle subtracts one.
+the cycle subtracts one - `rtl/fb_sim.sv`'s `vbl_bar` does (2026-09-03),
+for the `$C019` the accelerated core is served on the card and for the
+monitor's compare of every program `$C019` read at the bus's pace
+(FLOATING_BUS.md; CXXX.md, "The switch reads in the closed regime").
 
 ## What is not here
 

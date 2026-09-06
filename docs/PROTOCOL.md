@@ -71,7 +71,15 @@ host reads; the receiver carries parser state across all of them.
 | `0x22` | MEM_ROM | Host→card. One chunk of the IIe's 16 KB system ROM for the card's copy: payload `[{chunk[4:0]}]` then 128 words; 32 chunks make the ROM, in any order. See MEMORY.md. |
 | `0x23` | VIDHD_ROM | Host→card. Payload 64 words: the VidHD's 256-byte slot ROM - the signature software scans for, synthesised by the host. See VIDHD.md. |
 | `0x24` | UNKNOWN_TYPE | Card→host, **unsolicited**. Header only; `free[7:0]` = the type of a host→card message the card does not consume, `free[15:8]` = its length. The card skipped that message by its length - framing is intact - and this says so, so the host can log what it sent that the gateware lacks. One pending, the latest wins. |
-| `0x25`–`0xFF` | — | Application, unassigned. |
+| `0x25` | MOUSE_MOVE | Host→card. `free[1:0]` = the mouse's buttons (levels, 0 = button 0); payload one word `{dy[15:0], dx[15:0]}`, signed deltas in the mouse's own counts. Applied to the card's position with the program's clamps and raises the movement/button interrupt if the mode asks. See MOUSE.md. |
+| `0x26` | MOUSE_ROM | Host→card. `free[2:0]` = chunk; payload 64 words: one 256-byte page of the AppleMouse card's 2 KB firmware ROM. Eight chunks make the ROM, in any order. See MOUSE.md. |
+| `0x27` | NSC_TIME | Host→card. Payload two words: the No-Slot Clock's 64-bit clock register in packed BCD, low word `{hour, minute, second, centisecond}` then high `{year, month, date, day of week}`. Taken whole at the second word; the card keeps no time of its own, the host sends one every centisecond. See NSC.md. |
+| `0x28` | U2_CMD | Card→host, **unsolicited**. The Uthernet II: a write to a socket's command register, or a reset. `free[1:0]` the socket, `free[15:8]` the command byte (`$00` reset); payload 24 words: the W5100's common registers `$0000-$002F` then the socket's `$00-$2F`, as bytes, as the program would read them. See UTHERNET2.md. |
+| `0x29` | U2_TX | Card→host, **unsolicited**, after a SEND's U2_CMD: the bytes from `Sn_TX_RD` to `Sn_TX_WR`. `free` = `{bytes[11:0], last, first, sock[1:0]}`; payload the bytes packed four a word, up to 255 words a chunk. |
+| `0x2A` | U2_RX | Host→card. Bytes to append at a socket's RX write pointer, the W5100's header in front. `free` = `{bytes[11:0], 0, 0, sock[1:0]}`; payload the bytes packed four a word. The card moves `Sn_RX_WR` and adds to `Sn_RX_RSR` at the last word. |
+| `0x2B` | U2_STAT | Host→card. `free` = `{sr[7:0], 0, sock[1:0]}`: the socket's `Sn_SR`, at once; payload none, or two words `[DIPR][{MSSR, DPORT}]` (the socket's register words 3 and 4) for an accepted LISTEN's peer. |
+| `0x2C` | AUDIO_FRAMES | Card→host, **unsolicited once asked** (AUDIO_CTRL on). The sound on the card (AUDIO.md): n samples at the play rate, three words each - `{ay0, spk}`, `{ay2, ay1}`, `{seq, ay3}` - the speaker's and each AY chip's box average over one sample window (0..32767) and a running sample count. `free` = `{drops[7:0], n[7:0]}`, n = 32; `len` = 3n. A gap in `seq` is that many samples the card's FIFO dropped. |
+| `0x2D`–`0xFF` | — | Application, unassigned. |
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any
@@ -98,7 +106,7 @@ protocol.
 | `0x8000_0000` | BUILD_DATE | RO | `YYYYMMDD` as a decimal integer |
 | `0x8000_0004` | BUILD_TIME | RO | `HHMMSS` as a decimal integer |
 | `0x8000_0008` | CPU_SOURCE | RW bit 0 | which CPU drives the Apple bus; latched at RES' — see BUS_MASTER.md |
-| `0x8000_000C` | MB_SLOT | RW bits 2:0 | the Mockingboard's slot, 0 = off; latched at RES' — see MOCKINGBOARD.md |
+| `0x8000_000C` | MB_SLOT | RW bits 3:0 | the Mockingboard's slot, 0 = off, bit 3 a Phasor in it; latched at RES' (`[10:8]`, `[11]`) — see MOCKINGBOARD.md |
 | `0x8000_0010` | BOOT_HOLD | RW bit 0, W1 bit 16 | hold the soft core at its reset vector; `arm`, `held`, `runtime`, `release`, `holds` — see BOOT_MENU.md; the release serves the runtime door too — see RUNTIME_MENU.md |
 | `0x8000_0014` | HD_SLOT | RW bits 2:0 | the hard disk's slot, 0 = off; latched at RES', never MB_SLOT's; `rom`, `busy`, `execs` — see HARDDISK.md |
 | `0x8000_0018` | RESET | W1 bit 0, W bits 31:16 | pulse the Apple's RES' low, for a programmatic Ctrl-Reset; `pulsing`, `pulses` — see BUS_MASTER.md |
@@ -130,7 +138,7 @@ protocol.
 | `0x8000_0080` | FB_LAST2 | RO | `{addr[7:0] of $C0xx, scanner address[15:0], mode[7:0]}` of the last mismatch |
 | `0x8000_0084` | FB_OTHER | RO | `[15:0]` mismatches on screen-hole cycles, `[31:16]` on 80-column cycles — counted apart, see FLOATING_BUS.md |
 | `0x8000_0088` | FB_PEEK | RW bits 14:0 | a byte of the side copy: `[14]` 0 = text (`[10:0]` from $0400), 1 = hi-res (`[13:0]` from $2000); `[23:16]` the byte |
-| `0x8000_008C` | ACCEL_CTRL | RW bits 1:0, 23:8, 28; W1 bit 31 | the accelerated core (ACCELERATION.md): `[1:0]` mode - 0 off (the core locked to the bus, the old machine to the clock), 1 reads served on the card and every write on the bus, 2 reads and writes on the card; `[23:8]` the target, ops per bus cycle, 8.8 fixed point, 0 = unlimited; `[28]` swint_dis - 1 keeps the keyboard on the bus and the dummy parked at `$0000` (ACCELERATION.md "The keyboard in the dummies"), a level; W1 clear the ACCEL_* counters. What is slow is a matter of class alone: every `$Cxxx` access a slot answers rides the bus in every mode. Levels, safe under a running machine - except that leaving mode 2 for mode 0 or serving off runs the machine's stale RAM; the host refuses it |
+| `0x8000_008C` | ACCEL_CTRL | RW bits 1:0, 23:8, 28; W1 bit 31 | the accelerated core (ACCELERATION.md): `[1:0]` mode - 0 off (the core locked to the bus, the old machine to the clock), 1 reads served on the card and every write on the bus, 2 reads and writes on the card; `[23:8]` the target, ops per bus cycle, 8.8 fixed point, 0 = unlimited; `[28]` swint_dis - 1 keeps the keyboard on the bus and the dummy parked at `$0000` (ACCELERATION.md "The keyboard in the dummies"), a level; `[27]` game_dis - 1 keeps the game port on the bus and the dummies at `$C000` alone (CXXX.md "The game port"), a level; W1 clear the ACCEL_* counters. What is slow is a matter of class alone: every `$Cxxx` access a slot answers rides the bus in every mode. Levels, safe under a running machine - except that leaving mode 2 for mode 0 or serving off runs the machine's stale RAM; the host refuses it |
 | `0x8000_0090` | ACCEL_STAT | RO | `[0]` accelerating; `[1]` the core held by the governor; `[3]` the bus owns the op stream; `[7:4]` the sequencer's state; `[15:8]` event-merge overflows (must be 0); `[23:16]` fast ops decided twice; `[24]` the core's reset sequence has not yet reached `$FFFD` on the bus (every op rides the bus until it has - the IIe's MMU infers a reset from that sequence, not from RES′) |
 | `0x8000_0094` | ACCEL_FAST | RO | ops served on the card |
 | `0x8000_0098` | ACCEL_BUS | RO | the core's ops that rode a bus cycle; (FAST + BUS) / CYCLES is the ratio achieved |
@@ -144,6 +152,19 @@ protocol.
 | `0x8000_00B8` | ACCEL_FAST_DROM | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of the system ROM ($D000-$FFFF). The seven sum to ACCEL_FAST |
 | `0x8000_00BC` | ACCEL_FAST_DCX | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): data reads of the internal ROM in $C100-$CFFF. The seven sum to ACCEL_FAST |
 | `0x8000_00C0` | ACCEL_FAST_WR | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): writes. The seven sum to ACCEL_FAST |
+| `0x8000_00C8` | GAME_STAT | RO | the game port as the dummy loop last sampled it (CXXX.md "The game port"): `[2:0]` the buttons PB0..PB2, a level each; `[3]` pb_ok, all three sampled; `[4]` pdl_ok, a paddle measurement has completed; `[19:8]` paddle 0's sample, bus cycles from the strobe to the timer's fall (eleven a unit); `[31:20]` paddle 1's |
+| `0x8000_00CC` | GAME_STAT2 | RO | `[11:0]` paddle 2's sample; `[23:12]` paddle 3's; `[31:24]` measurements completed, wrapping |
+| `0x8000_00D0` | MOUSE_SLOT | RW bits 2:0 | the mouse card's slot, 0 = off; latched at RES', never MB_SLOT's, HD_SLOT's, FD_SLOT's or VIDHD_SLOT's; `[16]` rom loaded, `[17]` IRQ asserted, `[19:18]` the buttons, `[23:20]` the mode byte, `[31:24]` MOUSE_MOVEs applied — see MOUSE.md |
+| `0x8000_00D4` | MOUSE_STAT | RO | `{y[15:0], x[15:0]}`: the position as the card holds it |
+| `0x8000_00D8` | NSC_CTRL | RW bit 0 | the No-Slot Clock's lever (1 at reset); `[1]` time loaded, `[2]` reading out, `[3]` writes enabled, `[13:8]` comparison bit, `[21:16]` read-out bit, `[31:24]` unlocks — see NSC.md |
+| `0x8000_00DC` | NSC_TIME | RO | the time the card holds, low half: `{hour, minute, second, centisecond}` BCD |
+| `0x8000_00E0` | NSC_DATE | RO | ...high half: `{year, month, date, day of week}` BCD |
+| `0x8000_00E4` | U2_SLOT | RW bits 2:0 | the Uthernet II's slot, 0 = off; latched at RES', never any of the five others'; `[11]` a command was dropped, `[15:12]` the sockets' `Sn_SR != 0`, `[23:16]` U2_CMDs sent, `[31:24]` U2_RX chunks landed — see UTHERNET2.md |
+| `0x8000_00E8` | U2_STAT | RO | `{Sn_RX_RSR[15:0], Sn_TX_FSR[15:0]}` of socket 0 |
+| `0x8000_00EC` | LINK_STAT | RO | the card's own view of the link, the UART status line's facts over USB3: `[0]` phi0 ticking (the card is in a powered machine), `[1]` capture enabled, `[4:2]` the link's last reset cause (`{0, watchdog, UART 'R'}`), `[15:8]` the chip-side snapshot `{txe, rxf, qcount, state}` taken as it fired, `[23:16]` resets so far, `[24]` DDR3 calibrated (RING_STATUS[25] again). One read answers "is there a link, and is it in a machine"; the UART is for the card that answers no register at all |
+| `0x8000_00F0` | AUDIO_CTRL | RW | the sound on the card (AUDIO.md): `[0]` the AUDIO_FRAMES stream on, `[1]` the AYs clocked by the real bus's phi0 rather than the core's time; readback adds `[16]` = the stream on |
+| `0x8000_00F4` | AUDIO_RATE | RW | the sampler's NCO increment, `rate_hz * 2^32 / 1e8`; resets to 1 894 081 (44.1 kHz); the host trims it by ppm to hold its buffer |
+| `0x8000_00F8` | AUDIO_STAT | RO | `[15:0]` samples sent, `[23:16]` samples dropped for a full FIFO, `[24]` the FIFO full now |
 | `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s

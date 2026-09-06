@@ -56,6 +56,8 @@ run sync_fifo     rtl/sync_fifo.sv
 run synth_bus_events rtl/synth_bus_events.sv
 run bus_event_capture rtl/bus_event_capture.sv rtl/sync_fifo.sv
 run bus_event_filter rtl/bus_event_filter.sv
+# vbeam shares the scanner formula with vbl_lock and fb_sim.
+run vbeam         -Irtl rtl/vbeam.sv
 run event_merge   rtl/event_merge.sv
 run synchronizer  rtl/synchronizer.sv
 run wb_regfile    rtl/wb_regfile.sv rtl/fast_census.sv
@@ -81,10 +83,17 @@ run iscan         rtl/iscan.sv
 run boot_hold     rtl/boot_hold.sv
 run kbd_inject    rtl/kbd_inject.sv
 run kbd_notice    rtl/kbd_notice.sv
+run speaker       rtl/speaker.sv
+run audio_sampler rtl/audio_sampler.sv
+run audio_tx      rtl/audio_tx.sv rtl/sync_fifo.sv
 run pb_inject     rtl/pb_inject.sv
+run game_port     rtl/game_port.sv
 run slot_switches rtl/slot_switches.sv
 run hd_card       rtl/hd_card.sv rtl/slot_switches.sv
 run vidhd_card    rtl/vidhd_card.sv rtl/slot_switches.sv
+run mouse_card    rtl/mouse_card.sv rtl/slot_switches.sv
+run no_slot_clock rtl/no_slot_clock.sv
+run uthernet2_card rtl/uthernet2_card.sv rtl/fd_bank.sv -Wno-MULTIDRIVEN
 # fd_bank is the two-process true-dual-port RAM template Vivado infers block
 # RAM from (UG901); Verilator reads its two writers as a multi-driven array,
 # which is the shape, not a bug.
@@ -92,12 +101,16 @@ run floppy_card   rtl/floppy_card.sv rtl/fd_bank.sv rtl/slot_switches.sv \
                   -Wno-MULTIDRIVEN
 # vbl_lock and fb_sim share the scanner formula, an `include beside the RTL.
 run vbl_lock      -Irtl rtl/vbl_lock.sv
-run fb_sim        -Irtl rtl/fb_sim.sv
+run fb_sim        -Irtl rtl/fb_sim.sv rtl/fd_bank.sv -Wno-MULTIDRIVEN
 # via6522 is third-party (see its header) and linted only as a dependency of
 # the mockingboard, with the style warnings its 2011 idiom trips suppressed
 # rather than fixed - it ran real machines as-is, and diverging from the
 # source to quiet a linter is how faithful ports stop being faithful.
-run mockingboard  rtl/mockingboard.sv rtl/via6522.v rtl/slot_switches.sv \
+# YM2149.sv is third-party too (a2fpga's, via aty) and carries width idioms
+# Verilator dislikes; suppressed here, not edited there.
+run ay_pair       rtl/ay_pair.sv rtl/YM2149.sv -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND
+run ssi263        rtl/ssi263.sv
+run mockingboard  rtl/mockingboard.sv rtl/via6522.v rtl/slot_switches.sv rtl/ay_pair.sv rtl/YM2149.sv rtl/ssi263.sv -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND \
                   -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY
 # -Irtl: the microcode field definitions are a generated `include, and they live
 # beside the RTL rather than in the simulator's working directory.

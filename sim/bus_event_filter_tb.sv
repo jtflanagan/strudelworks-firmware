@@ -27,7 +27,8 @@ module bus_event_filter_tb;
     always #5 clk = ~clk;
     reg rst = 1'b1;
 
-    reg         enable = 1'b0, sparse = 1'b0;
+    reg         enable = 1'b0, sparse = 1'b0, virt = 1'b0, in_carrier = 1'b0;
+    reg  [15:0] in_drop = 16'd0;
     reg  [31:0] in_data = 32'd0;
     reg         in_valid = 1'b0, in_mark = 1'b0, in_dummy = 1'b0;
     reg  [15:0] in_mark_free = 16'd0;
@@ -38,7 +39,7 @@ module bus_event_filter_tb;
     bus_event_filter #(.CAP (CAP)) dut (
         .clk (clk), .rst (rst), .enable (enable), .sparse (sparse),
         .in_data (in_data), .in_valid (in_valid), .in_mark (in_mark), .in_mark_free (in_mark_free),
-        .in_dummy (in_dummy),
+        .in_dummy (in_dummy), .virt (virt), .in_drop (in_drop), .in_carrier (in_carrier),
         .out_data (out_data), .out_valid (out_valid), .out_mark (out_mark), .out_mark_free (out_mark_free)
     );
 
@@ -126,6 +127,40 @@ module bus_event_filter_tb;
         end
     endtask
 
+    // A fast op's word carrying a mark (rtl/vbeam.sv's, in the virtual base).
+    task fastm(input [15:0] addr);
+        begin
+            @(negedge clk);
+            in_data  = fw(addr, 1'b1, 8'h33);
+            in_valid = 1'b1; in_mark = 1'b1; in_mark_free = 16'hA503;
+            sent[sent_n] = in_data; sent_n = sent_n + 1;
+            @(negedge clk);
+            in_valid = 1'b0; in_mark = 1'b0; in_mark_free = 16'd0;
+            repeat (2) @(negedge clk);
+        end
+    endtask
+    // A fast op's word carrying the merge's count of dropped cycles before it.
+    task fast_d(input [15:0] addr, input rw, input [7:0] data, input [15:0] ndrop);
+        begin
+            @(negedge clk);
+            in_data  = fw(addr, rw, data); in_drop = ndrop;
+            in_valid = 1'b1;
+            sent[sent_n] = in_data; sent_n = sent_n + 1;
+            @(negedge clk);
+            in_valid = 1'b0; in_drop = 16'd0;
+            repeat (2) @(negedge clk);
+        end
+    endtask
+    // A carrier: a count with no word.
+    task carrier_d(input [15:0] ndrop);
+        begin
+            @(negedge clk);
+            in_data = 32'd0; in_drop = ndrop; in_carrier = 1'b1; in_valid = 1'b1;
+            @(negedge clk);
+            in_valid = 1'b0; in_carrier = 1'b0; in_drop = 16'd0;
+            repeat (2) @(negedge clk);
+        end
+    endtask
     task rd(input [15:0] addr);  begin cycle(addr, 1'b1, 8'h5A, 1'b0); end endtask
     task wr(input [15:0] addr);  begin cycle(addr, 1'b0, 8'hA5, 1'b0); end endtask
     task settle;                 begin repeat (8) @(negedge clk); end endtask
@@ -315,35 +350,71 @@ module bus_event_filter_tb;
         else $display("  ok: %0d skipped + %0d kept = %0d cycles; the %0d fast words are not cycles", skipped_total(), kept_total(), cycles, 3);
         if (consecutive_bad != 0) fail("case 7: bad adjacency");
 
-        // --- case 8 / accelerated, sparse: fast reads dropped uncounted, fast writes kept ----
-        $display("case 8: sparse under acceleration");
+        // --- case 8 / accelerated, sparse, the real base: a fast word is kept (the
+        // merge's door already dropped the reads, case 9b) and is not a cycle ----
+        $display("case 8: sparse under acceleration, the real base");
         enable = 1'b0; settle; sparse = 1'b1; enable = 1'b1; @(negedge clk);
         reset_record;
         dummy();                              // first: kept
-        fast(16'h1000, 1'b1, 8'h11);          // a fast read: dropped, not counted
-        fast(16'h1001, 1'b0, 8'h22);          // a fast write: kept
+        fast(16'h1001, 1'b0, 8'h22);          // a fast write: kept, not a cycle
         dummy(); dummy(); dummy();            // counted: 3
         wr(16'h0400);                         // kept, SKIP 3 first
         rd(16'h0300);                         // an ordinary RAM read: counted 1
         cur_vbl = 1'b1;
-        fast(16'h1002, 1'b1, 8'h33);          // dropped; carries the new level, must not eat the edge
         rd(16'h0301);                         // the edge's cycle: kept, SKIP 1 first
         settle;
         if (got_n != 6) fail($sformatf("case 8: expected 6 words out, got %0d", got_n));
         else begin
             bad = 0;
             if (got[0] !== sent[0]) bad = bad + 1;
-            if (got[1] !== sent[2]) bad = bad + 1;
-            if (got[2] !== {4'hD, 28'd3} || got[3] !== sent[6]) bad = bad + 1;
-            if (got[4] !== {4'hD, 28'd1} || got[5] !== sent[9]) bad = bad + 1;
+            if (got[1] !== sent[1]) bad = bad + 1;
+            if (got[2] !== {4'hD, 28'd3} || got[3] !== sent[5]) bad = bad + 1;
+            if (got[4] !== {4'hD, 28'd1} || got[5] !== sent[7]) bad = bad + 1;
             if (bad != 0) fail("case 8: the words out are not the expected ones");
-            else $display("  ok: a fast read vanishes uncounted, a fast write is kept, the edge stays with its cycle");
+            else $display("  ok: a fast write is kept and not a cycle, the edge stays with its cycle");
         end
         if (skipped_total() + kept_total() != cycles) fail("case 8: skipped + kept != cycles");
+
+        // --- case 10 / the virtual base: the core's cycles are the cycles --------
+        $display("case 10: the virtual base counts the door's drops in order, not dummies");
+        enable = 1'b0; settle; sparse = 1'b1; virt = 1'b1; cur_vbl = 1'b0; cur_res = 1'b1; enable = 1'b1; @(negedge clk);
+        reset_record;
+        rd(16'h0300);                                   // first: kept          sent[0]
+        dummy; dummy;                                   // not cycles here       sent[1..2]
+        fast_d(16'h2000, 1'b0, 8'h44, 16'd3);           // kept, 3 dropped reads before it: SKIP 3 first   sent[3]
+        fast_d(16'hC054, 1'b1, 8'hA0, 16'd2);           // kept (a switch read), SKIP 2 first   sent[4]
+        cur_vbl = 1'b1; fast_d(16'h1004, 1'b1, 8'h06, 16'd1);   // kept: an edge on a fast word, SKIP 1 first   sent[5]
+        fastm(16'h1005);                                // kept, marked          sent[6]
+        carrier_d(16'd7);                               // a count with no word: 7
+        rd(16'h0301);                                   // dropped, counted: 1   sent[7]
+        dummy;                                          // not a cycle           sent[8]
+        wr(16'h0400);                                   // kept, SKIP 8 first    sent[9]
+        settle;
+        // Expected out: E300 S3 W2000 S2 C054 S1 F1004 F1005(mark) S8 W400
+        if (got_n != 10) fail($sformatf("case 10: expected 10 words out, got %0d", got_n));
+        else begin
+            bad = 0;
+            if (got[0] !== sent[0]) bad = bad + 1;
+            if (got[1] !== {4'hD, 28'd3} || got[2] !== sent[3]) bad = bad + 1;
+            if (got[3] !== {4'hD, 28'd2} || got[4] !== sent[4]) bad = bad + 1;
+            if (got[5] !== {4'hD, 28'd1} || got[6] !== sent[5]) bad = bad + 1;
+            if (got[7] !== sent[6] || got_mark[7] !== 1'b1 || got_free[7] !== 16'hA503) bad = bad + 1;
+            if (got[8] !== {4'hD, 28'd8} || got[9] !== sent[9]) bad = bad + 1;
+            for (i = 0; i < got_n; i = i + 1) if (got_mark[i] && i != 7) bad = bad + 1;
+            if (bad != 0) begin
+                fail("case 10: the words out are not the expected ones");
+                for (i = 0; i < got_n; i = i + 1) $display("    got[%0d] = %08x mark %0d", i, got[i], got_mark[i]);
+            end else $display("  ok: the door's counts and a carrier into the SKIPs, dummies dropped uncounted, the switch read, the edge and the mark on fast words");
+        end
+        if (consecutive_bad != 0) fail("case 10: a word other than an event followed a SKIP on the next clock");
+        virt = 1'b0; enable = 1'b0; settle;
+
 
         // --- case 9 / the merge in front of the filter ------------------------------------
         $display("case 9: event_merge - order, spacing, the same-clock collision, the dummy flag");
         run_merge;
+        $display("case 9b: the merge's door in the virtual base");
+        run_door;
 
         if (errors == 0) $display("PASS");
         else             $display("FAIL: %0d error(s)", errors);
@@ -367,7 +438,7 @@ module bus_event_filter_tb;
     bus_event_filter #(.CAP (CAP)) dut2 (
         .clk (clk), .rst (rst), .enable (c_enable), .sparse (1'b1),
         .in_data (c_in_data), .in_valid (c_in_valid), .in_mark (c_in_mark), .in_mark_free (16'h0700),
-        .in_dummy (1'b0),
+        .in_dummy (1'b0), .virt (1'b0), .in_drop (16'd0), .in_carrier (1'b0),
         .out_data (f_data), .out_valid (f_valid), .out_mark (f_mark), .out_mark_free (f_free)
     );
     bus_event_capture #(.DEPTH (64), .FRAME_EVENTS (8), .FLUSH_TICKS (200)) cap (
@@ -429,10 +500,12 @@ module bus_event_filter_tb;
     reg         m_bus_valid = 1'b0, m_bus_dummy = 1'b0, m_bus_mark = 1'b0;
     reg  [31:0] m_bus_data = 32'd0;
     reg         m_fast_valid = 1'b0, m_fast_rw = 1'b1, m_vbl = 1'b0;
+    reg         m_sparse = 1'b0, m_virt = 1'b0, m_quiet = 1'b0, m_fmark = 1'b0;
     reg  [15:0] m_fast_addr = 16'd0;
     reg  [7:0]  m_fast_data = 8'd0;
     wire [31:0] m_data, m3_data;
-    wire        m_valid, m_mark, m_dummy, m3_valid, m3_mark;
+    wire        m_valid, m_mark, m_dummy, m3_valid, m3_mark, m_carrier;
+    wire [15:0] m_drop;
     wire [15:0] m_free, m3_free;
     wire [7:0]  m_overflows;
 
@@ -441,14 +514,15 @@ module bus_event_filter_tb;
         .bus_valid (m_bus_valid), .bus_data (m_bus_data), .bus_mark (m_bus_mark),
         .bus_mark_free (16'h0700), .bus_dummy (m_bus_dummy),
         .fast_valid (m_fast_valid), .fast_addr (m_fast_addr), .fast_rw (m_fast_rw),
-        .fast_data (m_fast_data), .fast_sync (1'b0), .vbl_level (m_vbl), .res_level (1'b1),
+        .fast_data (m_fast_data), .fast_sync (1'b0), .fast_mark (m_fmark), .fast_mark_free (16'hA503),
+        .fast_quiet (m_quiet), .vbl_level (m_vbl), .res_level (1'b1), .sparse (m_sparse), .virt (m_virt),
         .out_valid (m_valid), .out_data (m_data), .out_mark (m_mark), .out_mark_free (m_free),
-        .out_dummy (m_dummy), .overflows (m_overflows)
+        .out_dummy (m_dummy), .out_drop (m_drop), .out_carrier (m_carrier), .overflows (m_overflows)
     );
     bus_event_filter #(.CAP (CAP)) dut3 (
         .clk (clk), .rst (rst), .enable (m_enable), .sparse (1'b0),
         .in_data (m_data), .in_valid (m_valid), .in_mark (m_mark), .in_mark_free (m_free),
-        .in_dummy (m_dummy),
+        .in_dummy (m_dummy), .virt (1'b0), .in_drop (m_drop), .in_carrier (m_carrier),
         .out_data (m3_data), .out_valid (m3_valid), .out_mark (m3_mark), .out_mark_free (m3_free)
     );
     reg  [31:0] m_got [0:255];
@@ -467,6 +541,50 @@ module bus_event_filter_tb;
         end
     end
     integer j;
+    // The door (case 9b): the merge's own output recorded.
+    reg  [31:0] d_data [0:31]; reg [15:0] d_drop [0:31]; reg d_carrier [0:31]; reg d_mark [0:31];
+    integer     d_n = 0;
+    always @(posedge clk) if (m_valid) begin
+        d_data[d_n] = m_data; d_drop[d_n] = m_drop; d_carrier[d_n] = m_carrier; d_mark[d_n] = m_mark; d_n = d_n + 1;
+    end
+    task m_op(input [15:0] addr, input rw, input [7:0] data, input quiet, input mark);
+        begin
+            m_fast_valid = 1'b1; m_fast_addr = addr; m_fast_rw = rw; m_fast_data = data; m_quiet = quiet; m_fmark = mark;
+            @(negedge clk);
+            m_fast_valid = 1'b0; m_quiet = 1'b0; m_fmark = 1'b0;
+            repeat (3) @(negedge clk);
+        end
+    endtask
+    task run_door;
+        begin
+            m_enable = 1'b0; repeat (4) @(negedge clk);
+            m_sparse = 1'b1; m_virt = 1'b1; m_vbl = 1'b0; d_n = 0;
+            m_enable = 1'b1; repeat (2) @(negedge clk);
+            m_op(16'h1000, 1'b1, 8'h11, 1'b0, 1'b0);    // a read: dropped, counted 1
+            m_op(16'h1001, 1'b1, 8'h12, 1'b0, 1'b0);    // a read: dropped, counted 2
+            m_op(16'h2000, 1'b0, 8'h44, 1'b0, 1'b0);    // a write: kept, carrying 2
+            m_vbl = 1'b1;
+            m_op(16'h1002, 1'b1, 8'h13, 1'b0, 1'b0);    // a read on the blanking edge: kept, carrying 0
+            m_op(16'hC054, 1'b1, 8'hA0, 1'b1, 1'b0);    // a quiet switch read: dropped, counted 1
+            m_op(16'hC055, 1'b1, 8'hA0, 1'b0, 1'b0);    // a switch read: kept, carrying 1
+            m_op(16'h1003, 1'b1, 8'h14, 1'b0, 1'b1);    // a read at the origin, marked: kept, carrying 0
+            repeat (30) @(negedge clk);
+            if (d_n != 4) fail($sformatf("case 9b: expected 4 entries out of the door, got %0d", d_n));
+            else begin
+                bad = 0;
+                if (d_data[0][15:0] !== 16'h2000 || d_drop[0] !== 16'd2 || d_carrier[0]) bad = bad + 1;
+                if (d_data[1][15:0] !== 16'h1002 || d_drop[1] !== 16'd0 || d_data[1][19] !== 1'b1) bad = bad + 1;
+                if (d_data[2][15:0] !== 16'hC055 || d_drop[2] !== 16'd1) bad = bad + 1;
+                if (d_data[3][15:0] !== 16'h1003 || d_drop[3] !== 16'd0 || !d_mark[3]) bad = bad + 1;
+                if (bad != 0) begin
+                    fail("case 9b: the door's entries are not the expected ones");
+                    for (j = 0; j < d_n; j = j + 1) $display("    entry %0d: %08x drop %0d carrier %0d mark %0d", j, d_data[j], d_drop[j], d_carrier[j], d_mark[j]);
+                end else $display("  ok: the door drops the reads and a quiet switch read with their counts in order, keeps the write, the edge, the switch read and the mark");
+            end
+            if (m_overflows != 0) fail("case 9b: the merge overflowed");
+            m_enable = 1'b0; m_sparse = 1'b0; m_virt = 1'b0;
+        end
+    endtask
     task run_merge;
         begin
             m_enable = 1'b1; repeat (2) @(negedge clk);

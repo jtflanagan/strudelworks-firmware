@@ -89,7 +89,8 @@ module snoop_top #(
         .real_data (real_data), .real_valid (real_valid),
         .real_mark (1'b0), .real_mark_free (16'd0),   // no scanner lock without a CPU
         // ...and no sequencer: no dummies, no fast ops.
-        .real_dummy (1'b0), .fast_valid (1'b0), .fast_addr (16'd0), .fast_rw (1'b1),
+        .real_dummy (1'b0), .virt (1'b0), .fast_mark (1'b0), .fast_mark_free (16'd0), .fast_quiet (1'b0), .fast_force (1'b0),
+        .fast_valid (1'b0), .fast_addr (16'd0), .fast_rw (1'b1),
         .fast_data (8'd0), .fast_sync (1'b0), .fast_vbl (1'b0), .merge_overflows (),
         .phi0_live (phi0_live),
         .apple_res_sync (apple_res_sync),
@@ -106,6 +107,8 @@ module snoop_top #(
         .fd_stale (2'd0), .fd_dirty (2'd0), .fd_phase (14'd0), .fd_ctl (4'd0),
         .fd_late (8'd0), .fd_fill_max (16'd0), .fd_late_clr (), .fd_fill_clr (),
         .vidhd_slot_active (), .vidhd_rom_loaded (1'b0),   // nor for a VidHD
+        .u2_slot_active (), .u2_sock_open (4'd0), .u2_cmd_dropped (1'b0),   // nor an Uthernet II
+        .u2_cmds (8'd0), .u2_rx_chunks (8'd0), .u2_s0_rsr (16'd0), .u2_s0_fsr (16'd0),
         .kbd_press (), .kbd_press_key (), .kbd_drop (),   // nor type at it
         .kbd_lock (), .kbd_flags (3'd0), .kbd_counts (32'd0),
         .kbd_resolved_key (7'd0), .kbd_changed (1'b0),
@@ -127,6 +130,8 @@ module snoop_top #(
         .accel_on (1'b0), .accel_stat (32'd0), .accel_fast (32'd0), .accel_bus (32'd0),
         .accel_cycles (32'd0), .accel_wait (32'd0), .accel_turbo (32'd0),
         .accel_cen_v (1'b0), .accel_cen_sel (3'd0),
+        .accel_game_dis (), .game_pb (3'd0), .game_pb_ok (1'b0), .game_pdl_ok (1'b0),
+        .game_pdl0 (12'd0), .game_pdl1 (12'd0), .game_pdl2 (12'd0), .game_pdl3 (12'd0), .game_meas (8'd0),
         .ev_fast_room (),
         .fb_serve (), .fb_cnt_clr (), .fb_peek_addr (),   // nor simulate the floating bus
         .fb_mode (7'd0), .fb_compared (32'd0), .fb_mismatch (32'd0), .fb_last (32'd0),
@@ -136,6 +141,9 @@ module snoop_top #(
         .app_msg_len (), .app_pay_data (), .app_pay_valid (),
         .aux_word (32'd0), .aux_valid (1'b0), .aux_take (),
         .fd_word (32'd0), .fd_valid (1'b0), .fd_take (),
+        .u2_word (32'd0), .u2_valid (1'b0), .u2_take (),
+        .au_word (32'd0), .au_valid (1'b0), .au_take (),
+        .audio_on (), .audio_realtime (), .audio_rate (), .audio_stat (32'd0),
         .ft_clk (ft_clk), .ft_rxf (ft_rxf), .ft_txe (ft_txe),
         .ft_rd (ft_rd), .ft_wr (ft_wr), .ft_oe (ft_oe),
         .ft_wakeup (ft_wakeup), .ft_reset (ft_reset),

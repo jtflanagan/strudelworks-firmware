@@ -222,7 +222,7 @@ module floppy_card_tb;
         .late_clr (late_clr), .fill_clr (fill_clr),
         .rom_loaded (rom_loaded), .stale_o (stale), .dirty_o (dirty),
         .phase_o (phase), .motor_o (motor), .drive_sel_o (drive_sel),
-        .q6_o (q6), .q7_o (q7), .seeks (seeks), .late (late), .fill_max (fill_max)
+        .q6_o (q6), .q7_o (q7), .seeks (seeks), .late (late), .fill_max (fill_max), .stall_o ()
     );
 
     // ---- card -> host: through the real arbiter, parsed as the host would ---

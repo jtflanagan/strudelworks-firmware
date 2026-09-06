@@ -1,5 +1,33 @@
 # $Cxxx under acceleration: what to serve fast
 
+**STEP 6 PROVEN ON HARDWARE (2026-09-04 night, branch `cxxx_work`, the Pt, SRAM):** the
+speaker, `$C030-$C03F`, served on the card in the closed regime - "The
+speaker", below.
+
+**THE NO-SLOT CLOCK PROVEN ON HARDWARE (2026-09-05, branch `cxxx_work`, the Pt, SRAM):**
+a DS1216 under the CD ROM, hung on the unified stream and the MMU's map,
+its bit substituted into the core's byte in every mode - not a serve, not
+a slot, and nothing on the bus.  docs/NSC.md.
+
+**STEP 5 PROVEN ON HARDWARE (2026-09-04 evening, branch `cxxx_work`, the Pt, SRAM):** the
+card's OWN slots - the hard disk, the floppy, the Mockingboard - served on
+the card in the closed regime: "The on-card slots", below.  The user's
+rule changes with it: a slot that is THIS card's is no longer "hardware
+that rides the bus"; a slot in a socket still is, and so is the VidHD's
+signature ROM (not asked for).
+
+**STEP 4 PROVEN ON HARDWARE (2026-09-04, branch `cxxx_work`, the Pt, SRAM):**
+the switch WRITES in the closed regime - "The switch writes", below.  The
+banked list's item 1 is now complete on both sides; INTCXROM and SLOTC3ROM
+stay on the bus by design, and that section says why that is the right
+answer to "how do slot accesses still reach the slots".
+
+**STEP 3 BUILT AND SIMULATED (2026-09-03, branch `cxxx_work`, the Pt):**
+the switch READS in the closed regime - "The switch reads in the closed
+regime", below.  The banked list's item 1, read side only, taken up
+because the demos the user wants to run sync to the beam through exactly
+these reads, and the larger FPGA lifted the ban.
+
 Status: **STEP 1 PROVEN ON HARDWARE** (2026-09-02, fw 2db1baf, bit in
 SRAM) - page $C3 on the instruction front once the INTC8ROM latch is set.
 **STEPS BANKED 2026-09-02** (below, "The next steps, BANKED"): nothing
@@ -136,7 +164,9 @@ same exclusion sits in the dline's last-byte serve ($Cxxx whole).
   (and of every switch), killing every held line and both CAMs.
 - The user's standing rule (docs/ACCELERATION.md): a $Cxxx access that is
   not the motherboard's own ROM is slow - every slot is hardware and rides
-  the bus - and nothing else is slow.  The plan must keep that.
+  the bus - and nothing else is slow.  The plan must keep that.  (Revised
+  2026-09-04, step 5: the card's OWN slots are served on the card in the
+  closed regime; a slot in a socket still rides the bus.)
 
 ## The refinement as first identified (BUILT as step 1, above - the term is the latch alone after the set-condition fix; and iscan has its own copy of the rule)
 
@@ -257,6 +287,527 @@ kinds are:
 Ranked by clocks on this screen: read misses ~16%, AUXMOVE's switches
 ~18% (two-cycle bus ops), LC writes ~9%, keyboard ~9%, I misses ~3%.
 
+## The switch reads in the closed regime (step 3, 2026-09-03)
+
+**What a demo watches.** A demo finds the beam one of two ways: it polls
+`$C019` for the IIe's VBL', or it vapor-locks on the floating bus through
+a video toggle (`$C054`, `$C050`...).  Under acceleration both were bus
+ops - right, but a bus cycle each, so a poll loop ran at the bus's pace -
+and the floating one was answered from the real bus, which in mode 2
+carries the machine's STALE RAM (fb_sim's serve substitutes the copy's
+byte there, and that part was already right).  This step serves both on
+the card, at the core's pace, with the values the real machine would give
+at that real moment.
+
+**The position was real time - and that was the one wrong decision of
+this step.** Served the real beam, a cycle-counting demo is right at a
+governed 1.00 and wrong at every other ratio: it counts its own cycles
+between reads, and the real beam moves a sixtieth of that at 60x.  The
+position is now `rtl/vbeam.sv`'s - the real counter passed through while
+the core keeps the bus's time, a counter stepped once per core cycle
+while it does not - and the stream and the host render in that time base:
+docs/VIRTUAL_TIME.md.  The reads served are the same; only where the
+position comes from changed.
+
+**The reads served, and by whom** (`rtl/apple_mmu.sv` q_swi, decided on
+the live address beside q_cls; `rtl/master_top.sv` picks the byte on the
+registered op):
+
+| read | byte | gate |
+|---|---|---|
+| `$C000-$C00F` | the parked-dummy latch (step 2, unchanged) | latch holds a byte |
+| `$C011-$C01F` except `$C019` | bit 7 from the shadow, over the latch's low bits (as the IOU serves them, AppleWin's `IORead_C01x`) | always |
+| `$C019` | bit 7 = the IIe's VBL' from the counter, ONE CYCLE AHEAD (VBL.md "What the machine said"): the level of the cycle after the one in flight | the VBL lock |
+| `$C050-$C057` | fb_sim's byte for the cycle in flight; the toggle lands in the shadow at the synthetic commit exactly as at a bus commit | fb_sim.int_ok: serving, locked, not 80 columns |
+| `$C080-$C08F` | the same floating byte; the language card's state machine steps at the synthetic commit | the same |
+
+Stays on the bus: `$C010` (the real strobe), `$C058-$C05F` (annunciators
+and DHIRES - the shadow does not carry them; DHIRES is the host's), the
+speaker and the rest of `$C02x-$C07x`, every slot, and **every write** -
+the write side of the banked item is still banked (AUXMOVE's RAMRD/RAMWRT
+dance keeps its four bus ops).  The regime is step 2's: mode 2, serving,
+`ACCEL_CTRL[28]` clear, the core not held; the one lever covers both.
+
+**The stream.** An internalized read retires with the synthetic commit
+(step 2's mechanism, one clock, `u_commit` high with the op still on
+`u_addr`), so the shadow, `map_changed`, the fronts' kills and the
+keyboard's bookkeeping all fire as for a bus op.  Its fast-op word is
+what tells the HOST: `pipeline.cpp` applies every word, fast or not, to
+the mirror and the display shadow before it decides the word is not a
+cycle - so a `$C055` served on the card flips the host's PAGE2 through
+its word.  Two rules keep that from flooding the link:
+
+- `rtl/bus_event_filter.sv` keeps a fast READ on a sparse stream only if
+  it is of `$C05x` or `$C08x` (the ones carrying state); `$C00x`/`$C01x`
+  polls stay off it as every fast read did.
+- `rtl/accel_seq.sv` puts NO word on the stream for a QUIET `$C050-$C057`
+  read - one whose switch already holds the value the address sets
+  (`apple_mmu.q_swi_quiet`).  A vapor-lock loop polling `$C054` at ten
+  million reads a second is all quiet reads; the one that flips a page is
+  not.  The language card's reads are never quiet (the prewrite state
+  moves on each); the host's LC follows them.  In FULL capture the same
+  rule holds - a quiet read is a no-op for every consumer of the stream,
+  the trace included - so the census counts it and the stream does not.
+
+**Proof.** At the bus's pace the monitor (`rtl/fb_sim.sv`) now compares
+`$C019` reads too - bit 7 against the bus, counted with the ordinary
+mismatches, `FB_LAST2`'s op address `$19` telling them apart - so
+`tools/fb_test.sh`-style runs and the VBL probe prove the served value
+before acceleration uses it.  `sim/fb_sim_tb.sv` case 6g probes a frame
+of `$C019` against a model that carries the lead: 0 mismatches.
+`sim/accel.s` phase 5c reads the status page back after every switch,
+flips PAGE2/MIXED/TEXT by reads (one of them quiet), and walks the LC
+pair; the bench's machine model moves its switches at the synthetic
+commit as the pins would, and the same program passes in every mode.
+Hardware: the demo the user named first is `megademo.dsk`.
+
+## The switch writes (step 4, 2026-09-04)
+
+**What was left.** After step 3 every switch READ the card could answer
+was answered on the card, and every WRITE still rode the bus - AUXMOVE's
+RAMRD/RAMWRT dance around every tile on the Nox map was four bus ops
+(18% of the clocks there, the census said), and the LC pair, 80STORE and
+the video toggles by STA were the rest of the bus traffic on that screen.
+This step serves those writes on the card, on the same path the reads
+took: `apple_mmu.q_swi` now answers for a write too, the op rides S_FAST
+(the page cache decides a BUS-class write with nothing written - a write
+outside the image lands nowhere, `cl_wr_image` clear), and it retires
+with the synthetic commit, so the shadow moves, `map_changed` fires, the
+fronts' kills fire, and the fast word carries the write to the host
+exactly as a bus commit would have.  A write wants no byte, so it needs
+no fb_sim.  The census counts it in WR beside every other write; KBD is
+now the internalized READS alone.
+
+**The writes served** (`rtl/apple_mmu.sv` qi_wr), and the quiet rule:
+
+| write | effect | quiet when |
+|---|---|---|
+| `$C000/1` 80STORE, `$C002/3` RAMRD, `$C004/5` RAMWRT, `$C008/9` ALTZP, `$C00C/D` 80COL, `$C00E/F` ALTCHAR | the shadow's switch, at the synthetic commit | the switch already holds the value |
+| `$C050-$C057` | TEXT/MIXED/PAGE2/HIRES, likewise | the same |
+| `$C080-$C08F` | the language card's state machine, WRITE semantics (A0 = 1 clears prewrite, leaves the enable alone) | never |
+
+A quiet write, like a quiet read, puts no word on the stream: the host's
+mirror and display shadow would apply it as a no-op.  The regime is the
+same lever as steps 2 and 3 - mode 2, serving, `ACCEL_CTRL[28]` clear,
+the core not held, past the reset sequence; the host's `swint` key and
+`accel swint on|off` - and outside it every one of these writes is a bus
+op as before.  In mode 1 RAM writes land on the motherboard, so the
+motherboard's switches must follow the program's: everything rides the
+bus there, by the rule.
+
+**What stays on the bus, and why that is the answer to the slot
+question.** The user's concern going in: if the card stops telling the
+motherboard about switch writes, will a slot access the card DOES put on
+the bus still reach the slot?  The IIe routes I/O SELECT' ($Cn00-$CnFF)
+and I/O STROBE' ($C800-$CFFF) to the slots on exactly three things:
+INTCXROM, SLOTC3ROM, and the INTC8ROM latch those two feed.  Nothing
+else - not 80STORE, RAMRD, RAMWRT, ALTZP, the IOU's pair, the toggles or
+the language card - touches slot routing, and DEVICE SELECT' ($C0n0-
+$C0nF) is never gated at all.  So:
+
+- **`$C006/7` INTCXROM and `$C00A/B` SLOTC3ROM stay bus ops in every
+  mode.**  The card's classifier (`classify`, "THE CX CLASS") only makes
+  a $Cnxx access a BUS op when its shadow says the slot owns the page,
+  and its shadow and the motherboard's MMU have then seen the same
+  writes to the same two switches - so the motherboard routes the cycle
+  the same way the card decided it.  The four on-card peripherals track
+  the same two writes from the driven stream (`rtl/slot_switches.sv`),
+  a second reason they must be there.
+- **INTC8ROM may diverge, in the harmless direction only.**  A $C3xx read
+  with SLOTC3ROM clear is ROM class, served on the card with no bus
+  cycle, so the card's latch sets and the motherboard's does not.  The
+  card then serves $C800-$CFFF itself and never externalizes it, so the
+  motherboard being MORE open to the slots than the card believes causes
+  no wrong cycle.  The dangerous direction - the motherboard more closed
+  than the card - would need it to have seen an INTCXROM/SLOTC3ROM write
+  the card did not, and there are none.
+- **A reset does not give an "all slots" state, and does not need to.**
+  The motherboard's inferred reset (ACCELERATION.md, "The reset sequence
+  rides the bus") leaves INTCXROM clear and SLOTC3ROM clear: slots 1, 2,
+  4-7 and $C800 routed to the slots, $C3xx to the internal ROM.  The
+  monitor ROM never writes SLOTC3ROM (the only `STA $C00A/B` in the
+  16 KB are the 80-column firmware's PR#3 disconnect at $C2E2/$C2EA), so
+  the machine stays there until a program asks otherwise - and when one
+  does, the write rides the bus.  The alternative considered and
+  rejected: forcing the motherboard to INTCXROM off / SLOTC3ROM on as a
+  fixed backplane and internalizing those two writes as well.  It would
+  buy a handful of cycles (the ROM toggles INTCXROM around its $C8xx
+  calls and at reset) and cost a synthetic `$C00B` write after every
+  reset sequence plus a permanent motherboard/shadow divergence to
+  re-sync on any move to mode 0.
+- Also on the bus, as before: `$C010` and every `$C01x` write (the
+  strobe), `$C058-$C05F`, the rest of `$C02x-$C07x`, `$CFFF`, every
+  slot.
+
+**The host** needed nothing: `pipeline.cpp` applies every word, fast or
+not, to the mirror and the display shadow before deciding whether it is
+a cycle, and the sparse filter keeps every fast write.  A `STA $C003`
+served on the card flips the host's RAMRD through its fast word, as the
+`$C055` read did in step 3.
+
+**Proof.** `sim/accel.s` phase 5d writes every served switch and reads
+it back through the status page (RAMRD excepted - the program runs from
+RAM at $6000, and the aux tests in ROM flip RAMRD already, now on this
+path), makes two quiet writes, drives the LC by writes, and writes both
+Cx-ROM switches; `sim/accel_tb.sv`'s machine model moves its switches at
+a synthetic-commit write with the pins' semantics, and mode 2 asserts:
+switch writes served (309, 27 quiet), NO memory-switch write on the pins
+in the closed regime, INTCXROM/SLOTC3ROM writes ON the pins (33), none
+of those served on the card.  Verilator, both sweeps: 81 checks, 0
+errors, 71.4x unlimited, governors 4.00 and 1.00 exact.  `sim/boot_tb.sv`'s
+machine model got the same synthetic-commit write (it had the read half
+only, and the first run showed exactly the divergence that predicts: the
+reference's LC and aux state falling behind the card's after ProDOS's
+first internalized `STA`); with it the ProDOS boot bench, 2M bus cycles
+mode 2 unlimited, is bit-for-bit step 2's - 137.2M ops, 68.6x at Bitsy
+Bye, 12.6k bus ops, 0 bad reads, image equal to the reference in every
+bank - which is expected: ProDOS idling in Bitsy Bye writes no switches,
+so that bench is a correctness proof here and not a speed one.  Build:
+WNS +0.008, bitstream 2026-09-04 17:24.
+
+**The hazard the hardware found, and the settle (2026-09-04, same day).**
+The first bit locked Nox Archaist up in its DHGR splash - with `accel
+swint off` (the config's `swint = off`; the socket command was found
+broken on the host and fixed, `pipeline.cpp drive_accel_ctrl` dropped the
+disable bits) it booted, so the fault was in the internalized switch ops.
+The stuck loop was the splash's speaker sample player at $1116-$115B,
+sitting in BOTH banks with RAMRD on, the machine looping in it forever
+because a byte it depended on was wrong.  The cause, found by instrumenting
+`sim/accel_tb.sv`: a bus op's commit lands mid-cycle and the driver holds
+the core for the rest of it, so the shadow, `map_changed`, the CAM
+flash-clears and everything derived from them have settled before the
+core's next op; a SYNTHETIC commit comes one clock AFTER the core moved
+(fast_hit is the cyc_en; swi_commit follows a clock later), the shadow
+flips the clock after that and `map_changed` the clock after THAT - and
+`turbo_ok` was free again two clocks after fast_hit.  The instruction
+front served the opcode right after `STA $C003` from a CAM line resident
+under the OLD map, one clock before map_changed killed it: one byte from
+the wrong bank.  Step 3's reads had the same window (an LC or PAGE2 read
+followed by an opcode from the switched region) and nothing ran into it
+before Nox.  The fix, `rtl/accel_seq.sv` swi_settling: a switch-CHANGING
+synthetic commit (not a quiet one) holds `turbo_ok` and the dispatcher's
+`settled` for four clocks - the commit's, the shadow's, map_changed's and
+one for anything derived from map_changed - so the next op sees the new
+map everywhere, exactly as after a bus op.  Cost: four clocks per switch
+flip, against the ~98 the bus cycle cost.  The reproducer is `sim/accel.s`
+bankfetch (phase 4b): four stubs at $1F00-$1F3F identical in both banks
+except for the byte under test, flipping RAMRD/RAMWRT and continuing; the
+first cut had `LDA #imm` differing in the OPERAND and passed on the broken
+RTL, because the one byte served early is the OPCODE - it now differs in
+the opcode (INX/DEX) and fails on the broken RTL (mode 2: 1 turbo read
+disagreed, the program's flag raised) and passes with the settle.  The
+first cut of the settle held on EVERY non-quiet internalized op and cost
+the ProDOS boot bench 12% (68.6x -> 60.1x: Bitsy Bye's `$C000` poll paid
+four clocks a read); narrowed to the ops that can move a switch ($C00x
+writes, $C05x/$C08x either way) it is back to 137.2M ops, 68.6x, 420 ops
+short of before.  Battery with the settle: accel_tb 81 checks 0 errors
+both sweeps (bankfetch included), mode 2 71.1x; boot bench 0 bad; build
+WNS +0.021 after the post-route phys_opt (the pre-opt figure read -0.010).
+**ON HARDWARE (2026-09-04 18:50, SRAM, host with the swint fix):** Nox
+Archaist boots through the DHGR splash into the HiRes title with swint
+ON, mode 2 governed 16 - the WR bucket climbing (its switch writes served)
+and the KBD bucket too; the runtime `accel swint off` now reads back
+"swint OFF".
+
+**On hardware (2026-09-04, SRAM, host 3978b05 unchanged).**  megademo.dsk
+at the governed 8.00 in mode 2: runs as before; a 5 s sparse trace
+(36.7 s of machine time) carries only the Mockingboard's VIA writes in
+slot 4 and 43 speaker reads - its toggles are reads, served since step 3.
+wave.dsk's STARTUP (the AUXMOVE workload), mode 2 unlimited: an 8 s sparse
+trace covering 321 s of machine time has **zero bus events**, and the
+fast-op mix shows `$C002 W` and `$C003 W` at 1026 each - RAMRD's dance
+served on the card; `accel status` twice around the trace: 892M ops over
+9.19M cycles, ~97x, the bus-op counter frozen at 1,692,197 across the
+whole run (the earlier 60-90x readings of this section included Bitsy Bye
+and the boot).  The first swhost restart on the test config hit the
+FT601 "device gone" startup race (stop and start back to back); a 5 s gap
+between them cleared it.  Test config: `swwr_test.conf` on the Pi (floppy
+1 = wave.dsk, hd off, accel all unlimited), written by `tools/pi.sh conf`.
+
+## The on-card slots (step 5, 2026-09-04)
+
+**The rule, revised by the user.**  Until now every slot access rode the
+bus, the card's own peripherals included: the SmartPort HDC's `$C0F0`
+port and `$C7xx` ROM, the Disk II's sixteen switches at `$C0Ex` and its
+P5A ROM at `$C6xx`, the Mockingboard's VIAs at `$C4xx`.  A real card in a
+socket must still get its cycle, and nothing about that changes.  But an
+access one of THIS card's peripherals answers has no reason to cross the
+connector: the peripheral is a clock region away from the core, and the
+bus cycle was only the seam it happened to hang on.  So in the closed
+regime (the same lever as steps 2-4) those accesses are fast ops served
+on the card, and a slot in a socket is what "slow" means from now on.
+The VidHD's slot is NOT included - its ROM is read once at boot and the
+user did not ask for it.
+
+*2026-09-05: the mouse card (MOUSE.md) joined the on-card slots - its
+PIA at `$C0n0-$C0n3` and its ROM page are fast ops, its interrupt takes
+the Mockingboard's short route, and its 60 Hz timer ticks on the core's
+clock like the VIAs.*
+
+**The decision.**  `rtl/apple_mmu.sv` q_slot: an access is an on-card
+slot's when its address is a peripheral's DEVICE SELECT range
+`$C0n0-$C0nF` (never gated by a switch) or its I/O SELECT page
+`$Cn00-$CnFF` while the slot owns it (INTCXROM clear, and for slot 3
+SLOTC3ROM set - exactly the classifier's and `rtl/slot_switches.sv`'s
+rule, so every access this claims is one the classifier called BUS).
+The three slot numbers come from the same registers the peripherals are
+enabled by; 0 means none.  Reads and writes alike - a write to a slot's
+ROM page lands nowhere on a real card either.  q_swi includes q_slot; the
+op rides S_FAST like every internalized op and retires with the synthetic
+commit; no settle (a slot op moves no switch); never quiet.
+
+**The peripherals see the op through a view** (`rtl/master_top.sv`,
+"THE PERIPHERALS' VIEW OF THE OP STREAM").  The hard disk, the floppy and
+the Mockingboard decode the driver's op as they always did, and an
+internalized access is one the driver never sees.  So for its window -
+from the dispatch (accel_seq sl_win: S_FAST with a slot op, through its
+synthetic commit) - the three are shown the unified op instead: present
+on the dispatch clock, the core's address, direction and data, the
+synthetic commit as their commit.  Three rules make the window safe:
+
+- The driver's dummies are hidden for the window: a dummy is nobody's op,
+  and the peripherals only use a present to decode and claim.
+- The window's commit is flagged a dummy, so the floppy's and the VIAs'
+  core clocks (`tick`, `via_slow_clock`: a committed non-dummy op, or a
+  fast op) do not tick on it - fast_tick ticks them once for the op, as
+  for every fast op.  The hard disk keeps no such clock.
+- The claim is masked from the driver.  A peripheral's registered
+  rd_claim answers the fast op (master_top's swi_byte keys on the slot
+  FIRST - a slot ROM page's low nibble would otherwise read as the
+  keyboard's), and `rtl/apple_bus_write.sv` DRIVES a claimed read's byte
+  onto the bus in its data window.  A claim left over from a fast op
+  under a dummy's read of `$C000` would fight the IOU for the data bus.
+  sl_claim_fast masks it from the dispatch until the driver's next
+  visible present re-registers the claim for its own op.  fb_sim takes
+  the masked claim too (a claimed read is no floating candidate).
+
+The peripherals' answer is registered at their present, one clock after
+the dispatch; the fast op's decision (the page cache's `decided`, P3) is
+two clocks later still, so the byte is there by construction, as the
+keyboard's and the status page's were.
+
+**The stream and the host.**  Every internalized slot access is a fast
+word.  Writes are kept as every fast write is; fast READS are dropped on
+a sparse capture by the door's rule (rtl/event_merge.sv) - which is what
+the busy polls need: the SmartPort ROM's `lda IO_Execute,x / bmi` loop,
+a bus cycle a poll until now, runs at three clocks a poll on the card
+while the host's disk thread answers over USB, millions of them, and the
+host must not see them.  But the host's disk controller (src/hd_card.cpp)
+follows the port from the stream: the EXECUTE is an armed read of
+`$C0n0`, and the first non-busy read completes the command on its side.
+So the door has `fast_force`: master_top raises it for a fast read of the
+hard disk's port that was an EXECUTE (hd_card's exec_q, registered at the
+op's present and held to the next) or that did not answer `$80`.  The
+polls, all `$80`, are dropped; the two reads the host needs go through.
+The floppy's and the Mockingboard's reads nobody on the host consumes.
+On the host, `pipeline.cpp` no longer skips fast words for the disk
+controller (it decodes by address), and the sound gets `apply_fast`:
+a Mockingboard register write applied with NO time - the chips' cycles
+stay the bus words', as the shelved pacing decision left them (memory:
+audio-pacing-shelved).  The speaker (`$C030`) is not a slot and rides the
+bus as before.
+
+**Census.**  An on-card slot's read counts in CX (the dispatcher's $Cxxx
+reads: the internal ROM's data and now the slots'); its write in WR.
+
+**Not changed.**  The hard disk's DMA still lands by the override path
+with the core held (a hold is a hold in every mode); the floppy's stall
+on a pending track fill still holds the core's next op; the Mockingboard's
+interrupts still take the short route to the core.  INTCXROM/SLOTC3ROM
+stay bus ops (step 4's argument holds: they route a socket's slot, and the
+on-card peripherals track them from the driven stream).
+
+**Proof.**  The ProDOS boot bench is the hard disk's: hd_card sits in
+slot 7 of `sim/boot_tb.sv` with the bench playing host off the same view
+the peripheral sees (the bench's mirror taps p_* now, as the real host
+taps bus and fast words alike), so a boot in mode 2 runs every HDC access
+- ROM fetches, register writes, EXECUTE, polls, completion - on the card,
+and the DMA'd blocks must still equal the reference.  The accel bench has
+no peripherals (ties: no slot); it is the regression.  The floppy and the
+Mockingboard are proven on hardware: megademo.dsk (the floppy boot, the
+Mockingboard music), wave.dsk, Nox.
+
+**Two things the boot bench taught before it passed.**  First, its
+machine model's synthetic-commit block decoded the low address byte alone
+(it assumed `$C0xx`), and a fast fetch from the SmartPort ROM at `$C78x`
+now retires with a synthetic commit too - the model took it for an LC
+switch at `$C08x`, its language card diverged from the card's, and it
+dropped ProDOS's writes into the LC (444 image bytes wrong, the first
+`dline read $DC04: core got FC, the reference says 00`).  Both benches'
+models are guarded with the full address now.  Second - reasoned out
+while hunting the first, and real whether or not the bench happened to
+hit it: the hard disk's DMA could START inside a slot op's window.  The
+ROM polls the port in a tight loop of slot ops while the host answers
+over USB, so when the block arrives the odds of the DMA's first override
+present falling inside a window were a few percent per block - and the
+view hides the driver's presents for the window, while hd_card steps its
+DMA on them.  So the driver's override enable is gated for the window
+(`drv_ovr_en = ovr_en && !sl_win`; the dispatcher keeps the ungated level
+and holds as soon as it sees it) and the dispatcher refuses a fast
+dispatch on a clock the override is live (`fast_ok && !ovr_en`), so no
+non-dummy driver op can ever fall inside a window.  The DMA starts a few
+clocks later than it would have.
+
+**Results.**  ProDOS boot bench, 2M bus cycles mode 2 unlimited: 0 bad
+reads, image equal to the reference in every bank, 137.9M ops = 69.0x
+(step 4: 137.2M, 68.6x), and the bus ops over the whole run 12,605 ->
+1,619 - the HDC's ROM, registers, EXECUTEs, polls and completions all
+served on the card; what is left is the reset sequence, INTCXROM/SLOTC3ROM
+writes, `$C010` and the speaker.  Build: WNS +0.052 after the post-route
+phys_opt.
+
+**On hardware (2026-09-04 19:45, SRAM).**  Total Replay from the on-card
+hard disk (the test config's boot disk): boots and runs; `accel status`
+CX 131M after a minute (the HDC's accesses, served), bus ops 34k over 48M
+cycles; a 3 s sparse trace (173 s of machine time): the HD's register
+accesses (`$C0F9` R/W), its EXECUTE and completion reads (`$C0F0` R, the
+polls dropped) and the SmartPort ROM fetches (`$C78x`) all fast ops; on
+the bus only the empty sockets' slot scan (`$C100/$C200/$C500` R) and
+Total Replay's periodic block DMAs into the language card (override
+cycles are bus cycles by design).  megademo.dsk from the on-card floppy
+with the Mockingboard: boots (209 seeks, 1 fill, 0 late) and runs at the
+governed 16; a 5 s trace (78 s of machine time) has 112 speaker reads on
+the bus and nothing else, the VIA writes fast ops.
+
+**The bug that trace showed.**  `$C480`, `$C481` and `$C401` writes were
+there and `$C400` was not: apple_mmu's quiet rule decoded the LOW address
+byte alone (it assumed `$C0xx`), so a Mockingboard write to `$C400` with
+80STORE clear looked like a quiet 80STORE write and its word was dropped
+at the door - the card's VIA took the write, the host's sound never saw
+VIA0's ORB.  q_swi_quiet now requires the I/O page.  (The floppy's
+`$C0Ex` and the hard disk's `$C0Fx` were never at risk: their high
+nibbles match no switch decode.)  Rebuilt (WNS +0.034; accel_tb 81/0 both
+sweeps with the quiet counts unchanged, boot bench 0 bad) and retested
+2026-09-04 20:00: megademo's trace now carries `$C400 W` 210,936 beside
+`$C480 W` 210,936, `$C401`/`$C481` 105,468 each, and 99 speaker reads on
+the bus in 78 s of machine time.  **STEP 5 PROVEN ON HARDWARE.**
+
+**An observation, not a fault.**  `mmismatch` read 8.6M after the
+megademo boot and 4 after Total Replay's, static once running, last
+record `$01FE: image 00, machine 80`.  That is the boot-menu hold: the
+held core's stack read is re-presented every bus cycle against the
+motherboard's RAM, stale in mode 2 by design, for as long as the menu is
+up - one count a cycle when the stale byte happens to differ.
+
+## The speaker (step 6, 2026-09-04)
+
+Every access to `$C030-$C03F`, read or write, toggles the IOU's speaker
+flip-flop, and a program that makes sound makes them in a tight loop:
+Nox Archaist's splash player put 1.5M `STA $C030` on the bus in 35 s of
+machine time, 99% of its bus ops and ~40% of its cycles, and the
+megademo's residue on the bus after step 5 was speaker reads and nothing
+else.  In the closed regime they are fast ops now (`rtl/apple_mmu.sv`
+qi_c03x): a write served regardless, a read served when fb_sim can give
+the floating byte (as `$C05x`), never quiet - each access is a toggle -
+and no settle (nothing of the map moves).  The motherboard's own speaker
+falls silent for them; the sound is the host's, as it is for everything
+else in mode 2.
+
+**The stream and the host.**  A speaker READ is a click, so the door
+keeps fast `$C03x` reads on a sparse stream beside `$C05x` and `$C08x`
+(`rtl/event_merge.sv` fast_sw); writes were kept already.
+`AppleAudio::apply_fast` toggles the flip-flop and re-arms the gate with
+NO time: the sample window advances on bus words alone, as before, so
+toggles closer together than a bus cycle collapse into the level the
+next cycle samples.  At acceleration that is what a click loop sounded
+like on the bus too (a toggle a cycle at the bus's pace, the tone 60x
+too high); the pacing that would make it right is the shelved decision
+(memory: audio-pacing-shelved) and is not re-raised here.
+
+**Proof.**  `sim/accel.s` phase 5e makes five speaker accesses of every
+kind; `sim/accel_tb.sv` asserts in mode 2 that they were served and that
+none reached the pins.  The bench's byte for a served read is the
+model's floating constant, so the compare holds.  accel_tb 83 checks 0
+errors both sweeps (15 speaker accesses served, none on the pins); boot
+bench 0 bad, 69.0x, bus ops 1,619 -> 1,425 (ProDOS's beep); build WNS
++0.020.  **ON HARDWARE (2026-09-04 20:20):** megademo from the on-card
+floppy, a 5 s trace covering 365 s of machine time: **zero bus events**;
+`$C030 R` 474 and the VIA writes as fast ops; 6,326 bus ops in total since
+the boot (the reset sequence, the Cx-ROM switches, `$C010`).  The bus now
+carries nothing of a running program's in the closed regime unless it
+touches a socket's slot, INTCXROM/SLOTC3ROM, the strobe, or an
+annunciator.  **STEP 6 PROVEN ON HARDWARE.**
+
+## The game port (step 7, 2026-09-05)
+
+**What was left.** With the keyboard, the switches, the slots and the
+speaker served, a joystick game's input loop was the last thing on the
+bus in the closed regime: PREAD is a `$C070` strobe and then a read of
+`$C064` every eleven cycles until bit 7 falls, two bus cycles each, and
+the buttons a read of `$C061`-`$C063` a frame - and worse than slow, WRONG
+under acceleration: in mode 1 the reads ride the bus at two cycles each
+while the loop around them runs fast, so PREAD counts more loops per unit
+than eleven cycles' worth and reads every paddle high (the bench's mode 1
+reads a paddle at 40 as 88).  The user's design: a **dummy loop** in place
+of step 2's parked keyboard read, and the paddles **measured** by the card
+and **emulated** to the core at its own pace.
+
+**The dummy loop** (`rtl/game_port.sv`, `park_addr` into
+`rtl/apple_bus_write.sv`): every other dummy is still the keyboard's -
+a key must not wait - and the dummies between visit the game port in
+turn.  Between measurements they read the three buttons, `$C061`-`$C063`,
+a level each, into a latch; during one they probe the four paddle timers
+`$C064`-`$C067`.  A dummy is a SAMPLE, as before: `rtl/pb_inject.sv` now
+lets no override land on one, so the capture's byte for a dummy is the
+machine's own.
+
+**The measurement.** A paddle is a 558 one-shot: any access to
+`$C070`-`$C07F` triggers all four, and each timer's bit 7 stays high for
+eleven cycles a unit of its paddle's position (AppleWin's `PDL_CNTR_INTERVAL`,
+2816/255), then falls.  The loop strobes through a dummy READ of `$C070`,
+counts real bus cycles from it, and probes the four timers in turn until
+each has fallen or 4000 cycles have; the sample is the midpoint of the last
+probe that saw a timer high and the first that saw it low - within four
+cycles at the loop's pace, under half a PREAD unit.  Then it RESTS 1024
+cycles before the next strobe: a 558 retriggered while timing ignores the
+trigger (AppleWin GH#985), and the capacitor wants its settle after the
+fall.  Every few thousand cycles, then: a few hundred samples a second.
+
+**The core's side.** The port is emulated from the samples at the core's
+pace.  A `$C07x` access of the core's own - a READ served on the card
+(the synthetic commit), or a WRITE, which stays on the bus because the
+RamWorks bank register is two of those addresses - starts a virtual timer
+per paddle that is not already running, for as many CORE cycles as the
+sample counted bus cycles: the same unit, a 6502 cycle, the tick the
+floppy and the beam keep time by.  A served read of `$C064`-`$C067`
+returns bit 7 = that timer still running; of `$C061`-`$C063` the sampled
+button under the host's BUTTONS override; the low seven bits are the
+keyboard latch's, as the status page's are (fb_sim does not model $C06x,
+and no program reads them).  So PREAD at ninety times speed sees a timer that
+falls after the same number of its own cycles as the real one did, and
+reads the paddle the machine has, with no bus cycle for the strobe or any
+probe.  A write-strobe on the bus starts the virtual timers too and
+retriggers the real ones, which at worst spoils the measurement in flight.
+
+**Gates and the regime.** `apple_mmu.q_swi` answers for the buttons once
+all three are sampled (`pb_ok`) and for the paddles and the strobe once a
+measurement has completed (`pdl_ok`); until then the reads ride the bus,
+as before.  The buttons are resampled from scratch when the loop restarts
+after a hold (the user may have pressed one meanwhile); the paddle samples
+stand across it.  `$C060` (the cassette) and `$C068`-`$C06F` are nobody's
+and stay on the bus.  The regime is step 2's, under its own chicken bit:
+`ACCEL_CTRL[27] game_dis` keeps the dummies at `$C000` and every
+`$C06x`/`$C07x` access on the bus.  `GAME_STAT`/`GAME_STAT2` read the
+levels and the samples back (PROTOCOL.md).
+
+**Proof.** `sim/accel_tb.sv` models the port on the pins: three levels
+the bench sets and four 558 timers at eleven cycles a unit, triggered by
+any `$C07x` access on the pins.  `sim/accel.s` phase 5f reads the buttons
+and runs the monitor's PREAD on each paddle with Applesoft's rest between
+them, and stores the counts.  Mode 0 reads the positions exactly (40, 200,
+0, 255); mode 1 reads them inflated, as the real accelerator does; in
+mode 2, once the loop has two measurements and the buttons, a pass of
+the program reads a moved button and a moved paddle (101; 120) exactly,
+every read and strobe served on the card, none reaching the pins.  95
+checks at both bus phases.  **Hardware, 2026-09-05**, a joystick on the
+IIe, DOS 3.3's BASIC: mode 0 read PDL 121, 117, 255, 255 and PB2 high;
+mode all at 70x with the port served read 120, 116, 255, 255, the buttons
+the same, a forced Open-Apple (BUTTONS) showing through the served read;
+with the port put back on the bus (`accel game off`) the accelerated PREAD
+read every paddle as 255 - the fault this cures.  The loop's samples read
+back 1331 and 1285 bus cycles (121 and 117 units), 180 measurements in
+the minute.
+
 ## The next steps, BANKED (the user's decision, 2026-09-02)
 
 Written up so they can be picked up cold; not to be built now.  The
@@ -271,7 +822,8 @@ large reserves of LUTs, BRAM and placement space again.
 
 In the order the counters rank them on the animated map:
 
-1. **The closed-regime switch port** (~18% of clocks there).  The
+1. **The closed-regime switch port** (~18% of clocks there).  **DONE:
+   reads in step 3, writes in step 4 (above).**  The
    acceleration branch's 15c8444, minus what step 2 already carried.
    Gated exactly as the keyboard is - mode 2, serving, ACCEL_CTRL[28]
    clear, not held - which is the user's rule: internalizing a mapping
@@ -335,7 +887,7 @@ twice N seconds apart, deltas mod 2^32 (the turbo counter wraps every
 4. The keyboard ($C000/$C010): the kbd_inject latch model; a poll loop is
    the idle case and was measured at ~54x with swint - what is its status
    on the dcache lineage?
-5. Slot ROMs of the card's OWN slots (the SmartPort HDC, the floppy, the
+5. (The game port: DONE, step 7 above.)  Slot ROMs of the card's OWN slots (the SmartPort HDC, the floppy, the
    VidHD signature ROM): the card holds those bytes; the rule says slots
    are hardware and ride the bus.  A decision for the user, not the plan.
 6. Measurement: for every candidate, a trace with tools/swtrace_mix.py

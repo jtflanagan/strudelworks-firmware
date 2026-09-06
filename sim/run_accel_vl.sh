@@ -33,6 +33,7 @@ for high in "${highs[@]}"; do
         -GPHI0_HIGH="$high" \
         -Mdir "$obj" \
         "$root/sim/accel_tb.sv" "$root/rtl/cpu65c02.sv" "$root/rtl/accel_seq.sv" "$root/rtl/fast_census.sv" \
+        "$root/rtl/game_port.sv" \
         "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv" \
         "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv" \
         "$root/rtl/boot_hold.sv" \

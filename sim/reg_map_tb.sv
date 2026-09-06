@@ -99,6 +99,7 @@ module reg_map_tb;
     reg  apple_res_sync = 1'b1;      // active low, idle high
     wire cpu_source_active;
     wire [2:0] mb_slot_active;
+    wire       mb_phasor_active;
     // The boot hold's side of BOOT_HOLD: the tb plays the hold itself.
     wire boot_arm, boot_release;
     // The buttons' side of BUTTONS: the tb plays pb_inject.
@@ -135,6 +136,9 @@ module reg_map_tb;
     integer     fd_flush_pulses = 0, fd_late_clrs = 0, fd_fill_clrs = 0;
     // The VidHD's side of VIDHD_SLOT: the tb plays the card.
     wire [2:0]  vidhd_slot_active;
+    wire [2:0]  mouse_slot_active;
+    wire [2:0]  u2_slot_active;
+    wire        nsc_enable;
     reg         vidhd_rom_loaded = 1'b0;
     always @(posedge clk) begin
         if (fd_flush[0]) fd_flush_pulses = fd_flush_pulses + 1;
@@ -189,11 +193,13 @@ module reg_map_tb;
         if (mem_inval)   mem_invals = mem_invals + 1;
     end
 
+    wire        audio_on, audio_realtime;
+    wire [31:0] audio_rate;
     wb_regfile #(.BUILD_DATE (BUILD_DATE), .BUILD_TIME (BUILD_TIME),
                  .CAN_MASTER (1'b1)) u_regs (
         .clk (clk), .rst (rst),
         .apple_res_sync (apple_res_sync), .cpu_source_active (cpu_source_active),
-        .mb_slot_active (mb_slot_active),
+        .mb_slot_active (mb_slot_active), .mb_phasor_active (mb_phasor_active),
         .boot_arm (boot_arm), .boot_release (boot_release), .boot_held (boot_held),
         .hold_runtime (hold_runtime),
         .menu_en (menu_en), .menu_hotkey (menu_hotkey),
@@ -208,6 +214,13 @@ module reg_map_tb;
         .fd_ctl (fd_ctl), .fd_late (fd_late), .fd_fill_max (fd_fill_max),
         .fd_late_clr (fd_late_clr), .fd_fill_clr (fd_fill_clr),
         .vidhd_slot_active (vidhd_slot_active), .vidhd_rom_loaded (vidhd_rom_loaded),
+        .mouse_slot_active (mouse_slot_active), .mouse_rom_loaded (1'b1), .mouse_irq (1'b0),
+        .mouse_mode (4'd0), .mouse_buttons (2'd0), .mouse_moves (8'd0), .mouse_x (16'd0), .mouse_y (16'd0),
+        .u2_slot_active (u2_slot_active), .u2_sock_open (4'b0001), .u2_cmd_dropped (1'b0),
+        .u2_cmds (8'h07), .u2_rx_chunks (8'h21), .u2_s0_rsr (16'h0102), .u2_s0_fsr (16'h0FFE),
+        .nsc_enable (nsc_enable), .nsc_time_loaded (1'b1), .nsc_ring_en (1'b0), .nsc_wr_en (1'b1),
+        .nsc_cmp_idx (6'd5), .nsc_ring_idx (6'd9), .nsc_unlocks (8'h2A),
+        .nsc_now ({32'h2609_0507, 32'h1341_2599}),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key), .kbd_drop (kbd_drop),
         .kbd_lock (kbd_lock), .kbd_notify (kbd_notify),
         .kbd_flags (kbd_flags), .kbd_counts (kbd_counts),
@@ -232,7 +245,9 @@ module reg_map_tb;
         .fb_mode (7'b1010101), .fb_compared (32'h0004_2870), .fb_mismatch (32'h0000_0005),
         .fb_last (32'hA55A_C0A3), .fb_last2 (32'h5427_D8C2), .fb_other (32'h0002_0001),
         .fb_peek_data (fb_peek_addr[14] ? 8'hD5 : 8'h2A),
-        .ring_status (32'h0200_1234),
+        .ring_status (32'h0200_1234), .link_stat (32'h0103_A50B),
+        .audio_on (audio_on), .audio_realtime (audio_realtime), .audio_rate (audio_rate),
+        .audio_stat (32'h0107_4242),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
@@ -447,6 +462,43 @@ module reg_map_tb;
             errors = errors + 1;
         end else $display("  ok: RING_STATUS reads back tx_ring's word");
 
+        // --- case 5c / LINK_STAT reads back card_link's word ---------------
+        base = out_n;
+        do_read(32'h8000_00EC);
+        if (out_mem[base+2] !== 32'h0103_A50B) begin
+            $display("FAIL: LINK_STAT read %08x, expected 0103A50B", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: LINK_STAT reads back the card's link word");
+
+        // --- case 5d / AUDIO_CTRL, AUDIO_RATE, AUDIO_STAT (docs/AUDIO.md) -----
+        base = out_n;
+        do_read(32'h8000_00F4);
+        if (out_mem[base+2] !== 32'd1894081) begin
+            $display("FAIL: AUDIO_RATE resets to %0d, expected 1894081 (44.1 kHz)", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: AUDIO_RATE resets to 44.1 kHz");
+        if (audio_on !== 1'b0 || audio_realtime !== 1'b0) begin
+            $display("FAIL: audio levels not clear at reset");
+            errors = errors + 1;
+        end
+        do_write(32'h8000_00F0, 32'hFFFF_FFFF);
+        do_write(32'h8000_00F4, 32'd1894250);
+        base = out_n;
+        do_read(32'h8000_00F0);
+        if (out_mem[base+2] !== 32'h0001_0003 || audio_on !== 1'b1 || audio_realtime !== 1'b1 ||
+            audio_rate !== 32'd1894250) begin
+            $display("FAIL: AUDIO_CTRL read %08x (on %b rt %b rate %0d), expected 00010003 1 1 1894250",
+                     out_mem[base+2], audio_on, audio_realtime, audio_rate);
+            errors = errors + 1;
+        end else $display("  ok: AUDIO_CTRL's two bits and AUDIO_RATE write and read back");
+        base = out_n;
+        do_read(32'h8000_00F8);
+        if (out_mem[base+2] !== 32'h0107_4242) begin
+            $display("FAIL: AUDIO_STAT read %08x, expected 01074242", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: AUDIO_STAT reads back the sampler's word");
+        do_write(32'h8000_00F0, 32'h0000_0000);
+
         // --- case 6 / a reply must not land inside another message -----------
         // The one this file exists for.  A BUS_EVENTS message is streamed while
         // a register read is issued mid-payload; the message must come out whole.
@@ -564,9 +616,9 @@ module reg_map_tb;
 
         push_word(hdr(T_REG_WRITE, 8'd2, 16'd0));
         push_word(32'h8000_000C);
-        push_word(32'h0000_0004);          // slot 4, the Mockingboard's home
+        push_word(32'h0000_000C);          // slot 4, the Mockingboard's home, as a Phasor
         repeat (40) @(posedge clk);
-        if (mb_slot_active !== 3'd0) begin
+        if (mb_slot_active !== 3'd0 || mb_phasor_active !== 1'b0) begin
             $display("FAIL: the WRITE enabled the Mockingboard - it must take a reset");
             errors = errors + 1;
         end else $display("  ok: writing MB_SLOT does not enable on its own");
@@ -576,6 +628,10 @@ module reg_map_tb;
             $display("FAIL: RES' asserted but MB_SLOT did not latch to 4");
             errors = errors + 1;
         end else $display("  ok: the reset assertion latches the slot");
+        if (mb_phasor_active !== 1'b1) begin
+            $display("FAIL: RES' asserted but the Phasor bit did not latch with the slot");
+            errors = errors + 1;
+        end else $display("  ok: and the Phasor bit with it");
 
         base = out_n;
         push_word(hdr(T_REG_READ, 8'd1, 16'd0));
@@ -585,13 +641,15 @@ module reg_map_tb;
             $display("FAIL: no MB_SLOT reply");
             errors = errors + 1;
         end else if (out_mem[base+2][2:0] !== 3'd4 ||
-                     out_mem[base+2][10:8] !== 3'd4) begin
-            $display("FAIL: MB_SLOT readback %08x, expected desired=4 active=4",
+                     out_mem[base+2][10:8] !== 3'd4 ||
+                     out_mem[base+2][3] !== 1'b1 || out_mem[base+2][11] !== 1'b1) begin
+            $display("FAIL: MB_SLOT readback %08x, expected desired=4 active=4, phasor both",
                      out_mem[base+2]);
             errors = errors + 1;
         end else begin
-            $display("  ok: readback desired=%0d active=%0d",
-                     out_mem[base+2][2:0], out_mem[base+2][10:8]);
+            $display("  ok: readback desired=%0d active=%0d, phasor %0d/%0d",
+                     out_mem[base+2][2:0], out_mem[base+2][10:8],
+                     out_mem[base+2][3], out_mem[base+2][11]);
         end
 
         // --- case 10 / BOOT_HOLD: arm is a level, release is a pulse ---------
@@ -1227,6 +1285,163 @@ module reg_map_tb;
             errors = errors + 1;
         end else $display("  ok: VIDHD_SLOT=3 latches at the reset; rom reads back");
         vidhd_rom_loaded = 1'b0;
+
+        $display("");
+        // ---- MOUSE_SLOT --------------------------------------------------------
+        // The mouse's slot latches like the VidHD's and yields to ALL FOUR of
+        // the others; the VidHD is still in 3 from above.
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse is enabled before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: MOUSE_SLOT starts disabled");
+        do_write(32'h8000_00D0, 32'h0000_0003);       // the VidHD's slot
+        pulse_reset_line;
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse took the VidHD's slot");
+            errors = errors + 1;
+        end else $display("  ok: the mouse yields the VidHD's slot");
+        do_write(32'h8000_00D0, 32'h0000_0006);       // the floppy's
+        pulse_reset_line;
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse took the floppy's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the floppy's");
+        do_write(32'h8000_00D0, 32'h0000_0007);       // the disk's
+        pulse_reset_line;
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse took the hard disk's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the hard disk's");
+        do_write(32'h8000_00D0, 32'h0000_0004);       // the Mockingboard's
+        pulse_reset_line;
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the mouse took the Mockingboard's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the Mockingboard's");
+        do_write(32'h8000_00D0, 32'h0000_0005);
+        if (mouse_slot_active !== 3'd0) begin
+            $display("FAIL: the WRITE enabled the mouse - it must take a reset");
+            errors = errors + 1;
+        end
+        pulse_reset_line;
+        base = out_n;
+        do_read(32'h8000_00D0);
+        // rom is tied 1 in this bench; irq, buttons, mode and moves tied 0.
+        if (mouse_slot_active !== 3'd5 || out_mem[base+2] !== 32'h0001_0505) begin
+            $display("FAIL: MOUSE_SLOT readback %08x, expected desired=5 active=5 rom=1",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: MOUSE_SLOT=5 latches at the reset; rom reads back");
+        base = out_n;
+        do_read(32'h8000_00D4);
+        if (out_mem[base+2] !== 32'h0000_0000) begin
+            $display("FAIL: MOUSE_STAT reads %08x, expected the tied-off position 0,0", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: MOUSE_STAT reads the position");
+        do_write(32'h8000_00D0, 32'h0000_0000);
+        pulse_reset_line;
+
+        $display("");
+        // ---- U2_SLOT / U2_STAT -------------------------------------------------
+        // The Uthernet II's slot latches like the mouse's and yields to four
+        // of the others - the VidHD, still in 3 from above, it SHARES with:
+        // a ROM page and a device-select range have no byte in common.  The
+        // mouse is put in 5 for the clash.
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II is enabled before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: U2_SLOT starts disabled");
+        do_write(32'h8000_00D0, 32'h0000_0005);       // the mouse in 5
+        do_write(32'h8000_00E4, 32'h0000_0005);
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II took the mouse's slot");
+            errors = errors + 1;
+        end else $display("  ok: the Uthernet II yields the mouse's slot");
+        do_write(32'h8000_00E4, 32'h0000_0003);       // the VidHD's: shared
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd3 || vidhd_slot_active !== 3'd3) begin
+            $display("FAIL: the Uthernet II and the VidHD did not share slot 3 (u2 %0d, vidhd %0d)",
+                     u2_slot_active, vidhd_slot_active);
+            errors = errors + 1;
+        end else $display("  ok: ...but shares the VidHD's: a page and a device-select range");
+        do_write(32'h8000_00E4, 32'h0000_0006);       // the floppy's
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II took the floppy's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the floppy's");
+        do_write(32'h8000_00E4, 32'h0000_0007);       // the disk's
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II took the hard disk's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the hard disk's");
+        do_write(32'h8000_00E4, 32'h0000_0004);       // the Mockingboard's
+        pulse_reset_line;
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the Uthernet II took the Mockingboard's slot");
+            errors = errors + 1;
+        end else $display("  ok: ...and the Mockingboard's");
+        do_write(32'h8000_00E4, 32'h0000_0001);
+        if (u2_slot_active !== 3'd0) begin
+            $display("FAIL: the WRITE enabled the Uthernet II - it must take a reset");
+            errors = errors + 1;
+        end
+        pulse_reset_line;
+        base = out_n;
+        do_read(32'h8000_00E4);
+        // open=0001, dropped=0, cmds=$07, rx=$21 are tied in this bench.
+        if (u2_slot_active !== 3'd1 || out_mem[base+2] !== 32'h2107_1101) begin
+            $display("FAIL: U2_SLOT readback %08x, expected 21071101 (desired=1 active=1 open=1 cmds=7 rx=21)",
+                     out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: U2_SLOT=1 latches at the reset; the counters read back");
+        base = out_n;
+        do_read(32'h8000_00E8);
+        if (out_mem[base+2] !== 32'h0102_0FFE) begin
+            $display("FAIL: U2_STAT reads %08x, expected the tied-off {RSR $0102, FSR $0FFE}", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: U2_STAT reads socket 0's numbers");
+        do_write(32'h8000_00E4, 32'h0000_0000);
+        do_write(32'h8000_00D0, 32'h0000_0000);
+        pulse_reset_line;
+
+        $display("");
+        // ---- NSC_CTRL / NSC_TIME / NSC_DATE ------------------------------------
+        // The lever is 1 at reset (the clock answers nothing until a time
+        // arrives, so this is safe); the rest reads straight through from
+        // the tied-off state: loaded, wr, cmp=5, idx=9, unlocks=$2A.
+        if (nsc_enable !== 1'b1) begin
+            $display("FAIL: the No-Slot Clock's lever is not on at reset");
+            errors = errors + 1;
+        end else $display("  ok: NSC_CTRL enable is 1 at reset");
+        base = out_n;
+        do_read(32'h8000_00D8);
+        if (out_mem[base+2] !== 32'h2A09_050B) begin
+            $display("FAIL: NSC_CTRL reads %08x, expected 2A09050B", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: NSC_CTRL reads the state");
+        do_write(32'h8000_00D8, 32'h0000_0000);
+        base = out_n;
+        do_read(32'h8000_00D8);
+        if (nsc_enable !== 1'b0 || out_mem[base+2] !== 32'h2A09_050A) begin
+            $display("FAIL: NSC_CTRL write 0 - lever %b, readback %08x", nsc_enable, out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: NSC_CTRL enable clears and reads back");
+        do_write(32'h8000_00D8, 32'h0000_0001);
+        base = out_n;
+        do_read(32'h8000_00DC);
+        if (out_mem[base+2] !== 32'h1341_2599) begin
+            $display("FAIL: NSC_TIME reads %08x, expected 13412599", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: NSC_TIME reads the host's time");
+        base = out_n;
+        do_read(32'h8000_00E0);
+        if (out_mem[base+2] !== 32'h2609_0507) begin
+            $display("FAIL: NSC_DATE reads %08x, expected 26090507", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: NSC_DATE reads the host's date");
 
         $display("");
         // ---- MEM_CTRL / MEM_STAT and the counters -----------------------------

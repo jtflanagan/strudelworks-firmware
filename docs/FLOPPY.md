@@ -42,9 +42,14 @@ tighter, one or two ms. That is the budget a host has to deliver a track in.
 
 **What the host delivers.** The card's notice reaches the host in tens of
 microseconds (README.md's link measurements: 36 us p50, 118 us worst in
-production), a track pre-nibblized in host RAM is seven 1 KB messages, ~370
-us of wire at the Pi's ~19 MB/s, and the answer is written straight into
-the card's buffer as it arrives. Typically **0.5-1 ms** end to end; the tails
+production), a track pre-nibblized in host RAM is seven 1 KB messages down
+the same SuperSpeed link the stream comes up - the bytes themselves are
+tens of microseconds of wire; what a fill pays is seven per-message
+overheads and the notice's round trip (DERISK.md: the link is
+latency-bound, not per-byte-bound) - and the answer is written straight
+into the card's buffer as it arrives.  (An earlier revision put "~19 MB/s"
+here; that figure was the Pi's SD card in the host README's boot-time
+analysis, nothing to do with the FT601.) Typically **0.5-1 ms** end to end; the tails
 (the FT601's 0.5 ms dry spells, the ingest thread's 2 ms design deadline)
 are inside the DOS budget and outside a fast loader's.
 
@@ -60,6 +65,15 @@ bus side would change.)
 on numbers: FD_STAT's `fill_max` is the longest fill, head movement to
 seventh chunk, in bus cycles; `late` counts the fills that landed after the
 machine had already tried to read. Read them after a session of seeking.
+
+**Served on the card under acceleration (2026-09-04).**  In the closed
+regime (CXXX.md "The on-card slots") the sixteen switches at `$C0Ex` and
+the P5A ROM at `$C6xx` are fast ops the card answers itself, no bus
+cycle; the controller sees them through master_top's peripheral view of
+the unified stream, with a synthetic commit that does not tick (fast_tick
+ticks once for the op, as for every fast op), so the bit-cell timing is
+the program's virtual time exactly as before.  The stall on a pending
+track fill is unchanged.
 
 ## What the card does
 
@@ -236,5 +250,10 @@ registers. And the hardware above.
 - **The 13-sector ROM**, and DOS 3.2's `D5 AA B5`.
 - **A neighbour prefetch** (the host filling T+-1 into spare buffers) and
   **DDR3 staging** - the two upgrades, if `fill_max` and `late` say so.
+  Under acceleration `late` said so (27 on a 45-second loader at ~90x),
+  and the answer there is not a faster fill but the core waiting for it:
+  `stall_o` holds the accelerated core while the selected drive's buffer
+  is stale (docs/VIRTUAL_TIME.md, "The floppy holds the core"); at the
+  bus's pace nothing changes.
 - **The latch hold extended by zero bits** (AppleWin's GH#662): 6&2
   nibbles always start with a 1, so it never applies to these images.

@@ -20,9 +20,12 @@ Out-of-context synthesis: **32 RAMB36, WNS +3.41 ns at 100 MHz**, 1596 LUTs,
 runs snapshot → fill → flush in SERIES (the snapshot's 17 clocks sit ahead of
 the critical read, serving it at ~30 clocks instead of ~12 against a
 ~91-clock deadline) — the overlap remains an optimization for a faster
-regime.  §"The floating bus reads the main bank" is implemented too — the
+regime.  §"The floating bus reads the main bank" was implemented too — the
 side copy deleted, `rtl/fb_sim.sv` on the main bank's port B alternating
-with the peek, 4.5 tiles returned.
+with the peek, 4.5 tiles returned — and **reversed on branch `cxxx_work`
+(2026-09-03)** once the 100T lifted the limit: the copy is back, fed by
+the main bank's write tap (`mw_stb/mw_addr/mw_byte`), and port B is tied
+off.  docs/FLOATING_BUS.md has the why.
 
 **The full build FITS the XC7A35T**, by one last move: the banks put the
 design two tiles over (48 RAMB36 + 8 RAMB18 = 104 RAMB18-sites against the
@@ -257,6 +260,15 @@ is not even interesting. Misses exist only while RamWorks banking is live.
 the budget above is the 1 MHz argument only.)
 
 ## The floating bus reads the main bank
+
+> **Reversed 2026-09-03 (branch `cxxx_work`).** The side copy is back in
+> `rtl/fb_sim.sv`, written from a tap on the main bank's port A write
+> (`mw_stb`, `mw_addr`, `mw_byte`: the strobe, address and byte on the
+> clock the bank takes them), and the main bank's port B is idle.  The
+> reason is the last paragraph below, answered: under acceleration writes
+> land on arbitrary clocks, the shared port gave the scanner every other
+> clock, and a cycle-correct byte wants a port of its own.  The section is
+> kept as the record of the small-part design.
 
 The floating-bus simulator keeps its own 18 KB side copy of the text and
 hi-res pages because the authoritative image was in DDR3, behind a cache,

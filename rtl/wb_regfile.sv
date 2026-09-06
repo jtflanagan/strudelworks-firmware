@@ -64,7 +64,10 @@ module wb_regfile #(
 
     // Which slot the on-card Mockingboard answers as; 0 keeps it out of the
     // machine entirely.  Latched the same way CPU_SOURCE is - see below.
+    // mb_phasor_active: the card in that slot is a Phasor rather than a
+    // Mockingboard (rtl/mockingboard.sv), latched with the slot.
     output wire [2:0]      mb_slot_active,
+    output wire            mb_phasor_active,
 
     // The boot hold (rtl/boot_hold.sv).  arm is a level the host sets;
     // release is a one-cycle pulse per write of the release bit; held comes
@@ -121,6 +124,37 @@ module wb_regfile #(
     // watching top ties the input to 0 and leaves the output unconnected.
     output wire [2:0]      vidhd_slot_active,
     input  wire            vidhd_rom_loaded,
+    // The mouse (rtl/mouse_card.sv, docs/MOUSE.md): its slot latched like
+    // the VidHD's, yielding to all four of the others; MOUSE_STAT reads
+    // the card's position and the rest for diagnosis.
+    output wire [2:0]      mouse_slot_active,
+    input  wire            mouse_rom_loaded,
+    input  wire            mouse_irq,
+    input  wire [3:0]      mouse_mode,
+    input  wire [1:0]      mouse_buttons,
+    input  wire [7:0]      mouse_moves,
+    input  wire [15:0]     mouse_x,
+    input  wire [15:0]     mouse_y,
+    // The Uthernet II (rtl/uthernet2_card.sv, docs/UTHERNET2.md): its slot
+    // latched like the mouse's, yielding to all five of the others; the
+    // card's counters for U2_SLOT and socket 0's two numbers for U2_STAT.
+    output wire [2:0]      u2_slot_active,
+    input  wire [3:0]      u2_sock_open,
+    input  wire            u2_cmd_dropped,
+    input  wire [7:0]      u2_cmds,
+    input  wire [7:0]      u2_rx_chunks,
+    input  wire [15:0]     u2_s0_rsr,
+    input  wire [15:0]     u2_s0_fsr,
+    // The No-Slot Clock (rtl/no_slot_clock.sv, docs/NSC.md): its lever,
+    // and its state and the host's time for NSC_CTRL / NSC_TIME / NSC_DATE.
+    output wire            nsc_enable,
+    input  wire            nsc_time_loaded,
+    input  wire            nsc_ring_en,
+    input  wire            nsc_wr_en,
+    input  wire [5:0]      nsc_cmp_idx,
+    input  wire [5:0]      nsc_ring_idx,
+    input  wire [7:0]      nsc_unlocks,
+    input  wire [63:0]     nsc_now,
 
     // Keyboard injection (rtl/kbd_inject.sv).  press and drop are one-cycle
     // pulses per write of their bits, press_key the key that write carried;
@@ -187,6 +221,16 @@ module wb_regfile #(
     // outputs unconnected.
     output logic [1:0]     accel_mode,
     output logic           accel_swint_dis, // [28]: no internalized keyboard, dummies at $0000
+    output logic           accel_game_dis,  // [27]: no internalized game port, dummies at $C000 only
+    // The game port's samples, for GAME_STAT (rtl/game_port.sv).
+    input  wire [2:0]      game_pb,
+    input  wire            game_pb_ok,
+    input  wire            game_pdl_ok,
+    input  wire [11:0]     game_pdl0,
+    input  wire [11:0]     game_pdl1,
+    input  wire [11:0]     game_pdl2,
+    input  wire [11:0]     game_pdl3,
+    input  wire [7:0]      game_meas,
     output logic [15:0]    accel_target,
     output logic           accel_cnt_clr,   // pulses
     input  wire [31:0]     accel_stat,
@@ -224,6 +268,18 @@ module wb_regfile #(
     // RING_STATUS, straight from tx_ring: the DDR3 ring's occupancy in
     // lines, whether it is full, and whether the DDR3 has calibrated at all.
     input  wire [31:0]     ring_status,
+    // LINK_STAT, from card_link: the card's own view of the link - the UART
+    // status line's facts the host could not see over USB3 (phi0 ticking,
+    // capture enabled, the link's last reset), so the UART is needed only
+    // when no register answers at all.
+    input  wire [31:0]     link_stat,
+    // The sound (docs/AUDIO.md): AUDIO_CTRL's bits as levels - the stream
+    // on, the AYs clocked in real time - the NCO increment, and the
+    // sampler's counters back for AUDIO_STAT.
+    output wire            audio_on,
+    output wire            audio_realtime,
+    output wire [31:0]     audio_rate,
+    input  wire [31:0]     audio_stat,
     input  wire            wb_cyc,
     input  wire            wb_stb,
     input  wire            wb_we,
@@ -296,6 +352,19 @@ module wb_regfile #(
     localparam [13:0] R_ACCEL_FAST_DCX = 'd47; // 0x8000_00BC, RO
     localparam [13:0] R_ACCEL_FAST_WR = 'd48; // 0x8000_00C0, RO
     localparam [13:0] R_ACCEL_FAST_KBD = 'd49; // 0x8000_00C4, RO
+    localparam [13:0] R_GAME_STAT      = 'd50; // 0x8000_00C8, RO
+    localparam [13:0] R_GAME_STAT2     = 'd51; // 0x8000_00CC, RO
+    localparam [13:0] R_MOUSE_SLOT     = 'd52; // 0x8000_00D0, RW in bits 2:0
+    localparam [13:0] R_MOUSE_STAT     = 'd53; // 0x8000_00D4, RO
+    localparam [13:0] R_NSC_CTRL       = 'd54; // 0x8000_00D8, RW bit 0
+    localparam [13:0] R_NSC_TIME       = 'd55; // 0x8000_00DC, RO
+    localparam [13:0] R_NSC_DATE       = 'd56; // 0x8000_00E0, RO
+    localparam [13:0] R_U2_SLOT        = 'd57; // 0x8000_00E4, RW in bits 2:0
+    localparam [13:0] R_U2_STAT        = 'd58; // 0x8000_00E8, RO
+    localparam [13:0] R_LINK_STAT      = 'd59; // 0x8000_00EC, RO
+    localparam [13:0] R_AUDIO_CTRL     = 'd60; // 0x8000_00F0, RW bits 1:0 (docs/AUDIO.md)
+    localparam [13:0] R_AUDIO_RATE     = 'd61; // 0x8000_00F4, RW
+    localparam [13:0] R_AUDIO_STAT     = 'd62; // 0x8000_00F8, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -360,7 +429,9 @@ module wb_regfile #(
     // ---- MB_SLOT ------------------------------------------------------------
     //
     //   [2:0]    desired   RW   which slot the Mockingboard answers as; 0 = off
+    //   [3]      phasor    RW   ...and as a Phasor rather than a Mockingboard
     //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [11]     phasor    RO   ...and whether it was a Phasor then
     //
     // The same reset-latched contract as CPU_SOURCE, for the same reason
     // scaled down: the slot scan happens at boot, and a card that appears (or
@@ -372,13 +443,18 @@ module wb_regfile #(
     // which is the register telling the truth rather than erring.
     logic [2:0] mb_slot_desired;
     logic [2:0] mb_slot_active_q;
+    logic       mb_phasor_desired;
+    logic       mb_phasor_active_q;
 
-    assign mb_slot_active = mb_slot_active_q;
+    assign mb_slot_active   = mb_slot_active_q;
+    assign mb_phasor_active = mb_phasor_active_q;
 
     always_ff @(posedge clk) begin
         if (rst) begin
             mb_slot_desired <= 3'd0;      // no Mockingboard until asked for
             mb_slot_active_q <= 3'd0;
+            mb_phasor_desired <= 1'b0;
+            mb_phasor_active_q <= 1'b0;
         end else begin
             // A reset assertion is the ordinary latch point; a boot-hold
             // RELEASE is the second one, so that a menu shown during a hold
@@ -387,13 +463,18 @@ module wb_regfile #(
             // docs/BOOT_MENU.md.  The write only ever sets `desired`; both
             // edges copy it into `active`.
             if (res_assert || boot_relatch) begin
-                mb_slot_active_q <= CAN_MASTER ? mb_slot_desired : 3'd0;
+                mb_slot_active_q   <= CAN_MASTER ? mb_slot_desired : 3'd0;
+                mb_phasor_active_q <= CAN_MASTER ? mb_phasor_desired : 1'b0;
             end
-            if (wr_mb_slot) mb_slot_desired <= wb_dat_w[2:0];
+            if (wr_mb_slot) begin
+                mb_slot_desired   <= wb_dat_w[2:0];
+                mb_phasor_desired <= wb_dat_w[3];
+            end
         end
     end
 
-    wire [31:0] mb_slot_rd = {21'd0, mb_slot_active_q, 5'd0, mb_slot_desired};
+    wire [31:0] mb_slot_rd = {20'd0, mb_phasor_active_q, mb_slot_active_q,
+                              4'd0, mb_phasor_desired, mb_slot_desired};
 
     // ---- BOOT_HOLD ----------------------------------------------------------
     //
@@ -587,6 +668,133 @@ module wb_regfile #(
     wire [31:0] vidhd_slot_rd = {8'd0, 7'd0, vidhd_rom_loaded,
                                  5'd0, vidhd_slot_active_q, 5'd0, vidhd_slot_desired};
 
+    // ---- MOUSE_SLOT ---------------------------------------------------------
+    //
+    //   [2:0]    desired   RW   which slot the mouse card answers as; 0 = off
+    //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [16]     rom       RO   the 2 KB firmware ROM has been loaded (MOUSE_ROM)
+    //   [17]     irq       RO   the card's interrupt line is asserted
+    //   [19:18]  buttons   RO   the buttons as the host holds them
+    //   [23:20]  mode      RO   the mode byte SETMOUSE left
+    //   [31:24]  moves     RO   MOUSE_MOVE messages applied, wrapping
+    //
+    // VIDHD_SLOT's contract, the clash rule five-way: the mouse is the newest
+    // and yields to all four of the others.  See docs/MOUSE.md.
+    logic [2:0] mouse_slot_desired;
+    logic [2:0] mouse_slot_active_q;
+
+    assign mouse_slot_active = mouse_slot_active_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            mouse_slot_desired  <= 3'd0;   // no mouse until asked for
+            mouse_slot_active_q <= 3'd0;
+        end else begin
+            if (res_assert || boot_relatch) begin
+                mouse_slot_active_q <= (CAN_MASTER &&
+                                        mouse_slot_desired != mb_slot_desired &&
+                                        mouse_slot_desired != hd_slot_desired &&
+                                        mouse_slot_desired != fd_slot_desired &&
+                                        mouse_slot_desired != vidhd_slot_desired)
+                                       ? mouse_slot_desired : 3'd0;
+            end
+            if (wr_mouse_slot) mouse_slot_desired <= wb_dat_w[2:0];
+        end
+    end
+
+    wire [31:0] mouse_slot_rd = {mouse_moves, mouse_mode, mouse_buttons, mouse_irq, mouse_rom_loaded,
+                                 5'd0, mouse_slot_active_q, 5'd0, mouse_slot_desired};
+    // MOUSE_STAT: {y[15:0], x[15:0]}, the position as the card holds it.
+    wire [31:0] mouse_stat_rd = {mouse_y, mouse_x};
+
+    // ---- U2_SLOT ------------------------------------------------------------
+    //
+    //   [2:0]    desired   RW   which slot the Uthernet II answers as; 0 = off
+    //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [11]     dropped   RO   a command was dropped (the card's queue overflowed)
+    //   [15:12]  open      RO   the four sockets' Sn_SR != 0
+    //   [23:16]  cmds      RO   U2_CMD messages sent, wrapping
+    //   [31:24]  rx        RO   U2_RX chunks landed, wrapping
+    //
+    // MOUSE_SLOT's contract, and the clash rule with a first exception: the
+    // Uthernet II is the newest and yields to the Mockingboard, the disk, the
+    // floppy and the mouse - but NOT to the VidHD.  The VidHD is a slot ROM
+    // page ($Cn00-$CnFF) and nothing else; the Uthernet II is DEVICE SELECT'
+    // ($C0n0-$C0nF) and nothing else; the two ranges are disjoint, so the two
+    // cards share a slot without a byte in common - and slot 3 is where both
+    // live by convention.  See docs/UTHERNET2.md.
+    logic [2:0] u2_slot_desired;
+    logic [2:0] u2_slot_active_q;
+
+    assign u2_slot_active = u2_slot_active_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            u2_slot_desired  <= 3'd0;   // no card until asked for
+            u2_slot_active_q <= 3'd0;
+        end else begin
+            if (res_assert || boot_relatch) begin
+                u2_slot_active_q <= (CAN_MASTER &&
+                                     u2_slot_desired != mb_slot_desired &&
+                                     u2_slot_desired != hd_slot_desired &&
+                                     u2_slot_desired != fd_slot_desired &&
+                                     u2_slot_desired != mouse_slot_desired)
+                                    ? u2_slot_desired : 3'd0;
+            end
+            if (wr_u2_slot) u2_slot_desired <= wb_dat_w[2:0];
+        end
+    end
+
+    wire [31:0] u2_slot_rd = {u2_rx_chunks, u2_cmds, u2_sock_open, u2_cmd_dropped,
+                              u2_slot_active_q, 5'd0, u2_slot_desired};
+    // U2_STAT: {Sn_RX_RSR, Sn_TX_FSR} of socket 0.
+    wire [31:0] u2_stat_rd = {u2_s0_rsr, u2_s0_fsr};
+
+    // ---- NSC_CTRL -----------------------------------------------------------
+    //
+    //   [0]      enable    RW   the No-Slot Clock listens; 1 at reset - it
+    //                           answers nothing until the host has sent a time
+    //   [1]      loaded    RO   a time has arrived (NSC_TIME messages)
+    //   [2]      ring      RO   the clock register is being read out
+    //   [3]      wr        RO   writes are enabled (no key mismatch pending)
+    //   [13:8]   cmp       RO   the comparison register's bit index
+    //   [21:16]  idx       RO   the clock register's bit index
+    //   [31:24]  unlocks   RO   times the key matched and the register filled
+    //
+    // NSC_TIME: the host's time, low half - {hour, minute, second, centisecond}
+    // as BCD bytes, the centisecond lowest; NSC_DATE the high half - {year,
+    // month, date, day of week}.  docs/NSC.md.
+    logic nsc_enable_q;
+    always_ff @(posedge clk) begin
+        if (rst)              nsc_enable_q <= 1'b1;
+        else if (wr_nsc_ctrl) nsc_enable_q <= wb_dat_w[0];
+    end
+    assign nsc_enable = nsc_enable_q;
+    wire [31:0] nsc_ctrl_rd = {nsc_unlocks, 2'd0, nsc_ring_idx, 2'd0, nsc_cmp_idx,
+                               4'd0, nsc_wr_en, nsc_ring_en, nsc_time_loaded, nsc_enable_q};
+
+    // ---- AUDIO_CTRL / AUDIO_RATE / AUDIO_STAT -------------------------------
+    // AUDIO_CTRL: [0] the sample stream on (silent until asked), [1] the AYs
+    // clocked by the real bus's phi0 rather than the core's clock; readback
+    // adds [16] = the stream on, as the sampler sees it.  AUDIO_RATE: the
+    // sampler's NCO increment, rate_hz * 2^32 / 1e8, 44 100 Hz at reset.
+    // AUDIO_STAT: rtl/audio_tx.sv's word.  docs/AUDIO.md.
+    logic [1:0]  audio_ctrl_q;
+    logic [31:0] audio_rate_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            audio_ctrl_q <= 2'd0;
+            audio_rate_q <= 32'd1894081;
+        end else begin
+            if (wr_audio_ctrl) audio_ctrl_q <= wb_dat_w[1:0];
+            if (wr_audio_rate) audio_rate_q <= wb_dat_w;
+        end
+    end
+    assign audio_on       = audio_ctrl_q[0];
+    assign audio_realtime = audio_ctrl_q[1];
+    assign audio_rate     = audio_rate_q;
+    wire [31:0] audio_ctrl_rd = {15'd0, audio_ctrl_q[0], 14'd0, audio_ctrl_q};
+
     // ---- FD_DRIVE1 / FD_DRIVE2 ----------------------------------------------
     //
     //   [0]      inserted  RW   a disk is in the drive
@@ -725,11 +933,13 @@ module wb_regfile #(
             accel_target  <= 16'd0;
             accel_cnt_clr <= 1'b0;
             accel_swint_dis <= 1'b0;
+            accel_game_dis  <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
                 accel_mode    <= wb_dat_w[1:0];
                 accel_target  <= wb_dat_w[23:8];
                 accel_swint_dis <= wb_dat_w[28];
+                accel_game_dis  <= wb_dat_w[27];
             end
             accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
         end
@@ -738,6 +948,9 @@ module wb_regfile #(
     //   [28]     swint_dis  RW   1 = the keyboard is not internalized and the
     //                           dummy parks at $0000: every $C00x read rides
     //                           the bus, as before the closed regime
+    //   [27]     game_dis   RW   1 = the game port is not internalized: the
+    //                           dummies stay at $C000 and every $C06x/$C07x
+    //                           access rides the bus (rtl/game_port.sv)
     // The fast-op census counts here, beside the registers it is read through.
     wire [31:0] accel_fast_i, accel_fast_dram, accel_fast_dlc, accel_fast_drom,
                 accel_fast_dcx, accel_fast_wr, accel_fast_kbd;
@@ -748,7 +961,15 @@ module wb_regfile #(
         .fast_drom (accel_fast_drom), .fast_dcx (accel_fast_dcx), .fast_wr (accel_fast_wr),
         .fast_kbd (accel_fast_kbd)
     );
-    wire [31:0] accel_ctrl_rd = {3'd0, accel_swint_dis, 4'd0, accel_target, 6'd0, accel_mode};
+    wire [31:0] accel_ctrl_rd = {3'd0, accel_swint_dis, accel_game_dis, 3'd0, accel_target, 6'd0, accel_mode};
+
+    // ---- GAME_STAT ----------------------------------------------------------
+    // The game port as the dummy loop last sampled it (rtl/game_port.sv):
+    //   GAME_STAT   [2:0] the buttons' levels PB0..PB2; [3] pb_ok; [4] pdl_ok;
+    //               [19:8] paddle 0's sample, bus cycles; [31:20] paddle 1's
+    //   GAME_STAT2  [11:0] paddle 2's; [23:12] paddle 3's; [31:24] measurements, wrapping
+    wire [31:0] game_stat_rd  = {game_pdl1, game_pdl0, 3'd0, game_pdl_ok, game_pb_ok, game_pb};
+    wire [31:0] game_stat2_rd = {game_meas, game_pdl3, game_pdl2};
 
     // ---- FB_CTRL ------------------------------------------------------------
     //
@@ -1013,6 +1234,17 @@ module wb_regfile #(
                         R_MEM_LAST:   wb_dat_r <= mem_last;
                         R_MEM_DIVERTED: wb_dat_r <= mem_diverted;
                         R_VIDHD_SLOT: wb_dat_r <= vidhd_slot_rd;
+                        R_MOUSE_SLOT: wb_dat_r <= mouse_slot_rd;
+                        R_MOUSE_STAT: wb_dat_r <= mouse_stat_rd;
+                        R_NSC_CTRL:   wb_dat_r <= nsc_ctrl_rd;
+                        R_NSC_TIME:   wb_dat_r <= nsc_now[31:0];
+                        R_NSC_DATE:   wb_dat_r <= nsc_now[63:32];
+                        R_U2_SLOT:    wb_dat_r <= u2_slot_rd;
+                        R_U2_STAT:    wb_dat_r <= u2_stat_rd;
+                        R_LINK_STAT:  wb_dat_r <= link_stat;
+                        R_AUDIO_CTRL: wb_dat_r <= audio_ctrl_rd;
+                        R_AUDIO_RATE: wb_dat_r <= audio_rate_q;
+                        R_AUDIO_STAT: wb_dat_r <= audio_stat;
                         R_FB_CTRL:    wb_dat_r <= fb_ctrl_rd;
                         R_FB_COMPARED: wb_dat_r <= fb_compared;
                         R_FB_MISMATCH: wb_dat_r <= fb_mismatch;
@@ -1035,6 +1267,8 @@ module wb_regfile #(
                         R_ACCEL_FAST_DCX: wb_dat_r <= accel_fast_dcx;
                         R_ACCEL_FAST_WR: wb_dat_r <= accel_fast_wr;
                         R_ACCEL_FAST_KBD: wb_dat_r <= accel_fast_kbd;
+                        R_GAME_STAT:      wb_dat_r <= game_stat_rd;
+                        R_GAME_STAT2:     wb_dat_r <= game_stat2_rd;
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -1082,6 +1316,16 @@ module wb_regfile #(
                          (word == R_MEM_CTRL);
     wire wr_vidhd_slot = access && !wb_ack && in_region && wb_we &&
                          (word == R_VIDHD_SLOT);
+    wire wr_mouse_slot = access && !wb_ack && in_region && wb_we &&
+                         (word == R_MOUSE_SLOT);
+    wire wr_nsc_ctrl   = access && !wb_ack && in_region && wb_we &&
+                         (word == R_NSC_CTRL);
+    wire wr_audio_ctrl = access && !wb_ack && in_region && wb_we &&
+                         (word == R_AUDIO_CTRL);
+    wire wr_audio_rate = access && !wb_ack && in_region && wb_we &&
+                         (word == R_AUDIO_RATE);
+    wire wr_u2_slot    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_U2_SLOT);
     wire wr_fb_ctrl    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FB_CTRL);
     wire wr_fb_peek    = access && !wb_ack && in_region && wb_we &&

@@ -81,9 +81,11 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     reg       pal = 1'b0;
     reg [6:0] H = 7'h00;
     reg [8:0] V = 9'h100;
+    reg [8:0] Vp = 9'h0FF;          // the line before: the machine's mixed-mode lag needs it
     always @(posedge clk) if (fall) begin
         if (H == 7'h7F) begin
             H <= 7'h00;
+            Vp <= V;
             V <= (V == 9'h1FF) ? (pal ? 9'hC8 : 9'hFA) : V + 9'd1;
         end else if (H == 7'h00) begin
             H <= 7'h40;
@@ -266,21 +268,28 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     reg         fb_serve = 1'b0, fb_cnt_clr = 1'b0;
     reg  [14:0] peek_addr = 15'd0;
     wire [6:0]  mode;
+    wire        vbl_bar;
     wire [31:0] compared, mismatches, last, last2, other;
     wire [7:0]  peek_data;
 
-    // The main bank's port B, stood in for: the card's main memory (cmem,
-    // written beside the machine's on every main write), one registered
-    // clock behind the address, as rtl/page_cache.sv serves it.
-    wire [15:0] mb_addr;
-    reg  [7:0]  mb_byte;
-    always @(posedge clk) mb_byte <= cmem[mb_addr];
+    // The main bank's write tap, stood in for: every main write the card's
+    // bank (cmem) takes, reported on the clock it takes it, as
+    // rtl/page_cache.sv does.  The condition is the cmem write's below.
+    reg         mw_stb  = 1'b0;
+    reg  [15:0] mw_addr = 16'd0;
+    reg  [7:0]  mw_byte = 8'd0;
+    always @(posedge clk) begin
+        mw_stb  <= (since_fall == BUS_AT) && driving && !rw_drive &&
+                   (addr_drive[15:12] != 4'hC) && !wr_aux(addr_drive);
+        mw_addr <= addr_drive;
+        mw_byte <= data_drive;
+    end
 
     fb_sim dut (
         .clk (clk), .rst (rst),
         .op_addr (op_addr), .op_rw (op_rw),
         .op_present (op_present), .op_commit (op_commit), .op_ovr (op_ovr),
-        .mb_addr (mb_addr), .mb_byte (mb_byte),
+        .mw_stb (mw_stb), .mw_addr (mw_addr), .mw_byte (mw_byte),
         .sw_state (sw_state), .vid_sw (vid_sw),
         .locked (locked), .scan_v (scan_v), .scan_h (scan_h), .pal (dpal),
         .master_active (master_active),
@@ -288,6 +297,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .slot_rd_claim (1'b0), .kbd_sub_en (1'b0), .pb_sub_en (1'b0),
         .serve (fb_serve), .cnt_clr (fb_cnt_clr), .peek_addr (peek_addr),
         .sub_en (sub_en), .sub_data (sub_data),
+        .int_ok (), .vbl_bar (vbl_bar),
         .mode (mode), .compared (compared), .mismatches (mismatches),
         .last (last), .last2 (last2), .other (other), .peek_data (peek_data)
     );
@@ -316,14 +326,20 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     endfunction
 
     // The byte the scanner read this cycle, and where it was: text
-    // addressing when TEXT, or MIXED on the lines V4 && V2; page 2 only
-    // when 80STORE is off.
-    wire        sc_text  = sw_text || (sw_mixed && V[7] && V[5]);
+    // addressing when TEXT, or MIXED on the lines V4 && V2 - one cycle
+    // late, as the machine does it: the FIRST cycle (H state $00) of a line
+    // still goes by the line before (measured 2026-09-03: rtl/scan_addr.vh);
+    // page 2 only when 80STORE is off.
+    wire        sc_text  = sw_text || (sw_mixed && (H == 7'h00 ? (Vp[7] && Vp[5]) : (V[7] && V[5])));
     wire        sc_hires = sw_hires && !sc_text;
     wire        sc_page2 = sw_page2 && !sw_store80;
     wire [15:0] sc_now   = sc_addr(V, H, sc_hires, sc_page2);
     wire [7:0]  sc_real  = mem[sc_now];
     wire [7:0]  sc_byte  = bus_dead ? 8'h00 : sc_real;
+    // The IIe's VBL' at $C019: one cycle AHEAD of the scanner's counters
+    // (docs/VBL.md) - the level of the cycle after this one.
+    wire [8:0]  Vn        = (V == 9'h1FF) ? (pal ? 9'hC8 : 9'hFA) : V + 9'd1;
+    wire        vbl_n_iie = (H == 7'h7F) ? (sc_line(Vn, pal) < 192) : (sc_line(V, pal) < 192);
 
     // What the scanner showed for the op in flight.
     reg [7:0]  exp_byte;            // the picture's byte, dead bus or not
@@ -342,6 +358,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
             case (addr_drive)
                 16'hC000: data_pin <= {kbd_strobe, kbd_key};
                 16'hC010: begin data_pin <= 8'h00; kbd_strobe <= 1'b0; end
+                16'hC019: data_pin <= {vbl_n_iie, sc_byte[6:0]};
                 16'hC050: begin sw_text  <= 1'b0; data_pin <= sc_byte; end
                 16'hC051: begin sw_text  <= 1'b1; data_pin <= sc_byte; end
                 16'hC052: begin sw_mixed <= 1'b0; data_pin <= sc_byte; end
@@ -724,6 +741,20 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
                      err, compared - c0, mismatches - m0, sub_on_ovr); errors = errors + 1;
         end else $display("  ok: the probe's %0d reads are compared, none substituted, 0 mismatches", NTSC_CYC);
         @(negedge clk); fb_serve = 1'b0;
+        // (g) $C019 on every cycle of a frame: bit 7 against the IIe's VBL',
+        // which runs one cycle ahead of the counter - the value the
+        // internalized read serves under acceleration.
+        machine_reset(4);
+        cycles(30);
+        if (held !== 1'b1) fail("case 6g: not held");
+        c0 = compared; m0 = mismatches;
+        probe_addr = 16'hC019;
+        pulse_probe;
+        wait_idle(20_000);
+        if (err !== 4'd0 || compared != c0 + NTSC_CYC || mismatches != m0) begin
+            $display("FAIL: case 6g: err %0d, %0d compared over the $C019 probe, +%0d mismatches (last %08x %08x)",
+                     err, compared - c0, mismatches - m0, last, last2); errors = errors + 1;
+        end else $display("  ok: $C019's %0d reads compared on bit 7 against the IIe's VBL', 0 mismatches", NTSC_CYC);
 
         // --- case 7 / the counters clear -------------------------------------------
         pulse_clr;

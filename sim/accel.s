@@ -27,6 +27,18 @@ IPTR    = $08            ; irqtest's roving pointer, distinct from PTR
 :
 .endmacro
 
+.macro  jpl target
+        bmi :+
+        jmp target
+:
+.endmacro
+
+.macro  jmi target
+        bpl :+
+        jmp target
+:
+.endmacro
+
 .macro  jcs target
         bcc :+
         jmp target
@@ -139,6 +151,13 @@ ver:    tya
         jsr auxtest
         jcs fail
 
+        ; ---- 4b. the op right after a bank switch comes from the new bank:
+        ; a stub present in BOTH banks flips RAMRD/RAMWRT and its very next
+        ; fetch, read or write must land on the other side (the Nox splash
+        ; lockup of 2026-09-04, docs/CXXX.md "The switch writes")
+        jsr bankfetch
+        jcs fail
+
         ; ---- 5. the RamWorks banks, from the ROM - once the card is serving.
         ; The machine the testbench models has no RamWorks; the card is it,
         ; and only its image can answer.  The testbench sets RWFLAG through
@@ -157,6 +176,154 @@ norw:
         bpl nokey
         lda $C010               ; a key waited: take it, clear the strobe
 nokey:
+
+        ; ---- 5c. the switch reads in the closed regime (docs/CXXX.md): the
+        ; status page read back through the program's own hands after each
+        ; switch, the floating-value toggles, the language card's pair.  In
+        ; the closed regime none of these READS ride a bus cycle (the STAs
+        ; still do); in every mode the answers are the same, because the
+        ; model's pins answer the status page too.  BIT tests bit 7 only.
+        lda $C083
+        lda $C083               ; bank 2, read RAM, write enabled
+        bit $C011
+        jpl fail                ; RDLCBNK2 must be set
+        bit $C012
+        jpl fail                ; RDLCRAM must be set
+        lda $C08B
+        lda $C08B               ; bank 1
+        bit $C011
+        jmi fail
+        lda $C082               ; ROM back, protected
+        bit $C012
+        jmi fail
+        lda $C055               ; PAGE2 on, by a read: a floating value comes back
+        bit $C01C
+        jpl fail
+        lda $C054               ; off
+        bit $C01C
+        jmi fail
+        lda $C054               ; again - quiet: no switch moves, no word
+        lda $C053               ; MIXED on
+        bit $C01B
+        jpl fail
+        lda $C052               ; off
+        bit $C01B
+        jmi fail
+        lda $C051               ; TEXT on (it is already: quiet)
+        bit $C01A
+        jpl fail
+        sta $C001               ; 80STORE on (a write: served on the card too, since step 4)
+        bit $C018
+        jpl fail
+        sta $C000               ; off
+        bit $C018
+        jmi fail
+        bit $C013               ; RAMRD is off here
+        jmi fail
+
+        ; ---- 5d. the switch WRITES in the closed regime (docs/CXXX.md, "The
+        ; switch writes"): every memory-mapping and IOU strobe, the toggles
+        ; and the language card by a write, each read back through the
+        ; status page; two quiet writes (no switch moves, no word); and the
+        ; two Cx-ROM switches, which ride the bus in every mode - the
+        ; testbench counts them on the pins.  This code runs from RAM at
+        ; $6000, so RAMRD cannot be turned on here (the next fetch would come
+        ; from aux) - the aux tests in ROM below do that, and in mode 2 their
+        ; STAs now take this path; RAMWRT and ALTZP are flipped only between
+        ; instructions that touch no memory but the switch and the status page.
+        sta $C002               ; RAMRD main, already: a quiet write
+        sta $C005               ; RAMWRT aux
+        bit $C014
+        jpl fail
+        sta $C004               ; main
+        bit $C014
+        jmi fail
+        sta $C009               ; ALTZP on (no zero page or stack use until it is off)
+        bit $C016
+        jpl fail
+        sta $C008               ; off
+        bit $C016
+        jmi fail
+        sta $C00D               ; 80COL on
+        bit $C01F
+        jpl fail
+        sta $C00C               ; off
+        bit $C01F
+        jmi fail
+        sta $C00F               ; ALTCHAR on
+        bit $C01E
+        jpl fail
+        sta $C00E               ; off
+        bit $C01E
+        jmi fail
+        sta $C055               ; PAGE2 on, by a write
+        bit $C01C
+        jpl fail
+        sta $C054               ; off
+        bit $C01C
+        jmi fail
+        sta $C054               ; again - quiet
+        sta $C057               ; HIRES on
+        bit $C01D
+        jpl fail
+        sta $C056               ; off
+        bit $C01D
+        jmi fail
+        sta $C08B               ; the LC by a write: bank 1, read RAM; A0 = 1 on a
+        bit $C011               ; write clears prewrite, the enable stays as it was
+        jmi fail                ; RDLCBNK2 clear
+        bit $C012
+        jpl fail                ; RDLCRAM set
+        sta $C082               ; ROM back, protected, bank 2
+        bit $C011
+        jpl fail
+        bit $C012
+        jmi fail
+        sta $C007               ; INTCXROM on: this write rides the bus
+        bit $C015
+        jpl fail
+        sta $C006               ; off: so does this one
+        bit $C015
+        jmi fail
+        sta $C00B               ; SLOTC3ROM on: the bus
+        bit $C017
+        jpl fail
+        sta $C00A               ; off: the bus
+        bit $C017
+        jmi fail
+
+        ; ---- 5e. the speaker (docs/CXXX.md "The speaker"): every access
+        ; toggles it, read or write, and in the closed regime none rides the
+        ; bus - the testbench counts them served and none on the pins.
+        lda $C030
+        sta $C030
+        bit $C030
+        sta $C03F
+        lda $C03F
+
+        ; ---- 5f. the game port (docs/CXXX.md "The game port"): the three
+        ; buttons, and PREAD on each of the four paddles - the strobe, then
+        ; the count of eleven-cycle loops until the timer's bit falls.  In
+        ; the closed regime the strobe is a served read and the timers are
+        ; the card's virtual ones, started from the dummy loop's samples;
+        ; in every mode the counts are the positions the testbench set.  A
+        ; rest between paddles, as Applesoft's PDL has one: a timer still
+        ; running from the last strobe ignores the next.
+        lda $C061
+        sta $0320
+        lda $C062
+        sta $0321
+        lda $C063
+        sta $0322
+        ldx #0
+pdlnext:
+        jsr pread
+        tya
+        sta $0324,x
+        jsr pdlrest
+        inx
+        cpx #4
+        bne pdlnext
 
         ; ---- 6. self-modifying code: the operand and the opcode change
         ; under the icache's feet.  A stale line shows as the wrong A or X.
@@ -470,6 +637,32 @@ dumfail:
 fail:   lda #$FF
         sta FAILF
 halt:   jmp halt
+
+; The monitor's PREAD: strobe, then count eleven-cycle loops until paddle
+; X's timer falls; Y is the count, 255 at most.
+pread:  lda $C070
+        ldy #0
+        nop
+        nop
+pread2: lda $C064,x
+        bpl pread3
+        iny
+        bne pread2
+        dey
+pread3: rts
+; ...and ~3300 cycles of rest, longer than any timer runs.
+pdlrest:
+        tya
+        pha
+        ldy #0
+prest1: nop
+        nop
+        nop
+        dey
+        bne prest1
+        pla
+        tay
+        rts
 
 ; The operand of an immediate is rewritten and at once executed; then an
 ; instruction's OPCODE is rewritten, both ways.  The compares read the
@@ -875,6 +1068,111 @@ axfail_zp: sta $C008
         rts
 axfail: sec
         rts
+
+; bankfetch: the hazard Nox Archaist's splash found on hardware (2026-09-04).
+; A program that sits in both banks flips RAMRD and simply keeps executing -
+; the next opcode fetch, the next data read, the next write must all see
+; the NEW bank, with no instruction in between.  On the bus that always
+; held: a switch's commit lands clocks before the core's next op can be
+; served.  A switch served on the card (steps 3/4) retires with a
+; synthetic commit one clock after the core moved, so the fronts and the
+; dispatcher have to hold until the shadow and map_changed have landed.
+; Four stubs at $1F00-$1F3F, identical in both banks except for the byte
+; under test; each called twice so the second time runs with the stub's
+; line resident in the CAM under the OLD bank.  Carry set on failure;
+; RAMRD/RAMWRT are off again before any return, and the stack (main, ALTZP
+; off) is untouched by the flips.
+bankfetch:
+        ; write the main copy, then the aux copy, of the stubs
+        ldx #0
+bf_wm:  lda bf_main,x
+        sta $1F00,x
+        inx
+        cpx #bf_len
+        bne bf_wm
+        sta $C005               ; RAMWRT aux
+        ldx #0
+bf_wa:  lda bf_aux,x
+        sta $1F00,x
+        inx
+        cpx #bf_len
+        bne bf_wa
+        sta $C004               ; RAMWRT main
+        ; stub 1: RAMRD on, then the very next OPCODE byte is aux's DEX (main
+        ; has INX there): the one byte the front can serve before the kill
+        ldx #0
+        jsr $1F00
+        cpx #$FF
+        jne bf_fail
+        ldx #0
+        jsr $1F00               ; again, the main line resident
+        cpx #$FF
+        jne bf_fail
+        ; stub 2: RAMRD on, then the next DATA READ is aux's $1F80 = $44
+        jsr $1F10
+        cmp #$44
+        jne bf_fail
+        jsr $1F10
+        cmp #$44
+        jne bf_fail
+        ; stub 3: RAMWRT on, then the next WRITE lands in aux $1F90
+        lda #$77
+        sta $1F90               ; main's copy: $77
+        lda #$88
+        jsr $1F20               ; aux's copy: $88
+        lda $1F90
+        cmp #$77
+        jne bf_fail
+        sta $C003               ; RAMRD aux (this code is in ROM)
+        lda $1F90
+        sta $C002
+        cmp #$88
+        jne bf_fail
+        lda #$99
+        jsr $1F20               ; again
+        sta $C003
+        lda $1F90
+        sta $C002
+        cmp #$99
+        jne bf_fail
+        ; stub 4: RAMRD off, from aux: the next opcode is main's INX (aux: DEX)
+        ldx #0
+        sta $C003               ; enter the stub with RAMRD on: aux's copy runs
+        jsr $1F30
+        cpx #1
+        jne bf_fail
+        ldx #0
+        sta $C003
+        jsr $1F30
+        cpx #1
+        jne bf_fail
+        clc
+        rts
+bf_fail:
+        sta $C002
+        sta $C004
+        sec
+        rts
+; the stubs: 16 bytes each, at $1F00, $1F10, $1F20, $1F30; $1F80/$1F90 data
+bf_main:
+        .byte $8D,$03,$C0, $E8, $8D,$02,$C0, $60, $EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA   ; $1F00 STA $C003; INX; STA $C002; RTS
+        .byte $8D,$03,$C0, $AD,$80,$1F, $8D,$02,$C0, $60, $EA,$EA,$EA,$EA,$EA,$EA   ; $1F10 STA $C003; LDA $1F80; STA $C002; RTS
+        .byte $8D,$05,$C0, $8D,$90,$1F, $8D,$04,$C0, $60, $EA,$EA,$EA,$EA,$EA,$EA   ; $1F20 STA $C005; STA $1F90; STA $C004; RTS
+        .byte $8D,$02,$C0, $E8, $60, $EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA    ; $1F30 STA $C002; INX; RTS
+        .res  $40, $EA                                                               ; $1F40-$1F7F
+        .byte $33                                                                    ; $1F80
+        .res  $0F, $EA
+        .byte $00                                                                    ; $1F90
+bf_len = * - bf_main
+bf_aux:
+        .byte $8D,$03,$C0, $CA, $8D,$02,$C0, $60, $EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA   ; $1F00: DEX here
+        .byte $8D,$03,$C0, $AD,$80,$1F, $8D,$02,$C0, $60, $EA,$EA,$EA,$EA,$EA,$EA
+        .byte $8D,$05,$C0, $8D,$90,$1F, $8D,$04,$C0, $60, $EA,$EA,$EA,$EA,$EA,$EA
+        .byte $8D,$02,$C0, $CA, $60, $EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA,$EA    ; $1F30: DEX here (must NOT run)
+        .res  $40, $EA
+        .byte $44                                                                    ; $1F80: aux's byte
+        .res  $0F, $EA
+        .byte $00
 
 ; The RamWorks: bank 0 is the regular auxiliary memory auxtest just used,
 ; banks 1-3 are their own; a bank that does not exist is ignored; ALTZP's
