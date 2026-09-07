@@ -109,6 +109,20 @@ card).  Neither is the shelved "time compression" (`shelved/AUDIO_PACING.md`
 on the host) nor the old ring's chunk-dropping; the user picks the time
 base by ear and it is a register bit.
 
+## Oversampling, on the host's request (2026-09-07)
+
+AUDIO_RATE is the host's to set, and the accumulators have the headroom for
+a window a quarter as long (a speaker count of 567, the 12-bit counter; a
+chip's 434 k in 22 bits), so the host asks for 4 x 44.1 kHz and scales the
+quarter-size samples back up (the constants map the nominal window to full
+scale).  The reason: a speaker PWM player's carrier sits in the tens of
+kHz, and one 44.1 kHz box folds it under 22 kHz as a whine - Nox
+Archaist's splash, heard on the day the speaker moved to the card.  The
+host's `CardAudio` runs a 127-tap windowed-sinc low-pass (14 kHz, -74 dB
+stopband) across the five channels and takes every fourth sample into the
+mixer (`audio_oversample`, `audio_lowpass` in swhost.conf; 1 is the plain
+box).  Nothing here changed: four times the messages, 5.5 k a second.
+
 ## The message
 
 `rtl/audio_tx.sv` queues three words a sample:
