@@ -42,7 +42,7 @@ firmware (AUXMOVE), not to the bus.
 - Host: a **BUS CAPTURE** menu row toggles sparse/full read-write capture
   live ([[bus-capture-menu]]) - the tool that made the tracing possible.
 
-**NEXT: the $Cxxx plan (docs/CXXX.md), then rung 4 - streams.** Branch `dcache`, both repos,
+**NEXT: the $Cxxx plan (docs/CXXX.md) ran its course; rung 4 was tried and reverted (below); a capacity rung is the open question.** Branch `dcache`, both repos,
 cut from the merged master (page cache + istream front + carry gift, all
 hardware-proven). The old acceleration-branch D$ plan (its DCACHE_PLAN.md)
 is explicitly NOT the basis for this work: it solved a cache-hierarchy
@@ -407,7 +407,30 @@ rather than prose:
 Expect the write population (~10% of ops) to move; the dispatcher is
 then bus-ops-only. Bench toward ~60x.  (Measured: 68.9x.)
 
-### Rung 4 - streams
+### Rung 4 - streams: TRIED AND REVERTED (2026-09-07)
+
+Built as planned on a branch (stream table beside the CAM, descending
+too, dummies ignored, buffer ways of the CAM's shape, prefetch as the
+claim engine's third trigger, three counters through the regfile and
+the host): 97/97 on the accel bench at 70.0x (baseline 69.6x), boots
+clean, WNS +0.126, on hardware.  Then a full capture of the animated Nox
+map at 4x - the scene whose 43M read misses were the target - said what
+the misses are: of the data reads the CAM could see, only 18% are at
+the previous address +1 and none descending; the working set is 190
+lines, 67 of them carrying 93% of the reads (HGR page 1 read back by the
+drawing code, tile data at $61xx/$62xx, tables at $B2xx-$B4xx); a
+4-way CAM misses 64% of them, a 32-line LRU 1%, and the stream table
+takes one point off either.  A 4-entry table (12 ways of tag compare
+and AND-OR) missed timing at -0.184.  The user's verdict: a failure;
+reverted whole, the branch deleted, nothing merged.  The lesson for the
+next attempt at this rung: the data side's remaining misses on a busy
+screen are CAPACITY - an address-indexed cache of 32-64 lines, the
+shadow's LUTRAM shape rather than more FF ways - and a full capture at
+4x with the reads modelled through cache variants is the way to size it
+before building.  The analyzer and the trace were kept beside the
+session's notes.
+
+The plan, as it was:
 
 One or two line buffers BESIDE the CAM; a same-line-and-advancing
 comparator on the d_pred stream detects; prefetch of line+1 rides the

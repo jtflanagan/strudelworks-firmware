@@ -222,7 +222,7 @@ module kbd_inject_tb;
         .clk (clk), .rst (rst),
         .master_active (master_active),
         .sel (pb_sel),
-        .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
+        .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit), .op_dummy (1'b0),
         .data_sync (data_s),
         .sub_en (pb_sub_en), .sub_data (pb_sub_data),
         .hw_level (pb_hw)

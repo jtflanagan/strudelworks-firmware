@@ -923,9 +923,15 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // path never checked it either (the pins carried hd_card's byte back):
     // the ROM page IS checked, through cx_byte's hd_rom.
     wire fev_hd_port = (fev_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)});
+    // ...and so is the Mockingboard's page: a Mockingboard maps its 6522s
+    // into the slot's $Cn00-$CnFF, so the ProDOS slot scan's reads there
+    // get VIA registers from the card (timers, ports), which nothing in the
+    // reference models - the reference says FLOAT.  With INTCXROM set the
+    // motherboard ROM owns the page and the reference is right again.
+    wire fev_mb_page = (MB_SLOT != 0) && !m_intcx && (fev_addr[15:8] == {4'hC, 4'(MB_SLOT)});
     always @(posedge clk) if (fev_valid && fev_rw) begin
         reads = reads + 1; fast_reads = fast_reads + 1;
-        if (!fev_hd_port && fev_data !== exp_read(fev_addr)) begin
+        if (!fev_hd_port && !fev_mb_page && fev_data !== exp_read(fev_addr)) begin
             reads_bad = reads_bad + 1;
             if (reads_bad <= 20) $display("[%0t] BAD fast read $%04X: core got %02x, the reference says %02x",
                                           $time, fev_addr, fev_data, exp_read(fev_addr));

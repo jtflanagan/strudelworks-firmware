@@ -28,8 +28,9 @@ Microcode:
 
 `--iverilog` adds the iverilog accel battery (~2 min): the rung gate (docs/DLINE.md
 "Phasing and proof") wants both simulators; the everyday loop is Verilator-first and does
-not (user decision 2026-09-02). Known pre-existing failures on cxxx_work: kbd_inject and
-bus_event_filter (button-readback and door cases, seen 2026-09-06 on the untouched tree).
+not (user decision 2026-09-02). Every bench is expected green (the kbd_inject /
+bus_event_filter / boot slot-4 failures of 2026-09-06 were bench wiring, fixed 2026-09-07):
+a FAIL is a finding, never "known".
 
 ## Steps
 

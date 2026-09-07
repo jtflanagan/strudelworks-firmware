@@ -1,7 +1,9 @@
 # The boot bench: the plan
 
 Status: **BUILT AND GREEN, 2026-09-02; a Phasor in slot 4 and a scripted
-key since 2026-09-06** (sim/boot_tb.sv,
+key since 2026-09-06; the Phasor's own page ($C400-$C4FF, the 6522s the
+reference cannot model) exempt from the fast-read compare since 2026-09-07 -
+both images 0 bad again** (sim/boot_tb.sv,
 sim/run_boot_tb.sh, tools/trace_diff.py). All four proof runs pass at 2M
 bus cycles under Verilator (~2.5 min each, ~1.4M clk/s): the ProDOS 2.4.3
 .po and nox_los.HDV, each at mode 0 and mode 2 unlimited - zero bad
