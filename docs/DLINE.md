@@ -3,7 +3,7 @@
 Status: **rungs 1-3 and 5 DONE and ON HARDWARE** (rung 5: 2026-09-07,
 branch `dline_capacity`, fw 52dc698 plus the margin cuts; 72.3x on the
 animated Nox map from 63.4x, wave.dsk 83x drawing / 97x flipping; build
-WNS +0.051 with no dline path in the deep tail).  **Rung 4 (streams) was
+WNS +0.150 after the read-claim cut, no dline path in the deep tail).  **Rung 4 (streams) was
 tried and reverted** the same day - see its section.
 - Rung 1 (fw e9170ab): the zp/stack shadow, 39.5x, sim and HW agreeing.
 - Rung 2 (fw 2e85924): the 4-line CAM + last-byte serve, 45.2x on the
@@ -477,6 +477,18 @@ dline has NO endpoint left in the deep tail (its deepest: 15 levels at
 cone (u_vidhd/rd_claim -> the slot read mux -> fev_data -> cpu_din), 13
 levels at 77% wire - not the data front.  Price of the copies: 40
 flip-flops in all.
+
+**The read-claim cone, cut (dline_capacity8): WNS +0.051 -> +0.150.**
+Every on-card slot registers its claim and byte at op_present, so they
+exist from P1; the sequencer consumes the byte at P3, when the page
+cache's `decided` fires.  rtl/accel_seq.sv now samples swi_byte once,
+at P2 (swi_byte_q feeds cpu_din and the event byte): no stall, and the
+six cards' claim mux ends at one register - a card added later can only
+lengthen the P1->P2 mux, which has a whole clock and five levels today,
+never the core's din cone.  Sweep 49 identical, boot 2/2.  The worst
+path is the data front's serve again (rows index copy -> way 0's row ->
+byte mux -> the OR -> d_din -> the core, 15 levels) with three times the
+margin it had.
 
 ### Rung 4 - streams: TRIED AND REVERTED (2026-09-07)
 
