@@ -409,6 +409,18 @@ module accel_seq (
     // internalized read's byte is swi_byte, ready by construction, and an
     // internalized write wants nothing - the cache's decided is only the
     // pacing for both.
+    //
+    // swi_byte is taken through ONE register.  An on-card slot's byte is
+    // the card's own registered claim, valid from P1, muxed through every
+    // card's claim on the way here; the core consumes it at P3, when
+    // `decided` fires.  Sampling at P2 costs nothing and cuts the cards'
+    // claim mux out of the din cone - the design's worst path once the
+    // data front was cut (u_vidhd/rd_claim -> the slot mux -> cpu_din ->
+    // the core, 13 levels at 77% wire, 2026-09-07).  The other bytes swi
+    // carries (the keyboard latch, the status page, the floating bus) are
+    // stable across a clock.
+    logic [7:0] swi_byte_q;
+    always_ff @(posedge clk) swi_byte_q <= swi_byte;
     wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en || swi_q);
     wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en && !swi_q;
 
@@ -432,7 +444,7 @@ module accel_seq (
     // ---- the core's side ----------------------------------------------------
     assign cyc_en     = off_q ? cyc_done : (st == S_BUS) ? cyc_done : fast_hit;
     assign cpu_din    = (off_q || st == S_BUS) ? drv_din
-                      : swi_q ? swi_byte : mem_sub_data;
+                      : swi_q ? swi_byte_q : mem_sub_data;
     assign bus_owns   = off_q || bus_owns_q;
     assign core_valid = off_q || core_valid_q;
 
@@ -585,7 +597,7 @@ module accel_seq (
                             fev_quiet <= swi_q && quiet_q;
                             fev_addr  <= u_addr;
                             fev_rw    <= u_rw;
-                            fev_data  <= u_rw ? (swi_q ? swi_byte : mem_sub_data)
+                            fev_data  <= u_rw ? (swi_q ? swi_byte_q : mem_sub_data)
                                               : u_wdata;
                             fev_sync  <= u_sync;
                         end else if (fast_miss) begin

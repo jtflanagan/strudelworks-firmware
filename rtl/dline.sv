@@ -14,14 +14,24 @@
 //     (32 lines x 16 B, one valid FF per line, claimed lazily).  It never
 //     invalidates for map reasons: its identity is physical, ALTZP only
 //     DIVERTS traffic, and the content dies only with the image (inval).
-//   * THE CAM (rung 2): 4 lines as FF rows with FF tags carrying PHYSICAL
-//     identity - {aux, bank, folded off[15:4]} - serving RAM- and LC-class
-//     reads outside the shadow's estate.  Tags are physical, but a fill's
-//     FOLDING was captured under the map of its day, so the CAM flash-clears
-//     on map_changed - iline's rule, kept.  Round-robin replacement until
-//     rung 4 refines insertion.  The rows are flip-flops, not LUTRAM: four
-//     rows are cheap, and per-entry write ports mean a splice never contends
-//     with anything - no kills, only the in-flight install abort.
+//   * THE CACHE (rung 5, 2026-09-07; rung 2's 4-line CAM before it): 64
+//     sets x 2 ways of 16-byte lines, 2 KB of LUTRAM in the shadow's own
+//     shape, indexed by addr[9:4], serving RAM- and LC-class reads outside
+//     the shadow's estate.  The serve compares a 6-bit VIRTUAL tag
+//     (addr[15:10]) against the indexed way - rung 2's lesson kept: under
+//     an unchanged map one virtual line is one physical line, so the whole
+//     classify cone stays out of the serve, and the cache flash-clears on
+//     map_changed as the CAM did.  A PHYSICAL tag - {aux, bank, folded
+//     off[15:10]} - sits beside each line for the snoops, which index by the
+//     write's off[9:4] (the fold never touches the low 12 bits, so the two
+//     views agree on the set).  One LRU bit per set.  Why this and not more
+//     CAM ways: a full capture of the animated Nox map showed 190 distinct
+//     lines in play with 67 carrying 93% of the reads - the 4-way CAM missed
+//     64% of them, this geometry 0.9% in the model - and 12 FF ways had
+//     already missed timing: capacity has to be indexed, and an index is a
+//     LUTRAM read, one level deep.  Each way's LUTRAM has ONE write port
+//     behind the shadow's mux discipline: a splice's read-modify-write beats
+//     an install, which drops and reclaims.
 //   * THE LAST BYTE (rung 2): the previous data read's {addr, byte} in one
 //     register.  The CMOS core's LAST and FIXUP dummy cycles re-read the
 //     previous cycle's address, so they always hit here - one clock, no
@@ -273,6 +283,13 @@ module dline #(
     // KEEP holds the nets apart.
     (* KEEP = "TRUE" *) logic [3:0] dq_ix_sh;
     (* KEEP = "TRUE" *) logic [3:0] dq_ix_cam [0:3];
+    // ...and of the set index, one per way (rung 5): the build that met at
+    // +0.008 had Vivado's own copies at 111 loads each on the worst path.
+    (* KEEP = "TRUE" *) logic [2:0] dq_sx [0:3];
+    // ...and one more per way for the TAG array alone: with rows and tags
+    // on one copy (142 loads) the tag read was the worst path's first hop
+    // at +0.043; the tag leg is the long one, so it gets the light copy.
+    (* KEEP = "TRUE" *) logic [2:0] dq_st [0:3];
     always_ff @(posedge clk) begin
         if (rst || cpu_rst || inval) begin
             dq_v  <= 1'b0;
@@ -288,6 +305,14 @@ module dline #(
             dq_ix_cam[1] <= d_pred[3:0];
             dq_ix_cam[2] <= d_pred[3:0];
             dq_ix_cam[3] <= d_pred[3:0];
+            dq_sx[0] <= d_pred[6:4];
+            dq_sx[1] <= d_pred[6:4];
+            dq_sx[2] <= d_pred[6:4];
+            dq_sx[3] <= d_pred[6:4];
+            dq_st[0] <= d_pred[6:4];
+            dq_st[1] <= d_pred[6:4];
+            dq_st[2] <= d_pred[6:4];
+            dq_st[3] <= d_pred[6:4];
         end
     end
     assign dq_rw = !dq_wv;
@@ -308,28 +333,77 @@ module dline #(
     // registers' own enables).  A main line's bank is 0 by convention
     // (cl_bank carries rw_bank even for main writes, so the effective bank
     // is normalized on both sides of the snoop).
-    logic [3:0]   cv;
-    logic [11:0]  vt      [0:3];      // virtual: addr[15:4], the serve's compare
-    logic         ct_aux  [0:3];      // physical, the snoops' compare
-    logic [7:0]   ct_bank [0:3];
-    logic [11:0]  ct_off  [0:3];
-    logic [127:0] crow    [0:3];
-    logic [1:0]   rr;
-
+    // ---- the cache (rung 5) -----------------------------------------------
+    // NSET sets x NWAY ways of 16-byte lines, indexed by addr[IW+3:4].  The
+    // rows and tags are small arrays (a set index of three bits reads in
+    // one LUT level); the valid bits and the round-robin pointers are
+    // flip-flops, so a map change clears every line in one clock, as the
+    // CAM flash-cleared.  The 64 x 2 LUTRAM shape tried first (2026-09-07)
+    // put a 64:1 valid mux and F7/F8 read stages in the serve cone and
+    // missed timing twice; the user's call: small and shallow, forever.
+    localparam integer NSET = 8;
+    localparam integer NWAY = 4;
+    localparam integer IW   = 3;                // the set: addr[6:4]
+    localparam integer TW   = 16 - 4 - IW;      // the virtual tag: addr[15:7]
+    localparam integer PTW  = 1 + 8 + TW;       // the physical tag: {aux, bank, off[15:7]}
+    localparam integer WW   = 2;                // a way index
+    wire [IW-1:0] sidx = dq_addr[IW+3:4];
+    wire [TW-1:0] stag = dq_addr[15:IW+4];
     wire       in_sh_estate = (dq_addr[15:9] == 7'd0) && zs_main_q;
     wire       d_cls_ok     = (d_cls == CLS_RAM) || (d_cls == CLS_LC);
     wire [7:0] want_bank    = d_aux ? rw_bank : 8'd0;
-
-    wire [3:0] chit;
-    genvar ge;
-    generate for (ge = 0; ge < 4; ge = ge + 1) begin : g_chit
-        assign chit[ge] = cv[ge] && (vt[ge] == dq_addr[15:4]);
+    integer k;
+    logic [NSET-1:0] cv   [0:NWAY-1];           // valid, per line (flip-flops)
+    logic [WW-1:0]   rrp  [0:NSET-1];           // the next victim, per set
+    logic [NWAY-1:0] hitv;
+    wire  [7:0]      wbyte [0:NWAY-1];
+    // Per way: rows, tags, hit, byte, and the one-write-port mux.  The
+    // install's inputs (inst_w, t_set, the m_*_t stamp) and the splice's
+    // (spc_hit_w, spi, iw_*) are declared ahead of the generate below.
+    logic [NWAY-1:0] inst_w, spc_hit;
+    logic [IW-1:0]   t_set;
+    logic [IW-1:0]   spi;
+    logic [PTW-1:0]  spt;
+    logic            m_aux_q_t;
+    logic [7:0]      m_bank_q_t;
+    logic [11:0]     m_off_q_t, m_vt_q_t;
+    wire  [127:0]    dl_row_w = dl_row;
+    genvar gw;
+    generate for (gw = 0; gw < NWAY; gw = gw + 1) begin : g_way
+        logic [127:0]  rows [0:NSET-1];
+        logic [TW-1:0] vt   [0:NSET-1];
+        logic [PTW-1:0] pt  [0:NSET-1];
+        assign hitv[gw]  = cv[gw][dq_st[gw]] && (vt[dq_st[gw]] == stag);
+        assign wbyte[gw] = {8{hitv[gw]}} & rows[dq_sx[gw]][dq_ix_cam[gw]*8 +: 8];
+        // The splice's cut: the write's set, its physical identity.
+        assign spc_hit[gw] = iw_v && cv[gw][spi] && (pt[spi] == spt);
+        // One write port: a splice's read-modify-write beats an install,
+        // which drops (its valid bit stays clear) and reclaims.
+        logic          we;
+        logic [IW-1:0] wa;
+        logic [127:0]  wd, md;
+        always_comb begin
+            we = spc_hit[gw] || inst_w[gw];
+            wa = spc_hit[gw] ? spi : t_set;
+            md = rows[wa];
+            md[iw_off[3:0]*8 +: 8] = iw_data;
+            wd = spc_hit[gw] ? md : dl_row_w;
+        end
+        always_ff @(posedge clk) if (we) rows[wa] <= wd;
+        always_ff @(posedge clk) if (inst_w[gw]) begin
+            vt[t_set] <= m_vt_q_t[11:IW];
+            pt[t_set] <= {m_aux_q_t, m_bank_q_t, m_off_q_t[11:IW]};
+        end
     end endgenerate
-    wire       cam_hit  = dq_v && (chit != 4'd0);
-    wire [7:0] cam_byte = chit[0] ? crow[0][dq_ix_cam[0]*8 +: 8] :
-                          chit[1] ? crow[1][dq_ix_cam[1]*8 +: 8] :
-                          chit[2] ? crow[2][dq_ix_cam[2]*8 +: 8] :
-                                    crow[3][dq_ix_cam[3]*8 +: 8];
+    wire cam_hit = dq_v && (hitv != '0);
+    // One-hot AND-OR across the ways (no two ways hold one line: a miss
+    // sees them all before it claims).
+    logic [7:0] cam_byte;
+    integer wi;
+    always_comb begin
+        cam_byte = 8'd0;
+        for (wi = 0; wi < NWAY; wi = wi + 1) cam_byte = cam_byte | wbyte[wi];
+    end
 
     // ---- the last byte ------------------------------------------------------
     // The previous completed READ - I side or D side - one register deep.
@@ -378,7 +452,11 @@ module dline #(
     // popping on their own - and the write never pays the dispatcher's
     // price.
     wire serve_hit  = sh_hit || cam_hit || lb_hit;
-    wire [7:0] serve_byte = sh_hit ? dq_byte : cam_hit ? cam_byte : lb_byte;
+    // One-hot AND-OR, not a priority chain: the shadow and the cache never
+    // hold the same line (claims exclude the estate), and the last byte,
+    // when it also hits, IS that line's byte (any write clears it).
+    wire [7:0] serve_byte = ({8{sh_hit}} & dq_byte) | ({8{cam_hit}} & cam_byte) |
+                            ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte);
 
     wire d_cycle = !cyc_is_i &&  cpu_rw;
     wire w_cycle = !cyc_is_i && !cpu_rw;
@@ -409,7 +487,13 @@ module dline #(
 
     assign d_commit = retire;
     assign cyc_en   = il_cyc_en || retire;
-    assign d_din    = serve_hit ? serve_byte : accel_din;
+    // The core's byte is one flat one-hot OR - the shadow's, each way's
+    // (wbyte is already gated), the last byte's and, when nothing here
+    // serves, the sequencer's - not a mux after an OR after an OR: two LUT
+    // levels where the build at +0.008 spent three.
+    assign d_din    = ({8{sh_hit}} & dq_byte) | wbyte[0] | wbyte[1] | wbyte[2] | wbyte[3] |
+                      ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte) |
+                      ({8{!serve_hit}} & accel_din);
     assign claim    = claim_q;
 
     // The last byte follows the retiring edge: whatever READ completed -
@@ -519,7 +603,7 @@ module dline #(
     logic       miss_q, cmiss_q;
     logic [4:0] miss_line_q;
     logic       t_cam;
-    logic [1:0] t_ent;
+    logic [WW-1:0] t_way;
     logic       m_aux_q;
     logic [7:0] m_bank_q;
     logic [11:0] m_off_q, m_vt_q;
@@ -568,15 +652,11 @@ module dline #(
     wire sp_hit  = iw_v && !iw_aux && (iw_off[15:9] == 7'd0);
     wire [4:0] sp_line = iw_off[8:4];
 
-    wire [3:0] spc_hit;
-    generate for (ge = 0; ge < 4; ge = ge + 1) begin : g_spc
-        assign spc_hit[ge] = iw_v && cv[ge] && (ct_aux[ge] == iw_aux) &&
-                             (ct_bank[ge] == iw_bank) && (ct_off[ge] == iw_off[15:4]);
-    end endgenerate
-    // ...and against an in-flight CAM claim's target identity.
-    logic       m_aux_q_t;
-    logic [7:0] m_bank_q_t;
-    logic [11:0] m_off_q_t, m_vt_q_t;
+    // The cache's cut: the write's own set, its physical identity against
+    // every way there (spc_hit, in the generate above).
+    assign spi = iw_off[IW+3:4];
+    assign spt = {iw_aux, iw_bank, iw_off[15:IW+4]};
+    // ...and against an in-flight cache claim's target identity.
     wire spc_flight = iw_v && (m_aux_q_t == iw_aux) && (m_bank_q_t == iw_bank) &&
                       (m_off_q_t == iw_off[15:4]);
 
@@ -594,18 +674,14 @@ module dline #(
         sh_wdata = sp_write ? sp_mod : dl_row;
     end
 
-    // The CAM rows: per-entry write, splice or install, splice first (an
-    // install racing a splice of its own line is aborted below and never
-    // reaches here on the same entry).
-    integer e;
-    always_ff @(posedge clk) begin
-        for (e = 0; e < 4; e = e + 1) begin
-            if (spc_hit[e])
-                crow[e][iw_off[3:0]*8 +: 8] <= iw_data;
-            else if (cst == C_W2 && t_cam && !spc_flight && !rst && !inval &&
-                     !map_changed && t_ent == 2'(e))
-                crow[e] <= dl_row;
-        end
+    // The install, per way: the claim's target way, on the row's clock,
+    // unless a splice owns that way's port this clock (then it drops and
+    // reclaims) or the claim was aborted.
+    wire inst_ok = (cst == C_W2) && t_cam && !spc_flight && !rst && !inval && !map_changed;
+    integer wj;
+    always_comb begin
+        for (wj = 0; wj < NWAY; wj = wj + 1)
+            inst_w[wj] = inst_ok && (t_way == WW'(wj)) && !spc_hit[wj];
     end
 
     always_ff @(posedge clk) begin
@@ -627,10 +703,10 @@ module dline #(
 
         if (rst || inval) begin
             shv <= 32'd0;
-            cv  <= 4'd0;
-            rr  <= 2'd0;
+            for (k = 0; k < NWAY; k = k + 1) cv[k] <= '0;
+            for (k = 0; k < NSET; k = k + 1) rrp[k] <= '0;
             cst <= C_IDLE; dl_req <= 1'b0; dl_line <= 12'd0; c_line <= 5'd0;
-            dl_aux <= 1'b0; dl_bank <= 8'd0; t_cam <= 1'b0; t_ent <= 2'd0;
+            dl_aux <= 1'b0; dl_bank <= 8'd0; t_cam <= 1'b0; t_way <= '0; t_set <= '0;
             m_aux_q_t <= 1'b0; m_bank_q_t <= 8'd0; m_off_q_t <= 12'd0;
             miss_q <= 1'b0; cmiss_q <= 1'b0;
             tick_q <= 1'b0; dev_valid <= 1'b0;
@@ -654,7 +730,7 @@ module dline #(
 
             // The splices themselves ride the write ports above; only the
             // books live here.
-            if (sp_write || spc_hit != 4'd0) cnt_splices <= cnt_splices + 32'd1;
+            if (sp_write || spc_hit != '0) cnt_splices <= cnt_splices + 32'd1;
 
             case (cst)
                 C_IDLE: if (miss_q) begin
@@ -666,8 +742,13 @@ module dline #(
                     dl_req  <= 1'b1;
                     cst     <= C_REQ;
                 end else if (cmiss_q) begin
+                    // The victim: an empty way first, else the set's round robin.
                     t_cam     <= 1'b1;
-                    t_ent     <= rr;
+                    t_set     <= m_vt_q[IW-1:0];
+                    t_way     <= !cv[0][m_vt_q[IW-1:0]] ? 2'd0 :
+                                 !cv[1][m_vt_q[IW-1:0]] ? 2'd1 :
+                                 !cv[2][m_vt_q[IW-1:0]] ? 2'd2 :
+                                 !cv[3][m_vt_q[IW-1:0]] ? 2'd3 : rrp[m_vt_q[IW-1:0]];
                     m_aux_q_t <= m_aux_q;
                     m_bank_q_t <= m_bank_q;
                     m_off_q_t <= m_off_q;
@@ -700,14 +781,12 @@ module dline #(
                             cnt_claims  <= cnt_claims + 32'd1;
                         end
                     end else begin
-                        if (!spc_flight && !map_changed) begin
-                            cv[t_ent]      <= 1'b1;
-                            vt[t_ent]      <= m_vt_q_t;
-                            ct_aux[t_ent]  <= m_aux_q_t;
-                            ct_bank[t_ent] <= m_bank_q_t;
-                            ct_off[t_ent]  <= m_off_q_t;
-                            rr             <= rr + 2'd1;
-                            cnt_claims     <= cnt_claims + 32'd1;
+                        // The row and the tags land through the ports above
+                        // on this same edge (inst_w); here the books.
+                        if (inst_w != '0) begin
+                            cv[t_way][t_set] <= 1'b1;
+                            rrp[t_set]       <= t_way + 1'b1;
+                            cnt_claims       <= cnt_claims + 32'd1;
                         end
                     end
                     cst <= C_IDLE;
@@ -730,8 +809,10 @@ module dline #(
 
             // The map moved: the CAM's foldings are of the old map.  Tags
             // die, and an in-flight CAM claim dies with them.
+            // The map moved: the cache's foldings are of the old map.  Every
+            // line dies, and an in-flight cache claim dies with them.
             if (map_changed) begin
-                cv <= 4'd0;
+                for (k = 0; k < NWAY; k = k + 1) cv[k] <= '0;
                 if (cst != C_IDLE && t_cam) begin
                     dl_req <= 1'b0;
                     cst    <= C_IDLE;

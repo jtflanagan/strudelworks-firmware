@@ -1,11 +1,10 @@
 # The dline: 1-clock data
 
-Status: **rungs 1-3 DONE and ON HARDWARE** (2026-09-02).  **Rung 4
-(streams) is DEFERRED** by the user's decision: the next work is the
-$Cxxx plan (docs/CXXX.md) - what in $C000-$CFFF can be served fast, as one
-plan rather than piecemeal - because a trace of wave.dsk's end loop showed
-its cycles going to dispatcher-served instruction fetches in the $C3xx
-firmware (AUXMOVE), not to the bus.
+Status: **rungs 1-3 and 5 DONE and ON HARDWARE** (rung 5: 2026-09-07,
+branch `dline_capacity`, fw 52dc698 plus the margin cuts; 72.3x on the
+animated Nox map from 63.4x, wave.dsk 83x drawing / 97x flipping; build
+WNS +0.150 after the read-claim cut, no dline path in the deep tail).  **Rung 4 (streams) was
+tried and reverted** the same day - see its section.
 - Rung 1 (fw e9170ab): the zp/stack shadow, 39.5x, sim and HW agreeing.
 - Rung 2 (fw 2e85924): the 4-line CAM + last-byte serve, 45.2x on the
   bench, virtual-tag serve, on HW.
@@ -42,7 +41,7 @@ firmware (AUXMOVE), not to the bus.
 - Host: a **BUS CAPTURE** menu row toggles sparse/full read-write capture
   live ([[bus-capture-menu]]) - the tool that made the tracing possible.
 
-**NEXT: the $Cxxx plan (docs/CXXX.md) ran its course; rung 4 was tried and reverted (below); a capacity rung is the open question.** Branch `dcache`, both repos,
+**NEXT: rung 5, capacity (below, in progress on `dline_capacity`); rung 4 was tried and reverted.** Branch `dcache`, both repos,
 cut from the merged master (page cache + istream front + carry gift, all
 hardware-proven). The old acceleration-branch D$ plan (its DCACHE_PLAN.md)
 is explicitly NOT the basis for this work: it solved a cache-hierarchy
@@ -406,6 +405,90 @@ rather than prose:
 
 Expect the write population (~10% of ops) to move; the dispatcher is
 then bus-ops-only. Bench toward ~60x.  (Measured: 68.9x.)
+
+### Rung 5 - capacity: 8 sets x 4 ways, DONE AND ON HARDWARE (2026-09-07)
+
+Branch `dline_capacity` (both repos, from master fw ee35a3f / host 811f1ca).
+The trace that killed rung 4 sized this one: over the animated Nox map's
+front-visible data reads (main and LC, outside the shadow), lines of 16:
+
+| geometry | lines | misses |
+|---|---|---|
+| 4-way CAM, round robin (rungs 2-4) | 4 | 63.6% |
+| 8 sets x 2 ways | 16 | 39.4% |
+| 16 sets x 2 ways | 32 | 13.8% |
+| **8 sets x 4 ways** (round robin 7.2%, LRU 7.1%) | 32 | **7.1%** |
+| 32 sets x 2 ways | 64 | 4.9% |
+| 64 sets x 2 ways | 128 | 0.9% |
+| 32 sets x 4 ways | 128 | 0.7% |
+
+**What was tried first and abandoned (the user's call): 64 x 2 in LUTRAM.**
+Three builds: -0.116 (one index register driving ~270 read-address loads;
+cured by KEEP'd copies), -0.181 (a 64:1 flip-flop mux of the valid bits,
+three levels in the serve cone), then the valid bits replaced by a dead
+tag plus a 64-clock sweep on every map change - which served the
+keyboard from a dead row until $Cxxx was excluded, and would have made
+every map change a 64-clock dark window and a 128-line flush.  Sims
+green throughout (95/95 at 67.6x, boots clean); the fourth build met at
+WNS +0.053 after the verdict was already in: "even if it squeezes in on timing, it will still
+be the long pole for timing, forever."  The lesson: the data front's
+capacity must be SMALL AND SHALLOW - a set index of three bits reads in
+one LUT level, an 8:1 valid mux is one level, and a flash-clear is one
+clock again.
+
+As built in rtl/dline.sv:
+
+- 8 sets x 4 ways, index addr[6:4], a 9-bit VIRTUAL tag addr[15:7] and a
+  flip-flop valid bit per line; the serve is four small row reads, four
+  byte selects, four 9-bit compares and a one-hot AND-OR - rung 2's
+  virtual-tag lesson kept, the classify cone nowhere near it.
+- A PHYSICAL tag {aux, bank, off[15:7]} per line for the snoops, which
+  index by the write's off[6:4]: the fold never touches the low 12 bits,
+  so the two views agree on the set.  Four compares per write, as the
+  CAM had.
+- Valid bits and a 2-bit round-robin pointer per set are flip-flops:
+  map_changed clears every line in one clock.  The victim is an empty
+  way first, else the set's round robin (LRU is 0.1 point better on the
+  trace and costs more state).
+- Rows in per-way arrays with the shadow's ONE-write-port mux: a splice's
+  read-modify-write beats an install to the same way, which drops and
+  reclaims.
+- The serve byte is a one-hot AND-OR of shadow, cache and last byte.
+- The claim engine, the in-flight abort, the posted-write path, the
+  shadow and the last-byte serve are unchanged; the claim's target is a
+  set and a way.  ACCEL_DLINE keeps its meaning; the host needs nothing.
+
+**Landed (fw 52dc698) and PROVEN ON HW 2026-09-07:** accel battery 95/95
+both sweeps (67.6x; dispatcher data ops 24.3k -> 17.9k on the bench),
+boot bench 2/2; build WNS +0.008 (thin).  On the animated Nox map over a
+29 s census: **63.4x -> 72.3x**, RAM read misses 1.95M/s -> 0.53M/s
+(12.6% -> 3.0% of data accesses, ~15% -> ~3% of clocks); wave.dsk 83.4x
+drawing, 97x frame-flipping - the user's call: close enough to the
+asymptote, the priority is now TIMING MARGIN to carry forward.
+
+**Margin, three logic-equivalent cuts (dline_capacity6/7):** the core's
+byte as one flat one-hot OR (shadow | each way's gated byte | last byte |
+the sequencer's when nothing serves) instead of mux-after-OR-after-OR;
+a KEEP'd copy of the set index per way for the rows; another per way for
+the tag array alone (the tag-to-hit leg is the long one).  WNS +0.008 ->
++0.043 -> **+0.051**, WHS +0.046, the >= 14 tail 269 -> 229, and the
+dline has NO endpoint left in the deep tail (its deepest: 15 levels at
++0.59 ns).  The design's worst path is now the on-card slots' read-claim
+cone (u_vidhd/rd_claim -> the slot read mux -> fev_data -> cpu_din), 13
+levels at 77% wire - not the data front.  Price of the copies: 40
+flip-flops in all.
+
+**The read-claim cone, cut (dline_capacity8): WNS +0.051 -> +0.150.**
+Every on-card slot registers its claim and byte at op_present, so they
+exist from P1; the sequencer consumes the byte at P3, when the page
+cache's `decided` fires.  rtl/accel_seq.sv now samples swi_byte once,
+at P2 (swi_byte_q feeds cpu_din and the event byte): no stall, and the
+six cards' claim mux ends at one register - a card added later can only
+lengthen the P1->P2 mux, which has a whole clock and five levels today,
+never the core's din cone.  Sweep 49 identical, boot 2/2.  The worst
+path is the data front's serve again (rows index copy -> way 0's row ->
+byte mux -> the OR -> d_din -> the core, 15 levels) with three times the
+margin it had.
 
 ### Rung 4 - streams: TRIED AND REVERTED (2026-09-07)
 
