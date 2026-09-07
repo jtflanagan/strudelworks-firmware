@@ -191,6 +191,7 @@ if {$snoop || $master} {
             [file join $root rtl fd_bank.sv] \
             [file join $root rtl floppy_card.sv] \
             [file join $root rtl vidhd_card.sv] \
+            [file join $root rtl printer_card.sv] \
             [file join $root rtl mouse_card.sv] \
             [file join $root rtl uthernet2_card.sv] \
             [file join $root rtl no_slot_clock.sv] \

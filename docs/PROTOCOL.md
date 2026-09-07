@@ -73,6 +73,7 @@ host reads; the receiver carries parser state across all of them.
 | `0x24` | UNKNOWN_TYPE | Card→host, **unsolicited**. Header only; `free[7:0]` = the type of a host→card message the card does not consume, `free[15:8]` = its length. The card skipped that message by its length - framing is intact - and this says so, so the host can log what it sent that the gateware lacks. One pending, the latest wins. |
 | `0x25` | MOUSE_MOVE | Host→card. `free[1:0]` = the mouse's buttons (levels, 0 = button 0); payload one word `{dy[15:0], dx[15:0]}`, signed deltas in the mouse's own counts. Applied to the card's position with the program's clamps and raises the movement/button interrupt if the mode asks. See MOUSE.md. |
 | `0x26` | MOUSE_ROM | Host→card. `free[2:0]` = chunk; payload 64 words: one 256-byte page of the AppleMouse card's 2 KB firmware ROM. Eight chunks make the ROM, in any order. See MOUSE.md. |
+| `0x2D` | PRINTER_ROM | Host→card. Payload 64 words: the parallel printer card's 256-byte slot ROM (AppleWin's Parallel.rom, or the host's synthesis of the output hook). The whole ROM or nothing. See PRINTER.md. |
 | `0x27` | NSC_TIME | Host→card. Payload two words: the No-Slot Clock's 64-bit clock register in packed BCD, low word `{hour, minute, second, centisecond}` then high `{year, month, date, day of week}`. Taken whole at the second word; the card keeps no time of its own, the host sends one every centisecond. See NSC.md. |
 | `0x28` | U2_CMD | Card→host, **unsolicited**. The Uthernet II: a write to a socket's command register, or a reset. `free[1:0]` the socket, `free[15:8]` the command byte (`$00` reset); payload 24 words: the W5100's common registers `$0000-$002F` then the socket's `$00-$2F`, as bytes, as the program would read them. See UTHERNET2.md. |
 | `0x29` | U2_TX | Card→host, **unsolicited**, after a SEND's U2_CMD: the bytes from `Sn_TX_RD` to `Sn_TX_WR`. `free` = `{bytes[11:0], last, first, sock[1:0]}`; payload the bytes packed four a word, up to 255 words a chunk. |
@@ -165,6 +166,7 @@ protocol.
 | `0x8000_00F0` | AUDIO_CTRL | RW | the sound on the card (AUDIO.md): `[0]` the AUDIO_FRAMES stream on, `[1]` the AYs clocked by the real bus's phi0 rather than the core's time; readback adds `[16]` = the stream on |
 | `0x8000_00F4` | AUDIO_RATE | RW | the sampler's NCO increment, `rate_hz * 2^32 / 1e8`; resets to 1 894 081 (44.1 kHz); the host trims it by ppm to hold its buffer |
 | `0x8000_00F8` | AUDIO_STAT | RO | `[15:0]` samples sent, `[23:16]` samples dropped for a full FIFO, `[24]` the FIFO full now |
+| `0x8000_00FC` | PRINTER_SLOT | RW bits 2:0 | the printer card's slot, 0 = off; latched at RES', never any other card's; `[16]` rom loaded, `[31:24]` $C0n0 writes seen — see PRINTER.md |
 | `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s

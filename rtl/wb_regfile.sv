@@ -144,6 +144,11 @@ module wb_regfile #(
     input  wire [7:0]      u2_cmds,
     input  wire [7:0]      u2_rx_chunks,
     input  wire [15:0]     u2_s0_rsr,
+    // The printer card (rtl/printer_card.sv, docs/PRINTER.md): its slot
+    // latched like the Uthernet II's, yielding to all six of the others.
+    output wire [2:0]      printer_slot_active,
+    input  wire            printer_rom_loaded,
+    input  wire [7:0]      printer_writes,
     input  wire [15:0]     u2_s0_fsr,
     // The No-Slot Clock (rtl/no_slot_clock.sv, docs/NSC.md): its lever,
     // and its state and the host's time for NSC_CTRL / NSC_TIME / NSC_DATE.
@@ -365,6 +370,7 @@ module wb_regfile #(
     localparam [13:0] R_AUDIO_CTRL     = 'd60; // 0x8000_00F0, RW bits 1:0 (docs/AUDIO.md)
     localparam [13:0] R_AUDIO_RATE     = 'd61; // 0x8000_00F4, RW
     localparam [13:0] R_AUDIO_STAT     = 'd62; // 0x8000_00F8, RO
+    localparam [13:0] R_PRINTER_SLOT   = 'd63; // 0x8000_00FC, RW in bits 2:0
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -749,6 +755,43 @@ module wb_regfile #(
                               u2_slot_active_q, 5'd0, u2_slot_desired};
     // U2_STAT: {Sn_RX_RSR, Sn_TX_FSR} of socket 0.
     wire [31:0] u2_stat_rd = {u2_s0_rsr, u2_s0_fsr};
+
+    // ---- PRINTER_SLOT -------------------------------------------------------
+    //
+    //   [2:0]    desired   RW   which slot the printer card answers as; 0 = off
+    //   [10:8]   active    RO   what was latched at the last RES' assertion
+    //   [16]     rom       RO   the 256-byte slot ROM has been loaded (PRINTER_ROM)
+    //   [31:24]  writes    RO   $C0n0 writes the card saw, wrapping
+    //
+    // U2_SLOT's contract; the printer is the newest and yields to all six
+    // of the others (its ROM page and its device-select range both, so no
+    // sharing).  See docs/PRINTER.md.
+    logic [2:0] printer_slot_desired;
+    logic [2:0] printer_slot_active_q;
+
+    assign printer_slot_active = printer_slot_active_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            printer_slot_desired  <= 3'd0;   // no card until asked for
+            printer_slot_active_q <= 3'd0;
+        end else begin
+            if (res_assert || boot_relatch) begin
+                printer_slot_active_q <= (CAN_MASTER &&
+                                          printer_slot_desired != mb_slot_desired &&
+                                          printer_slot_desired != hd_slot_desired &&
+                                          printer_slot_desired != fd_slot_desired &&
+                                          printer_slot_desired != vidhd_slot_desired &&
+                                          printer_slot_desired != mouse_slot_desired &&
+                                          printer_slot_desired != u2_slot_desired)
+                                         ? printer_slot_desired : 3'd0;
+            end
+            if (wr_printer_slot) printer_slot_desired <= wb_dat_w[2:0];
+        end
+    end
+
+    wire [31:0] printer_slot_rd = {printer_writes, 7'd0, printer_rom_loaded,
+                                   5'd0, printer_slot_active_q, 5'd0, printer_slot_desired};
 
     // ---- NSC_CTRL -----------------------------------------------------------
     //
@@ -1240,6 +1283,7 @@ module wb_regfile #(
                         R_NSC_TIME:   wb_dat_r <= nsc_now[31:0];
                         R_NSC_DATE:   wb_dat_r <= nsc_now[63:32];
                         R_U2_SLOT:    wb_dat_r <= u2_slot_rd;
+                        R_PRINTER_SLOT: wb_dat_r <= printer_slot_rd;
                         R_U2_STAT:    wb_dat_r <= u2_stat_rd;
                         R_LINK_STAT:  wb_dat_r <= link_stat;
                         R_AUDIO_CTRL: wb_dat_r <= audio_ctrl_rd;
@@ -1326,6 +1370,8 @@ module wb_regfile #(
                          (word == R_AUDIO_RATE);
     wire wr_u2_slot    = access && !wb_ack && in_region && wb_we &&
                          (word == R_U2_SLOT);
+    wire wr_printer_slot = access && !wb_ack && in_region && wb_we &&
+                         (word == R_PRINTER_SLOT);
     wire wr_fb_ctrl    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FB_CTRL);
     wire wr_fb_peek    = access && !wb_ack && in_region && wb_we &&

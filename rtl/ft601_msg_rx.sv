@@ -71,6 +71,7 @@ module ft601_msg_rx (
     localparam [7:0] T_NSC_TIME   = 8'h27;   // rtl/no_slot_clock.sv
     localparam [7:0] T_U2_RX      = 8'h2A;   // rtl/uthernet2_card.sv
     localparam [7:0] T_U2_STAT    = 8'h2B;
+    localparam [7:0] T_PRINTER_ROM = 8'h2D;  // rtl/printer_card.sv
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -93,7 +94,8 @@ module ft601_msg_rx (
                      (hdr_type == T_FD_TRACK)  || (hdr_type == T_MEM_ROM)    ||
                      (hdr_type == T_VIDHD_ROM) || (hdr_type == T_MOUSE_MOVE) ||
                      (hdr_type == T_MOUSE_ROM)  || (hdr_type == T_NSC_TIME)   ||
-                     (hdr_type == T_U2_RX)      || (hdr_type == T_U2_STAT);
+                     (hdr_type == T_U2_RX)      || (hdr_type == T_U2_STAT)   ||
+                     (hdr_type == T_PRINTER_ROM);
 
     always_ff @(posedge clk) begin
         if (rst) begin

@@ -174,6 +174,9 @@ module card_link #(
     input  wire [7:0]  u2_rx_chunks,
     input  wire [15:0] u2_s0_rsr,
     input  wire [15:0] u2_s0_fsr,
+    output wire [2:0]  printer_slot_active,   // rtl/printer_card.sv
+    input  wire        printer_rom_loaded,
+    input  wire [7:0]  printer_writes,
     // The No-Slot Clock (rtl/no_slot_clock.sv): its lever out, its state
     // and the host's time in, for NSC_CTRL / NSC_TIME / NSC_DATE.
     output wire        nsc_enable,
@@ -994,6 +997,8 @@ module card_link #(
         .u2_slot_active (u2_slot_active), .u2_sock_open (u2_sock_open),
         .u2_cmd_dropped (u2_cmd_dropped), .u2_cmds (u2_cmds), .u2_rx_chunks (u2_rx_chunks),
         .u2_s0_rsr (u2_s0_rsr), .u2_s0_fsr (u2_s0_fsr),
+        .printer_slot_active (printer_slot_active), .printer_rom_loaded (printer_rom_loaded),
+        .printer_writes (printer_writes),
         .nsc_enable (nsc_enable), .nsc_time_loaded (nsc_time_loaded),
         .nsc_ring_en (nsc_ring_en), .nsc_wr_en (nsc_wr_en),
         .nsc_cmp_idx (nsc_cmp_idx), .nsc_ring_idx (nsc_ring_idx),

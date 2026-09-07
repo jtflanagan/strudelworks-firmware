@@ -168,6 +168,9 @@ module master_top #(
     wire        u2_cmd_dropped, u2_stall;
     wire [7:0]  u2_cmds, u2_rx_chunks;
     wire [15:0] u2_s0_rsr, u2_s0_fsr;
+    wire [2:0]  printer_slot_active;
+    wire        printer_rom_loaded;
+    wire [7:0]  printer_writes;
     wire [31:0] u2_word;
     wire        audio_on, audio_realtime;
     wire [31:0] audio_rate, audio_stat;
@@ -375,6 +378,8 @@ module master_top #(
         .u2_slot_active (u2_slot_active), .u2_sock_open (u2_sock_open),
         .u2_cmd_dropped (u2_cmd_dropped), .u2_cmds (u2_cmds), .u2_rx_chunks (u2_rx_chunks),
         .u2_s0_rsr (u2_s0_rsr), .u2_s0_fsr (u2_s0_fsr),
+        .printer_slot_active (printer_slot_active), .printer_rom_loaded (printer_rom_loaded),
+        .printer_writes (printer_writes),
         .nsc_enable (nsc_enable), .nsc_time_loaded (nsc_time_loaded),
         .nsc_ring_en (nsc_ring_en), .nsc_wr_en (nsc_wr_en),
         .nsc_cmp_idx (nsc_cmp_idx), .nsc_ring_idx (nsc_ring_idx),
@@ -528,8 +533,8 @@ module master_top #(
     wire        op_rw;
     wire [7:0]  op_wdata;
     wire        op_present, op_commit, op_ovr;
-    wire        mb_rd_claim, hd_rd_claim, fd_rd_claim, vidhd_rd_claim, mouse_rd_claim, u2_rd_claim;
-    wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data, vidhd_rd_data, mouse_rd_data, u2_rd_data;
+    wire        mb_rd_claim, hd_rd_claim, fd_rd_claim, vidhd_rd_claim, mouse_rd_claim, u2_rd_claim, prn_rd_claim;
+    wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data, vidhd_rd_data, mouse_rd_data, u2_rd_data, prn_rd_data;
     wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw, vbl_ovr_en, vbl_ovr_rw;
     wire [15:0] boot_ovr_addr, hd_ovr_addr, vbl_ovr_addr;
     wire [7:0]  hd_ovr_wdata, vbl_ovr_wdata;
@@ -567,12 +572,13 @@ module master_top #(
     wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_en ? vbl_ovr_addr  : boot_ovr_addr;
     wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_en ? vbl_ovr_rw    : 1'b1;
     wire [7:0]  ovr_wdata = hd_ovr_en ? hd_ovr_wdata : vbl_ovr_wdata;
-    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim | vidhd_rd_claim | mouse_rd_claim | u2_rd_claim;
+    wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim | vidhd_rd_claim | mouse_rd_claim | u2_rd_claim | prn_rd_claim;
     wire [7:0]  slot_rd_data  = hd_rd_claim    ? hd_rd_data    :
                                 fd_rd_claim    ? fd_rd_data    :
                                 vidhd_rd_claim ? vidhd_rd_data :
                                 mouse_rd_claim ? mouse_rd_data :
-                                u2_rd_claim    ? u2_rd_data    : mb_rd_data;
+                                u2_rd_claim    ? u2_rd_data    :
+                                prn_rd_claim   ? prn_rd_data   : mb_rd_data;
 
     // ---- the keyboard in the dummies (docs/ACCELERATION.md) ------------------
     // The closed regime: mode 2, serving, the chicken bit clear - and the
@@ -1159,6 +1165,7 @@ module master_top #(
         .swi_mb_slot (mb_slot_active),
         .swi_mouse_slot (mouse_slot_active),
         .swi_u2_slot (u2_slot_active),
+        .swi_prn_slot (printer_slot_active),
         .q_slot     (q_slot),
         .q_nsc      (q_nsc),
         .q_swi      (q_swi),
@@ -1585,6 +1592,33 @@ module master_top #(
         .rx_chunks_o   (u2_rx_chunks),
         .s0_rsr_o      (u2_s0_rsr),
         .s0_fsr_o      (u2_s0_fsr)
+    );
+
+    // ---- the printer card -----------------------------------------------------
+    // A parallel printer interface's slot: the ROM page the host loads, a
+    // device-select range that reads $FF, and the writes left to the stream
+    // for the host's printer half.  See rtl/printer_card.sv and docs/PRINTER.md.
+    printer_card u_printer (
+        .clk           (apple_clk),
+        .rst           (apple_rst),
+        .res_sync      (apple_res_sync),
+        .master_active (cpu_source_active),
+        .slot_assign   (printer_slot_active),
+        .op_addr       (p_addr),
+        .op_rw         (p_rw),
+        .op_present    (p_present),
+        .op_commit     (p_commit),
+        .op_ovr        (p_ovr),
+        .rd_claim      (prn_rd_claim),
+        .rd_data       (prn_rd_data),
+        .msg_valid     (app_msg_valid),
+        .msg_type      (app_msg_type),
+        .msg_free      (app_msg_free),
+        .msg_len       (app_msg_len),
+        .pay_data      (app_pay_data),
+        .pay_valid     (app_pay_valid),
+        .rom_loaded    (printer_rom_loaded),
+        .writes        (printer_writes)
     );
 
     // ---- the No-Slot Clock --------------------------------------------------
