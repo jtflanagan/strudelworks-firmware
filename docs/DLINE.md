@@ -1,11 +1,10 @@
 # The dline: 1-clock data
 
-Status: **rungs 1-3 DONE and ON HARDWARE** (2026-09-02).  **Rung 4
-(streams) is DEFERRED** by the user's decision: the next work is the
-$Cxxx plan (docs/CXXX.md) - what in $C000-$CFFF can be served fast, as one
-plan rather than piecemeal - because a trace of wave.dsk's end loop showed
-its cycles going to dispatcher-served instruction fetches in the $C3xx
-firmware (AUXMOVE), not to the bus.
+Status: **rungs 1-3 and 5 DONE and ON HARDWARE** (rung 5: 2026-09-07,
+branch `dline_capacity`, fw 52dc698 plus the margin cuts; 72.3x on the
+animated Nox map from 63.4x, wave.dsk 83x drawing / 97x flipping; build
+WNS +0.051 with no dline path in the deep tail).  **Rung 4 (streams) was
+tried and reverted** the same day - see its section.
 - Rung 1 (fw e9170ab): the zp/stack shadow, 39.5x, sim and HW agreeing.
 - Rung 2 (fw 2e85924): the 4-line CAM + last-byte serve, 45.2x on the
   bench, virtual-tag serve, on HW.
@@ -407,7 +406,7 @@ rather than prose:
 Expect the write population (~10% of ops) to move; the dispatcher is
 then bus-ops-only. Bench toward ~60x.  (Measured: 68.9x.)
 
-### Rung 5 - capacity: 8 sets x 4 ways, IN PROGRESS (2026-09-07)
+### Rung 5 - capacity: 8 sets x 4 ways, DONE AND ON HARDWARE (2026-09-07)
 
 Branch `dline_capacity` (both repos, from master fw ee35a3f / host 811f1ca).
 The trace that killed rung 4 sized this one: over the animated Nox map's
@@ -459,9 +458,25 @@ As built in rtl/dline.sv:
   shadow and the last-byte serve are unchanged; the claim's target is a
   set and a way.  ACCEL_DLINE keeps its meaning; the host needs nothing.
 
-Gate: the accel battery both sweeps, the boot bench, the build with the
-depth audit, then the hardware census on the same screen (FAST_RAM read
-misses 1.95M/s at 63.4x before).
+**Landed (fw 52dc698) and PROVEN ON HW 2026-09-07:** accel battery 95/95
+both sweeps (67.6x; dispatcher data ops 24.3k -> 17.9k on the bench),
+boot bench 2/2; build WNS +0.008 (thin).  On the animated Nox map over a
+29 s census: **63.4x -> 72.3x**, RAM read misses 1.95M/s -> 0.53M/s
+(12.6% -> 3.0% of data accesses, ~15% -> ~3% of clocks); wave.dsk 83.4x
+drawing, 97x frame-flipping - the user's call: close enough to the
+asymptote, the priority is now TIMING MARGIN to carry forward.
+
+**Margin, three logic-equivalent cuts (dline_capacity6/7):** the core's
+byte as one flat one-hot OR (shadow | each way's gated byte | last byte |
+the sequencer's when nothing serves) instead of mux-after-OR-after-OR;
+a KEEP'd copy of the set index per way for the rows; another per way for
+the tag array alone (the tag-to-hit leg is the long one).  WNS +0.008 ->
++0.043 -> **+0.051**, WHS +0.046, the >= 14 tail 269 -> 229, and the
+dline has NO endpoint left in the deep tail (its deepest: 15 levels at
++0.59 ns).  The design's worst path is now the on-card slots' read-claim
+cone (u_vidhd/rd_claim -> the slot read mux -> fev_data -> cpu_din), 13
+levels at 77% wire - not the data front.  Price of the copies: 40
+flip-flops in all.
 
 ### Rung 4 - streams: TRIED AND REVERTED (2026-09-07)
 

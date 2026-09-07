@@ -283,6 +283,13 @@ module dline #(
     // KEEP holds the nets apart.
     (* KEEP = "TRUE" *) logic [3:0] dq_ix_sh;
     (* KEEP = "TRUE" *) logic [3:0] dq_ix_cam [0:3];
+    // ...and of the set index, one per way (rung 5): the build that met at
+    // +0.008 had Vivado's own copies at 111 loads each on the worst path.
+    (* KEEP = "TRUE" *) logic [2:0] dq_sx [0:3];
+    // ...and one more per way for the TAG array alone: with rows and tags
+    // on one copy (142 loads) the tag read was the worst path's first hop
+    // at +0.043; the tag leg is the long one, so it gets the light copy.
+    (* KEEP = "TRUE" *) logic [2:0] dq_st [0:3];
     always_ff @(posedge clk) begin
         if (rst || cpu_rst || inval) begin
             dq_v  <= 1'b0;
@@ -298,6 +305,14 @@ module dline #(
             dq_ix_cam[1] <= d_pred[3:0];
             dq_ix_cam[2] <= d_pred[3:0];
             dq_ix_cam[3] <= d_pred[3:0];
+            dq_sx[0] <= d_pred[6:4];
+            dq_sx[1] <= d_pred[6:4];
+            dq_sx[2] <= d_pred[6:4];
+            dq_sx[3] <= d_pred[6:4];
+            dq_st[0] <= d_pred[6:4];
+            dq_st[1] <= d_pred[6:4];
+            dq_st[2] <= d_pred[6:4];
+            dq_st[3] <= d_pred[6:4];
         end
     end
     assign dq_rw = !dq_wv;
@@ -358,8 +373,8 @@ module dline #(
         logic [127:0]  rows [0:NSET-1];
         logic [TW-1:0] vt   [0:NSET-1];
         logic [PTW-1:0] pt  [0:NSET-1];
-        assign hitv[gw]  = cv[gw][sidx] && (vt[sidx] == stag);
-        assign wbyte[gw] = {8{hitv[gw]}} & rows[sidx][dq_ix_cam[gw]*8 +: 8];
+        assign hitv[gw]  = cv[gw][dq_st[gw]] && (vt[dq_st[gw]] == stag);
+        assign wbyte[gw] = {8{hitv[gw]}} & rows[dq_sx[gw]][dq_ix_cam[gw]*8 +: 8];
         // The splice's cut: the write's set, its physical identity.
         assign spc_hit[gw] = iw_v && cv[gw][spi] && (pt[spi] == spt);
         // One write port: a splice's read-modify-write beats an install,
@@ -472,7 +487,13 @@ module dline #(
 
     assign d_commit = retire;
     assign cyc_en   = il_cyc_en || retire;
-    assign d_din    = serve_hit ? serve_byte : accel_din;
+    // The core's byte is one flat one-hot OR - the shadow's, each way's
+    // (wbyte is already gated), the last byte's and, when nothing here
+    // serves, the sequencer's - not a mux after an OR after an OR: two LUT
+    // levels where the build at +0.008 spent three.
+    assign d_din    = ({8{sh_hit}} & dq_byte) | wbyte[0] | wbyte[1] | wbyte[2] | wbyte[3] |
+                      ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte) |
+                      ({8{!serve_hit}} & accel_din);
     assign claim    = claim_q;
 
     // The last byte follows the retiring edge: whatever READ completed -
