@@ -264,6 +264,15 @@ module dline #(
     // the serve cycle from the REGISTERED address instead: register-rooted,
     // a whole cycle to run, sampled by the edge that ends the cycle.
     logic        dq_v, dq_wv;
+    // Fanout copies of the byte index (2026-09-06): dq_addr[3:0] drove 165
+    // loads - every row mux of the shadow and the four CAM ways, plus the
+    // compares - and its first hop alone was 1.27 ns on the worst path.
+    // One copy for the shadow's row mux and one PER CAM WAY - a single CAM
+    // copy still carried 128 loads and the same 1.2 ns first hop; dq_addr
+    // keeps the compares.  keep_equivalent_registers is set for synthesis,
+    // KEEP holds the nets apart.
+    (* KEEP = "TRUE" *) logic [3:0] dq_ix_sh;
+    (* KEEP = "TRUE" *) logic [3:0] dq_ix_cam [0:3];
     always_ff @(posedge clk) begin
         if (rst || cpu_rst || inval) begin
             dq_v  <= 1'b0;
@@ -273,11 +282,16 @@ module dline #(
             dq_wv <= d_pred_v && !d_pred_rw;
         end
         if (cyc_en) begin
-            dq_addr <= d_pred;
+            dq_addr   <= d_pred;
+            dq_ix_sh     <= d_pred[3:0];
+            dq_ix_cam[0] <= d_pred[3:0];
+            dq_ix_cam[1] <= d_pred[3:0];
+            dq_ix_cam[2] <= d_pred[3:0];
+            dq_ix_cam[3] <= d_pred[3:0];
         end
     end
     assign dq_rw = !dq_wv;
-    wire [7:0] dq_byte = shrow[dq_addr[8:4]][dq_addr[3:0]*8 +: 8];
+    wire [7:0] dq_byte = shrow[dq_addr[8:4]][dq_ix_sh*8 +: 8];
     wire       sh_hit  = dq_v && (dq_addr[15:9] == 7'd0) &&
                          shv[dq_addr[8:4]] && zs_main_q;
 
@@ -312,10 +326,10 @@ module dline #(
         assign chit[ge] = cv[ge] && (vt[ge] == dq_addr[15:4]);
     end endgenerate
     wire       cam_hit  = dq_v && (chit != 4'd0);
-    wire [7:0] cam_byte = chit[0] ? crow[0][dq_addr[3:0]*8 +: 8] :
-                          chit[1] ? crow[1][dq_addr[3:0]*8 +: 8] :
-                          chit[2] ? crow[2][dq_addr[3:0]*8 +: 8] :
-                                    crow[3][dq_addr[3:0]*8 +: 8];
+    wire [7:0] cam_byte = chit[0] ? crow[0][dq_ix_cam[0]*8 +: 8] :
+                          chit[1] ? crow[1][dq_ix_cam[1]*8 +: 8] :
+                          chit[2] ? crow[2][dq_ix_cam[2]*8 +: 8] :
+                                    crow[3][dq_ix_cam[3]*8 +: 8];
 
     // ---- the last byte ------------------------------------------------------
     // The previous completed READ - I side or D side - one register deep.

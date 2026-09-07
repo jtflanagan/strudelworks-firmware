@@ -190,7 +190,15 @@ module mouse_card #(
     logic        mv_pend, reclamp, settling, ev_pend, vbl_pend;
     logic signed [19:0] ix_plus, iy_plus;
 
-    assign irq        = enabled && irq_q;
+    // Registered on the way out (2026-09-06): `enabled` is a level that
+    // moves only at ROM load, yet as a wire it ran the slot's IRQ through
+    // the core's interrupt decision into the address prediction in one
+    // clock - the mouse card's only appearance on the design's worst
+    // paths.  An interrupt is asynchronous by nature; one card clock of
+    // delay is nothing.
+    logic irq_r;
+    always_ff @(posedge clk) irq_r <= rst ? 1'b0 : (enabled && irq_q);
+    assign irq        = irq_r;
     assign pos_x      = ix[15:0];
     assign pos_y      = iy[15:0];
     assign mode_rd    = mode;

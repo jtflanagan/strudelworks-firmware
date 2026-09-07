@@ -364,7 +364,12 @@ module mockingboard #(
         .cb2_out    ()
     );
 
-    assign irq = enabled && (via0_irq || via1_irq || ssi_irq);
+    // Registered on the way out, as the mouse card's is (rtl/mouse_card.sv):
+    // the VIAs' halves are registered inside the 6522, the OR and the enable
+    // were not.  One card clock later, and interrupts are asynchronous.
+    logic irq_r;
+    always_ff @(posedge clk) irq_r <= rst ? 1'b0 : (enabled && (via0_irq || via1_irq || ssi_irq));
+    assign irq = irq_r;
 
     // ---- claim and read data ------------------------------------------------
     // Registered on op_present: one stable answer per bus cycle, decided in

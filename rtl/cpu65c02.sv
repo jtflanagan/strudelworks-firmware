@@ -661,7 +661,13 @@ module cpu65c02 #(
                 UC_LD_S_DEC: s_n = s - 8'd1;
                 default: ;
             endcase
-            if (f_wb == UC_WB_S) s_n = alu_res;   // TXS: S is the ALU's too
+            // TXS: the only word that writes S, and its operand is X, so S
+            // takes X itself - not the ALU result, whose cone holds the served
+            // byte (din).  s_n is the next data address's source (UC_ADDR_SP),
+            // and through alu_res a served byte reached it in the same clock:
+            // a path the microcode never exercises, but the worst path of the
+            // whole design (the dline serve loop, 17 levels, 2026-09-06).
+            if (f_wb == UC_WB_S) s_n = x;
         end
     end
 
@@ -689,6 +695,16 @@ module cpu65c02 #(
             end
         endcase
     end
+
+`ifndef SYNTHESIS
+    // The assumption s_n rests on: a word that writes S has X as its ALU
+    // operand (TXS).  Anything else is a microcode change that must revisit
+    // s_n, not silently write the wrong S.
+    always_ff @(posedge clk) begin
+        if (!rst && cyc_en && f_wb == UC_WB_S && f_alu_a != UC_ALU_A_X)
+            $error("cpu65c02: a microcode word writes S from an ALU operand other than X");
+    end
+`endif
 
     assign d_pred    = d_pred_mux;
     assign d_pred_v  = d_pred_known &&
@@ -777,7 +793,7 @@ module cpu65c02 #(
                     UC_WB_A:  a  <= alu_res;
                     UC_WB_X:  x  <= alu_res;
                     UC_WB_Y:  y  <= alu_res;
-                    UC_WB_S:  s  <= alu_res;
+                    UC_WB_S:  s  <= x;                  // TXS; see s_n above
                     UC_WB_MD: md <= alu_res;
                     UC_WB_P:  begin
                         f_n <= din[7]; f_v <= din[6]; f_d <= din[3];

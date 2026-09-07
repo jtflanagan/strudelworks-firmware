@@ -188,6 +188,7 @@ module kbd_inject (
     logic [6:0] last_read;
     logic [7:0] data_q;                 // data_sync a clock ago: the T_DIN sample
     logic       hot_q;                  // ...and the hotkey decision made on it
+    logic       match_q;                // ...and whether its low seven bits are the hotkey
     logic       lock_q;
 
     // A read of $C000-$C00F is the keyboard; a read of $C010 is the strobe
@@ -224,6 +225,14 @@ module kbd_inject (
     // ---- the parked-dummy latch ---------------------------------------------
     logic [7:0] real_latch;
     logic       latch_v;
+    // Whether the latched key IS the hotkey, decided when the latch was
+    // written (match_q rode beside data_q) rather than by a compare on the
+    // serve path: that compare - three LUT levels off the MENU_HOLD
+    // register - sat on every served $C000 byte's way into the core, and
+    // was the design's second-worst family (2026-09-06).  Stale only if
+    // the host changes the hotkey while a key sits in the latch, until the
+    // next dummy sample - microseconds, at a configuration write.
+    logic       latch_hot;
     wire dummy_kbd = commit && op_dummy && park_kbd && op_rw &&
                      (op_addr[15:4] == 12'hC00);
     always_ff @(posedge clk) begin
@@ -231,6 +240,7 @@ module kbd_inject (
             latch_v <= 1'b0;
         end else if (dummy_kbd) begin
             real_latch <= data_q;
+            latch_hot  <= match_q;
             latch_v    <= 1'b1;
         end else if (commit && !op_dummy && kbd_clear) begin
             // The strobe just cleared on the machine; the latch follows,
@@ -240,8 +250,7 @@ module kbd_inject (
     end
 
     // The internal serve: kbd_byte's decision against the latch.
-    wire int_hot = hotkey_en && !held && !lock && real_latch[7] &&
-                   (real_latch[6:0] == hotkey);
+    wire int_hot = hotkey_en && !held && !lock && real_latch[7] && latch_hot;
     assign int_byte = strobe                                   ? {1'b1, key} :
                       (real_latch[7] && !lock && !int_hot)     ? real_latch :
                                                                  {1'b0, last_read};
@@ -260,6 +269,7 @@ module kbd_inject (
         // returns: an injected key ahead of it is what the program gets, and
         // the hotkey is found by the next read after that one is cleared.
         hot_q  <= hot_byte && !strobe;
+        match_q <= (data_sync[6:0] == hotkey);
         if (cpu_rst) begin
             key    <= 7'd0;
             strobe <= 1'b0;
