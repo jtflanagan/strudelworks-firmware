@@ -91,6 +91,7 @@ run game_port     rtl/game_port.sv
 run slot_switches rtl/slot_switches.sv
 run hd_card       rtl/hd_card.sv rtl/slot_switches.sv
 run vidhd_card    rtl/vidhd_card.sv rtl/slot_switches.sv
+run printer_card  rtl/printer_card.sv rtl/slot_switches.sv
 run mouse_card    rtl/mouse_card.sv rtl/slot_switches.sv
 run no_slot_clock rtl/no_slot_clock.sv
 run uthernet2_card rtl/uthernet2_card.sv rtl/fd_bank.sv -Wno-MULTIDRIVEN
