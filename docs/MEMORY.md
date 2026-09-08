@@ -1,5 +1,17 @@
 # The machine's memory, on the card
 
+> **SUPERSEDED IN PART, 2026-09-08.**  The memory rethink
+> (`docs/MEMORY_REFACTOR.md`) replaced the two fixed 64 KB banks and the ROM's
+> own block RAM with ONE PHYSICAL SPACE of 256-byte pages, cached 128 sets x 8
+> ways: `rtl/bank_ram.sv` and `rtl/apple_rom.sv` are DELETED, the ROM is
+> physical bank $FF loaded through the posted-write seam
+> (`rtl/rom_loader.sv`), and the fronts' line port answers `il_done` three
+> clocks after its grant.  Everything below that names those modules, the two
+> banks, or the ROM beside the cache describes the design that was replaced.
+> The current design is `rtl/page_cache.sv`'s own header and
+> `docs/MEMORY_REFACTOR.md`; this file was not rewritten (a decision, not an
+> oversight - the user's, 2026-09-08).
+
 > **On branch `page_cache` the 4-way cache, its DDR3 client and the 24-bit
 > physical address described below are REPLACED** by the two-bank design of
 > docs/PAGE_CACHE.md (`rtl/page_cache.sv`, `rtl/page_client.sv`).  The MMU

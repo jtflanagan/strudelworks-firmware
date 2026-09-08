@@ -206,16 +206,16 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [15:0] ws_ppn_w;
     wire [7:0]  ws_off8_w;
     // The physical seam (docs/MEMORY_REFACTOR.md, rung 2).
-    wire [15:0] pw_ppn_w, cl_ppn_w, d_ppn_w, p_ppn_w;
+    wire [15:0] pw_ppn_w, cl_ppn_w, d_ppn_w, p_ppn_w, pf_ppn_w;
     wire [7:0]  pw_off_w, rwb_p1_w;
     wire [3:0]  d_reg_w, p_reg_w;
     wire        d_fold_w, p_fold_w, p_fs_w, map_settling;
     wire [69:0] rt_rd_flat;
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
-    wire        dl_req_w, dl_aux_w;
-    wire [7:0]  dl_bank_w;
-    wire [11:0] dl_line_w;
+    wire         dl_req_w;
+    wire [15:0]  dl_ppn_w;
+    wire [3:0]   dl_line_w;
     wire [15:0] dq_addr_w, doff_w;
     wire [1:0]  dcls_w;
     wire        daux_w;
@@ -226,13 +226,10 @@ module accel_tb #(parameter integer SWINT = 1,
     wire        p_aux_w, map_changed;
     wire [31:0] accel_maps;   // ACCEL_MAPS: map changes, the revalidation's denominator
     wire [15:0] p_addr_w, p_off_w;
-    wire        il_req, il_aux_w, il_ack, il_ok;
-    wire [7:0]  il_bank_w;
-    wire [11:0] il_line_w;
+    wire         il_req, il_ack, il_done, il_ok;
+    wire [15:0]  il_ppn_w;
+    wire [3:0]   il_line_w;
     wire [127:0] il_row;
-    wire        rom_r2_en, rom_r2_busy;
-    wire [11:0] rom_r2_addr;
-    wire [31:0] rom_r2_data;
 
     // ---- the keyboard in the dummies, as master_top gates it -----------------
     // SWINT = 0 is the chicken bit: dummies park at $0000, $C00x rides the bus.
@@ -355,14 +352,14 @@ module accel_tb #(parameter integer SWINT = 1,
         .tick_q (turbo_tick),
         .tev_valid (tev_valid), .tev_addr (tev_addr), .tev_data (tev_data),
         .tev_sync (tev_sync), .ev_room (1'b1),
-        .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
+        .p_addr (p_addr_w),
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
         .cl_ppn (cl_ppn_w), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
         .map_settling (map_settling), .idrop_o (), .irevive_o (),
-        .rw_bank (rw_bank), .map_changed (map_changed), .intc8rom (intc8rom),
-        .il_req (il_req), .il_aux (il_aux_w), .il_bank (il_bank_w), .il_line (il_line_w),
-        .il_ack (il_ack && il_req), .il_ok (il_ok), .il_row (il_row),
-        .r2_en (rom_r2_en), .r2_addr (rom_r2_addr), .r2_data (rom_r2_data), .r2_busy (rom_r2_busy),
+        .map_changed (map_changed), .intc8rom (intc8rom),
+        .il_req (il_req), .il_ppn (il_ppn_w), .il_line (il_line_w),
+        .il_ack (il_ack && il_req), .il_done (il_done && !il_src_q),
+        .il_ok (il_ok), .il_row (il_row),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
         .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
@@ -384,16 +381,17 @@ module accel_tb #(parameter integer SWINT = 1,
         .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data), .dev_rw (dev_rw),
         .ev_room (1'b1), .ev_room_w (ev_room_w_tb),
         .altzp (sw_state[3]),
-        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
+        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_off (doff_w),
         .rw_bank (rw_bank), .map_changed (map_changed),
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
         .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w), .map_settling (map_settling),
-        .dl_req (dl_req_w), .dl_aux (dl_aux_w), .dl_bank (dl_bank_w), .dl_line (dl_line_w),
-        .dl_ack (il_ack && !il_req), .dl_ok (il_ok), .dl_row (il_row),
+        .dl_req (dl_req_w), .dl_ppn (dl_ppn_w), .dl_line (dl_line_w),
+        .dl_ack (il_ack && !il_req), .dl_done (il_done && il_src_q),
+        .dl_ok (il_ok), .dl_row (il_row),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
         .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata),
         .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
-        .pw_data (pw_data_w), .pw_take (pw_take_w),
+        .pw_data (pw_data_w), .pw_take (pw_take_w && pw_valid_w),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .inval (inval),
         .cnt_clr (cnt_clr),
@@ -479,7 +477,6 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [15:0] cl_off, pf_off;
     wire [11:0] sw_state;
     wire [7:0]  rw_bank;
-    wire [7:0]  rom_byte_int;
     wire        rom_loaded, invalidating, image_ready, refresh_ok, rot_ok, mem_idle;
     wire [31:0] hits, misses, served, mismatches, last_mismatch, diverted;
     wire [7:0]  late_fills, fifo_drops;
@@ -497,7 +494,6 @@ module accel_tb #(parameter integer SWINT = 1,
     // slot is BUS class, so the core reads it over the bus in every mode.
     localparam [2:0] HD_SLOT = 3'd5;
     reg  [7:0] hd_rom [0:255];
-    wire [7:0] rom_byte = rom_byte_int;
 
     apple_mmu u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
@@ -507,8 +503,8 @@ module accel_tb #(parameter integer SWINT = 1,
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .intc8rom (intc8rom),
         .cl_posted (cl_posted), .cl_wdata (cl_wdata),
-        .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
-        .pw_data (pw_data_w), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
+        .pw_valid (pw_any_valid), .pw_ppn (pw_any_ppn), .pw_off (pw_any_off),
+        .pw_data (pw_any_data), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
@@ -522,36 +518,50 @@ module accel_tb #(parameter integer SWINT = 1,
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .map_changed (map_changed),
         // the physical space (docs/PAGE_CACHE.md); no consumer here yet
-        .cl_ppn (cl_ppn_w), .pf_ppn (),
+        .cl_ppn (cl_ppn_w), .pf_ppn (pf_ppn_w),
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
         .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w)
     );
-    apple_rom u_rom (
+    rom_loader u_rom (
         .clk (clk), .rst (rst),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
-        .rd_en (u_present), .rd_addr (u_addr[13:0]), .rd_data (rom_byte_int),
-        .r2_en (rom_r2_en), .r2_addr (rom_r2_addr), .r2_data (rom_r2_data), .r2_busy (rom_r2_busy),
-        .rom_loaded (rom_loaded)
+        .op_present (u_present), .image_ready (image_ready),
+        .pw_valid (rl_pw_valid), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
+        .pw_data (rl_pw_data), .pw_take (pw_take_w && !pw_valid_w),
+        .busy (rom_busy), .overruns (rom_overruns), .rom_ok (rom_loaded)
     );
+    wire        rl_pw_valid;
+    wire [15:0] rl_pw_ppn;
+    wire [7:0]  rl_pw_off, rl_pw_data;
+    wire        rom_busy;
+    wire [7:0]  rom_overruns;
+    wire        pw_any_valid = pw_valid_w || rl_pw_valid;
+    wire [15:0] pw_any_ppn   = pw_valid_w ? pw_ppn_w  : rl_pw_ppn;
+    wire [7:0]  pw_any_off   = pw_valid_w ? pw_off_w  : rl_pw_off;
+    wire [7:0]  pw_any_data  = pw_valid_w ? pw_data_w : rl_pw_data;
+    logic il_src_q;
+    always_ff @(posedge clk) if (il_ack) il_src_q <= !il_req;
     page_cache u_cache (
         .clk (clk), .rst (rst),
-        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
-        .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
-        .pw_pending (d_pending_w), .pw_ready (pw_ready_w), .pf_off (pf_off),
-        .op_addr (u_addr), .op_wdata (cl_wdata),
+        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_ppn (cl_ppn_w), .cl_off (cl_off[7:0]),
+        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_wdata (cl_wdata), .cl_posted (cl_posted),
+        .pw_pending (d_pending_w), .pw_ready (pw_ready_w),
+        .pf_ppn (pf_ppn_w), .pf_off (pf_off[7:0]),
+        .pw_take (pw_take_w), .pw_ppn (pw_any_ppn), .pw_off (pw_any_off),
+        .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
-        .rom_byte (rom_byte), .rom_loaded (1'b1),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .mw_stb (), .mw_addr (), .mw_byte (),
-        .il_req (il_req | dl_req_w), .il_aux (il_req ? il_aux_w : dl_aux_w),
-        .il_bank (il_req ? il_bank_w : dl_bank_w), .il_line (il_req ? il_line_w : dl_line_w),
-        .il_ack (il_ack), .il_ok (il_ok), .il_row (il_row),
+        .il_req (il_req | dl_req_w), .il_ppn (il_req ? il_ppn_w : dl_ppn_w),
+        .il_line (il_req ? il_line_w : dl_line_w), .il_src (!il_req),
+        .il_ack (il_ack), .il_done (il_done), .il_ok (il_ok), .il_row (il_row),
         .serve (serve), .inval (inval), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
         .hits (hits), .misses (misses), .served (served), .mismatches (mismatches),
         .last_mismatch (last_mismatch), .diverted (diverted), .late_fills (late_fills), .fifo_drops (fifo_drops),
+        .mem_fills (), .mem_flushes (), .mem_declines (),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data)
@@ -598,7 +608,10 @@ module accel_tb #(parameter integer SWINT = 1,
     // RamWorks banks 0-3, and nothing else: main memory lives in the card's
     // block RAM and the DDR3 never sees it (docs/PAGE_CACHE.md).
     localparam integer NRW = 4;
-    localparam integer IMG = NRW * 65536;
+    // Every bank now: main is physical bank 0, the machine's auxiliary bank
+    // 1, RamWorks bank k is k+1 and the ROM is $FF, so the stub backs the
+    // whole 16 MB rather than the RamWorks banks alone.
+    localparam integer IMG = 16 * 1024 * 1024;
     reg [7:0] smem [0:IMG-1];
     localparam integer DL = 64;
     reg [127:0] dl_d [0:DL-1];
@@ -610,8 +623,8 @@ module accel_tb #(parameter integer SWINT = 1,
     reg [3:0]   wb_aux_r = 0;
     assign wb_ack = wb_ack_r; assign wb_rdata = wb_rdata_r; assign wb_rdata_aux = wb_aux_r;
     assign wb_stall = s_stall;
-    function automatic [19:0] wb_to_byte(input [23:0] a);
-        wb_to_byte = {a[22:10], a[6:0]} << 4;
+    function automatic [23:0] wb_to_byte(input [23:0] a);
+        wb_to_byte = {{a[22:10], a[6:0]}, 4'd0};    // {ppn, line} * 16
     endfunction
     integer i;
     always @(posedge clk) begin
@@ -620,7 +633,7 @@ module accel_tb #(parameter integer SWINT = 1,
         s_stall <= ((s_cnt % 41) < 2);
         wb_ack_r <= 1'b0;
         if (wb_cyc && wb_stb && !wb_stall) begin
-            if (wb_addr[9:7] != 3'd0 || wb_addr[23] || wb_addr[22:10] >= 13'(IMG / 2048))
+            if (wb_addr[9:7] != 3'd0 || wb_addr[23])
                 fail($sformatf("DDR3 address outside the image: %06x", wb_addr));
             if (wb_we) begin
                 for (i = 0; i < 16; i = i + 1)
@@ -1072,7 +1085,14 @@ module accel_tb #(parameter integer SWINT = 1,
         end else dline_writes = dline_writes + 1;
         if (dev_addr[15:12] == 4'hC) dline_bad = dline_bad + 1;
     end
-    always @(posedge clk) if (cl_valid && cl_posted) drained = drained + 1;
+    // The posted seam has TWO producers now: the data front's retired writes
+    // and the ROM load's 16384 (rtl/rom_loader.sv).  Only the front's are the
+    // front's, and the ROM's are the only ones that land in bank $FF.
+    integer rom_drained = 0;
+    always @(posedge clk) if (cl_valid && cl_posted) begin
+        if (cl_ppn_w[15:8] == 8'hFF) rom_drained = rom_drained + 1;
+        else                         drained     = drained + 1;
+    end
     // The stream's bookkeeping: passes, the failure flag, classes, merging.
     always @(posedge clk) begin
         if (prog_wr) begin
@@ -1152,6 +1172,11 @@ module accel_tb #(parameter integer SWINT = 1,
             end
             pay_valid <= 1'b0;
             @(negedge clk);
+            // The loader turns each chunk into 512 physical writes and the
+            // seam takes one every four clocks, so the host - and this bench -
+            // waits for `busy` to fall before sending the next.  A chunk that
+            // arrives under a drain is dropped whole (rtl/rom_loader.sv).
+            while (rom_busy) @(negedge clk);
         end
     endtask
 
@@ -1242,17 +1267,41 @@ module accel_tb #(parameter integer SWINT = 1,
         end
     endtask
 
-    // The card's byte at a main offset: the main bank IS main memory.
-    function automatic [7:0] card_main(input [15:0] off);
-        card_main = u_cache.u_main.mem[off[15:4]][8 * off[3:0] +: 8];
+    // THE CARD'S BYTE AT A PHYSICAL ADDRESS.  No bank is privileged now:
+    // hash the page to its set, scan the set's ways for a valid tag, and read
+    // the way that holds it - else the page is not resident and the DDR3 has
+    // it.  A generate instance cannot be indexed by a variable, so the eight
+    // ways are named; the geometry sweep lives in sim/page_cache_tb.sv.
+    localparam integer MEM_SETS = 128, MEM_WAYS = 8;
+    localparam integer SIDX = $clog2(MEM_SETS);
+    function automatic [7:0] card_byte(input [15:0] ppn, input [7:0] off);
+        int st, w, hit;
+        logic [127:0] row;
+        begin
+            st  = int'(ppn[SIDX-1:0] ^ ppn[2*SIDX-1 -: SIDX]);
+            hit = -1;
+            for (w = 0; w < MEM_WAYS; w = w + 1)
+                if (u_cache.dir[w][st][17] && u_cache.dir[w][st][15:0] == ppn) hit = w;
+            row = 128'd0;
+            case (hit)
+                0: row = u_cache.g_way[0].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                1: row = u_cache.g_way[1].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                2: row = u_cache.g_way[2].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                3: row = u_cache.g_way[3].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                4: row = u_cache.g_way[4].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                5: row = u_cache.g_way[5].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                6: row = u_cache.g_way[6].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                7: row = u_cache.g_way[7].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                default: ;
+            endcase
+            card_byte = (hit >= 0) ? row[8 * off[3:0] +: 8] : smem[{ppn, off}];
+        end
     endfunction
-    // The card's byte at a banked-aux offset: the aux bank if the page is
-    // resident for that bank, the DDR3 stub otherwise.
+    function automatic [7:0] card_main(input [15:0] off);
+        card_main = card_byte({8'd0, off[15:8]}, off[7:0]);
+    endfunction
     function automatic [7:0] card_aux(input [7:0] b, input [15:0] off);
-        if (u_cache.vld[off[15:8]] && u_cache.tag_bank[off[15:8]] == b)
-            card_aux = u_cache.u_aux.mem[off[15:4]][8 * off[3:0] +: 8];
-        else
-            card_aux = smem[b * 65536 + off];
+        card_aux = card_byte({b + 8'd1, off[15:8]}, off[7:0]);
     endfunction
 
     task check_image(input string what);
@@ -1263,7 +1312,7 @@ module accel_tb #(parameter integer SWINT = 1,
             // bank only at P3: wait for the write pipeline to drain, or a
             // mid-flight write reads as a one-byte mismatch.
             @(negedge clk);
-            while (busy || u_cache.mw_en || u_cache.aw_en || d_pending_w) @(negedge clk);
+            while (busy || u_cache.wl_v || d_pending_w || rom_busy) @(negedge clk);
             bad = 0;
             for (a = 0; a < 16'hC000; a = a + 1) begin
                 if (card_main(16'(a)) !== ref_main[a]) bad = bad + 1;
@@ -1357,10 +1406,8 @@ module accel_tb #(parameter integer SWINT = 1,
         for (a = 0; a < 16384; a = a + 1) begin lc_main[a] = 8'h00; phys_lcaux[a] = 8'h00; ref_lc[a] = 8'h00; end
         for (a = 0; a < NRW * 16384; a = a + 1) ref_lcaux[a] = 8'h00;
         for (a = 0; a < IMG; a = a + 1) smem[a] = 8'h00;
-        for (a = 0; a < 4096; a = a + 1) begin
-            u_cache.u_main.mem[a] = 128'd0;        // the banks power up known,
-            u_cache.u_aux.mem[a]  = 128'd0;        // as the references do
-        end
+        // The cache's ways need no priming: every page is filled from the
+        // DDR3 before it is read, and the stub is zeroed above.
         for (a = 0; a < 12288; a = a + 1) rom_img[a] = $urandom;
         for (a = 0; a < 4096; a = a + 1) rom_img[12288 + a] = prog[a];
         for (a = 0; a < 256; a = a + 1) hd_rom[a] = $urandom;
@@ -1732,7 +1779,7 @@ module accel_tb #(parameter integer SWINT = 1,
         // drain, and up to the merge's depth between push and pop.
         if (drained > dline_writes || dline_writes - drained > 8)
             fail($sformatf("the end: %0d writes retired on the front, %0d drained through the classified stage", dline_writes, drained));
-        else ok($sformatf("the end: every one of the %0d posted writes drained through the classified stage exactly once", dline_writes));
+        else ok($sformatf("the end: every one of the %0d posted writes drained through the classified stage exactly once, beside the ROM's %0d", dline_writes, rom_drained));
         if (mg_write_drops != 0 || mg_write_out > mg_write_in || mg_write_in - mg_write_out > 8)
             fail($sformatf("the end: the merge took %0d write words, dropped %0d, delivered %0d", mg_write_in, mg_write_drops, mg_write_out));
         else ok($sformatf("the end: the merge took %0d write words and dropped none (%0d overflows of any kind)", mg_write_in, mg_overflows));

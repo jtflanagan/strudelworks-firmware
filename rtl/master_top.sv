@@ -74,7 +74,14 @@
 //////////////////////////////////////////////////////////////////////////////////
 module master_top #(
     parameter integer BUILD_DATE = 0,   // YYYYMMDD
-    parameter integer BUILD_TIME = 0    // HHMMSS
+    parameter integer BUILD_TIME = 0,   // HHMMSS
+    // The page cache's geometry (rtl/page_cache.sv, docs/PAGE_CACHE.md):
+    // 128 x 8 pages of 256 bytes is 256 KB, and the whole IIe plus its ROM
+    // occupies five of every set's eight ways.  64 x 8 is the cheap fallback
+    // if the block RAM is ever wanted elsewhere; both are proven by
+    // sim/run_page_cache_tb.sh's sweep.
+    parameter integer MEM_SETS = 128,
+    parameter integer MEM_WAYS = 8
 ) (
     input  wire        clk_pin,
     input  wire        rst_n,
@@ -219,6 +226,7 @@ module master_top #(
     wire [19:0] pq_line;
     wire [127:0] pq_wdata, pr_data;
     wire        mem_image_ready, mem_cnt_clr, mem_inval, mem_invalidating, mem_rom_loaded;
+    wire [31:0] mem_fills, mem_flushes, mem_declines;
     wire        mem_serve;
     wire [11:0] mem_sw;
     wire [7:0]  mem_rw_bank;
@@ -293,9 +301,9 @@ module master_top #(
     wire [15:0] cpu_d_pred, dev_addr;
     wire        cpu_d_pred_v, cpu_d_pred_rw;
     wire [7:0]  d_din_w, dev_data;
-    wire        dl_req_w, dl_aux_w;
-    wire [7:0]  dl_bank_w;
-    wire [11:0] dl_line_w;
+    wire         dl_req_w;
+    wire [15:0]  dl_ppn_w;
+    wire [3:0]   dl_line_w;
     wire [15:0] dq_addr_w, doff_w;
     wire [1:0]  dcls_w;
     wire        daux_w;
@@ -309,13 +317,10 @@ module master_top #(
     wire [1:0]  p_cls;
     wire        p_aux_w, map_changed;
     wire [15:0] p_addr_w, p_off_w;
-    wire        il_req, il_aux_w, il_ack, il_ok;
-    wire [7:0]  il_bank_w;
-    wire [11:0] il_line_w;
+    wire         il_req, il_ack, il_done, il_ok;
+    wire [15:0]  il_ppn_w;
+    wire [3:0]   il_line_w;
     wire [127:0] il_row;
-    wire        rom_r2_en, rom_r2_busy;
-    wire [11:0] rom_r2_addr;
-    wire [31:0] rom_r2_data;
     wire        cpu_cyc_is_i;
     wire [15:0] cpu_pc_addr;
     wire        app_msg_valid, app_pay_valid;
@@ -326,6 +331,7 @@ module master_top #(
     wire        aux_valid, aux_take;
 
     card_link #(
+        .MEM_PAGES_LOG2 ($clog2(MEM_SETS * MEM_WAYS)),
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
         .CAN_MASTER (1'b1)
@@ -408,7 +414,12 @@ module master_top #(
         .mem_serve (mem_serve), .mem_cnt_clr (mem_cnt_clr), .mem_inval (mem_inval),
         .mem_sw (mem_sw), .mem_rw_bank (mem_rw_bank), .mem_invalidating (mem_invalidating),
         .mem_rom_loaded (mem_rom_loaded),
-        .mem_late_fills (mem_late_fills), .mem_fifo_drops (mem_fifo_drops),
+        .mem_late_fills (mem_late_fills),
+        .mem_fills      (mem_fills),
+        .mem_flushes    (mem_flushes),
+        .mem_declines   (mem_declines),
+        .mem_rom_busy   (rom_busy),
+        .mem_rom_over   (rom_overruns), .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
         .mem_served (mem_served), .mem_last (mem_last), .mem_diverted (mem_diverted),
         .mem_intc8rom (mem_intc8rom),
@@ -844,9 +855,6 @@ module master_top #(
         .tev_sync      (tev_sync),
         .ev_room       (ev_fast_room),
         .p_addr        (p_addr_w),
-        .p_cls         (p_cls),
-        .p_aux         (p_aux_w),
-        .p_off         (p_off_w),
         .p_ppn         (p_ppn_w),
         .p_reg         (p_reg_w),
         .p_fold        (p_fold_w),
@@ -857,20 +865,15 @@ module master_top #(
         .map_settling  (map_settling),
         .idrop_o       (accel_idrop),
         .irevive_o     (accel_irevive),
-        .rw_bank       (mem_rw_bank),
         .map_changed   (map_changed),
         .intc8rom      (mem_intc8rom),
         .il_req        (il_req),
-        .il_aux        (il_aux_w),
-        .il_bank       (il_bank_w),
+        .il_ppn        (il_ppn_w),
         .il_line       (il_line_w),
         .il_ack        (il_ack && il_req),
+        .il_done       (il_done && !il_src_q),
         .il_ok         (il_ok),
         .il_row        (il_row),
-        .r2_en         (rom_r2_en),
-        .r2_addr       (rom_r2_addr),
-        .r2_data       (rom_r2_data),
-        .r2_busy       (rom_r2_busy),
         .cl_valid      (cl_valid),
         .cl_rw         (cl_rw),
         .cl_wr_image   (cl_wr_image),
@@ -923,7 +926,6 @@ module master_top #(
         .dq_addr       (dq_addr_w),
         .dq_rw         (dq_rw_w),
         .d_cls         (dcls_w),
-        .d_aux         (daux_w),
         .d_off         (doff_w),
         .d_ppn         (d_ppn_w),
         .d_reg         (d_reg_w),
@@ -934,10 +936,10 @@ module master_top #(
         .rw_bank       (mem_rw_bank),
         .map_changed   (map_changed),
         .dl_req        (dl_req_w),
-        .dl_aux        (dl_aux_w),
-        .dl_bank       (dl_bank_w),
+        .dl_ppn        (dl_ppn_w),
         .dl_line       (dl_line_w),
         .dl_ack        (il_ack && !il_req),
+        .dl_done       (il_done && il_src_q),
         .dl_ok         (il_ok),
         .dl_row        (il_row),
         .cl_valid      (cl_valid),
@@ -951,7 +953,10 @@ module master_top #(
         .pw_ppn        (pw_ppn_w),
         .pw_off        (pw_off_w),
         .pw_data       (pw_data_w),
-        .pw_take       (pw_take_w),
+        // ...and it is told a take is ITS take only when it was the source:
+        // the ROM loader shares this seam, and a front that popped its FIFO on
+        // the loader's takes would drop sixteen thousand of its own writes.
+        .pw_take       (pw_take_w && pw_valid_w),
         .ws_valid      (ws_valid_w),
         .ws_ppn        (ws_ppn_w),
         .ws_off8       (ws_off8_w),
@@ -1139,7 +1144,6 @@ module master_top #(
     wire [1:0]  cl_cls;
     wire [7:0]  cl_bank;
     wire [15:0] cl_off, pf_off;
-    wire [7:0]  rom_byte;
 
     // The MMU shadow follows the unified stream - every op, fast or bus or
     // override - and answers two questions of the address about to be
@@ -1176,10 +1180,10 @@ module master_top #(
         .cl_wr_image (cl_wr_image),
         .cl_posted  (cl_posted),
         .cl_wdata   (cl_wdata),
-        .pw_valid   (pw_valid_w),
-        .pw_ppn     (pw_ppn_w),
-        .pw_off     (pw_off_w),
-        .pw_data    (pw_data_w),
+        .pw_valid   (pw_any_valid),
+        .pw_ppn     (pw_any_ppn),
+        .pw_off     (pw_any_off),
+        .pw_data    (pw_any_data),
         .pw_ready   (pw_ready_w),
         .pw_take    (pw_take_w),
         .pf_off     (pf_off),
@@ -1233,49 +1237,73 @@ module master_top #(
         .rwb_p1     (rwb_p1_w)
     );
 
-    // Addressed at op_present, with the raw offset from $C000, so its byte
-    // stands at the page cache's decision (P2) - one clock earlier than the
-    // old pipeline asked for it.
-    apple_rom u_rom (
-        .clk        (apple_clk),
-        .rst        (apple_rst),
-        .msg_valid  (app_msg_valid),
-        .msg_type   (app_msg_type),
-        .msg_len    (app_msg_len),
-        .pay_data   (app_pay_data),
-        .pay_valid  (app_pay_valid),
-        .rd_en      (u_present),
-        .rd_addr    (u_addr[13:0]),
-        .rd_data    (rom_byte),
-        .r2_en      (rom_r2_en),
-        .r2_addr    (rom_r2_addr),
-        .r2_data    (rom_r2_data),
-        .r2_busy    (rom_r2_busy),
-        .rom_loaded (mem_rom_loaded)
+    // The system ROM is physical bank $FF now, cached like any other memory,
+    // so the host's MEM_ROM message is a producer of PHYSICAL WRITES rather
+    // than the filler of a block RAM of its own (rtl/rom_loader.sv).
+    rom_loader u_rom (
+        .clk         (apple_clk),
+        .rst         (apple_rst),
+        .msg_valid   (app_msg_valid),
+        .msg_type    (app_msg_type),
+        .msg_len     (app_msg_len),
+        .pay_data    (app_pay_data),
+        .pay_valid   (app_pay_valid),
+        .op_present  (u_present),
+        .image_ready (mem_image_ready),
+        .pw_valid    (rl_pw_valid),
+        .pw_ppn      (rl_pw_ppn),
+        .pw_off      (rl_pw_off),
+        .pw_data     (rl_pw_data),
+        .pw_take     (pw_take_w && !pw_valid_w),
+        .busy        (rom_busy),
+        .overruns    (rom_overruns),
+        .rom_ok      (mem_rom_loaded)
     );
 
-    page_cache u_cache (
+    // The posted-write seam has two producers: the data front's retired
+    // writes, and the ROM load.  The front goes first - it holds the machine
+    // up (accel_seq's d_pending) while the loader never does, and the loader
+    // only ever runs before the machine does.
+    wire        rl_pw_valid;
+    wire [15:0] rl_pw_ppn;
+    wire [7:0]  rl_pw_off, rl_pw_data;
+    wire        rom_busy;
+    wire [7:0]  rom_overruns;
+    wire        pw_any_valid = pw_valid_w || rl_pw_valid;
+    wire [15:0] pw_any_ppn   = pw_valid_w ? pw_ppn_w  : rl_pw_ppn;
+    wire [7:0]  pw_any_off   = pw_valid_w ? pw_off_w  : rl_pw_off;
+    wire [7:0]  pw_any_data  = pw_valid_w ? pw_data_w : rl_pw_data;
+
+    // Which front owns the line transaction in flight, so the cache's one
+    // `done` reaches the one that asked.  A new grant can land on the done's
+    // own clock; this register is read before it is written, so that is the
+    // old transaction's source, which is right.
+    logic il_src_q;
+    always_ff @(posedge apple_clk) if (il_ack) il_src_q <= !il_req;
+
+    page_cache #(.SETS (MEM_SETS), .WAYS (MEM_WAYS)) u_cache (
         .clk         (apple_clk),
         .rst         (apple_rst),
         .cl_valid    (cl_valid),
         .cl_cls      (cl_cls),
-        .cl_aux      (cl_aux),
-        .cl_bank     (cl_bank),
-        .cl_off      (cl_off),
+        .cl_ppn      (cl_ppn_w),
+        .cl_off      (cl_off[7:0]),
         .cl_rw       (cl_rw),
         .cl_wr_image (cl_wr_image),
+        .cl_wdata    (cl_wdata),
         .cl_posted   (cl_posted),
         .pw_pending  (d_pending_w),
         .pw_ready    (pw_ready_w),
-        .pf_off      (pf_off),
+        .pf_ppn      (pf_ppn_w),
+        .pf_off      (pf_off[7:0]),
+        .pw_take     (pw_take_w),
+        .pw_ppn      (pw_any_ppn),
+        .pw_off      (pw_any_off),
         .op_addr     (u_addr),
-        .op_wdata    (cl_wdata),
         .op_present  (u_present),
         .op_commit   (u_commit),
         .op_divert   (u_divert),
         .data_sync   (apple_data_sync),
-        .rom_byte    (rom_byte),
-        .rom_loaded  (1'b1),            // a ROM-class op always has its byte: the MMU folds the load in
         .sub_en      (mem_sub_en),
         .sub_data    (mem_sub_data),
         .decided     (mem_decided),
@@ -1287,10 +1315,11 @@ module master_top #(
         // data front's - iline first, always: its fills serve the running
         // fetch stream, the shadow's claims can only be early.
         .il_req      (il_req | dl_req_w),
-        .il_aux      (il_req ? il_aux_w : dl_aux_w),
-        .il_bank     (il_req ? il_bank_w : dl_bank_w),
+        .il_ppn      (il_req ? il_ppn_w  : dl_ppn_w),
         .il_line     (il_req ? il_line_w : dl_line_w),
+        .il_src      (!il_req),
         .il_ack      (il_ack),
+        .il_done     (il_done),
         .il_ok       (il_ok),
         .il_row      (il_row),
         .serve       (mem_serve),
@@ -1306,6 +1335,9 @@ module master_top #(
         .diverted    (mem_diverted),
         .late_fills  (mem_late_fills),
         .fifo_drops  (mem_fifo_drops),
+        .mem_fills   (mem_fills),
+        .mem_flushes (mem_flushes),
+        .mem_declines (mem_declines),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data)

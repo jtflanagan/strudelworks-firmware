@@ -35,6 +35,8 @@
 //////////////////////////////////////////////////////////////////////////////////
 
 module card_link #(
+    // log2 of the page cache's pages, for MEM_CTRL's readback.
+    parameter integer MEM_PAGES_LOG2 = 10,
     // Stamped by build/build.sh via build.tcl's -generic, and readable back over
     // the link as registers 0 and 1.  Zero means an unstamped build.
     parameter integer BUILD_DATE = 0,   // YYYYMMDD
@@ -246,6 +248,11 @@ module card_link #(
     input  wire        mem_invalidating,
     input  wire        mem_rom_loaded,
     input  wire [7:0]  mem_late_fills,
+    input  wire [31:0] mem_fills,
+    input  wire [31:0] mem_flushes,
+    input  wire [31:0] mem_declines,
+    input  wire        mem_rom_busy,
+    input  wire [7:0]  mem_rom_over,
     input  wire [7:0]  mem_fifo_drops,
     input  wire [31:0] mem_hits,
     input  wire [31:0] mem_misses,
@@ -956,6 +963,7 @@ module card_link #(
     wire mem_refresh_ok, mem_rot_ok;
 
     wb_regfile #(
+        .MEM_PAGES_LOG2 (MEM_PAGES_LOG2),
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
         .CAN_MASTER (CAN_MASTER)
@@ -1037,6 +1045,11 @@ module card_link #(
         .mem_invalidating  (mem_invalidating),
         .mem_rom_loaded    (mem_rom_loaded),
         .mem_late_fills    (mem_late_fills),
+        .mem_fills         (mem_fills),
+        .mem_flushes       (mem_flushes),
+        .mem_declines      (mem_declines),
+        .mem_rom_busy      (mem_rom_busy),
+        .mem_rom_over      (mem_rom_over),
         .mem_fifo_drops    (mem_fifo_drops),
         .mem_hits          (mem_hits),
         .mem_misses        (mem_misses),

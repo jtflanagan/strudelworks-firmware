@@ -29,9 +29,9 @@
 // wait would be measuring nothing but itself.
 //////////////////////////////////////////////////////////////////////////////////
 module wb_regfile #(
-    // log2 of the page cache's pages (256 x 256 bytes), for MEM_CTRL's
-    // readback.  Was log2 of the 4-way cache's sets before the page cache.
-    parameter integer MEM_SETS_LOG2 = 8,
+    // log2 of the page cache's pages (SETS x WAYS x 256 bytes), for
+    // MEM_CTRL's readback: the host renders the cache's size from it.
+    parameter integer MEM_PAGES_LOG2 = 10,
     // Stamped by build/build.sh through build.tcl's -generic.  Zero means the
     // bitstream was built without a stamp - an interactive GUI build - and the
     // host is expected to say "unstamped" rather than render it as a date.
@@ -212,6 +212,11 @@ module wb_regfile #(
     input  wire            mem_rom_loaded,
     input  wire [7:0]      mem_late_fills,
     input  wire [7:0]      mem_fifo_drops,
+    input  wire [31:0]     mem_fills,       // pages filled from the DDR3
+    input  wire [31:0]     mem_flushes,     // ...and dirty ones written back
+    input  wire [31:0]     mem_declines,    // line requests a page was not resident for
+    input  wire            mem_rom_busy,    // the ROM load is draining: the host waits
+    input  wire [7:0]      mem_rom_over,    // ...and chunks it had to drop
     input  wire [31:0]     mem_hits,
     input  wire [31:0]     mem_misses,
     input  wire [31:0]     mem_mismatch,
@@ -384,6 +389,10 @@ module wb_regfile #(
     localparam [13:0] R_ACCEL_IREVIVE   = 'd66; // 0x8000_0108, RO
     localparam [13:0] R_ACCEL_DDROP     = 'd67; // 0x8000_010C, RO
     localparam [13:0] R_ACCEL_DREVIVE   = 'd68; // 0x8000_0110, RO
+    localparam [13:0] R_MEM_FILLS       = 'd69; // 0x8000_0114, RO
+    localparam [13:0] R_MEM_FLUSHES     = 'd70; // 0x8000_0118, RO
+    localparam [13:0] R_MEM_DECLINES    = 'd71; // 0x8000_011C, RO
+    localparam [13:0] R_MEM_ROM         = 'd72; // 0x8000_0120, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -950,7 +959,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] mem_ctrl_rd = {4'd0, 4'(MEM_SETS_LOG2), mem_rw_bank, 15'd0, mem_serve};
+    wire [31:0] mem_ctrl_rd = {4'd0, 4'(MEM_PAGES_LOG2), mem_rw_bank, 15'd0, mem_serve};
 
     // ---- MEM_STAT -----------------------------------------------------------
     //
@@ -963,8 +972,13 @@ module wb_regfile #(
     //   [15]     rom_loaded RO   every MEM_ROM chunk has landed
     //   [23:16]  late_fills RO   fills that landed after their cycle: must be 0
     //   [31:24]  fifo_drops RO   requests the DDR3 client could not take: must be 0
+    //
+    // MEM_ROM (a word of its own) carries the ROM load's flow control: the
+    // loader turns a MEM_ROM chunk into 512 physical writes and the host must
+    // not send the next chunk until they have drained.
     wire [31:0] mem_stat_rd = {mem_fifo_drops, mem_late_fills, mem_rom_loaded,
                                mem_invalidating, mem_intc8rom, mem_image_ready, mem_sw};
+    wire [31:0] mem_rom_rd  = {16'd0, mem_rom_over, 7'd0, mem_rom_busy};
 
     // ---- ACCEL_CTRL ---------------------------------------------------------
     // (ACCEL_STAT, read straight through from the sequencer: [0] accelerating,
@@ -1322,6 +1336,10 @@ module wb_regfile #(
                         R_ACCEL_IREVIVE: wb_dat_r <= accel_irevive;
                         R_ACCEL_DDROP: wb_dat_r <= accel_ddrop;
                         R_ACCEL_DREVIVE: wb_dat_r <= accel_drevive;
+                        R_MEM_FILLS:    wb_dat_r <= mem_fills;
+                        R_MEM_FLUSHES:  wb_dat_r <= mem_flushes;
+                        R_MEM_DECLINES: wb_dat_r <= mem_declines;
+                        R_MEM_ROM:      wb_dat_r <= mem_rom_rd;
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
                         R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
                         R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;

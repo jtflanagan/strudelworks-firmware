@@ -2,160 +2,141 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
-// page_cache - the machine's memory in two 64 KB banks of block RAM, served
-// to the core; the DDR3 demoted to backing the RamWorks.  docs/PAGE_CACHE.md
-// is the design; this replaces rtl/mem_cache.sv and its 4-way cache.
+// page_cache - the machine's memory as ONE PHYSICAL SPACE, cached.
+// docs/PAGE_CACHE.md is the design; docs/MEMORY_REFACTOR.md is how it got
+// here (Part 3, rungs 4 and 5).
 //
-// THE CACHE IS THE ADDRESS SPACE.  Both banks are addressed one-to-one by the
-// folded 16-bit bus address (rtl/apple_mmu.sv's pf_off/cl_off: the language
-// card's bank 1 of $D000 in the $C000 hole), so the row read starts at
-// op_present, before classification - the classifier runs BESIDE the fetch
-// and its verdict arrives with the data, not in front of it.
+// The design this replaces WAS the address space: two fixed 64 KB banks
+// addressed one-to-one by the folded bus address, main tagless and
+// authoritative, the ROM in a block RAM of its own.  That shape has no answer
+// for a 65816 whose code and data are anywhere in 16 MB, so memory is now one
+// physical space of 256-byte pages - PPN = {bank, page}, bank 0 main, bank 1
+// auxiliary, bank k+1 RamWorks bank k, bank $FF the ROM - with the DDR3
+// behind everything and this cache in front of it.
 //
-//   MAIN is tagless, permanently resident, and AUTHORITATIVE: it is not a
-//   cache of main memory, it IS main memory, and the DDR3 holds no copy.
-//   It cannot miss and it never flushes.
+//   SETS x WAYS pages of block RAM (128 x 8 = 1024 pages = 256 KB), physically
+//   indexed and physically tagged.  The set index is HASHED,
+//   set = ppn[SIDX-1:0] ^ ppn[2*SIDX-1:SIDX], which spreads a bank crawl over
+//   the sets and lands the whole 128 KB machine plus the ROM in five of every
+//   set's eight ways - so an ordinary IIe never evicts anything.
 //
-//   AUX carries one tag per 256-byte page - which RamWorks bank is resident,
-//   a valid bit, ONE dirty bit - and misses only when RamWorks banking is
-//   actually in use.  An INVALID page is CLAIMED where it stands: tagged for
-//   the wanted bank with no fill and no flush, its bytes the garbage they
-//   were, exactly as a powered-up Apple's memory is garbage (docs/MEMORY.md).
-//   So a machine that never writes $C071/$C073 never touches the DDR3 at all.
+//   ONE cache for instructions and data.  A 6502 shares 256-byte pages between
+//   code and data and self-modifying code is real, so a split would need a
+//   coherence protocol to buy nothing.
 //
-// THE PIPELINE, in clocks after op_present (P0):
+// THE PIPELINE, in clocks after an entrant (P0):
 //
-//   P0  both banks and the ROM are addressed from the raw op; apple_mmu is
-//       classifying beside them
-//   P1  the classified op and the aux page's tag are registered
-//   P2  the rows are out of the block RAMs' second registers; ONE byte select
-//       per bank, ONE tag compare; the decision is registered
-//   P3  sub_en/sub_data stand, a write is landing in its bank, or the page
-//       engine has taken over
+//   P0  the set indexes every way's port A and the tag LUTRAMs; the tags, the
+//       valid, dirty and replacement bits are registered
+//   P1  WAYS tag compares against the entrant's page -> the one-hot hit way,
+//       the victim (an invalid way first, else the replacement bits'), all
+//       registered; a WRITE's decision is taken here
+//   P2  the rows are out of the block RAMs' second registers; one WAYS:1 row
+//       mux, one byte select; a write LANDS on its hit way's port A
+//   P3  sub_en/sub_data stand, decided pulses
 //
-// Three clocks against the old design's six, because nothing is serialized:
-// no classify-then-index, no four-way compare, no victim, no LRU, no tag
-// write-back on the way out.
+// Three clocks to a byte, exactly as the two-bank design, because the tag
+// compare rides beside the row read rather than in front of it: the P0 index
+// is a hash of a page number apple_mmu has already computed (its pf_ppn), and
+// the compare that decides the way happens while the block RAM is fetching.
 //
-// WRITES ARE WRITE-BACK.  A write lands in its bank's row and, on the aux
-// side, sets its page's one dirty bit; the DDR3 sees nothing until the page
-// is evicted, and a dirty page then flushes WHOLE - sixteen beats of one
-// incrementally-addressed burst.  Per-line dirty bits would fragment that
-// burst to save writes that cost a clock each (docs/PAGE_CACHE.md).
+// ONE ENTRANT PER CLOCK, three kinds: an op (op_present), a posted or host
+// write (pw_take), a front's line request (il_ack).  A write lands two clocks
+// after its entrant, and the LANDING RESERVATION refuses il_ack and pw_take on
+// that clock - a fill may not read a page on the clock a write to it lands.  A
+// fill acked BEFORE the landing read the pre-write row and is killed by the
+// write's classified snoop upstream (the P+2 law, docs/DLINE.md).  An op can
+// never collide with a landing: `busy` covers an op's own P0..P2, and
+// rtl/accel_seq.sv dispatches nothing while the data front has a posted write
+// short of the cache (its d_pending, dline's drain_sr).
 //
-// THE MISS, sequentially: SNAPSHOT the victim page out of port B into a
-// 256-byte buffer (17 clocks), FILL the page critical-line-first in sixteen
-// pipelined beats - the requested byte is served the moment its beat lands,
-// ~30 clocks into a ~98-clock cycle against a deadline of ~91 - then PATCH
-// the written byte in (a write miss), then FLUSH the buffer to the victim's
-// bank iff it was dirty.  The design doc overlaps the snapshot with the
-// critical read; this first cut takes the 17 clocks in series instead, which
-// spends margin the 1 MHz budget has and removes a race between the
-// snapshot's reads and the fill's installs on the one port.
+// ALWAYS FILL.  The old design CLAIMED an invalid aux page where it stood -
+// legitimate when the DDR3 held no copy of it.  Here an invalid entry says
+// nothing about whether the page was evicted to the DDR3 before, so every
+// miss fills.  A cold machine reads the DDR3's power-up garbage, which is
+// what a real Apple's RAM holds (docs/MEMORY.md).
 //
-// ONE OP AT A TIME, and the engine done before the next.  At Apple speed the
-// whole miss (~50 clocks, ~85 dirty and refresh-collided) is over before the
-// next op_present.  If an aux op ever arrives while the engine is busy it is
-// counted (late_fills) and NOT touched - not served, not written - because
-// the tags and the aux port are the engine's until it is done.  That counter
-// must read zero on hardware, exactly as the old design's late_fills did.
+// THE MISS: E_SNAP (17 clocks, a DIRTY victim only - its page must leave the
+// way's block RAM before the fill overwrites it), E_FILL (16 pipelined beats
+// critical-line-first: the requested byte is served the moment its beat
+// lands, the retag at the last), E_PATCH (a write miss), E_SETTLE, E_FLUSH
+// (16 beats, a dirty victim).  A CLEAN victim - the common case, and the only
+// one an ordinary IIe ever has - answers in about thirty clocks against a
+// 1 MHz budget of ninety.  Hit-under-miss is free: the victim way is invalid
+// from the engine's start, so every other way of every set still answers a
+// front's line request.  An OP that misses while the engine runs is counted
+// (late_fills) and untouched, as before; an op that hits is served.
 //
-// THE MONITOR AND THE COUNTERS keep rtl/mem_cache.sv's contract: compare
-// only memory the machine has (main, and aux RamWorks bank 0), at op_commit,
-// against the bus's byte; unwritten memory is garbage and the mismatch count
-// PLATEAUS rather than reads zero.  `late_fills` is the engine-overrun count
-// and `fifo_drops` counts ops a miss could not service (DDR3 not ready).
-// `invalidating` is tied low: an invalidate is one clock now (the valid bits
-// are flops), and note it DISCARDS dirty RamWorks pages - it is a debug
-// lever, not an operation the running machine uses.
+// WRITES ARE WRITE-BACK, one dirty bit per page, and a dirty page flushes
+// WHOLE - sixteen beats of one row of the DDR3 (docs/PAGE_CACHE.md).
+//
+// THE MONITOR keeps its contract: compare at op_commit, only memory the
+// machine itself has (physical banks 0 and 1), against the bus's byte;
+// unwritten memory is garbage so the count PLATEAUS rather than reads zero.
 //////////////////////////////////////////////////////////////////////////////////
-module page_cache (
+module page_cache #(
+    parameter integer SETS = 128,
+    parameter integer WAYS = 8
+) (
     input  wire        clk,
-    // The card's reset.  RES' never comes here: like real RAM, the banks
-    // survive the machine being reset.
+    // The card's reset.  RES' never comes here: like real RAM, the cache
+    // survives the machine being reset.
     input  wire        rst,
 
-    // The classified op, from apple_mmu (P1), and its P0 preview of the
-    // folded offset for the banks' addressing.
+    // ---- the classified op (P1), from apple_mmu ----------------------------
     input  wire        cl_valid,
     input  wire [1:0]  cl_cls,
-    input  wire        cl_aux,
-    input  wire [7:0]  cl_bank,
-    input  wire [15:0] cl_off,
+    input  wire [15:0] cl_ppn,        // the PHYSICAL page: {bank, page}
+    input  wire [7:0]  cl_off,        // the byte in it
     input  wire        cl_rw,
-    input  wire        cl_wr_image,
-    // A POSTED WRITE draining (rtl/dline.sv, rung 3): the classified stage
-    // carries the data front's stamped write instead of an op.  It rides
-    // the ordinary write path below - P2 decision, P3 bank write, the aux
-    // miss engine when its page is not resident - but it is NOT an op:
-    // `busy` ignores it (the sequencer's turbo retires go on around it),
-    // `decided` never pulses for it, and it is taken only when the whole
-    // pipeline is clear (pw_ready), so it never shares a stage with an op
-    // or another posted write.
-    input  wire        cl_posted,
-    // The front's pending: a posted write not yet in the banks.  No line
-    // fill is granted meanwhile - the fill-port P+2 law generalized to the
-    // FIFO's depth (docs/DLINE.md, rung 3).
-    input  wire        pw_pending,
+    input  wire        cl_wr_image,   // a write that lands in the image
+    input  wire [7:0]  cl_wdata,     // the write's byte
+    input  wire        cl_posted,     // a posted write draining, not an op
+    input  wire        pw_pending,    // the front has a write short of here
     output wire        pw_ready,
-    input  wire [15:0] pf_off,
 
-    // The op itself, from apple_bus_write.
+    // ---- the P0 previews ---------------------------------------------------
+    // An op's page and offset one clock before its classification (apple_mmu's
+    // pf_ppn/pf_off), and a posted write's, which enter on pw_take.
+    input  wire [15:0] pf_ppn,
+    input  wire [7:0]  pf_off,
+    input  wire        pw_take,
+    input  wire [15:0] pw_ppn,
+    input  wire [7:0]  pw_off,
+
+    // ---- the op itself -----------------------------------------------------
     input  wire [15:0] op_addr,
-    input  wire [7:0]  op_wdata,
     input  wire        op_present,
     input  wire        op_commit,
     input  wire        op_divert,
-    // The bus's byte, for the monitor.
-    input  wire [7:0]  data_sync,
+    input  wire [7:0]  data_sync,     // the bus's byte, for the monitor
 
-    // The ROM's byte for this op, valid from P2 (rtl/apple_rom.sv addressed
-    // at op_present).
-    input  wire [7:0]  rom_byte,
-    input  wire        rom_loaded,
-
-    // To the din mux: hold from the decision until the next op_present.
     output logic       sub_en,
     output logic [7:0] sub_data,
-    // For rtl/accel_seq.sv, which presents the next op only when this one is
-    // over: `decided` pulses on the clock the op's outcome is known - P3 for
-    // a hit, a claim, a ROM read, a write (a write MISS included: the engine
-    // finishes it unconditionally, and `busy` holds the next op off until it
-    // has) or an op nothing here answers; the clock the critical beat's serve
-    // lands for a read miss - with sub_en/sub_data valid on the same edge.
-    // `busy` is high from the op's arrival until the engine is idle again,
-    // and is what a fresh start (after reset, after a hold) waits on.  The
-    // sequencer never presents an op while `busy`, which is what keeps
-    // dec_aux_blocked (late_fills) impossible under acceleration.
     output logic       decided,
     output wire        busy,
 
-    // The main bank's writes as they land, for the floating-bus simulator's
-    // side copy of the display pages (rtl/fb_sim.sv): the strobe, the
-    // address and the byte on the clock port A takes them.  The main bank is
-    // bank 0 of the image and takes exactly one byte a write, so this is
-    // every main write and nothing else - after every switch that steers a
-    // write to aux has been applied.
+    // ---- the write tap, for the floating-bus simulator ---------------------
+    // Every byte that lands in physical bank 0 - the machine's main memory -
+    // whether from an op, a posted write or a write miss's patch.
     output wire        mw_stb,
     output wire [15:0] mw_addr,
     output wire [7:0]  mw_byte,
 
-    // The instruction front's line reads (rtl/iline.sv): granted onto the
-    // banks' port A on any clock the op path is not using it - not an op's
-    // fetch (P0), not a decision's write (P3) - and, on the aux side, only
-    // while the engine is idle and the wanted RamWorks bank is the resident
-    // one.  The row stands on il_row exactly TWO clocks after il_ack (the
-    // banks' two read registers); an op landing in between does not disturb
-    // it (the pipelines interleave - see the grant's exclusions).
+    // ---- the line port, both fronts through master_top's arbitration -------
+    // il_ack grants the read; il_done stands exactly three clocks later with
+    // il_ok (the page was resident) and il_row.  A non-resident page DECLINES:
+    // the op rides the sequencer and its miss fills the page.
     input  wire        il_req,
-    input  wire        il_aux,
-    input  wire [7:0]  il_bank,
-    input  wire [11:0] il_line,       // folded off[15:4]
-    output wire        il_ack,        // granted this clock
-    output wire        il_ok,         // with ack: the bank holds this line
-    output wire [127:0] il_row,       // valid two clocks after an ok'd ack
+    input  wire [15:0] il_ppn,
+    input  wire [3:0]  il_line,
+    input  wire        il_src,        // 0 = the instruction front, 1 = the data front
+    output wire        il_ack,
+    output wire        il_done,
+    output logic       il_ok,
+    output logic [127:0] il_row,
 
-    // Control and status, from MEM_CTRL / to MEM_STAT.
+    // ---- control and status ------------------------------------------------
     input  wire        serve,
     input  wire        inval,
     input  wire        cnt_clr,
@@ -167,16 +148,17 @@ module page_cache (
     output logic [31:0] mismatches,
     output logic [31:0] last_mismatch,
     output logic [31:0] diverted,
-    output logic [7:0]  late_fills,     // engine overruns: must read zero
-    output logic [7:0]  fifo_drops,     // misses the DDR3 could not service
+    output logic [7:0]  late_fills,   // engine overruns: must read zero
+    output logic [7:0]  fifo_drops,   // misses the DDR3 could not service
+    output logic [31:0] mem_fills,
+    output logic [31:0] mem_flushes,
+    output logic [31:0] mem_declines,
 
-    // The page engine's seam to rtl/page_client.sv: a pipelined stream of
-    // whole-line requests.  pq_busy spans the transaction so the client holds
-    // the arbiter's grant across the fill-to-flush turnaround.
+    // ---- the engine's seam to rtl/page_client.sv ---------------------------
     output wire         pq_busy,
     output logic        pq_valid,
     output logic        pq_we,
-    output logic [19:0] pq_line,        // {bank, off[15:4]}
+    output logic [19:0] pq_line,      // {ppn, line[3:0]}
     output wire [127:0] pq_wdata,
     input  wire         pq_ready,
     input  wire         pr_valid,
@@ -184,284 +166,460 @@ module page_cache (
 );
 
     localparam [1:0] CLS_BUS = 2'd0;
-    localparam [1:0] CLS_RAM = 2'd1;
-    localparam [1:0] CLS_LC  = 2'd2;
-    localparam [1:0] CLS_ROM = 2'd3;
 
-    // ---- the banks -------------------------------------------------------------
-    logic [127:0] main_row, aux_row;
-    wire  [127:0] mb_unused;   // the main bank's idle port B
-
-    // Port A: the op's read at P0, the decision's write at P3.
-    logic         mw_en, aw_en;
-    logic [11:0]  w_row;
-    logic [3:0]   w_lo;        // the byte's lane, for the tap
-    logic [15:0]  w_be;
-    logic [127:0] w_data;
-
-    logic         b_en;
-    logic [15:0]  b_we;
-    logic [11:0]  b_addr;
-    logic [127:0] b_wdata;
-    logic [127:0] b_rdata;
+    localparam [2:0] E_IDLE   = 3'd0;
+    localparam [2:0] E_SNAP   = 3'd1;
+    localparam [2:0] E_FILL   = 3'd2;
+    localparam [2:0] E_PATCH  = 3'd3;
+    localparam [2:0] E_SETTLE = 3'd4;
+    localparam [2:0] E_FLUSH  = 3'd5;
 
 
-    // A write reaches the banks at P3 (mw_en/aw_en, which block il_ack
-    // below); its classification is at P2 (cl_valid) and the front snoops
-    // and restarts an IN-FLIGHT fill there.  But P3-minus-one - the write
-    // classified, not yet in the banks, the snoop pulse already gone - is a
-    // hole: a fill that reaches its read on THAT clock takes the pre-write
-    // byte and nothing restarts it, so self-modifying code fetches stale
-    // (the Moon Patrol icache corruption, found in a hardware trace).  Hold
-    // il_ack off that clock when the write in it is the fill's own physical
-    // line; the fill waits the write out and reads it whole.  Registered so
-    // only a same-line compare, not the classify cone, reaches il_ack.
-    logic        wr_blk_v, wr_blk_aux;
-    logic [7:0]  wr_blk_bank;
-    logic [11:0] wr_blk_off;
+    // ---- the geometry ------------------------------------------------------
+    localparam integer SIDX  = $clog2(SETS);          // index bits
+    localparam integer AW    = SIDX + 4;              // a way's row address
+    localparam integer LEV   = $clog2(WAYS);          // the replacement tree's depth
+    localparam integer NODES = (1 << LEV) - 1;        // ...and its bits per set
+
+    // The hashed index.  Folding the bank's low bits onto the page's spreads a
+    // RamWorks bank crawl over every set instead of piling one bank's pages
+    // into the sets its page numbers name; the IIe's own two banks and the
+    // ROM then occupy five ways of each set and never collide.
+    function automatic [SIDX-1:0] set_of(input [15:0] ppn);
+        set_of = ppn[SIDX-1:0] ^ ppn[2*SIDX-1 -: SIDX];
+    endfunction
+
+    function automatic [WAYS-1:0] lowest_bit(input [WAYS-1:0] v);
+        lowest_bit = v & (-v);
+    endfunction
+
+    function automatic [LEV-1:0] way_enc(input [WAYS-1:0] oh);
+        int i;
+        way_enc = '0;
+        for (i = 0; i < WAYS; i = i + 1) if (oh[i]) way_enc = LEV'(i);
+    endfunction
+
+    // Tree pseudo-LRU, the classic: one bit per internal node, each pointing
+    // at the half that was used less recently.  The VICTIM walk follows the
+    // bits; a TOUCH walks the way's own index and flips every node it passes
+    // to point away - so an update's new bits are a function of the way alone,
+    // which keeps the read-modify-write of one LUTRAM word to LEV bits of
+    // constant data rather than a function of the whole word.
+    // A way count that is not a power of two leaves the tree with more leaves
+    // than ways; the surplus leaves fold back onto the low ways.  That is a
+    // legal policy (every way stays reachable, none is starved by more than
+    // the fold), and the geometry sweep's point is that the RTL builds and
+    // answers correctly at ten ways, not that ten ways replace optimally.
+    function automatic [WAYS-1:0] plru_victim(input [NODES-1:0] b);
+        int l, node, k;
+        logic [LEV-1:0] idx;
+        idx  = '0;
+        node = 0;
+        for (l = 0; l < LEV; l = l + 1) begin
+            idx  = (idx << 1) | LEV'(b[node]);
+            node = 2*node + 1 + int'(b[node]);
+        end
+        k = int'(idx);
+        if (k >= WAYS) k = k - WAYS;
+        plru_victim = {{(WAYS-1){1'b0}}, 1'b1} << k;
+    endfunction
+
+    function automatic [NODES-1:0] plru_touch(input [NODES-1:0] b, input [LEV-1:0] t);
+        int l, node;
+        logic dir;
+        plru_touch = b;
+        node = 0;
+        for (l = 0; l < LEV; l = l + 1) begin
+            dir = t[LEV-1-l];
+            plru_touch[node] = ~dir;
+            node = 2*node + 1 + int'(dir);
+        end
+    endfunction
+
+    // ---- the directory -----------------------------------------------------
+    // A DIRECTORY WORD PER WAY PER SET, in distributed RAM: {valid, dirty,
+    // tag}.  The first cut held valid, dirty and the replacement bits in
+    // FLOPS - 2944 of them - and out-of-context synthesis priced that at
+    // 11,425 LUTs against the plan's thousand.  The flops themselves are not
+    // the cost: each one needs its own next-state select fed by a DECODED set
+    // index, three writers deep, and that is two or three LUTs apiece.  In
+    // LUTRAM the write is one addressed write and the read is the one the
+    // tags already do, so the whole structure costs what the tags cost.
+    //
+    // The price of LUTRAM is that it cannot be cleared in a clock, so the
+    // invalidate is a WALK again - one set per clock, `invalidating` high
+    // across it, exactly the contract rtl/mem_cache.sv had and
+    // rtl/accel_seq.sv still honours (its fast_ok carries mem_invalidating).
+    // A reset walks it too, which is why nothing may be served during one.
+    localparam integer DW = 18;               // {valid, dirty, tag[15:0]}
+    (* ram_style = "distributed" *) logic [DW-1:0]    dir [WAYS][SETS];
+    (* ram_style = "distributed" *) logic [NODES-1:0] plr [SETS];
+
+    logic            iv_run;
+    logic [SIDX-1:0] iv_k;
+    assign invalidating = iv_run;
     always_ff @(posedge clk) begin
-        wr_blk_v    <= !rst && cl_valid && cl_wr_image && !cl_rw;
-        wr_blk_aux  <= cl_aux;
-        wr_blk_bank <= cl_bank;
-        wr_blk_off  <= cl_off[15:4];
-    end
-    wire wr_block = wr_blk_v && (wr_blk_aux == il_aux) &&
-                    (!il_aux || wr_blk_bank == il_bank) && (wr_blk_off == il_line);
-
-    // The front's grant: port A free of the op path this clock.  Aux asks
-    // one more thing - the engine idle (the tags are its while it runs) and
-    // the wanted bank resident.
-    assign il_ack = il_req && !op_present && !mw_en && !aw_en && !wr_block &&
-                    !pw_pending;
-    assign il_ok  = il_ack && (!il_aux ||
-                    ((state == E_IDLE) && vld[il_line[11:4]] &&
-                     tag_bank[il_line[11:4]] == il_bank));
-    wire il_main = il_ack && !il_aux;
-    wire il_auxg = il_ok  &&  il_aux;
-    logic il_aux_q, il_aux_qq;
-    always_ff @(posedge clk) begin
-        il_aux_q  <= il_auxg;          // which bank's a_rdata to hand back...
-        il_aux_qq <= il_aux_q;         // ...aligned to the row's two clocks
-    end
-    assign il_row = il_aux_qq ? aux_row : main_row;
-
-    bank_ram u_main (
-        .clk     (clk),
-        .a_en    (op_present || mw_en || il_main),
-        .a_we    (mw_en ? w_be : 16'd0),
-        .a_addr  (mw_en ? w_row : il_main ? il_line : pf_off[15:4]),
-        .a_wdata (w_data),
-        .a_rdata (main_row),
-        // Port B is free: the floating-bus simulator keeps its own copy
-        // now (docs/FLOATING_BUS.md), fed from the write tap below.
-        .b_en    (1'b0),
-        .b_we    (16'd0),
-        .b_addr  (12'd0),
-        .b_wdata (128'd0),
-        .b_rdata (mb_unused)
-    );
-
-    // The write tap: what port A takes this clock, byte-wide.
-    assign mw_stb  = mw_en;
-    assign mw_addr = {w_row, w_lo};
-    assign mw_byte = w_data[7:0];
-
-    bank_ram u_aux (
-        .clk     (clk),
-        .a_en    (op_present || aw_en || il_auxg),
-        .a_we    (aw_en ? w_be : 16'd0),
-        .a_addr  (aw_en ? w_row : il_auxg ? il_line : pf_off[15:4]),
-        .a_wdata (w_data),
-        .a_rdata (aux_row),
-        .b_en    (b_en),
-        .b_we    (b_we),
-        .b_addr  (b_addr),
-        .b_wdata (b_wdata),
-        .b_rdata (b_rdata)
-    );
-
-    // ---- the aux tags ----------------------------------------------------------
-    // One entry per 256-byte page: the resident bank in LUTRAM, valid and
-    // dirty as flops so an invalidate is one clock and the engine can set
-    // them beside its own state.
-    (* ram_style = "distributed" *) logic [7:0] tag_bank [0:255];
-    logic [255:0] vld, dty;
-
-    assign invalidating = 1'b0;
-
-    // ---- the op, staged --------------------------------------------------------
-    // P1: the classified op and the tag it indexes.
-    logic        g2, s_posted;
-    logic [1:0]  s_cls;
-    logic        s_aux, s_rw, s_wr_image, s_machine;
-    logic [7:0]  s_bank, s_tbank, s_wdata;
-    logic [15:0] s_off, s_addr;
-    logic        s_tvld, s_tdty;
-
-    always_ff @(posedge clk) begin
-        g2 <= cl_valid && !rst;
-        if (cl_valid) begin
-            s_posted   <= cl_posted;
-            s_cls      <= cl_cls;
-            s_aux      <= cl_aux;
-            s_bank     <= cl_bank;
-            s_off      <= cl_off;
-            s_rw       <= cl_rw;
-            s_wr_image <= cl_wr_image;
-            s_addr     <= op_addr;
-            s_wdata    <= op_wdata;
-            s_machine  <= !cl_aux || (cl_bank == 8'd0);
-            s_tbank    <= tag_bank[cl_off[15:8]];
-            s_tvld     <= vld[cl_off[15:8]];
-            s_tdty     <= dty[cl_off[15:8]];
+        if (rst)          begin iv_run <= 1'b1; iv_k <= {SIDX{1'b0}}; end
+        else if (inval)   begin iv_run <= 1'b1; iv_k <= {SIDX{1'b0}}; end
+        else if (iv_run)  begin
+            iv_k <= iv_k + {{(SIDX-1){1'b0}}, 1'b1};
+            if (iv_k == SIDX'(SETS-1)) iv_run <= 1'b0;
         end
     end
 
-    // P2: the decision's raw material, combinational.
-    wire [7:0] t_idx   = s_off[15:8];
-    wire [7:0] rbyte   = s_aux ? aux_row[8 * s_off[3:0] +: 8]
-                               : main_row[8 * s_off[3:0] +: 8];
-    wire       aux_hit = s_tvld && (s_tbank == s_bank);
-    wire       d_cache = (s_cls == CLS_RAM) || (s_cls == CLS_LC);
-    wire       d_hit   = !s_aux || aux_hit;
-    wire       d_claim = s_aux && !s_tvld;
-    wire       d_rom   = (s_cls == CLS_ROM) && rom_loaded;
-    wire       serve_this = serve && (d_cache || d_rom);
-
-    // The op is in flight from its present to its decision, and the engine's
-    // transaction extends that; rtl/accel_seq.sv starts a fast op only when
-    // this is low.
-    assign busy = op_present || (cl_valid && !cl_posted) || (g2 && !s_posted) ||
-                  !eng_idle;
-
-    // The posted drain's leave: nothing in any stage, nothing landing on
-    // port A, the engine idle (the tags are its while it runs).  One
-    // posted write in the pipeline at a time - a second cannot enter until
-    // the first has left P3, which keeps the aux decision's tag read and
-    // the engine start serial, exactly as ops are.
-    assign pw_ready = !op_present && !cl_valid && !g2 && eng_idle && !mw_en && !aw_en;
-
-    // A read miss that starts the engine is the one decision that defers: its
-    // outcome is the critical beat's serve.  Everything else - hit, claim,
-    // ROM, any write, a drop, an op nothing here answers - is known at P2.
-    wire eng_read_start = dec_read && !dec_aux_blocked && !d_hit && !d_claim &&
-                          image_ready;
-
-    // ---- the page engine -------------------------------------------------------
-    localparam [2:0] E_IDLE  = 3'd0;
-    localparam [2:0] E_SNAP  = 3'd1;
-    localparam [2:0] E_FILL  = 3'd2;
-    localparam [2:0] E_PATCH = 3'd3;
-    localparam [2:0] E_FLUSH = 3'd4;
-
+    // ---- P0: the entrant ---------------------------------------------------
     logic [2:0] state;
-    logic [7:0] e_page_want, e_old;
-    logic [7:0] e_page;
-    logic [3:0] e_crit, e_boff;
-    logic [7:0] e_wbyte;
-    logic       e_dirty, e_rw, e_serve, e_cmp;
-    logic [4:0] snap_k;
-    logic [3:0] req_n, fl_k;
-    logic [4:0] resp_n;
+    logic [2:0] il_sr;
+    logic       wl_v;
+    wire        eng_idle = (state == E_IDLE);
 
-    wire eng_idle = (state == E_IDLE);
+    wire il_busy = il_sr[0] || il_sr[1];
+    // The landing reservation and the patch: no line request may read a page
+    // on a clock a write to it lands, and E_PATCH is a write landing on port B.
+    assign il_ack = il_req && !op_present && !pw_take && !wl_v && !il_busy &&
+                    !pw_pending && !iv_run && (state != E_PATCH);
+
+    wire            e_op  = op_present;
+    wire            e_pw  = pw_take;
+    wire            e_il  = il_ack;
+    wire            e_any = e_op || e_pw || e_il;
+    wire [15:0]     en_ppn = e_op ? pf_ppn      : e_pw ? pw_ppn      : il_ppn;
+    wire [3:0]      en_ln  = e_op ? pf_off[7:4] : e_pw ? pw_off[7:4] : il_line;
+    wire [SIDX-1:0] en_set = set_of(en_ppn);
+    wire [AW-1:0]   en_row = {en_set, en_ln};
+
+    // ---- the ways ----------------------------------------------------------
+    logic [WAYS-1:0] wl_way;
+    logic [AW-1:0]   wl_row;
+    logic [15:0]     wl_be;
+    logic [127:0]    wl_data;
+    logic            wl_main;
+    logic [15:0]     wl_addr;
+
+    logic [WAYS-1:0] e_way;          // the engine's way, one-hot
+    logic            eb_en;
+    logic [15:0]     eb_we;
+    logic [AW-1:0]   eb_addr;
+    logic [127:0]    eb_wdata;
+
+    wire [127:0] a_row [WAYS];
+    wire [127:0] b_row [WAYS];
+
+    genvar gw;
+    generate
+        for (gw = 0; gw < WAYS; gw = gw + 1) begin : g_way
+            wire land = wl_v && wl_way[gw];
+            way_ram #(.ROWS (SETS * 16)) u_way (
+                .clk     (clk),
+                .a_en    (e_any || land),
+                .a_we    (land ? wl_be  : 16'd0),
+                .a_addr  (land ? wl_row : en_row),
+                .a_wdata (wl_data),
+                .a_rdata (a_row[gw]),
+                .b_en    (eb_en && e_way[gw]),
+                .b_we    (eb_we),
+                .b_addr  (eb_addr),
+                .b_wdata (eb_wdata),
+                .b_rdata (b_row[gw])
+            );
+        end
+    endgenerate
+
+    // ---- P0 -> P1: the directory read, registered --------------------------
+    logic             e1_v, e1_op, e1_il;
+    logic [15:0]      e1_ppn;
+    logic [SIDX-1:0]  e1_set;
+    logic [3:0]       e1_line;
+    logic [15:0]      tq   [WAYS];
+    logic [WAYS-1:0]  tq_v, tq_d;
+    logic [NODES-1:0] tq_p;
+
+    always_ff @(posedge clk) begin
+        e1_v  <= e_any && !rst;
+        e1_op <= (e_op || e_pw) && !rst;
+        e1_il <= e_il && !rst;
+        if (e_any) begin
+            e1_ppn  <= en_ppn;
+            e1_set  <= en_set;
+            e1_line <= en_ln;
+            tq_p <= plr[en_set];
+            for (int i = 0; i < WAYS; i = i + 1) begin
+                tq[i]   <= dir[i][en_set][15:0];
+                tq_v[i] <= dir[i][en_set][17];
+                tq_d[i] <= dir[i][en_set][16];
+            end
+        end
+    end
+
+    // ---- P1: the compare, the victim ---------------------------------------
+    // A dirty bit set one clock ago has not reached tq_d.  It cannot reach the
+    // hit compare (the op path's entrants are three clocks apart, `busy`), but
+    // a victim chosen with a stale dirty bit would drop a page's writes on the
+    // floor, so that one bit is forwarded.
+    logic            dw_v;
+    logic [SIDX-1:0] dw_set;
+    logic [WAYS-1:0] dw_way;
+    wire [WAYS-1:0]  tq_de = tq_d |
+        ((dw_v && dw_set == e1_set) ? dw_way : {WAYS{1'b0}});
+
+    wire [WAYS-1:0] c_hit_w;
+    generate
+        for (gw = 0; gw < WAYS; gw = gw + 1) begin : g_cmp
+            assign c_hit_w[gw] = tq_v[gw] && (tq[gw] == e1_ppn);
+        end
+    endgenerate
+    wire c_hit = |c_hit_w;
+
+    wire [WAYS-1:0] free_w = ~tq_v;
+    wire [WAYS-1:0] c_vic  = (|free_w) ? lowest_bit(free_w) : plru_victim(tq_p);
+
+    logic [15:0] c_vtag;
+    always_comb begin
+        c_vtag = 16'd0;
+        for (int i = 0; i < WAYS; i = i + 1) if (c_vic[i]) c_vtag = c_vtag | tq[i];
+    end
+    wire c_vdty = |(c_vic & tq_de);
+
+    // ---- P1 -> P2: the op's stage, and a write's landing -------------------
+    logic            s_v, s_posted, s_rw, s_wr_image, s_machine, s_hit, s_vdty;
+    logic [1:0]      s_cls;
+    logic [15:0]     s_ppn, s_vtag, s_addr;
+    logic [7:0]      s_off, s_wdata;
+    logic [SIDX-1:0] s_set;
+    logic [WAYS-1:0] s_way, s_vic;
+
+    // The write's decision is taken HERE, one clock before it lands, so the
+    // reservation that protects the fill port is a register and not a cone.
+    wire p1_wr = cl_valid && !cl_rw && cl_wr_image && c_hit && !iv_run;
+
+    always_ff @(posedge clk) begin
+        s_v  <= cl_valid && !rst;
+        wl_v <= p1_wr && !rst;
+        dw_v <= p1_wr && !rst;
+        if (cl_valid) begin
+            s_posted   <= cl_posted;
+            s_cls      <= cl_cls;
+            s_ppn      <= cl_ppn;
+            s_off      <= cl_off;
+            s_rw       <= cl_rw;
+            s_wr_image <= cl_wr_image;
+            s_wdata    <= cl_wdata;
+            s_addr     <= op_addr;
+            s_machine  <= (cl_ppn[15:8] <= 8'd1);
+            s_set      <= e1_set;
+            s_hit      <= c_hit;
+            s_way      <= c_hit_w;
+            s_vic      <= c_vic;
+            s_vtag     <= c_vtag;
+            s_vdty     <= c_vdty;
+        end
+        if (p1_wr) begin
+            wl_way  <= c_hit_w;
+            wl_row  <= {e1_set, cl_off[7:4]};
+            wl_be   <= 16'd1 << cl_off[3:0];
+            wl_data <= {16{cl_wdata}};
+            wl_main <= (cl_ppn[15:8] == 8'd0);
+            wl_addr <= {cl_ppn[7:0], cl_off};
+            dw_set  <= e1_set;
+            dw_way  <= c_hit_w;
+        end
+    end
+
+    // ---- P2: one row mux, two consumers ------------------------------------
+    // The op's byte and a line request's row are never muxed on the same
+    // clock - a line request is refused on an op's P0, so its row is out one
+    // clock either side of the op's - so one WAYS:1 mux serves both, its
+    // select the compare of the clock before.
+    logic [WAYS-1:0] mx_sel;
+    always_ff @(posedge clk) mx_sel <= c_hit_w;
+
+    logic [127:0] mux_row;
+    always_comb begin
+        mux_row = 128'd0;
+        for (int i = 0; i < WAYS; i = i + 1) if (mx_sel[i]) mux_row = mux_row | a_row[i];
+    end
+    wire [7:0] rbyte = mux_row[8 * s_off[3:0] +: 8];
+
+    // ---- the line port's pipeline ------------------------------------------
+    // ack at T: the compare at T+1, the row out of the block RAM at T+2 and
+    // registered there, so il_done stands at T+3 with il_ok and il_row.
+    logic il_hit_q;
+    assign il_done = il_sr[2];
+    always_ff @(posedge clk) begin
+        il_sr <= rst ? 3'd0 : {il_sr[1:0], il_ack};
+        if (e1_il)    il_hit_q <= c_hit;
+        if (il_sr[1]) il_row   <= mux_row;
+        if (il_sr[1]) il_ok    <= il_hit_q;
+    end
+
+    // ---- the engine --------------------------------------------------------
+    logic [15:0]     e_ppn, e_old, e_addr;
+    logic [SIDX-1:0] e_set;
+    logic [3:0]      e_crit, e_boff;
+    logic [7:0]      e_wbyte;
+    logic            e_dirty, e_rw, e_serve, e_cmp, e_main;
+    logic [4:0]      snap_k;
+    logic [3:0]      req_n, fl_k;
+    logic [4:0]      resp_n;
+
     assign pq_busy = !eng_idle;
 
-    // The snapshot buffer: the victim page, one line per entry.
     logic [127:0] pbuf [0:15];
     assign pq_wdata = pbuf[fl_k];
-
     wire accept = pq_valid && pq_ready;
 
-    // Port B: the snapshot's reads, a fill's installs, the patch.
+    logic [127:0] b_mux;
     always_comb begin
-        b_en    = 1'b0;
-        b_we    = 16'd0;
-        b_addr  = 12'd0;
-        b_wdata = 128'd0;
+        b_mux = 128'd0;
+        for (int i = 0; i < WAYS; i = i + 1) if (e_way[i]) b_mux = b_mux | b_row[i];
+    end
+
+    always_comb begin
+        eb_en    = 1'b0;
+        eb_we    = 16'd0;
+        eb_addr  = {AW{1'b0}};
+        eb_wdata = 128'd0;
         case (state)
             E_SNAP: begin
-                b_en   = !snap_k[4];
-                b_addr = {e_page, snap_k[3:0]};
+                eb_en   = !snap_k[4];
+                eb_addr = {e_set, snap_k[3:0]};
             end
             E_FILL: if (pr_valid) begin
-                b_en    = 1'b1;
-                b_we    = 16'hFFFF;
-                b_addr  = {e_page, e_crit + resp_n[3:0]};
-                b_wdata = pr_data;
+                eb_en    = 1'b1;
+                eb_we    = 16'hFFFF;
+                eb_addr  = {e_set, e_crit + resp_n[3:0]};
+                eb_wdata = pr_data;
             end
             E_PATCH: begin
-                b_en    = 1'b1;
-                b_we    = 16'd1 << e_boff;
-                b_addr  = {e_page, e_crit};
-                b_wdata = {16{e_wbyte}};
+                eb_en    = 1'b1;
+                eb_we    = 16'd1 << e_boff;
+                eb_addr  = {e_set, e_crit};
+                eb_wdata = {16{e_wbyte}};
             end
             default: ;
         endcase
     end
 
-    // ---- the tag writes --------------------------------------------------------
-    // Two writers that cannot collide: the engine retags at its fill's end,
-    // and the engine holds off every aux decision while it runs.
-    wire dec_read  = g2 && s_rw && d_cache;
-    wire dec_write = g2 && !s_rw && s_wr_image;
-    wire dec_aux_blocked = (dec_read || dec_write) && s_aux && !eng_idle;
+    // ---- the decision ------------------------------------------------------
+    wire d_cache   = (s_cls != CLS_BUS);
+    wire serve_this = serve && d_cache;
+    wire dec_read  = s_v && s_rw && d_cache;
+    wire dec_write = s_v && !s_rw && s_wr_image;
+    wire dec_block = (dec_read || dec_write) && (iv_run || (!s_hit && !eng_idle));
+    wire eng_read_start = dec_read && !dec_block && !s_hit && image_ready;
     wire eng_retag = (state == E_FILL) && pr_valid && (resp_n == 5'd15);
-    wire dec_claim = (dec_read || dec_write) && d_claim && eng_idle;
 
+    // The write tap: main memory's bytes as they land, for rtl/fb_sim.sv.
+    assign mw_stb  = (wl_v && wl_main) || ((state == E_PATCH) && e_main);
+    assign mw_addr = wl_v ? wl_addr : e_addr;
+    assign mw_byte = wl_v ? wl_data[7:0] : e_wbyte;
+
+    assign busy = op_present || (cl_valid && !cl_posted) || (s_v && !s_posted) ||
+                  !eng_idle;
+    assign pw_ready = !op_present && !cl_valid && !s_v && eng_idle && !wl_v && !iv_run;
+
+    // ---- the books the bench reads through the hierarchy -------------------
+    // A clash is an entrant on a landing clock, or a classified op whose page
+    // is not the one its P0 indexed: both are impossible by the argument in
+    // the header, and both would corrupt silently, so they are counted.
+    // il_src says which front asked, so the line port's traffic can be split
+    // between them in the hardware census at rung 5.
+    logic [31:0] cnt_land_clash, cnt_ppn_clash, cnt_hit_uc, cnt_decline;
+    logic [31:0] cnt_il_i, cnt_il_d, cnt_iv_block;
+    // The posted writes, and those that found their page absent and had to
+    // fill it: the data front's drain must be able to do that.
+    logic [31:0] cnt_posted, cnt_posted_miss;
     always_ff @(posedge clk) begin
-        if (eng_retag)      tag_bank[e_page] <= e_page_want;
-        else if (dec_claim) tag_bank[t_idx]  <= s_bank;
+        if (rst) begin
+            cnt_land_clash <= 32'd0; cnt_ppn_clash <= 32'd0;
+            cnt_hit_uc <= 32'd0; cnt_decline <= 32'd0;
+            cnt_il_i <= 32'd0; cnt_il_d <= 32'd0; cnt_iv_block <= 32'd0;
+            cnt_posted <= 32'd0; cnt_posted_miss <= 32'd0;
+        end else begin
+            if (il_ack && !il_src)                cnt_il_i       <= cnt_il_i + 32'd1;
+            if (il_ack &&  il_src)                cnt_il_d       <= cnt_il_d + 32'd1;
+            if (wl_v && e_any)                    cnt_land_clash <= cnt_land_clash + 32'd1;
+            if (cl_valid && (!e1_op || e1_ppn != cl_ppn || e1_line != cl_off[7:4]))
+                                                  cnt_ppn_clash  <= cnt_ppn_clash + 32'd1;
+            if (dec_read && s_hit && !eng_idle)   cnt_hit_uc     <= cnt_hit_uc + 32'd1;
+            if ((dec_read || dec_write) && iv_run) cnt_iv_block  <= cnt_iv_block + 32'd1;
+            if (s_v && s_posted)                  cnt_posted     <= cnt_posted + 32'd1;
+            if (dec_write && s_posted && !s_hit && !dec_block && image_ready)
+                                                  cnt_posted_miss <= cnt_posted_miss + 32'd1;
+            if (e1_il && !c_hit)                  cnt_decline    <= cnt_decline + 32'd1;
+        end
     end
 
-    // ---- the decision, the engine, the counters -------------------------------
+    // ---- the directory's writers -------------------------------------------
+    // Valid and dirty never collide: the engine's are its own clocks, and no
+    // op or posted write enters while it runs.  The replacement bits can, and
+    // the engine wins - they are a hint.
+    wire eng_go = (dec_read || dec_write) && !dec_block && !s_hit && image_ready;
+    wire plru_op = s_v && s_hit && !dec_block && (dec_read || dec_write);
+    wire plru_il = e1_il && c_hit;
+
+    wire            plru_we  = eng_retag || plru_op || plru_il;
+    wire [SIDX-1:0] plru_set = eng_retag ? e_set : plru_op ? s_set : e1_set;
+    wire [LEV-1:0]  plru_way = way_enc(eng_retag ? e_way : plru_op ? s_way : c_hit_w);
+
+    // Four writers, one port per way, and they cannot collide.  The walk owns
+    // the directory outright (nothing is served under it).  A retag runs
+    // inside the engine, where no op or posted write can enter; the victim's
+    // clear STARTS the engine, so it is never the same clock as a retag; and
+    // a write's dirty set can only share a clock with a retag if it hit a
+    // DIFFERENT way, which is a different port.
+    generate
+        for (gw = 0; gw < WAYS; gw = gw + 1) begin : g_dirw
+            wire w_retag = eng_retag && e_way[gw];
+            wire w_go    = eng_go    && s_vic[gw];
+            wire w_dirty = p1_wr     && c_hit_w[gw];
+            wire [SIDX-1:0] w_set = iv_run ? iv_k   :
+                                    w_retag ? e_set :
+                                    w_go    ? s_set : e1_set;
+            wire [DW-1:0]   w_dat = iv_run  ? {DW{1'b0}} :
+                                    w_retag ? {1'b1, !e_rw, e_ppn} :
+                                    w_dirty ? {1'b1, 1'b1,  tq[gw]} : {DW{1'b0}};
+            always_ff @(posedge clk) begin
+                if (iv_run || w_retag || w_go || w_dirty) dir[gw][w_set] <= w_dat;
+            end
+        end
+    endgenerate
+
+    // The replacement tree is read where a set is indexed and read again where
+    // it is touched; the touch is a read-modify-write of one word, and two
+    // touches of one set in consecutive clocks see each other because the
+    // write is synchronous and the read is not.
+    always_ff @(posedge clk) begin
+        if (plru_we) plr[plru_set] <= plru_touch(plr[plru_set], plru_way);
+    end
+
+    // ---- the pipeline's tail: the serve, the engine, the counters ----------
     logic       cmp_valid;
     logic [7:0] cmp_byte;
     logic [7:0] data_q;
 
-    // The books, for the bench (hierarchy-visible): posted writes drained,
-    // and those whose aux page was not resident and raised the engine.
-    logic [31:0] cnt_posted, cnt_posted_miss;
     always_ff @(posedge clk) begin
-        if (rst) begin
-            cnt_posted <= 32'd0; cnt_posted_miss <= 32'd0;
-        end else begin
-            if (g2 && s_posted) cnt_posted <= cnt_posted + 32'd1;
-            if (dec_write && s_posted && s_aux && !aux_hit && !d_claim && !dec_aux_blocked)
-                cnt_posted_miss <= cnt_posted_miss + 32'd1;
-        end
-    end
-
-    always_ff @(posedge clk) begin
-        // Defaults: single-cycle strobes.
-        mw_en  <= 1'b0;
-        aw_en  <= 1'b0;
-        data_q <= data_sync;
-        // Decided on this edge: P2 unless a read miss is raising the engine,
-        // or the miss's critical beat.
-        decided <= (g2 && !s_posted && !eng_read_start) ||
-                   (state == E_FILL && pr_valid && resp_n == 5'd0 && e_rw);
+        data_q  <= data_sync;
+        decided <= (s_v && !s_posted && !eng_read_start) ||
+                   ((state == E_FILL) && pr_valid && (resp_n == 5'd0) && e_rw);
 
         if (rst) begin
             sub_en <= 1'b0; sub_data <= 8'd0;
             decided <= 1'b0;
             cmp_valid <= 1'b0; cmp_byte <= 8'd0;
-            vld <= 256'd0; dty <= 256'd0;
             state <= E_IDLE;
             pq_valid <= 1'b0; pq_we <= 1'b0; pq_line <= 20'd0;
-            e_page_want <= 8'd0; e_old <= 8'd0; e_page <= 8'd0;
-            e_crit <= 4'd0; e_boff <= 4'd0; e_wbyte <= 8'd0;
-            e_dirty <= 1'b0; e_rw <= 1'b1; e_serve <= 1'b0; e_cmp <= 1'b0;
+            e_ppn <= 16'd0; e_old <= 16'd0; e_set <= {SIDX{1'b0}}; e_way <= {WAYS{1'b0}};
+            e_crit <= 4'd0; e_boff <= 4'd0; e_wbyte <= 8'd0; e_addr <= 16'd0;
+            e_dirty <= 1'b0; e_rw <= 1'b1; e_serve <= 1'b0; e_cmp <= 1'b0; e_main <= 1'b0;
             snap_k <= 5'd0; req_n <= 4'd0; fl_k <= 4'd0; resp_n <= 5'd0;
-            w_row <= 12'd0; w_lo <= 4'd0; w_be <= 16'd0; w_data <= 128'd0;
             hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
             mismatches <= 32'd0; last_mismatch <= 32'd0; diverted <= 32'd0;
             late_fills <= 8'd0; fifo_drops <= 8'd0;
+            mem_fills <= 32'd0; mem_flushes <= 32'd0; mem_declines <= 32'd0;
         end else begin
-            // ---- a new op: the previous one is over -------------------------
-            // A miss transaction in flight still completes - its installs and
-            // its retag are the page's, not the op's - but its serve and its
-            // compare belonged to the op that started it, and die with it.
+            // A new op ends the previous one's serve and compare; a miss
+            // transaction in flight still completes, for the page's sake.
             if (op_present) begin
                 sub_en    <= 1'b0;
                 cmp_valid <= 1'b0;
@@ -469,104 +627,61 @@ module page_cache (
                 e_cmp     <= 1'b0;
             end
 
-            // ---- P2: the decision -------------------------------------------
-            if (dec_read) begin
-                if (dec_aux_blocked) begin
-                    late_fills <= late_fills + 8'd1;
-                end else if (d_hit) begin
-                    hits <= hits + 32'd1;
-                    if (serve_this) begin
-                        sub_en   <= 1'b1;
-                        sub_data <= rbyte;
-                        served   <= served + 32'd1;
-                    end
-                    cmp_valid <= 1'b1;
-                    cmp_byte  <= rbyte;
-                end else if (d_claim) begin
-                    // Claimed where it stands: garbage, as real RAM powers up.
-                    misses <= misses + 32'd1;
-                    vld[t_idx] <= 1'b1;
-                    dty[t_idx] <= 1'b0;
-                    if (serve_this) begin
-                        sub_en   <= 1'b1;
-                        sub_data <= rbyte;
-                        served   <= served + 32'd1;
-                    end
-                    cmp_valid <= 1'b1;
-                    cmp_byte  <= rbyte;
-                end else begin
-                    misses <= misses + 32'd1;
-                    if (image_ready) begin
-                        state       <= E_SNAP;
-                        e_page      <= s_off[15:8];
-                        e_crit      <= s_off[7:4];
-                        e_boff      <= s_off[3:0];
-                        e_page_want <= s_bank;
-                        e_old       <= s_tbank;
-                        e_dirty     <= s_tdty;
-                        e_rw        <= 1'b1;
-                        e_serve     <= serve_this;
-                        e_cmp       <= s_machine;
-                        snap_k      <= 5'd0;
-                    end else begin
-                        fifo_drops <= fifo_drops + 8'd1;
-                    end
-                end
-            end else if (g2 && s_rw && d_rom) begin
-                if (serve) begin
+            if (e1_il && !c_hit) mem_declines <= mem_declines + 32'd1;
+
+            // ---- P2 ---------------------------------------------------------
+            if (dec_block) begin
+                if (!iv_run) late_fills <= late_fills + 8'd1;
+            end else if (dec_read && s_hit) begin
+                hits <= hits + 32'd1;
+                if (serve_this) begin
                     sub_en   <= 1'b1;
-                    sub_data <= rom_byte;
+                    sub_data <= rbyte;
                     served   <= served + 32'd1;
                 end
                 cmp_valid <= 1'b1;
-                cmp_byte  <= rom_byte;
-            end else if (dec_write) begin
-                if (dec_aux_blocked) begin
-                    late_fills <= late_fills + 8'd1;
-                end else if (!s_aux || aux_hit || d_claim) begin
-                    w_row  <= s_off[15:4];
-                    w_lo   <= s_off[3:0];
-                    w_be   <= 16'd1 << s_off[3:0];
-                    w_data <= {16{s_wdata}};
-                    if (s_aux) begin
-                        aw_en      <= 1'b1;
-                        vld[t_idx] <= 1'b1;   // a claim; a hit re-affirms
-                        dty[t_idx] <= 1'b1;
-                        if (d_claim) misses <= misses + 32'd1;
-                    end else begin
-                        mw_en <= 1'b1;
+                cmp_byte  <= rbyte;
+            end else if ((dec_read || dec_write) && !s_hit) begin
+                misses <= misses + 32'd1;
+                if (image_ready) begin
+                    state     <= s_vdty ? E_SNAP : E_FILL;
+                    e_ppn     <= s_ppn;
+                    e_old     <= s_vtag;
+                    e_set     <= s_set;
+                    e_way     <= s_vic;
+                    e_crit    <= s_off[7:4];     // the classified answer, not the preview
+                    e_boff    <= s_off[3:0];
+                    e_wbyte   <= s_wdata;
+                    e_addr    <= {s_ppn[7:0], s_off};
+                    e_main    <= (s_ppn[15:8] == 8'd0);
+                    e_dirty   <= s_vdty;
+                    e_rw      <= s_rw;
+                    e_serve   <= s_rw && serve_this;
+                    e_cmp     <= s_rw && s_machine;
+                    snap_k    <= 5'd0;
+                    mem_fills <= mem_fills + 32'd1;
+                    if (s_vdty) mem_flushes <= mem_flushes + 32'd1;
+                    if (!s_vdty) begin
+                        pq_valid <= 1'b1;
+                        pq_we    <= 1'b0;
+                        pq_line  <= {s_ppn, s_off[7:4]};
+                        req_n    <= 4'd0;
+                        resp_n   <= 5'd0;
                     end
                 end else begin
-                    misses <= misses + 32'd1;
-                    if (image_ready) begin
-                        state       <= E_SNAP;
-                        e_page      <= s_off[15:8];
-                        e_crit      <= s_off[7:4];
-                        e_boff      <= s_off[3:0];
-                        e_wbyte     <= s_wdata;
-                        e_page_want <= s_bank;
-                        e_old       <= s_tbank;
-                        e_dirty     <= s_tdty;
-                        e_rw        <= 1'b0;
-                        e_serve     <= 1'b0;
-                        e_cmp       <= 1'b0;
-                        snap_k      <= 5'd0;
-                    end else begin
-                        fifo_drops <= fifo_drops + 8'd1;
-                    end
+                    fifo_drops <= fifo_drops + 8'd1;
                 end
             end
 
-            // ---- the engine ---------------------------------------------------
+            // ---- the engine -------------------------------------------------
             case (state)
                 E_SNAP: begin
-                    // Address k this clock, catch its line the next.
-                    if (snap_k != 5'd0) pbuf[snap_k[3:0] - 4'd1] <= b_rdata;
+                    if (snap_k != 5'd0) pbuf[snap_k[3:0] - 4'd1] <= b_mux;
                     if (snap_k == 5'd16) begin
                         state    <= E_FILL;
                         pq_valid <= 1'b1;
                         pq_we    <= 1'b0;
-                        pq_line  <= {e_page_want, e_page, e_crit};
+                        pq_line  <= {e_ppn, e_crit};
                         req_n    <= 4'd0;
                         resp_n   <= 5'd0;
                     end else begin
@@ -577,8 +692,8 @@ module page_cache (
                     if (accept) begin
                         if (req_n == 4'd15) pq_valid <= 1'b0;
                         else begin
-                            req_n         <= req_n + 4'd1;
-                            pq_line[3:0]  <= e_crit + req_n + 4'd1;
+                            req_n        <= req_n + 4'd1;
+                            pq_line[3:0] <= e_crit + req_n + 4'd1;
                         end
                     end
                     if (pr_valid) begin
@@ -595,26 +710,21 @@ module page_cache (
                             end
                         end
                         if (resp_n == 5'd15) begin
-                            vld[e_page] <= 1'b1;
-                            dty[e_page] <= !e_rw;
-                            state <= !e_rw    ? E_PATCH :
-                                     e_dirty  ? E_FLUSH : E_IDLE;
-                            if (e_rw && e_dirty) begin
-                                pq_valid <= 1'b1;
-                                pq_we    <= 1'b1;
-                                pq_line  <= {e_old, e_page, 4'd0};
-                                fl_k     <= 4'd0;
-                            end
+                            state <= !e_rw   ? E_PATCH :
+                                     e_dirty ? E_SETTLE : E_IDLE;
                         end
                     end
                 end
-                E_PATCH: begin
-                    state <= e_dirty ? E_FLUSH : E_IDLE;
+                E_PATCH: state <= E_SETTLE;
+                E_SETTLE: begin
                     if (e_dirty) begin
+                        state    <= E_FLUSH;
                         pq_valid <= 1'b1;
                         pq_we    <= 1'b1;
-                        pq_line  <= {e_old, e_page, 4'd0};
+                        pq_line  <= {e_old, 4'd0};
                         fl_k     <= 4'd0;
+                    end else begin
+                        state <= E_IDLE;
                     end
                 end
                 E_FLUSH: begin
@@ -641,15 +751,11 @@ module page_cache (
                 last_mismatch <= {s_addr, cmp_byte, data_q};
             end
 
-            // ---- the levers -------------------------------------------------
-            if (inval) begin
-                vld <= 256'd0;
-                dty <= 256'd0;
-            end
             if (cnt_clr) begin
                 hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
                 mismatches <= 32'd0; last_mismatch <= 32'd0; diverted <= 32'd0;
                 late_fills <= 8'd0; fifo_drops <= 8'd0;
+                mem_fills <= 32'd0; mem_flushes <= 32'd0; mem_declines <= 32'd0;
             end
         end
     end

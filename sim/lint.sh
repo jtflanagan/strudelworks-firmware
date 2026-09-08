@@ -67,17 +67,15 @@ run reply_stream  rtl/reply_stream.sv
 run msg_master    rtl/msg_master.sv
 run wb_arb        rtl/wb_arb.sv
 run apple_mmu     rtl/apple_mmu.sv
-run apple_rom     rtl/apple_rom.sv
-# bank_ram is the two-process true-dual-port RAM template, like fd_bank.
-run bank_ram      rtl/bank_ram.sv -Wno-MULTIDRIVEN
-run page_cache    rtl/page_cache.sv rtl/bank_ram.sv -Wno-MULTIDRIVEN
-# way_ram is bank_ram's shape at a way's geometry; phys_cache is linted at all
-# three of the geometries sim/run_phys_cache_tb.sh sweeps, because a way count
-# that is not a power of two takes different paths through its replacement tree.
+run rom_loader    rtl/rom_loader.sv
+# way_ram is the two-process true-dual-port RAM template at a way's geometry,
+# like fd_bank; page_cache is linted at all three of the geometries
+# sim/run_page_cache_tb.sh sweeps, because a way count that is not a power of
+# two takes different paths through its replacement tree.
 run way_ram       rtl/way_ram.sv -Wno-MULTIDRIVEN
-run phys_cache    rtl/phys_cache.sv rtl/way_ram.sv -Wno-MULTIDRIVEN
-run phys_cache    rtl/phys_cache.sv rtl/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=10
-run phys_cache    rtl/phys_cache.sv rtl/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=8
+run page_cache    rtl/page_cache.sv rtl/way_ram.sv -Wno-MULTIDRIVEN
+run page_cache    rtl/page_cache.sv rtl/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=10
+run page_cache    rtl/page_cache.sv rtl/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=8
 run page_client   rtl/page_client.sv
 run tx_ring       rtl/tx_ring.sv rtl/sync_fifo.sv
 run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv

@@ -37,8 +37,8 @@ for high in "${highs[@]}"; do
         "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv" \
         "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv" \
         "$root/rtl/boot_hold.sv" \
-        "$root/rtl/apple_mmu.sv" "$root/rtl/apple_rom.sv" "$root/rtl/page_cache.sv" \
-        "$root/rtl/bank_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" "$root/rtl/event_merge.sv" \
+        "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv" \
+        "$root/rtl/way_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" "$root/rtl/event_merge.sv" \
         -o accel_vl > "$work/verilator_$high.log" 2>&1 || {
             echo "verilator build failed:" >&2; tail -30 "$work/verilator_$high.log" >&2; exit 1; }
     echo "== PHI0_HIGH = $high"

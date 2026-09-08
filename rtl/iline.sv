@@ -129,10 +129,6 @@ module iline (
 
     // The MMU: the prefetch's classification, and the map's edge.
     output wire [15:0] p_addr,
-    input  wire [1:0]  p_cls,         // CLS_* as apple_mmu has them
-    input  wire        p_aux,
-    input  wire [15:0] p_off,
-    input  wire [7:0]  rw_bank,
     input  wire        map_changed,
     // The PHYSICAL side of the same picture (docs/MEMORY_REFACTOR.md, rung 3):
     // the picked line's page, the REGION it classifies in, the fold bit, and
@@ -151,20 +147,18 @@ module iline (
     input  wire        map_settling,
     input  wire        intc8rom,      // apple_mmu's latch: page $C3 is servable while set
 
-    // The page cache's line port (rtl/page_cache.sv).
+    // The page cache's line port (rtl/page_cache.sv).  The request names a
+    // PHYSICAL page and the line in it; the grant is il_ack, and il_done
+    // stands exactly three clocks later with il_ok (the page was resident)
+    // and the row.  A page that is not resident DECLINES: the fetch rides
+    // the sequencer instead, and the miss it takes fills the page.
     output wire         il_req,
-    output wire         il_aux,
-    output wire [7:0]   il_bank,
-    output wire [11:0]  il_line,
+    output wire [15:0]  il_ppn,
+    output wire [3:0]   il_line,
     input  wire         il_ack,
+    input  wire         il_done,
     input  wire         il_ok,
     input  wire [127:0] il_row,
-
-    // The ROM's line port (rtl/apple_rom.sv).
-    output wire        r2_en,
-    output wire [11:0] r2_addr,
-    input  wire [31:0] r2_data,
-    input  wire        r2_busy,       // load traffic: ROM lines and fills die
 
     // The write snoop: the MMU's classified op (P1)...
     input  wire        cl_valid,
@@ -203,7 +197,6 @@ module iline (
     // away, or to being replaced.
     logic         r      [0:1];
     logic [11:0]  vtag   [0:1];       // pc_addr[15:4] of the line
-    logic         t_rom  [0:1];       // served from the ROM, not the banks
     // The line's PHYSICAL IDENTITY: its page, the REGION it was classified
     // in, and whether the language card's fold applied.  The page plus
     // vtag[3:0] (the line within the page - the fold never touches a[11:4])
@@ -240,13 +233,11 @@ module iline (
     logic               cam_v    [0:CAMN-1];
     logic               cam_r    [0:CAMN-1];
     logic [11:0]        cam_vtag [0:CAMN-1];
-    logic               cam_rom  [0:CAMN-1];
     logic [15:0]        cam_ppn  [0:CAMN-1];
     logic [3:0]         cam_reg  [0:CAMN-1];
     logic               cam_fold [0:CAMN-1];
     logic [127:0]       cam_data [0:CAMN-1];   // the LUTRAM
     logic [2:0]         cam_wp;                // round-robin allocation
-    logic [127:0]       f_cbuf;                // a CAM-only ROM fill's staging
 
     // The loop bits: the scanner saw a transfer from slot s's line into the
     // other's - the pair holds a loop whole, so the crossing must not rotate
@@ -289,12 +280,11 @@ module iline (
     // compares in the retire's ihit, two snoop terms in kill_now - are the
     // build's watchpoints, each with a registered-hint fallback.
     genvar gs;
-    wire [CAMN-1:0] cam_mpc, cam_hi, cam_hh, cam_romv;
+    wire [CAMN-1:0] cam_mpc, cam_hi, cam_hh;
     generate for (gs = 0; gs < CAMN; gs = gs + 1) begin : g_camserve
         assign cam_mpc[gs]  = cam_v[gs] && (cam_vtag[gs] == pc_addr[15:4]);
         assign cam_hi[gs]   = cam_v[gs] && (cam_vtag[gs] == exp_inc[15:4]);
         assign cam_hh[gs]   = cam_v[gs] && (cam_vtag[gs] == exp_q[15:4]);
-        assign cam_romv[gs] = cam_v[gs] && cam_rom[gs];
     end endgenerate
     wire cam_pc_hit = |cam_mpc;       // the fetch's line is retained
     function automatic [7:0] cam_byte(input [CAMN-1:0] m, input [3:0] off);
@@ -511,13 +501,13 @@ module iline (
     // revive holding a byte a write has since replaced, and the instruction
     // front has no splice, so the write KILLS it outright.
     wire        snp = cl_valid && !cl_rw && cl_wr_image;
-    wire snp_kill0 = (snp && r[0] && !t_rom[0] &&
+    wire snp_kill0 = (snp && r[0] &&
                       (t_ppn[0] == cl_ppn) && (vtag[0][3:0] == cl_off[7:4])) ||
-                     (ws_valid && r[0] && !t_rom[0] &&
+                     (ws_valid && r[0] &&
                       (t_ppn[0] == ws_ppn) && (vtag[0][3:0] == ws_off8[7:4]));
-    wire snp_kill1 = (snp && r[1] && !t_rom[1] &&
+    wire snp_kill1 = (snp && r[1] &&
                       (t_ppn[1] == cl_ppn) && (vtag[1][3:0] == cl_off[7:4])) ||
-                     (ws_valid && r[1] && !t_rom[1] &&
+                     (ws_valid && r[1] &&
                       (t_ppn[1] == ws_ppn) && (vtag[1][3:0] == ws_off8[7:4]));
 
     // ...and against every CAM entry, the same terms: a retained line is a
@@ -525,10 +515,10 @@ module iline (
     wire [CAMN-1:0] cam_snp_kill;
     genvar gk;
     generate for (gk = 0; gk < CAMN; gk = gk + 1) begin : g_camsnp
-        assign cam_snp_kill[gk] = (snp && cam_r[gk] && !cam_rom[gk] &&
+        assign cam_snp_kill[gk] = (snp && cam_r[gk] &&
                                    (cam_ppn[gk] == cl_ppn) &&
                                    (cam_vtag[gk][3:0] == cl_off[7:4])) ||
-                                  (ws_valid && cam_r[gk] && !cam_rom[gk] &&
+                                  (ws_valid && cam_r[gk] &&
                                    (cam_ppn[gk] == ws_ppn) &&
                                    (cam_vtag[gk][3:0] == ws_off8[7:4]));
     end endgenerate
@@ -569,23 +559,25 @@ module iline (
     // Stage 2, combinational into the always_ff below: does the entry still
     // name this line?  A ROM line wants ROM class, a RAM/LC line wants
     // RAM or LC - and both want the bank and the fold they were filled with.
-    function automatic logic rv_ok(input [RT_W-1:0] e, input is_rom,
+    // The ROM is bank $FF now, so a line's own bank says which class the
+    // table must still be naming: no separate ROM flag per line.
+    function automatic logic rv_ok(input [RT_W-1:0] e,
                                    input [7:0] bank, input fold);
         logic [7:0] want;
         begin
             want = (e[3:2] == BS_AUX) ? rwb_p1 : (e[3:2] == BS_ROM) ? 8'hFF : 8'd0;
             rv_ok = e[0] &&                                   // front-servable
-                    (is_rom ? (e[6:5] == CLS_ROM)
-                            : (e[6:5] == CLS_RAM || e[6:5] == CLS_LC)) &&
+                    ((bank == 8'hFF) ? (e[6:5] == CLS_ROM)
+                                     : (e[6:5] == CLS_RAM || e[6:5] == CLS_LC)) &&
                     (bank == want) && (fold == e[1]);
         end
     endfunction
-    wire rv_t0 = r[0] && rv_ok(rv1_t[0], t_rom[0], t_ppn[0][15:8], t_fold[0]);
-    wire rv_t1 = r[1] && rv_ok(rv1_t[1], t_rom[1], t_ppn[1][15:8], t_fold[1]);
+    wire rv_t0 = r[0] && rv_ok(rv1_t[0], t_ppn[0][15:8], t_fold[0]);
+    wire rv_t1 = r[1] && rv_ok(rv1_t[1], t_ppn[1][15:8], t_fold[1]);
     wire [CAMN-1:0] rv_c;
     generate for (gr = 0; gr < CAMN; gr = gr + 1) begin : g_rvc
         assign rv_c[gr] = cam_r[gr] &&
-                          rv_ok(rv1_c[gr], cam_rom[gr], cam_ppn[gr][15:8], cam_fold[gr]);
+                          rv_ok(rv1_c[gr], cam_ppn[gr][15:8], cam_fold[gr]);
     end endgenerate
 
     // The scanner's seams (rtl/iscan.sv, instantiated below).
@@ -600,13 +592,10 @@ module iline (
                     // serve is refused before map_changed's kill lands.
                     (pc_addr[15:8] == 8'hC3 && !intc8rom_q) ||
                     (hslot ? snp_kill1 : snp_kill0) ||
-                    ((hslot ? t_rom[1] : t_rom[0]) && r2_busy) ||
                     // ...and a retained copy of THIS fetch's line dying on
-                    // this very clock - a snoop, or ROM traffic - cancels a
-                    // serve sourced from it, the slots' race handled the
-                    // slots' way.
-                    (|(cam_mpc & cam_snp_kill)) ||
-                    ((|(cam_mpc & cam_romv)) && r2_busy);
+                    // this very clock cancels a serve sourced from it, the
+                    // slots' race handled the slots' way.
+                    (|(cam_mpc & cam_snp_kill));
 
     // Retire only when a prediction matches the fetch on offer AND the
     // live tags still agree - every term register-vs-register now that the
@@ -628,22 +617,18 @@ module iline (
     logic        want_v   [0:1];
     logic [11:0] want_tag [0:1];
 
-    localparam [3:0] F_IDLE = 4'd0, F_REQ = 4'd1, F_W1 = 4'd2, F_W2 = 4'd3,
-                     F_R0 = 4'd4, F_R1 = 4'd5, F_R2 = 4'd6, F_R3 = 4'd7,
-                     F_CAM = 4'd8;    // the promote's own beat
-    logic [3:0]  fst;
+    localparam [2:0] F_IDLE = 3'd0, F_REQ = 3'd1, F_W1 = 3'd2, F_W2 = 3'd3,
+                     F_CAM = 3'd4;    // the promote's own beat
+    logic [2:0]  fst;
     logic [2:0]  cam_pidx;            // the entry a promote is copying
-    logic        f_slot, f_rom, f_aux;
+    logic        f_slot;
     logic        f_cam;               // a CAM-only fill: the scanner's, no slot
-    logic [7:0]  f_bank;
-    logic [11:0] f_vtag, f_poff;
-    // ...and the identity the filled line will carry.  f_aux/f_bank/f_poff
-    // stay because the line-row request still speaks the old triple until
-    // Part 3 makes the page cache physical.
+    logic [11:0] f_vtag;
+    // ...and the identity the filled line will carry.  The line-row request
+    // speaks the physical space now: the page, and the line in it.
     logic [15:0] f_ppn;
     logic [3:0]  f_reg;
     logic        f_fold;
-    logic [127:0] f_buf;
     wire f_active = (fst != F_IDLE);
 
     // The engine's pick, and the classifier's answer for it.  The demand
@@ -665,7 +650,6 @@ module iline (
     // rule (a $C3 line is servable only while INTC8ROM is set).
     wire p_bus = !p_fs;
     localparam [1:0] CLS_ROM = 2'd3;
-    wire p_rom = (p_cls == CLS_ROM);
 
     // The CAM against the picked tag (a hit is a promote or a drop), and
     // against the fill in flight (the allocation's dedupe).
@@ -694,21 +678,17 @@ module iline (
     // write's grant-clock race is exactly this: a fill granted on the
     // write's retire clock read the banks before the write could reach
     // them, and the posted snoop a clock later restarts it.
-    wire snp_fill = (snp && f_active && !f_rom &&
+    wire snp_fill = (snp && f_active &&
                      (f_ppn == cl_ppn) && (f_vtag[3:0] == cl_off[7:4])) ||
-                    (ws_valid && f_active && !f_rom &&
+                    (ws_valid && f_active &&
                      (f_ppn == ws_ppn) && (f_vtag[3:0] == ws_off8[7:4]));
     // Everything that restarts or kills a fill.  A restart keeps the want:
     // the relaunch re-classifies and re-reads.
-    wire f_restart = f_active && (map_changed || inval || snp_fill ||
-                                  (f_rom && r2_busy));
+    wire f_restart = f_active && (map_changed || inval || snp_fill);
 
     assign il_req  = (fst == F_REQ);
-    assign il_aux  = f_aux;
-    assign il_bank = f_bank;
-    assign il_line = f_poff;
-    assign r2_en   = (fst == F_R0) || (fst == F_R1) || (fst == F_R2) || (fst == F_R3);
-    assign r2_addr = {f_vtag[9:0], fst[1:0]};   // F_R0..3 encode the beat in [1:0]
+    assign il_ppn  = f_ppn;
+    assign il_line = f_vtag[3:0];      // the line within the page
 
     // ---- the claim ----------------------------------------------------------
     // A fetch this module holds, or is clocks from holding, is THIS module's:
@@ -803,7 +783,6 @@ module iline (
     // within one iteration because the scan re-anchors every opcode fetch.
     wire slots_disturbed = ((fst == F_W2) && !f_restart && !f_cam) || (fst == F_CAM) ||
                            snp_kill0 || snp_kill1 || map_changed || inval || !serve ||
-                           (r2_busy && (t_rom[0] || t_rom[1])) ||
                            (miss_q && !wanted_now) || rot0 || rot1;
     always_ff @(posedge clk) begin
         if (rst || slots_disturbed) begin
@@ -925,7 +904,6 @@ module iline (
             v[0] <= 1'b0; v[1] <= 1'b0;
             r[0] <= 1'b0; r[1] <= 1'b0;
             vtag[0] <= 12'd0; vtag[1] <= 12'd0;
-            t_rom[0] <= 1'b0; t_rom[1] <= 1'b0;
             t_ppn[0] <= 16'd0; t_ppn[1] <= 16'd0;
             t_reg[0] <= 4'd0; t_reg[1] <= 4'd0;
             t_fold[0] <= 1'b0; t_fold[1] <= 1'b0;
@@ -933,8 +911,8 @@ module iline (
             want_v[0] <= 1'b0; want_v[1] <= 1'b0;
             want_tag[0] <= 12'd0; want_tag[1] <= 12'd0;
             fst <= F_IDLE;
-            f_slot <= 1'b0; f_rom <= 1'b0; f_aux <= 1'b0; f_cam <= 1'b0;
-            f_bank <= 8'd0; f_vtag <= 12'd0; f_poff <= 12'd0;
+            f_slot <= 1'b0; f_cam <= 1'b0;
+            f_vtag <= 12'd0;
             f_ppn <= 16'd0; f_reg <= 4'd0; f_fold <= 1'b0;
             tick_q <= 1'b0; tev_valid <= 1'b0;
             for (s = 0; s < CAMN; s = s + 1) begin cam_v[s] <= 1'b0; cam_r[s] <= 1'b0; end
@@ -949,10 +927,8 @@ module iline (
                 // CAM-only fill is speculation - dropped, the scanner asks
                 // again if it still matters.
                 if (!f_cam) begin
-                    if (!(f_rom && r2_busy)) begin
-                        want_v[f_slot]   <= 1'b1;                  // retry...
-                        want_tag[f_slot] <= f_vtag;
-                    end else want_v[f_slot] <= 1'b0;               // ...but not a reload
+                    want_v[f_slot]   <= 1'b1;                      // retry
+                    want_tag[f_slot] <= f_vtag;
                 end
             end else case (fst)
                 F_IDLE: if (want_pending) begin
@@ -970,7 +946,6 @@ module iline (
                         f_slot   <= pick;
                         f_cam    <= 1'b0;
                         f_vtag   <= p_tag;
-                        f_rom    <= cam_rom[cam_idx];
                         f_ppn    <= cam_ppn[cam_idx];
                         f_reg    <= cam_reg[cam_idx];
                         f_fold   <= cam_fold[cam_idx];
@@ -983,15 +958,11 @@ module iline (
                         f_slot <= pick;
                         f_cam  <= 1'b0;
                         f_vtag <= p_tag;
-                        f_rom  <= p_rom;
-                        f_aux  <= !p_rom && p_aux;
-                        f_bank <= rw_bank;
-                        f_poff <= p_off[15:4];
                         f_ppn  <= p_ppn;
                         f_reg  <= p_reg;
                         f_fold <= p_fold;
                         want_v[pick] <= 1'b0;
-                        fst <= p_rom ? F_R0 : F_REQ;
+                        fst <= F_REQ;
                     end
                 end else if (scan_go) begin
                     // The speculative wants - the resolved branch's early
@@ -1003,14 +974,10 @@ module iline (
                         !p_bus && !excl(p_tag)) begin
                         f_cam  <= 1'b1;
                         f_vtag <= p_tag;
-                        f_rom  <= p_rom;
-                        f_aux  <= !p_rom && p_aux;
-                        f_bank <= rw_bank;
-                        f_poff <= p_off[15:4];
                         f_ppn  <= p_ppn;
                         f_reg  <= p_reg;
                         f_fold <= p_fold;
-                        fst    <= p_rom ? F_R0 : F_REQ;
+                        fst    <= F_REQ;
                     end
                 end
                 F_CAM: begin
@@ -1022,7 +989,6 @@ module iline (
                         v[f_slot]      <= 1'b1;
                         vtag[f_slot]   <= f_vtag;
                         r[f_slot]      <= 1'b1;
-                        t_rom[f_slot]  <= f_rom;
                         t_ppn[f_slot]  <= f_ppn;
                         t_reg[f_slot]  <= f_reg;
                         t_fold[f_slot] <= f_fold;
@@ -1032,18 +998,19 @@ module iline (
                     end
                     fst <= F_IDLE;
                 end
-                F_REQ: begin
-                    if (il_ack && il_ok)       fst <= F_W1;
-                    else if (il_ack && !il_ok) fst <= F_IDLE;   // not resident: decline
-                end
-                F_W1: fst <= F_W2;
+                F_REQ: if (il_ack) fst <= F_W1;
+                // The cache answers three clocks after the grant, residency
+                // and row together (rtl/page_cache.sv): a physically indexed
+                // directory cannot say whether it holds a page until its own
+                // tag compare has run.  A decline drops the want and the op
+                // rides the sequencer, whose miss fills the page.
+                F_W1: if (il_done) fst <= il_ok ? F_W2 : F_IDLE;
                 F_W2: begin
                     if (!f_cam) begin
-                        if (!f_rom) ldata[f_slot] <= il_row;
+                        ldata[f_slot]  <= il_row;
                         v[f_slot]      <= 1'b1;
                         r[f_slot]      <= 1'b1;
                         vtag[f_slot]   <= f_vtag;
-                        t_rom[f_slot]  <= 1'b0;
                         t_ppn[f_slot]  <= f_ppn;
                         t_reg[f_slot]  <= f_reg;
                         t_fold[f_slot] <= f_fold;
@@ -1052,12 +1019,10 @@ module iline (
                     // deduplicated - a live entry with this tag keeps its
                     // claim, its bytes identical by the snoop.
                     if (!cam_dup) begin
-                        cam_data[cam_wp] <= f_rom ? (f_cam ? f_cbuf : ldata[f_slot])
-                                                  : il_row;
+                        cam_data[cam_wp] <= il_row;
                         cam_v[cam_wp]    <= 1'b1;
                         cam_r[cam_wp]    <= 1'b1;
                         cam_vtag[cam_wp] <= f_vtag;
-                        cam_rom[cam_wp]  <= f_rom;
                         cam_ppn[cam_wp]  <= f_ppn;
                         cam_reg[cam_wp]  <= f_reg;
                         cam_fold[cam_wp] <= f_fold;
@@ -1065,36 +1030,8 @@ module iline (
                     end
                     fst <= F_IDLE;
                 end
-                // The ROM's four words: issue beat N, its word lands with
-                // beat N+1's issue.  r2_busy restarts above.  A CAM-only
-                // fill stages into f_cbuf; the slots' bytes are not its.
-                F_R0: fst <= F_R1;
-                F_R1: begin
-                    if (f_cam) f_cbuf[31:0] <= r2_data;
-                    else       ldata[f_slot][31:0] <= r2_data;
-                    fst <= F_R2;
-                end
-                F_R2: begin
-                    if (f_cam) f_cbuf[63:32] <= r2_data;
-                    else       ldata[f_slot][63:32] <= r2_data;
-                    fst <= F_R3;
-                end
-                F_R3: begin
-                    if (f_cam) f_cbuf[95:64] <= r2_data;
-                    else       ldata[f_slot][95:64] <= r2_data;
-                    fst <= F_W1;                   // one more clock for word 3
-                end
                 default: fst <= F_IDLE;
             endcase
-            // Word 3 of a ROM line, and its commit, share F_W1/F_W2 with the
-            // RAM path's wait: F_W1 samples it, F_W2 commits.
-            if (fst == F_W1 && f_rom) begin
-                if (f_cam) f_cbuf[127:96] <= r2_data;
-                else       ldata[f_slot][127:96] <= r2_data;
-            end
-            if (fst == F_W2 && f_rom && !f_cam) begin
-                t_rom[f_slot] <= 1'b1;             // overrides F_W2's clear
-            end
 
             // ---- the train and the rotation --------------------------------
             // A slot the train or the rotation re-aims is about to hold a
@@ -1173,12 +1110,6 @@ module iline (
             if (!serve) begin
                 want_v[0] <= 1'b0; want_v[1] <= 1'b0;
                 fst <= F_IDLE;
-            end
-            if (r2_busy) begin
-                if (t_rom[0]) begin v[0] <= 1'b0; r[0] <= 1'b0; end
-                if (t_rom[1]) begin v[1] <= 1'b0; r[1] <= 1'b0; end
-                for (s = 0; s < CAMN; s = s + 1)
-                    if (cam_rom[s]) begin cam_v[s] <= 1'b0; cam_r[s] <= 1'b0; end
             end
         end
     end

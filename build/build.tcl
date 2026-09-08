@@ -156,8 +156,8 @@ if {$snoop || $master} {
         [file join $root rtl tx_ring.sv] \
         [file join $root rtl page_client.sv] \
         [file join $root rtl apple_mmu.sv] \
-        [file join $root rtl apple_rom.sv] \
-        [file join $root rtl bank_ram.sv] \
+        [file join $root rtl rom_loader.sv] \
+        [file join $root rtl way_ram.sv] \
         [file join $root rtl page_cache.sv] \
         [file join $root rtl event_merge.sv] \
         [file join $root rtl uart_tx.v] \

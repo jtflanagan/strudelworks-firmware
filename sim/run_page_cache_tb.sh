@@ -1,21 +1,40 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
-# The page cache's two banks, its engine, the DDR3 client, the arbiter's
-# priority slot and the ROM, against a Wishbone memory that acks like the
-# DDR3 and a streaming client sharing the port.  ~30 s.  See
-# sim/page_cache_tb.sv and docs/PAGE_CACHE.md.
+# The physical page cache (rtl/page_cache.sv), its engine, the DDR3 client,
+# the arbiter's priority slot and a streaming client sharing the port, against
+# a Wishbone memory that acks like the DDR3 - and against a full model of the
+# cache, so the replacement policy is checked exactly and not merely plausibly.
+#
+# THE GEOMETRY IS SWEPT: 128x8 (the shipping shape), 64x10 (a way count that
+# is not a power of two, on purpose) and 64x8.  Pass one as an argument to run
+# it alone: sim/run_page_cache_tb.sh 64x10
+#
+# Verilator, about a minute for all three.  See sim/page_cache_tb.sv and
+# docs/MEMORY_REFACTOR.md Part 3.
 set -euo pipefail
-
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-work="$root/sim/mem_work"
-mkdir -p "$work"
+work="$root/sim/mem_work"; mkdir -p "$work"
+command -v verilator > /dev/null || { echo "verilator not found" >&2; exit 1; }
 
-rm -f "$work/page_cache_tb.out"
-iverilog -g2012 -o "$work/page_cache_tb.out" -s page_cache_tb \
-    "$root/sim/page_cache_tb.sv" "$root/rtl/page_cache.sv" "$root/rtl/bank_ram.sv" \
-    "$root/rtl/apple_rom.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" \
-    2>&1 | grep -vE "sorry: constant selects|cannot be synthesized" || true
-[ -f "$work/page_cache_tb.out" ] || { echo "compile failed" >&2; exit 1; }
-vvp -N "$work/page_cache_tb.out" | tee "$work/page_cache_tb.log" | grep -vE "^\$finish|VCD"
-grep -q '^PASS$' "$work/page_cache_tb.log" || exit 1
+if [ $# -gt 0 ]; then geoms=("$@"); else geoms=(128x8 64x10 64x8); fi
+
+fail=0
+for g in "${geoms[@]}"; do
+    sets="${g%x*}"; ways="${g#*x}"
+    obj="$work/obj_$g"
+    verilator --binary --timing -j 4 -O1 -Wno-fatal --top-module page_cache_tb \
+        -GSETS="$sets" -GWAYS="$ways" \
+        -I"$root/rtl" --Mdir "$obj" \
+        "$root/sim/page_cache_tb.sv" \
+        "$root/rtl/page_cache.sv" \
+        "$root/rtl/way_ram.sv" \
+        "$root/rtl/page_client.sv" \
+        "$root/rtl/wb_arb.sv" \
+        > "$work/build_$g.log" 2>&1 || { echo "== $g: BUILD FAILED"; tail -30 "$work/build_$g.log"; fail=1; continue; }
+    echo "== geometry $sets x $ways"
+    if "$obj/Vpage_cache_tb" | tee "$work/run_$g.log" | grep -vE '^ok: '; then :; fi
+    grep -q '^PASS$' "$work/run_$g.log" || fail=1
+done
+[ "$fail" = 0 ] || { echo "FAIL"; exit 1; }
+echo "PASS"

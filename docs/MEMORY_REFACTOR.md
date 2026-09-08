@@ -1,12 +1,15 @@
 # The physical memory rethink: a 24-bit page cache and switch-surviving fronts
 
-Status: **rungs 1-3 DONE and proven on hardware, rung 4 (the physical page
-cache, standalone) DONE in simulation and out-of-context synthesis, 2026-09-08;
+Status: **FINISHED, 2026-09-08.  Rungs 1-5 DONE and proven on hardware; rung 6
+NOT PURSUED by the user's decision (see "How this ends", last).
 branch `memory_refactor`, taken from master (fw `87cfbfa` / host `e9042c0`).
-Last bitstream TIMING MET wns=+0.041 whs=+0.062 fail=0/62793 (rung 3; rung 4
-adds no RTL to it).  `sim/run_phys_cache_tb.sh` 52 checks / 0 errors at each of
-128x8, 64x10 and 64x8; the new block synthesises out of context at 2,746 LUTs
-/ 1,061 flops / 64 RAMB36 with WNS +1.425 at 10 ns.  Rungs 5-6 not started.**
+Last bitstream **TIMING MET wns=+0.238 whs=+0.027 fail=0/70934**, 83 RAMB36 of
+135: the >= +0.039 gate met six times over, and the long-chain tail SHORTER
+than before the rung (181 endpoints at >= 14 levels against 269).  Simulation
+at the pre-refactor check counts: accel_vl 98/0 both sweeps, the boot bench on
+ProDOS 2.4.3 and nox_los.HDV at modes 0 AND 2, mem_integ 21/0, page_cache 52/0
+at 128x8, 64x10 and 64x8.  On the animated Nox map: 569 pages filled, **ZERO flushed**, 0 late fills, 0
+drops, mismatches plateaued at 5, and both fronts reproducing rungs 2-3 exactly.**
 
 This is the run sheet for the user's 2026-09-07 decision to make the card's
 memory one PHYSICAL space.  `docs/PAGE_CACHE.md` still describes the two fixed
@@ -116,8 +119,8 @@ run; Verilator only.
 | 2 | Part 2 dline: revalidation, PPN stamps/seams, `DDROP/DREVIVE`, the `revaltest` phase, header rewrite | battery + revaltest's dline asserts, boot 2/2; HW census | **DONE** |
 | 3 | Part 2 iline: revalidation, settle 5, `IDROP/IREVIVE`, ISTREAM/CXXX text | battery + revaltest's iline asserts, boot 2/2; HW: Nox map before/after | **DONE, timing margin OPEN** |
 | 4 | Part 3 alone: `way_ram`, the new cache as `phys_cache` beside the old, `sim/phys_cache_tb.sv` sweeping the geometry, OOC synthesis | 128x8 / 64x10 / 64x8 pass, the il race sweep, the pressure round trip, the clean-victim path's answer | **DONE** |
-| 5 | Part 3 integration: master_top, F_WAIT/C_WAIT, fb_sim tap, monitor, regfile, ROM as pages + host write path, `apple_rom` removed, mem_integ_tb | mem_integ 20 checks, battery, boot bench both images mode 0 vs 2 parity; the HW ladder | not started |
-| 6 | Part 4 + docs: PAGE_CACHE.md rewrite, MEMORY.md, DLINE.md, ISTREAM.md, CXXX.md, PROTOCOL.md, DDR3_USAGE.md; then the 64 x 8 build | | not started |
+| 5 | Part 3 integration: master_top, F_WAIT/C_WAIT, fb_sim tap, monitor, regfile, ROM as pages + host write path, `apple_rom` removed, mem_integ_tb | mem_integ 20 checks, battery, boot bench both images mode 0 vs 2 parity; the HW ladder | **DONE, on hardware** |
+| 6 | Part 4 + docs; then the 64 x 8 build | | **NOT PURSUED** - Part 4 landed inside rung 5; the docs carry a SUPERSEDED banner instead of a rewrite |
 
 ## Rung 1, as built
 
@@ -731,3 +734,324 @@ take "not resident" for an answer.
 - `accel_seq` already honours `mem_invalidating`; with the walk back it
   matters again, and the reset walk (SETS clocks) finishes long before the
   DDR3 calibrates.
+
+## Rung 5, as built
+
+The physical page cache is the card's memory now.  `rtl/page_cache.sv` is the
+module rung 4 built as `phys_cache`; `rtl/bank_ram.sv` and `rtl/apple_rom.sv`
+are gone, and with them the two fixed 64 KB banks and the ROM's own block RAM.
+
+### The ROM stopped being special
+
+`rtl/apple_rom.sv` held the IIe's 16 KB in a block RAM of its own and served it
+from there, with a second port the instruction front pulled ROM lines through
+four bytes at a time (`r2_*`, four states of iline's fill engine).  All of that
+is gone.  The ROM is physical bank $FF, pages $C0-$FF, cached like anything
+else - which means a ROM line is fetched by the same line port a RAM line is,
+installed in the same slots, revalidated by the same rule, and snooped by the
+same compare.  iline lost its `t_rom`/`cam_rom` per-line flag, its `F_R0..F_R3`
+states, its ROM staging buffer and its `r2_busy` invalidation, and `rv_ok` lost
+its `is_rom` argument: a line's own BANK says which class the region table must
+still be naming, because the ROM's bank is $FF and nothing else's is.
+
+`rtl/rom_loader.sv` replaces it - the same MEM_ROM message on the wire, turned
+into 16384 PHYSICAL WRITES through the posted-write seam, arbitrated in
+master_top behind the data front's.  After the load the ROM's sixty-four pages
+sit in the cache, dirty, and hit like any other page.
+
+**Two things about that had to be worked out rather than assumed.**
+
+*The rate.*  A chunk arrives at up to a word a clock and a byte leaves every
+four clocks, so the link delivers sixteen times faster than the seam drains.
+The loader therefore stages one chunk (512 bytes) and the host waits for its
+`busy` to fall before sending the next; a chunk that arrives under a drain is
+counted as an OVERRUN and dropped WHOLE, so `rom_ok` never sets and the machine
+runs from its own ROM - a visible failure rather than a ROM with a hole in it.
+`swhost`'s status prints the overrun count.
+
+*The window, and this one is a real hazard the plan does not mention.*  The
+page cache serves one miss at a time and an op that misses while the engine is
+busy is counted (`late_fills`) and NOT served - which for a WRITE means the
+byte is lost.  That never happened before because ONLY OPS started fills, and
+ops are ninety-eight clocks apart while a fill is fifty: the engine was always
+idle before the next one.  The loader is the first thing that can start a fill
+asynchronously, and the first byte of each of the ROM's sixty-four pages is
+exactly such a fill.  So the loader offers a byte only just after a bus cycle
+has begun - where a fill has the whole cycle to finish in - or when the machine
+has presented nothing for long enough that there is no cycle to be inside.
+`sim/mem_integ_tb.sv` caught this on its first run, as one late fill.
+
+### The line port grew a `done`
+
+The old port answered `il_ok` WITH the ack and put the row on the bus two
+clocks later.  A physically indexed cache cannot do that: whether it holds a
+page is the answer to a tag compare that has not run yet at the grant.  So
+`il_ack` grants, and `il_done` stands exactly three clocks later with `il_ok`
+and `il_row` together.  Both fronts' wait states follow it - iline's `F_W1`,
+dline's `C_W1` - and master_top registers which front was granted (`il_src_q`)
+so the one `done` reaches the one that asked.  A decline costs four clocks
+where it used to cost one, which matters not at all: with the whole machine
+and its ROM resident in a 256 KB cache, a decline is a cold-start event.
+
+### Everything that assumed a privileged main bank
+
+- The fronts' requests speak `{ppn, line}` rather than `{aux, bank, off}`;
+  dline's shadow names bank 0's pages 0 and 1 explicitly (it only ever fills
+  while the zero page and stack ARE main memory, its `zs_main_q`), and its
+  last old-triple carriers - `m_aux_q`, `m_bank_q`, the transaction copies -
+  are retired, along with `d_aux` and iline's `p_cls`/`p_aux`/`p_off`/`rw_bank`.
+- `card_byte(ppn, off)` is how the benches read the card's memory now: hash the
+  page to its set, scan the ways, read the one that holds it, else the DDR3.
+  `card_main` and `card_aux` are two lines on top of it.
+- The benches' DDR3 stubs back the whole 16 MB: main and the ROM are in the
+  DDR3 now, not just the RamWorks banks.
+- `MEM_CTRL[27:24]` is log2 of the cache's PAGES (10), from master_top's
+  `MEM_SETS`/`MEM_WAYS` through `card_link`.  `MEM_FILLS`, `MEM_FLUSHES`,
+  `MEM_DECLINES` at 0x8000_0114.., and `MEM_ROM` at 0x0120 for the load's flow
+  control.
+
+### The three bugs rung 5 cost, all mine, all found by running
+
+**The loader can start a fill, and nothing else ever could.**  See THE WINDOW
+above.  `sim/mem_integ_tb.sv` reported it as one late fill on the first run,
+which is exactly what the counter is for.
+
+**The benches outran the seam.**  `boot_tb` and `accel_tb` sent their 32 ROM
+chunks back to back, so thirty-one were dropped, `rom_ok` never set, and every
+ROM fetch went to the bus.  The boot bench's shape said it precisely: the disk
+booted, `bad 0 mism 0` throughout - correct, because the machine was reading
+its own ROM over the bus - while the turbo count FROZE at 325,559 and bus reads
+climbed to 295,000.  A machine that is perfectly correct and accelerates
+nothing is what a missing ROM looks like now.
+
+**The data front popped its FIFO on writes that were not its own.**  The posted
+seam has two producers now, and `pw_take` says only that SOMETHING was taken.
+dline was wired to it directly, so for each of a ROM load's 16,384 takes it
+discarded one of its own queued writes.  Two benches said so at once, in two
+different languages: the accel battery counted 1015 monitor mismatches whose
+last was a read of $0000 the card answered 00 to and the machine answered 38,
+and the boot bench's drain accounting came out 131,072 too high - 16,384 for
+the ROM, and the rest dline's own writes going round again.  The fix is one
+term: a front is told a take is ITS take only when it was the source.
+
+The general lesson is the one the seam's name hides.  "Arbitrated with dline's
+FIFO" is a single clause in the plan, and it costs three signals: who offers,
+who is told they were taken, and who may offer at all.  Getting two of the
+three right is a design that works until the second producer runs.
+
+### Rung 5's evidence
+
+Simulation, 2026-09-08 - every bench at its pre-refactor check count:
+
+- `sim/run_accel_vl.sh`, both sweeps: **98 checks, 0 errors** each, the count
+  rung 3 left.  The revalidation books are rung 3's to within the program's own
+  jitter: D 5481 drops / 5154 revives / 31740 revived-line serves, I 777 / 483.
+  Mode 2's fast-op census shows **1024 ROM ops** - the ROM served as cached
+  pages, at a fast op's cost.
+- `sim/run_mem_integ_tb.sh` **21 checks, 0 errors** (20 before, plus the ROM
+  load's own), no late fills, no drops.  It runs under Verilator now.
+- The boot bench, ProDOS 2.4.3 and nox_los.HDV at mode 2: **PASS** each - the
+  image equals the reference in every bank, the disk boots, and every posted
+  write drained through the classified stage exactly once (9,165,238 and
+  1,279,134) beside the ROM's 16,384.
+- `sim/run_page_cache_tb.sh` 52 checks x 3 geometries, `reg_map`, `lint`,
+  `tools/check_ports.py`: all clean.  The host cross-builds.
+
+**The boot bench at MODE 0 found a gap in its own reference, not in the card.**
+A handful of `$C4xx` reads disagreed - but `MB_SLOT = 4`, so that page is the
+Mockingboard's, and the ProDOS slot scan reads VIA registers there that the
+reference explicitly does not model (it answers FLOAT).  The card agreed with
+the machine on every one.  The bench already carries that exemption on the
+FAST-read path; the BUS-read path never got it, which is why only mode 0 sees
+it - with the core accelerated those reads are fast ops.  Mode 0 had not been
+run since before the Phasor went into slot 4.  The exemption is on both paths
+now.
+
+### Rung 5's timing: spent, then more than recovered
+
+    build 1, as integrated       wns=+0.007  whs=+0.045   fail=0/67856
+    build 2, as integrated       wns=+0.018  whs=+0.030   fail=0/67856
+    build 3, the row array sliced  **wns=+0.238  whs=+0.027   fail=0/70934**
+
+Against the plan's >= +0.039, and rung 3's +0.024/+0.041.  The first two
+samples fell either side of the +/-30 ps spread and both fell short, so the
+integration really did cost about twenty picoseconds; the third recovered ten
+times that.  83 RAMB36 of 135 where the design had 59.  The long-chain tail
+came out SHORTER than before the rung: 181 endpoints at >= 14 levels against
+269.
+
+**It was never the new cache.**  Counting long chains by source register - the
+user's method - puts `u_cache` nowhere: the leaders were `u_vbl/locked_reg`
+(2169), `u_merge/q_reg` (2127), `u_cpu/pcl_reg` (500), `u_dline/spl_v_reg`
+(483), every one pre-existing.  The critical path was the one rung 3 recorded
+as STILL OPEN - the data front's one-clock serve into the CPU's datapath,
+`u_dline/dq_sx_reg -> u_cpu/md_reg`.  Routed, it read:
+
+    dq_sx_reg[1][1] -> net (fo=128)          1.282 ns   the row LUTRAM's address
+                    -> RAMD32 + route        1.050 ns
+                    -> lb_byte i_29/17/6/2   2.246 ns   FOUR LUT levels of byte steering
+                    -> d_din -> the CPU                ~1.0 ns
+
+### The lesson: it was wide, not deep
+
+The user asked whether the chain could be cut by giving the cache another cycle
+of latency.  It could - the path halves at the LUTRAM almost exactly - but the
+report says the price was not necessary, and why is the part worth keeping:
+
+    every LUT on that path costs 0.105 ns, and there were five of them
+    ONE NET cost 1.282 ns
+
+Not a deep chain: a WIDE one.  1.282 ns is a single hop from a flop to 128
+RAMD32 address pins that share it, before any logic runs.  dline already
+replicates that register per way, and its own comment records the previous
+round of this same argument - but per-way is as far as replication can go while
+a way's row array is one 128-bit object, because every bit of that object
+shares one address.
+
+So the ARRAY is sliced rather than the register replicated: four 32-bit arrays
+per way, each with its own address copy at a fanout of 32.  The same RAM bits,
+the same latency, twelve more flops, no cycle given up - and +0.007 became
++0.238.  The accel battery came out at 98 checks 0 errors with the revalidation
+books byte-identical (D 5481/5154/31740, I 777/483), which is what says the
+change was a restructuring and nothing else.
+
+**The rule to carry forward: when a first hop costs a third of the period and
+the logic after it costs a tenth, the answer is not a pipeline stage - it is
+asking what that one net has to reach.**
+
+And what a cycle would have cost, since the question was asked: the limiter is
+the FRONT, not the 256 KB cache.  The page cache is already a three-clock hit
+and closed out of context at +1.425, so a cycle there is cheap and buys
+nothing.  The front's serve is one clock by design and covers about 13% of ops
+(8.9M of 66.3M in the ProDOS boot), so a second clock there is roughly 8-9% of
+the machine's speed.  The expensive cycle was the only one that would have
+helped.
+
+### The next lever, if margin is ever wanted again
+
+The user's second question - how much of the path is steering to the exact byte,
+and could that happen in parallel - names it.  Byte steering was 2.246 ns of a
+5.7 ns path, four LUT levels of 16:1 mux run AFTER the RAM read, even though
+the byte index (`dq_ix_cam`) is registered from `d_pred` at the same moment the
+row address is.  Two ways to collect it, unbuilt:
+
+- Write the mux as two explicit 4:1 stages.  A 16:1 select needs two LUT6
+  levels; synthesis built four plus MUXF7s out of the variable part-select.
+- Better: fold the slice select into the ADDRESS.  The array is 8 deep x 128
+  wide today, so every RAMD32 holds 8 of its 32 entries and the width is paid
+  for in mux depth.  Reshaped to 32 deep x 32 wide, addressed by
+  `{set, dq_ix[3:2]}`, the depth is native to a RAMD32, the steering collapses
+  to ONE 4:1 level on `dq_ix[1:0]`, and it costs 32 RAMD32s instead of 128.
+  The price lands where it is cheap: an install writes a line, so it becomes
+  four writes instead of one - and installs are the miss path (2488 in a whole
+  ProDOS boot), while SPLICES get cheaper (one 32-bit slice write instead of a
+  128-bit read-modify-write, and there are nine million of those).
+
+### Rung 5 on hardware, the animated Nox map
+
+Loaded onto the card, ROM and all, and taken to the measurement screen by the
+user's route (reboot, the main menu, Return, 1 - the memory note
+`nox-measure-screen`).  The screen's own menus and maps are HGR, so the text
+screen shows only graphics memory decoded as text: `screenshot`, not
+`wait_for_text`.
+
+**The memory census, and it is the whole point of the rung:**
+
+    1024 pages, 256 KB; image ready
+    hits 97,870,446   misses 569   served 92,745,055
+    mismatches 5   late fills 0   drops 0
+    pages: 569 filled, 0 FLUSHED, 280 line requests declined
+
+- **569 fills, and 569 misses, and nothing else, ever.**  A 128 KB IIe is 512
+  pages and the ROM is 64, so 576 is every page the machine has; the cache
+  faulted in 569 of them once and then stopped missing.  Between two readings
+  the hit count went from 9.5 million to 97.9 million and the miss count did
+  not move.
+- **ZERO FLUSHES.**  Nothing has ever been evicted, which is the rung's gate
+  and the whole argument for the hashed index: bank 0's two pages per set,
+  bank 1's two, the ROM's one, five ways of eight, and nothing collides.
+- late fills 0 and drops 0 - the counters that must read zero.
+- mismatches plateaued at **5**, the same five rung 2 measured on hardware.
+- 280 declines: the cold-start line requests, before their pages were resident.
+- The ROM load itself: `mmiss=64` immediately after the host sent it, exactly
+  one fill per ROM page, and `mrom=1`.
+
+**The fronts, unchanged from rungs 2 and 3 on the real machine:**
+
+| | rung 5 | rungs 2-3 |
+|---|---|---|
+| D lines dropped per map change | **16.15** of 32 | 16.1 |
+| of those, revived | **95.66%** | 95.7% |
+| net refills per map change | **0.70** | 0.70 |
+| I front drops / revives | **0 / 0** | 0 / 0 |
+
+**Speed: 66-78x over four intervals, and NO CLAIM IS MADE FROM IT.**  Two
+measurement hazards showed up and both are worth recording:
+
+- The op counters are 32 bits and WRAP.  One interval read turbo going
+  backwards, 2,760,226,267 to 498,727,694.
+- `maps` and the drop/revive counters come back on a SLOWER POLL ROTATION than
+  the op counters.  Consecutive reads gave map deltas of 328,358 / 328,374 /
+  328,385 no matter how long the interval - a rotation's worth, not an
+  interval's.  So maps-per-1000-cycles from consecutive reads is meaningless,
+  and the normalised ratio rungs 1-3 used cannot be computed this way.  What
+  IS valid is a ratio of two fields from the SAME snapshot, which is why the
+  drop/revive figures above stand.
+
+Rung 1's single sample on this screen was 86.25x.  Whether 66-78x is a
+regression, the same, or a different phase of the same game is NOT ESTABLISHED
+by these readings, and the matched A/B the run sheet has owed since rung 2 -
+both bitstreams, the same route, the same elapsed time, counters cleared - is
+still owed and is now the only way to settle it.
+
+**One hardware incident, and its cause is known.**  Between two swhost
+restarts the card dropped off the USB bus - `FAULTED: device gone` in the log,
+then LINK DOWN, DDR3 not calibrated, the cycle counter frozen and the FT601
+re-enumerating at a new address.  The FT601 is a separate chip from the FPGA
+and enumerates whatever the FPGA is doing, so that picture is an FPGA that lost
+its configuration: the bitstream lives in volatile SRAM (the memory note
+`pi-reboot-wipes-bit`).  Reloading it and restarting swhost recovered
+completely.  Nothing about the rung's RTL is implicated; the card is
+USB-powered and sits near its budget (`power-budget`).
+
+## How this ends
+
+The user's decision, 2026-09-08: **rung 5 is an acceptable finish.**  The card's
+memory is one 24-bit physical space, the machine and its ROM live in a 256 KB
+physically-indexed cache that never evicts, and both fronts survive a map change
+as rungs 2 and 3 built them to.  Performance on the real machine, across several
+disk images the user drove himself, is close enough to the old design that no
+regression is noticeable - which was the bar, since this refactor was for the
+65816's sake and not for speed.
+
+**What was deliberately NOT done, so nobody goes looking for it:**
+
+- **Rung 6's doc rewrite.**  `docs/PAGE_CACHE.md`, `MEMORY.md`, `ISTREAM.md`,
+  `ACCELERATION.md` and `BOOT_BENCH.md` still describe the two-bank design and
+  the ROM's own block RAM.  Each now opens with a SUPERSEDED banner naming what
+  replaced it; the living description is `rtl/page_cache.sv`'s header and this
+  file.  A banner is not a rewrite and is not pretending to be one.
+- **Part 4 of the plan** is not outstanding: it landed inside rung 5 (the new
+  register words, `mem_ctrl_pages_log2`, the poll list, the atomics,
+  `mem_report`'s pages/fills/flushes/declines, and `mem status` on the control
+  socket).  The one leftover is a stale comment in the host's
+  `src/apple_memory.hpp` about image banks 1-255, which is now the card's
+  convention too.
+- **The 64 x 8 build**, the cheap fallback geometry: proven in the geometry
+  sweep and out of context (same LUTs, half the block RAM) but never built into
+  a bitstream.  `MEM_SETS`/`MEM_WAYS` in `master_top` are the whole change.
+- **The matched A/B for a speed claim**, owed since rung 2 and now closed
+  unpursued: judged on the real machine instead.  No x-factor claim is made
+  anywhere in this document, and the reasons the derived ratio cannot carry one
+  are recorded above (32-bit counters that wrap; `maps` on a slower poll
+  rotation than the op counters).
+- **The rest of rung 5's scripted ladder** - `ramworks_test.sh`, `mem_test.sh`,
+  `fb_test.sh` - not run.  `ramworks_test.sh` is the one that would matter most
+  if this is ever picked up again, because RamWorks banks moved to physical
+  k+1 and dropped to 254.
+
+**Where the design goes next, if it goes anywhere:** the 65816 this was all
+for.  `xlate()` already takes a 24-bit address and maps banks >= 2 to
+themselves; the `flat` input the plan describes is unbuilt but the function's
+shape allows it.  And if timing margin is ever wanted again, the byte-steering
+lever above is written up and unbuilt.

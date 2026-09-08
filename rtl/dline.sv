@@ -156,14 +156,14 @@ module dline #(
     // The map: ALTZP as the MMU holds it (sw_state[3]); registered here.
     input  wire        altzp,
 
-    // The MMU's d-side query port, rooted at dq_addr/dq_rw below: the
-    // class, the bank side and the folded offset of the candidate,
-    // evaluated THROUGH the serve cycle.  rw_bank is the wanted RamWorks
-    // bank; map_changed flash-clears the CAM.
+    // The MMU's d-side query port, rooted at dq_addr/dq_rw below: the class
+    // and the folded offset of the candidate, evaluated THROUGH the serve
+    // cycle.  rw_bank is the wanted RamWorks bank - only its being non-zero
+    // matters here, as the write retire's qualifier; map_changed is the
+    // map's edge.
     output logic [15:0] dq_addr,
     output wire        dq_rw,
     input  wire [1:0]  d_cls,
-    input  wire        d_aux,
     input  wire [15:0] d_off,
     input  wire [7:0]  rw_bank,
     input  wire        map_changed,
@@ -181,13 +181,13 @@ module dline #(
     input  wire        map_settling,
 
     // The line-row port, arbitrated in the top behind iline's requests.
-    output logic       dl_req,
-    output logic       dl_aux,
-    output logic [7:0] dl_bank,
-    output logic [11:0] dl_line,
-    input  wire        dl_ack,        // granted this clock (top gates by priority)
-    input  wire        dl_ok,
-    input  wire [127:0] dl_row,       // valid two clocks after an ok'd ack
+    output logic        dl_req,
+    output logic [15:0] dl_ppn,       // the PHYSICAL page...
+    output logic [3:0]  dl_line,      // ...and the line in it
+    input  wire         dl_ack,       // granted this clock (top gates by priority)
+    input  wire         dl_done,      // the answer, exactly three clocks later
+    input  wire         dl_ok,
+    input  wire [127:0] dl_row,
 
     // The splice: the classified stream's writes that reach the image
     // (bus ops, the dispatcher's, DMA).  A posted write comes back round
@@ -300,9 +300,14 @@ module dline #(
     // KEEP holds the nets apart.
     (* KEEP = "TRUE" *) logic [3:0] dq_ix_sh;
     (* KEEP = "TRUE" *) logic [3:0] dq_ix_cam [0:3];
-    // ...and of the set index, one per way (rung 5): the build that met at
-    // +0.008 had Vivado's own copies at 111 loads each on the worst path.
-    (* KEEP = "TRUE" *) logic [2:0] dq_sx [0:3];
+    // ...and of the set index, one per way AND PER 32-BIT SLICE of that way's
+    // row array (rung 5).  A per-way copy is not enough and cannot be: a way's
+    // rows are 128 bits, so one address bit reaches 128 RAMD32 primitives that
+    // share it, and the routed first hop was 1.282 ns - a third of the period,
+    // before any logic ran.  The array is sliced into four 32-bit arrays
+    // below, each with its own copy at a fanout of 32.  Same RAM bits, same
+    // latency, twelve more flops.
+    (* KEEP = "TRUE" *) logic [2:0] dq_sx [0:4*NWAY-1];
     // ...and one more per way for the TAG array alone: with rows and tags
     // on one copy (142 loads) the tag read was the worst path's first hop
     // at +0.043; the tag leg is the long one, so it gets the light copy.
@@ -322,10 +327,7 @@ module dline #(
             dq_ix_cam[1] <= d_pred[3:0];
             dq_ix_cam[2] <= d_pred[3:0];
             dq_ix_cam[3] <= d_pred[3:0];
-            dq_sx[0] <= d_pred[6:4];
-            dq_sx[1] <= d_pred[6:4];
-            dq_sx[2] <= d_pred[6:4];
-            dq_sx[3] <= d_pred[6:4];
+            for (int c = 0; c < 4*NWAY; c = c + 1) dq_sx[c] <= d_pred[6:4];
             dq_st[0] <= d_pred[6:4];
             dq_st[1] <= d_pred[6:4];
             dq_st[2] <= d_pred[6:4];
@@ -372,7 +374,6 @@ module dline #(
     wire [TW-1:0] stag = dq_addr[15:IW+4];
     wire       in_sh_estate = (dq_addr[15:9] == 7'd0) && zs_main_q;
     wire       d_cls_ok     = (d_cls == CLS_RAM) || (d_cls == CLS_LC);
-    wire [7:0] want_bank    = d_aux ? rw_bank : 8'd0;
     integer k;
     logic [NSET-1:0] cv   [0:NWAY-1];           // valid, per line (flip-flops)
     // RETAINED, beside valid: the tags and the row mean something and the
@@ -401,20 +402,23 @@ module dline #(
     logic [IW-1:0]   t_set;
     logic [IW-1:0]   spi;
     logic [PTW-1:0]  spt;
-    logic            m_aux_q_t;
-    logic [7:0]      m_bank_q_t;
-    logic [11:0]     m_off_q_t, m_vt_q_t;
+    logic [11:0]     m_vt_q_t;
     logic [15:0]     m_ppn_q_t;
     logic [3:0]      m_reg_q_t;
     logic            m_fold_q_t;
     wire  [127:0]    dl_row_w = dl_row;
     genvar gw;
     generate for (gw = 0; gw < NWAY; gw = gw + 1) begin : g_way
-        logic [127:0]  rows [0:NSET-1];
+        // FOUR 32-BIT SLICES, not one 128-bit array: the bits are the same
+        // and so is the latency, but each slice's read address is its own net
+        // at a fanout of 32 instead of one net at 128.  See dq_sx above.
+        logic [31:0]   rows [0:3][0:NSET-1];
         logic [TW-1:0] vt   [0:NSET-1];
         logic [PTW-1:0] pt  [0:NSET-1];
+        wire [127:0] srow = {rows[3][dq_sx[4*gw+3]], rows[2][dq_sx[4*gw+2]],
+                             rows[1][dq_sx[4*gw+1]], rows[0][dq_sx[4*gw+0]]};
         assign hitv[gw]  = cv[gw][dq_st[gw]] && (vt[dq_st[gw]] == stag);
-        assign wbyte[gw] = {8{hitv[gw]}} & rows[dq_sx[gw]][dq_ix_cam[gw]*8 +: 8];
+        assign wbyte[gw] = {8{hitv[gw]}} & srow[dq_ix_cam[gw]*8 +: 8];
         // The splice's cut: the write's set, its physical identity - against
         // every RETAINED line, valid or not, so a line written while it is
         // out of service comes back holding the new byte.
@@ -427,11 +431,16 @@ module dline #(
         always_comb begin
             we = spc_hit[gw] || inst_w[gw];
             wa = spc_hit[gw] ? spi : t_set;
-            md = rows[wa];
+            md = {rows[3][wa], rows[2][wa], rows[1][wa], rows[0][wa]};
             md[iw_off8[3:0]*8 +: 8] = iw_data;
             wd = spc_hit[gw] ? md : dl_row_w;
         end
-        always_ff @(posedge clk) if (we) rows[wa] <= wd;
+        always_ff @(posedge clk) if (we) begin
+            rows[0][wa] <= wd[31:0];
+            rows[1][wa] <= wd[63:32];
+            rows[2][wa] <= wd[95:64];
+            rows[3][wa] <= wd[127:96];
+        end
         always_ff @(posedge clk) if (inst_w[gw]) begin
             vt[t_set] <= m_vt_q_t[11:IW];
             pt[t_set] <= {m_ppn_q_t, m_vt_q_t[3]};
@@ -748,8 +757,6 @@ module dline #(
     logic [4:0] miss_line_q;
     logic       t_cam;
     logic [WW-1:0] t_way;
-    logic       m_aux_q;
-    logic [7:0] m_bank_q;
     logic [11:0] m_off_q, m_vt_q;
     logic [15:0] m_ppn_q;
     logic [3:0]  m_reg_q;
@@ -761,16 +768,13 @@ module dline #(
     // the registered copy as describing THIS cycle's dq_addr; on the
     // clock after a cyc_en it still describes the previous cycle's, and
     // the trigger waits (a missed read cycle lasts many clocks).
-    logic       pc_ok_q, p_aux_q2, pq_fresh;
-    logic [7:0] p_bank_q2;
+    logic       pc_ok_q, pq_fresh;
     logic [11:0] p_off_q2;
     logic [15:0] p_ppn_q2;
     logic [3:0]  p_reg_q2;
     logic        p_fold_q2;
     always_ff @(posedge clk) begin
         pc_ok_q   <= d_cls_ok;
-        p_aux_q2  <= d_aux;
-        p_bank_q2 <= want_bank;
         p_off_q2  <= d_off[15:4];
         p_ppn_q2  <= d_ppn;
         p_reg_q2  <= d_reg;
@@ -850,8 +854,6 @@ module dline #(
         miss_q      <= live_miss && (cst == C_IDLE);
         miss_line_q <= cpu_addr[8:4];
         cmiss_q     <= live_cmiss && (cst == C_IDLE);
-        m_aux_q     <= p_aux_q2;
-        m_bank_q    <= p_bank_q2;
         m_off_q     <= p_off_q2;
         m_vt_q      <= dq_addr[15:4];
         m_ppn_q     <= p_ppn_q2;
@@ -864,9 +866,8 @@ module dline #(
                 cv[k] <= '0; cr[k] <= '0; crev[k] <= '0;
             end
             for (k = 0; k < NSET; k = k + 1) rrp[k] <= '0;
-            cst <= C_IDLE; dl_req <= 1'b0; dl_line <= 12'd0; c_line <= 5'd0;
-            dl_aux <= 1'b0; dl_bank <= 8'd0; t_cam <= 1'b0; t_way <= '0; t_set <= '0;
-            m_aux_q_t <= 1'b0; m_bank_q_t <= 8'd0; m_off_q_t <= 12'd0;
+            cst <= C_IDLE; dl_req <= 1'b0; dl_line <= 4'd0; c_line <= 5'd0;
+            dl_ppn <= 16'd0; t_cam <= 1'b0; t_way <= '0; t_set <= '0;
             m_ppn_q_t <= 16'd0; m_reg_q_t <= 4'd0; m_fold_q_t <= 1'b0;
             miss_q <= 1'b0; cmiss_q <= 1'b0;
             tick_q <= 1'b0; dev_valid <= 1'b0;
@@ -898,9 +899,11 @@ module dline #(
                 C_IDLE: if (miss_q) begin
                     t_cam   <= 1'b0;
                     c_line  <= miss_line_q;
-                    dl_line <= {7'd0, miss_line_q};
-                    dl_aux  <= 1'b0;
-                    dl_bank <= 8'd0;
+                    // The shadow is the zero page and the stack, and it only
+                    // fills while they are MAIN memory (zs_main_q above), so
+                    // its page is bank 0's page 0 or 1.
+                    dl_ppn  <= {15'd0, miss_line_q[4]};
+                    dl_line <= miss_line_q[3:0];
                     dl_req  <= 1'b1;
                     cst     <= C_REQ;
                 end else if (cmiss_q) begin
@@ -915,26 +918,26 @@ module dline #(
                                  !cr[1][m_vt_q[IW-1:0]] ? 2'd1 :
                                  !cr[2][m_vt_q[IW-1:0]] ? 2'd2 :
                                  !cr[3][m_vt_q[IW-1:0]] ? 2'd3 : rrp[m_vt_q[IW-1:0]];
-                    m_aux_q_t <= m_aux_q;
-                    m_bank_q_t <= m_bank_q;
-                    m_off_q_t <= m_off_q;
                     m_vt_q_t  <= m_vt_q;
                     m_ppn_q_t <= m_ppn_q;
                     m_reg_q_t <= m_reg_q;
                     m_fold_q_t <= m_fold_q;
-                    dl_line   <= m_off_q;
-                    dl_aux    <= m_aux_q;
-                    dl_bank   <= m_bank_q;
+                    dl_ppn    <= m_ppn_q;
+                    dl_line   <= m_off_q[3:0];
                     dl_req    <= 1'b1;
                     cst       <= C_REQ;
                 end
                 C_REQ: if (dl_ack) begin
                     dl_req <= 1'b0;
-                    // Main always holds; an aux line's page may not be
-                    // resident, and then there is nothing to install.
-                    cst    <= dl_ok ? C_W1 : C_IDLE;
+                    cst    <= C_W1;
                 end
-                C_W1: cst <= C_W2;
+                // The cache answers three clocks after the grant, residency
+                // and row together (rtl/page_cache.sv): a physically indexed
+                // directory cannot say whether it holds a page until its own
+                // tag compare has run.  A page that is not resident declines
+                // and there is nothing to install - the op rides the
+                // sequencer, and the miss it takes fills the page.
+                C_W1: if (dl_done) cst <= dl_ok ? C_W2 : C_IDLE;
                 C_W2: begin
                     // The row arrives, on the write ports above - unless a
                     // splice interferes.  For the shadow: ANY splice this

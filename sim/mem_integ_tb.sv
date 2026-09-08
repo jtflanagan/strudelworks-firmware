@@ -131,8 +131,13 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [15:0] cl_off, pf_off;
     wire [11:0] sw_state;
     wire [7:0]  rw_bank;
-    wire [7:0]  rom_byte;
+    localparam integer SETS = 128, WAYS = 8;
     wire        rom_loaded, invalidating, image_ready, refresh_ok, rot_ok, mem_idle;
+    wire        rom_busy, pw_ready, pw_take;
+    wire [7:0]  rom_overruns;
+    wire        rl_pw_valid;
+    wire [15:0] rl_pw_ppn, cl_ppn, pf_ppn;
+    wire [7:0]  rl_pw_off, rl_pw_data;
     wire [31:0] hits, misses, served, mismatches, last_mismatch, diverted;
     wire [7:0]  late_fills, fifo_drops;
     reg         msg_valid = 1'b0, pay_valid = 1'b0;
@@ -150,38 +155,41 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (pf_off),
         .cl_posted (cl_posted), .cl_wdata (cl_wdata),
-        .pw_valid (1'b0), .pw_ppn (16'd0), .pw_off (8'd0), .pw_data (8'd0),
-        .pw_ready (1'b0), .pw_take (),
+        .pw_valid (rl_pw_valid), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
+        .pw_data (rl_pw_data), .pw_ready (pw_ready), .pw_take (pw_take),
         .sw_state (sw_state), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert),
         .p_addr (16'd0), .p_cls (), .p_aux (), .p_off (), .map_changed (),
-        // the physical space (docs/PAGE_CACHE.md); no consumer here yet
-        .cl_ppn (), .pf_ppn (), .p_ppn (), .p_reg (), .p_fold (), .p_fs (),
+        .cl_ppn (cl_ppn), .pf_ppn (pf_ppn), .p_ppn (), .p_reg (), .p_fold (), .p_fs (),
         .d_ppn (), .d_reg (), .d_fold (), .map_settling (), .rt_rd_flat (), .rwb_p1 ()
     );
-    apple_rom u_rom (
+    rom_loader u_rom (
         .clk (clk), .rst (rst),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
-        .rd_en (op_present), .rd_addr (op_addr[13:0]), .rd_data (rom_byte),
-        .r2_en (1'b0), .r2_addr (12'd0), .r2_data (), .r2_busy (), .rom_loaded (rom_loaded)
+        .op_present (op_present), .image_ready (image_ready),
+        .pw_valid (rl_pw_valid), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
+        .pw_data (rl_pw_data), .pw_take (pw_take),
+        .busy (rom_busy), .overruns (rom_overruns), .rom_ok (rom_loaded)
     );
-    page_cache u_cache (
+    page_cache #(.SETS (SETS), .WAYS (WAYS)) u_cache (
         .clk (clk), .rst (rst),
-        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
-        .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (pf_off),
-        .cl_posted (cl_posted), .pw_pending (1'b0), .pw_ready (),
-        .op_addr (op_addr), .op_wdata (cl_wdata),
+        .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_ppn (cl_ppn), .cl_off (cl_off[7:0]),
+        .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_wdata (cl_wdata),
+        .cl_posted (cl_posted), .pw_pending (1'b0), .pw_ready (pw_ready),
+        .pf_ppn (pf_ppn), .pf_off (pf_off[7:0]),
+        .pw_take (pw_take), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
+        .op_addr (op_addr),
         .op_present (op_present), .op_commit (op_commit), .op_divert (op_divert), .data_sync (data_sync),
-        .rom_byte (rom_byte), .rom_loaded (rom_loaded),
         .sub_en (sub_en), .sub_data (sub_data),
         .mw_stb (), .mw_addr (), .mw_byte (),
-        .il_req (1'b0), .il_aux (1'b0), .il_bank (8'd0), .il_line (12'd0),
-        .il_ack (), .il_ok (), .il_row (),
+        .il_req (1'b0), .il_ppn (16'd0), .il_line (4'd0), .il_src (1'b0),
+        .il_ack (), .il_done (), .il_ok (), .il_row (),
         .serve (serve[0]), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
         .hits (hits), .misses (misses), .served (served), .mismatches (mismatches),
         .last_mismatch (last_mismatch), .diverted (diverted), .late_fills (late_fills), .fifo_drops (fifo_drops),
+        .mem_fills (), .mem_flushes (), .mem_declines (),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data)
@@ -223,11 +231,13 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .image_ready (image_ready)
     );
 
-    // ---- the DDR3 stub: the aux region, in order, twelve clocks late ----------------
-    // RamWorks banks 0-3, and nothing else: main memory lives in the card's
-    // block RAM and the DDR3 never sees it (docs/PAGE_CACHE.md).
+    // ---- the DDR3 stub: the physical space, in order, twelve clocks late ------
+    // Every bank now: main is physical bank 0, the machine's auxiliary bank is
+    // 1, RamWorks bank k is k+1, and the ROM is $FF - so the stub has to be
+    // the whole 16 MB rather than the four RamWorks banks the two-bank design
+    // put there (docs/PAGE_CACHE.md).
     localparam integer NRW = 4;                 // RamWorks banks the run uses
-    localparam integer IMG = NRW * 65536;
+    localparam integer IMG = 16 * 1024 * 1024;
     reg [7:0] smem [0:IMG-1];
     localparam integer DL = 64;
     reg [127:0] dl_d [0:DL-1];
@@ -239,8 +249,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     reg [3:0]   wb_aux_r = 0;
     assign wb_ack = wb_ack_r; assign wb_rdata = wb_rdata_r; assign wb_rdata_aux = wb_aux_r;
     assign wb_stall = s_stall;
-    function automatic [19:0] wb_to_byte(input [23:0] a);
-        wb_to_byte = {a[22:10], a[6:0]} << 4;
+    function automatic [23:0] wb_to_byte(input [23:0] a);
+        wb_to_byte = {{a[22:10], a[6:0]}, 4'd0};    // {ppn, line} * 16
     endfunction
     integer i;
     always @(posedge clk) begin
@@ -249,7 +259,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         s_stall <= ((s_cnt % 41) < 2);
         wb_ack_r <= 1'b0;
         if (wb_cyc && wb_stb && !wb_stall) begin
-            if (wb_addr[9:7] != 3'd0 || wb_addr[23] || wb_addr[22:10] >= 13'(IMG / 2048))
+            if (wb_addr[9:7] != 3'd0 || wb_addr[23])
                 fail($sformatf("DDR3 address outside the image: %06x", wb_addr));
             if (wb_we) begin
                 for (i = 0; i < 16; i = i + 1)
@@ -397,6 +407,18 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         else                ref_byte = lc_aux[bank * 16384 + (off - 16'hC000)];
     endfunction
 
+    // THE OP'S OWN CLASSIFICATION, latched.  cl_* is a SHARED stage: posted
+    // writes ride it too (the ROM load is 16384 of them), so by the data
+    // phase it may be describing something else entirely.  Latch the op's at
+    // its own cl_valid and read that.
+    reg        oc_aux;
+    reg [7:0]  oc_bank;
+    reg [15:0] oc_off;
+    reg [1:0]  oc_cls;
+    always @(posedge clk) if (cl_valid && !cl_posted) begin
+        oc_aux <= cl_aux; oc_bank <= cl_bank; oc_off <= cl_off; oc_cls <= cl_cls;
+    end
+
     // ---- the running checks --------------------------------------------------------
     integer reads = 0, reads_bad = 0, ovr_cycles = 0, served_reads = 0;
     integer banked_reads = 0, banked_writes = 0, pin_writes_banked = 0;
@@ -407,16 +429,16 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         if (op_rw) begin
             reads = reads + 1;
             if (sub_en) served_reads = served_reads + 1;
-            if (cl_aux && cl_bank != 8'd0 && (cl_cls == 2'd1 || cl_cls == 2'd2)) begin
+            if (oc_aux && oc_bank != 8'd0 && (oc_cls == 2'd1 || oc_cls == 2'd2)) begin
                 // RAM or LC in a bank the machine does not have: the
-                // reference is the truth.  (cl_aux/cl_bank stand for a BUS
+                // reference is the truth.  (oc_aux/oc_bank stand for a BUS
                 // or ROM op too, whose byte comes from elsewhere.)
                 banked_reads = banked_reads + 1;
-                if (cpu_din !== ref_byte(cl_bank, cl_off)) begin
+                if (cpu_din !== ref_byte(oc_bank, oc_off)) begin
                     reads_bad = reads_bad + 1;
                     if (reads_bad <= 5)
                         $display("    read $%04X (bank %0d off %04x): core got %02x, the reference says %02x (sub_en %0d)",
-                                 op_addr, cl_bank, cl_off, cpu_din, ref_byte(cl_bank, cl_off), sub_en);
+                                 op_addr, oc_bank, oc_off, cpu_din, ref_byte(oc_bank, oc_off), sub_en);
                 end
             end else if (cpu_din !== mach_byte) begin
                 reads_bad = reads_bad + 1;
@@ -425,7 +447,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                              op_addr, cpu_din, mach_byte, sub_en, sw_state);
             end
         end else begin
-            if (cl_aux && cl_bank != 8'd0 && (cl_cls == 2'd1 || cl_cls == 2'd2)) begin
+            if (oc_aux && oc_bank != 8'd0 && (oc_cls == 2'd1 || oc_cls == 2'd2)) begin
                 banked_writes = banked_writes + 1;
                 if (!op_divert) pin_writes_banked = pin_writes_banked + 1;
             end
@@ -443,6 +465,10 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                  now + 1, reads, image_ready, hits, misses, served);
 
     // ---- the ROM's load -----------------------------------------------------------
+    // The loader turns each chunk into 512 physical writes and the seam takes
+    // one every four clocks, so the host - and this bench - waits for `busy`
+    // to fall before sending the next.  A chunk that arrived under one would
+    // be dropped whole and counted (rtl/rom_loader.sv).
     task send_chunk(input integer c);
         integer k;
         begin
@@ -458,6 +484,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             end
             pay_valid <= 1'b0;
             @(negedge clk);
+            while (rom_busy) @(negedge clk);
         end
     endtask
 
@@ -472,17 +499,43 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     endtask
 
-    // The card's byte at a main offset: the main bank IS main memory.
-    function automatic [7:0] card_main(input [15:0] off);
-        card_main = u_cache.u_main.mem[off[15:4]][8 * off[3:0] +: 8];
+    // THE CARD'S BYTE AT A PHYSICAL ADDRESS.  There is no privileged bank any
+    // more, so this is the only way to ask: hash the page to its set, scan the
+    // set's ways for a valid tag, and read the way that holds it - else the
+    // page is not resident and the DDR3 has it.  Physical bank 0 is main,
+    // bank 1 the machine's auxiliary bank, bank k+1 RamWorks bank k.
+    localparam integer SIDX = $clog2(SETS);
+    function automatic [7:0] card_byte(input [15:0] ppn, input [7:0] off);
+        int st, w, hit;
+        logic [127:0] row;
+        begin
+            st  = int'(ppn[SIDX-1:0] ^ ppn[2*SIDX-1 -: SIDX]);
+            hit = -1;
+            for (w = 0; w < WAYS; w = w + 1)
+                if (u_cache.dir[w][st][17] && u_cache.dir[w][st][15:0] == ppn) hit = w;
+            // A generate instance cannot be indexed by a variable, so the
+            // eight ways are named.  WAYS is fixed at eight here; the
+            // geometry sweep lives in sim/page_cache_tb.sv.
+            row = 128'd0;
+            case (hit)
+                0: row = u_cache.g_way[0].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                1: row = u_cache.g_way[1].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                2: row = u_cache.g_way[2].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                3: row = u_cache.g_way[3].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                4: row = u_cache.g_way[4].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                5: row = u_cache.g_way[5].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                6: row = u_cache.g_way[6].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                7: row = u_cache.g_way[7].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                default: ;
+            endcase
+            card_byte = (hit >= 0) ? row[8 * off[3:0] +: 8] : smem[{ppn, off}];
+        end
     endfunction
-    // The card's byte at a banked-aux offset: the aux bank if the page is
-    // resident for that bank, the DDR3 stub otherwise.
+    function automatic [7:0] card_main(input [15:0] off);
+        card_main = card_byte({8'd0, off[15:8]}, off[7:0]);
+    endfunction
     function automatic [7:0] card_aux(input [7:0] b, input [15:0] off);
-        if (u_cache.vld[off[15:8]] && u_cache.tag_bank[off[15:8]] == b)
-            card_aux = u_cache.u_aux.mem[off[15:4]][8 * off[3:0] +: 8];
-        else
-            card_aux = smem[b * 65536 + off];
+        card_aux = card_byte({b + 8'd1, off[15:8]}, off[7:0]);
     endfunction
 
     task check_image(input string what);
@@ -528,10 +581,9 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         for (a = 0; a < 16384; a = a + 1) begin lc_main[a] = 8'h00; phys_lcaux[a] = 8'h00; end
         for (a = 0; a < NRW * 16384; a = a + 1) lc_aux[a] = 8'h00;
         for (a = 0; a < IMG; a = a + 1) smem[a] = 8'h00;
-        for (a = 0; a < 4096; a = a + 1) begin
-            u_cache.u_main.mem[a] = 128'd0;        // the banks power up known,
-            u_cache.u_aux.mem[a]  = 128'd0;        // as the references do
-        end
+        // The cache's ways need no priming: every page is filled from the
+        // DDR3 before it is read, and the stub is zeroed above.  Its
+        // directory is walked clear by the reset, below.
         for (a = 0; a < 12288; a = a + 1) rom_img[a] = $urandom;
         for (a = 0; a < 4096; a = a + 1) rom_img[12288 + a] = prog[a];
         rom_img[16'h1000] = 8'hC7;                 // what the program expects at ROM $D000
@@ -541,8 +593,13 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         rst <= 1'b0;
         @(negedge clk);
         if (!image_ready) fail("no image_ready with the DDR3 calibrated");
+        // The reset walks the cache's directory clear, one set a clock, and
+        // nothing is served under one (rtl/page_cache.sv).
+        while (invalidating) @(negedge clk);
         for (c = 0; c < 32; c = c + 1) send_chunk(c);
         if (!rom_loaded) fail("the ROM did not load");
+        else if (rom_overruns != 0) fail($sformatf("%0d ROM chunks were dropped", rom_overruns));
+        else ok("the ROM loads into physical bank $FF as 16384 writes, chunk by chunk");
 
         // The machine comes out of reset; the core with it.
         res_n <= 1'b0;

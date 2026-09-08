@@ -1,5 +1,17 @@
 # The boot bench: the plan
 
+> **SUPERSEDED IN PART, 2026-09-08.**  The memory rethink
+> (`docs/MEMORY_REFACTOR.md`) replaced the two fixed 64 KB banks and the ROM's
+> own block RAM with ONE PHYSICAL SPACE of 256-byte pages, cached 128 sets x 8
+> ways: `rtl/bank_ram.sv` and `rtl/apple_rom.sv` are DELETED, the ROM is
+> physical bank $FF loaded through the posted-write seam
+> (`rtl/rom_loader.sv`), and the fronts' line port answers `il_done` three
+> clocks after its grant.  Everything below that names those modules, the two
+> banks, or the ROM beside the cache describes the design that was replaced.
+> The current design is `rtl/page_cache.sv`'s own header and
+> `docs/MEMORY_REFACTOR.md`; this file was not rewritten (a decision, not an
+> oversight - the user's, 2026-09-08).
+
 Status: **BUILT AND GREEN, 2026-09-02; a Phasor in slot 4 and a scripted
 key since 2026-09-06; the Phasor's own page ($C400-$C4FF, the 6522s the
 reference cannot model) exempt from the fast-read compare since 2026-09-07 -
