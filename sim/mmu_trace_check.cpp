@@ -214,6 +214,7 @@ int main(int argc, char** argv) {
     uint64_t sw_accesses[12] = {0};
     uint64_t lc_accesses = 0, writes_recorded = 0, writes_dropped = 0;
     uint64_t bad_bank = 0;
+    uint64_t ppn_bad = 0;
     uint64_t fast_ops = 0;      // an accelerated capture's fast-op words: ops, not cycles
     bool armed = false;         // a reset has been seen: the shadow is known
     bool prev_res = true;
@@ -263,6 +264,16 @@ int main(int argc, char** argv) {
             if ((e.addr & 0xFFF0) == 0xC080) ++lc_accesses;
             if ((e.addr & 0xFFF0) == 0xC000 && !e.rw) ++sw_accesses[(e.addr >> 1) & 7];
 
+            // The decided physical space (docs/PAGE_CACHE.md): pa is
+            // already {bank, page, offset} with RamWorks bank k at k+1, so
+            // apple_mmu's own PPN must be its top sixteen bits.  Only where
+            // it means something - a class the image holds.
+            if ((cls == RAM || cls == LC) && (pa >> 8) != top.cl_ppn) {
+                if (ppn_bad < 8)
+                    std::fprintf(stderr, "ppn %04x != %05x (addr %04x rw %d)\n",
+                                 top.cl_ppn, pa >> 8, e.addr, e.rw ? 1 : 0);
+                ++ppn_bad;
+            }
             if (pa >= image.size()) { ++bad_bank; }
             else if (!e.rw) {
                 if (wr_image && (cls == RAM || cls == LC)) {
@@ -333,6 +344,8 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(cls_count[BUS]), static_cast<unsigned long long>(cls_count[RAM]),
                 static_cast<unsigned long long>(cls_count[LC]), static_cast<unsigned long long>(cls_count[ROM]),
                 static_cast<unsigned long long>(bad_bank));
+    std::printf("cl_ppn against the reconstructed index: %llu disagreements\n",
+                static_cast<unsigned long long>(ppn_bad));
     std::printf("writes recorded %llu  dropped (ROM, write-protected) %llu  LC switch accesses %llu\n",
                 static_cast<unsigned long long>(writes_recorded), static_cast<unsigned long long>(writes_dropped),
                 static_cast<unsigned long long>(lc_accesses));
@@ -354,7 +367,8 @@ int main(int argc, char** argv) {
     }
     std::printf("\n");
 
-    bool pass = armed && total_mismatch == 0 && total_status_wrong == 0 && bad_bank == 0;
+    bool pass = armed && total_mismatch == 0 && total_status_wrong == 0 && bad_bank == 0 &&
+                ppn_bad == 0;
     std::printf("%s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }

@@ -245,6 +245,7 @@ module wb_regfile #(
     input  wire [31:0]     accel_wait,
     input  wire [31:0]     accel_turbo,   // the front's one-clock ops (rtl/iline.sv)
     input  wire [31:0]     accel_dline,   // the data front's one-clock ops, reads and writes (rtl/dline.sv)
+    input  wire [31:0]     accel_maps,    // map changes (rtl/apple_mmu.sv's map_changed)
     input  wire            accel_cen_v,   // the census (rtl/fast_census.sv, below): a retired dispatcher op...
     input  wire [2:0]      accel_cen_sel, // ...and its bucket
 
@@ -371,6 +372,10 @@ module wb_regfile #(
     localparam [13:0] R_AUDIO_RATE     = 'd61; // 0x8000_00F4, RW
     localparam [13:0] R_AUDIO_STAT     = 'd62; // 0x8000_00F8, RO
     localparam [13:0] R_PRINTER_SLOT   = 'd63; // 0x8000_00FC, RW in bits 2:0
+    // The memory rethink's census (docs/PAGE_CACHE.md).  'd65-'d68 are
+    // reserved for the fronts' drop/revive counters, 'd69.. for the physical
+    // page cache's; a word an older bitstream does not implement reads zero.
+    localparam [13:0] R_ACCEL_MAPS      = 'd64; // 0x8000_0100, RO
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -1304,6 +1309,7 @@ module wb_regfile #(
                         R_ACCEL_WAIT: wb_dat_r <= accel_wait;
                         R_ACCEL_TURBO: wb_dat_r <= accel_turbo;
                         R_ACCEL_DLINE: wb_dat_r <= accel_dline;
+                        R_ACCEL_MAPS: wb_dat_r <= accel_maps;
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
                         R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
                         R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;

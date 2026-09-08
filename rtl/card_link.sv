@@ -271,6 +271,7 @@ module card_link #(
     input  wire [31:0]  accel_wait,
     input  wire [31:0]  accel_turbo,
     input  wire [31:0]  accel_dline,
+    input  wire [31:0]  accel_maps,    // ACCEL_MAPS (docs/MEMORY_REFACTOR.md)
     input  wire         accel_cen_v,
     input  wire [2:0]   accel_cen_sel,
     // The game port's samples, for GAME_STAT (rtl/game_port.sv); a
@@ -1052,6 +1053,7 @@ module card_link #(
         .accel_wait        (accel_wait),
         .accel_turbo       (accel_turbo),
         .accel_dline       (accel_dline),
+        .accel_maps        (accel_maps),
         .accel_cen_v       (accel_cen_v),
         .accel_cen_sel     (accel_cen_sel),
         .game_pb           (game_pb),

@@ -217,6 +217,7 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [31:0] turbo_ops;
     wire [1:0]  p_cls;
     wire        p_aux_w, map_changed;
+    wire [31:0] accel_maps;   // ACCEL_MAPS: map changes, the revalidation's denominator
     wire [15:0] p_addr_w, p_off_w;
     wire        il_req, il_aux_w, il_ack, il_ok;
     wire [7:0]  il_bank_w;
@@ -331,7 +332,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .fev_valid (fev_valid), .fev_addr (fev_addr), .fev_rw (fev_rw), .fev_data (fev_data),
         .fev_sync (fev_sync),
         .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
-        .fast_ops (fast_ops), .cen_v (cen_v), .cen_sel (cen_sel), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
+        .fast_ops (fast_ops), .map_changed (map_changed), .maps (accel_maps), .cen_v (cen_v), .cen_sel (cen_sel), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
         .cycles (cycles), .wait_clocks (wait_clocks),
         .retries (retries)
     );
@@ -506,7 +507,10 @@ module accel_tb #(parameter integer SWINT = 1,
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .d_addr (dq_addr_w), .d_rw (dq_rw_w),
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
-        .map_changed (map_changed)
+        .map_changed (map_changed),
+        // the physical space (docs/PAGE_CACHE.md); no consumer here yet
+        .cl_ppn (), .pf_ppn (), .p_ppn (), .p_reg (), .p_fold (), .p_fs (),
+        .d_ppn (), .d_reg (), .d_fold (), .map_settling (), .rt_rd_flat (), .rwb_p1 ()
     );
     apple_rom u_rom (
         .clk (clk), .rst (rst),

@@ -42,6 +42,7 @@ __pycache__/
 /sim/cpu816_work/
 /sim/mem_work/
 /sim/mmu_work/
+/sim/mmu_xlate_work/
 
 /build/results/
 

@@ -36,11 +36,13 @@
 // (cl_bank).  MAIN memory lives in its own block RAM bank
 // (rtl/page_cache.sv) and nothing banks it; an auxiliary access reaches
 // RamWorks bank cl_bank, and the DDR3 backs the banks that are not resident.
-// There is no 24-bit physical address and no +1 anywhere: RamWorks bank k is
-// DDR3 aux bank k (docs/PAGE_CACHE.md).  pf_off is cl_off's combinational
+// That triple is the OLD name for the byte and survives only until the page
+// cache is physical (docs/PAGE_CACHE.md, Part 3); the new one is the PPN
+// below, where RamWorks bank k is physical bank k+1.  pf_off is cl_off's
+// combinational
 // preview, valid with op_present, so the banks' block RAMs can be addressed
 // the clock BEFORE the classification lands - the classifier runs beside the
-// fetch, not in front of it.
+// fetch, not in front of it.  pf_ppn is the same preview in the new space.
 //
 // THE RAMWORKS.  An Applied Engineering RamWorks III in the auxiliary slot
 // replaces the 64 KB auxiliary memory with up to 256 banks of it, each a
@@ -54,11 +56,12 @@
 // real card, and software finds the banks by writing a signature into each
 // and looking for it.
 //
-// Here the card IS the RamWorks, with RW_BANKS = 255 banks: bank k is DDR3
-// aux bank k, the regular auxiliary memory (bank 0) at the region's start.
-// A write of a bank number that does not exist (255) is ignored and the
-// register keeps its value, which is what AppleWin does for a bank beyond
-// the configured size.
+// Here the card IS the RamWorks, with RW_BANKS = 254 banks: RamWorks bank k
+// is PHYSICAL bank k+1, the regular auxiliary memory (bank 0) at physical
+// bank 1.  A write of a bank number that does not exist (254 or 255) is
+// ignored and the register keeps its value, which is what AppleWin does for
+// a bank beyond the configured size.  254 rather than 255 because physical
+// bank $FF is the internal ROM's - see THE PHYSICAL SPACE below.
 //
 // THE BANK REGISTER RESETS ON RES', by decision.  The real card's does not
 // (AppleWin resets it only on a power cycle, GH#1414), so a program that
@@ -154,8 +157,55 @@
 // NOT MODELLED, deliberately: a physical card's $C800-$CFFF expansion ROM and
 // the per-slot I/O SELECT flip-flops that pick it - that page is BUS unless
 // the internal ROM answers, and the machine does the rest.
+//
+// THE PHYSICAL SPACE (docs/PAGE_CACHE.md, the 24-bit rethink).  Beside the
+// old {aux, bank, folded offset} triple this module now hands out a PHYSICAL
+// PAGE NUMBER, one flat name for the byte in a 16 MB space:
+//
+//   PPN[15:0] = {bank[7:0], page[7:0]},  byte address {PPN, off[7:0]}
+//   bank 0    main memory
+//   bank 1    the regular auxiliary memory, i.e. RamWorks bank 0
+//   bank k+1  RamWorks bank k            (so physical 1..254)
+//   bank $FF  the internal ROM, at its offsets $C000-$FFFF
+//
+// This is the host mirror's convention already (apple_memory.hpp: image bank
+// 0 main, banks 1.. the RamWorks banks), so the two images are again the same
+// bytes in the same order.  The language card's fold stays INSIDE a bank -
+// bank 1 of $D000 at that bank's $C000-$CFFF - and $Cxxx CPU addresses never
+// translate to a RAM bank's $Cx pages, which hold the fold; $C000-$C0FF is
+// BUS always, $C100-$CFFF is bank $FF or BUS.
+//
+// THE REGION TABLE.  The IIe's map has ten REGIONS of the 16-bit space, each
+// a function of the soft switches alone - a[7:0] never enters (the two
+// byte-level facts, $CFFF and iline's $CFF0 line, stay explicit overrides):
+//
+//   R_ZP  $00-01   R_TXT $04-07   R_HGR $20-3F   R_RAM the rest below $C0
+//   R_IO  $C0      R_CXL $C1,$C2,$C4-$C7        R_C3  $C3    R_C8 $C8-$CF
+//   R_LCD $Dx      R_LCE $Ex-$Fx
+//
+// So the whole map is TWO TABLES OF TEN ENTRIES - one for reads, one for
+// writes - each entry {cls, wr, bsel, fold, fs}: the class, whether a write
+// lands in the image, which bank side (main / aux / ROM), whether the
+// language card's fold applies, and FS, "front-servable", which replaces the
+// fronts' own `cls != BUS` plus iline's page-$C3 rule.  The tables are
+// REGISTERED and recomputed every clock from the switch registers, so they
+// are new exactly when map_changed rises, one clock behind the switches; the
+// settle after a switch-changing commit is what keeps any op from reading
+// them in that clock.  xlate() is then a mux and a fold, not a decode - and
+// the fronts can recompute a HELD line's validity from its stored region
+// without re-classifying it (rt_rd_flat, docs/PAGE_CACHE.md).
+//
+// 65816 READINESS.  xlate() takes a 24-bit address.  Banks 2 and up are RAM
+// no IIe switch touches and map to themselves; banks 0 and 1 go through the
+// region table.  Nothing drives a bank above 0 yet.
 //////////////////////////////////////////////////////////////////////////////////
-module apple_mmu (
+module apple_mmu #(
+    // The region table's shape.  Not meant to be overridden: they are here
+    // so the packed table can be a port.  Entry = {cls[1:0], wr, bsel[1:0],
+    // fold, fs}.
+    parameter int NREG = 10,
+    parameter int RT_W = 7
+) (
     input  wire        clk,
     input  wire        rst,
     // Synchronised RES', ACTIVE LOW.
@@ -202,6 +252,12 @@ module apple_mmu (
     // cl_off's combinational preview, valid with op_present: the banks'
     // block RAMs are addressed from this the clock before cl_* stands.
     output wire  [15:0] pf_off,
+    // ...and the same two in the PHYSICAL space (header, THE PHYSICAL
+    // SPACE): the classified op's page, and its preview - the physical page
+    // cache's P0 index source.  Nothing consumes these yet; the old triple
+    // above is still what rtl/page_cache.sv takes.
+    output logic [15:0] cl_ppn,
+    output wire  [15:0] pf_ppn,
 
     // The switches, for a status register:
     //   {prewrite, wren, lc_ramrd, bank2, slotc3rom, intcxrom, hires, page2,
@@ -276,6 +332,14 @@ module apple_mmu (
     output wire [1:0]  p_cls,
     output wire        p_aux,
     output wire [15:0] p_off,
+    // ...and its physical identity: the page, the REGION the line is
+    // classified in - the index the front revalidates through - the fold
+    // bit, and FS, which is what the front should ask instead of
+    // `p_cls != BUS` (it carries iline's page-$C3 rule too).
+    output wire [15:0] p_ppn,
+    output wire [3:0]  p_reg,
+    output wire        p_fold,
+    output wire        p_fs,
 
     // ...and the data front's (rtl/dline.sv): the same question for a DATA
     // access at d_addr - rooted at dline's REGISTERED candidate address, so
@@ -287,16 +351,31 @@ module apple_mmu (
     output wire [1:0]  d_cls,
     output wire        d_aux,
     output wire [15:0] d_off,
+    output wire [15:0] d_ppn,
+    output wire [3:0]  d_reg,
+    output wire        d_fold,
     // One pulse whenever anything that feeds classification moved - a soft
     // switch, the language card, the bank register, INTC8ROM, a reset.  The
     // front's held lines die on it: their classification was captured when
     // they were fetched.
-    output logic       map_changed
+    output logic       map_changed,
+    // ...stretched to the three clocks a REVALIDATION takes: map_changed
+    // itself and the two after it, by which time every front's valid bits
+    // and the registers derived from them stand under the new map.  The
+    // sequencer's turbo leash and the fronts' fill triggers hold on this.
+    output logic       map_settling,
+    // The read table, packed ten entries of RT_W bits, and the PHYSICAL bank
+    // a RamWorks access reaches (rw_bank + 1), both registered: a front
+    // recomputes a held line's validity from its stored region against
+    // these, without re-classifying the line's address.
+    output wire [NREG*RT_W-1:0] rt_rd_flat,
+    output wire [7:0]  rwb_p1
 );
 
     // RamWorks banks: 0..RW_BANKS-1 exist; a write of any other number is
-    // ignored.  255 banks plus main memory are the image's 256.
-    localparam [7:0] RW_BANKS = 8'd255;
+    // ignored.  254 of them, plus main memory, plus the internal ROM at
+    // physical bank $FF, are the 16 MB space's 256 banks.
+    localparam [7:0] RW_BANKS = 8'd254;
 
     localparam [1:0] CLS_BUS = 2'd0;
     localparam [1:0] CLS_RAM = 2'd1;
@@ -392,43 +471,166 @@ module apple_mmu (
         else if (op_commit && acc_cfff)                             intc8rom <= 1'b0;
     end
 
-    // ---- the classifier, as a function of the address and the switches ---------
-    // Returns {class, write lands in the image}.  Called twice: on the
-    // presented op (registered at op_present) and on the sequencer's question
-    // (combinational).
-    function automatic [2:0] classify(input [15:0] a, input rw);
-        logic [1:0] c;
-        logic       wr;
-        logic [3:0] page;
-        logic       in_io_f, in_hi_f, int_cx, int_c8;
+    // ---- the region table ------------------------------------------------------
+    // The header's ten regions: everything classification depends on, once
+    // the page byte has picked a region, is a function of the switches -
+    // so the map is two ten-entry tables, recomputed every clock and
+    // REGISTERED, and translation is a mux, a fold and a bank select.
+    localparam [3:0] R_ZP  = 4'd0, R_TXT = 4'd1, R_HGR = 4'd2, R_RAM = 4'd3,
+                     R_IO  = 4'd4, R_CXL = 4'd5, R_C3  = 4'd6, R_C8  = 4'd7,
+                     R_LCD = 4'd8, R_LCE = 4'd9;
+    // An entry's bank side.  BS_ROM is physical bank $FF.
+    localparam [1:0] BS_MAIN = 2'd0, BS_AUX = 2'd1, BS_ROM = 2'd2;
+
+    function automatic [3:0] region(input [7:0] pg);
         begin
-            in_io_f = (a[15:12] == 4'hC);
-            in_hi_f = (a[15:12] >= 4'hD);
-            page    = a[11:8];
-            int_cx  = intcxrom || (page == 4'd3 && !slotc3rom);
-            int_c8  = intcxrom || intc8rom;
-            c = CLS_BUS; wr = 1'b0;
-            if (in_io_f) begin
-                // The internal ROM's pages, and only those: every slot is BUS.
-                if (rw && rom_ok && page != 4'd0 && a != 16'hCFFF &&
-                    (page[3] ? int_c8 : int_cx)) c = CLS_ROM;
-            end else if (in_hi_f) begin
-                if (rw) begin
-                    c = lc_ramrd ? CLS_LC : (rom_ok ? CLS_ROM : CLS_BUS);
-                end else begin
-                    c  = lc_wren ? CLS_LC : CLS_ROM;
-                    wr = lc_wren;
-                end
-            end else begin
-                c  = CLS_RAM;
-                wr = !rw;
-            end
-            classify = {c, wr};
+            if (pg[7:4] < 4'hC) begin
+                if      (pg[7:1] == 7'd0)      region = R_ZP;    // $0000-$01FF
+                else if (pg[7:2] == 6'b000001) region = R_TXT;   // $0400-$07FF
+                else if (pg[7:5] == 3'b001)    region = R_HGR;   // $2000-$3FFF
+                else                           region = R_RAM;
+            end else if (pg[7:4] == 4'hC) begin
+                if      (pg[3])                region = R_C8;    // $C800-$CFFF
+                else if (pg[3:0] == 4'd0)      region = R_IO;    // $C000-$C0FF
+                else if (pg[3:0] == 4'd3)      region = R_C3;    // $C300-$C3FF
+                else                           region = R_CXL;
+            end else if (pg[7:4] == 4'hD)      region = R_LCD;   // $D000-$DFFF
+            else                               region = R_LCE;   // $E000-$FFFF
         end
     endfunction
 
-    wire [2:0] q_class = classify(q_addr, q_rw);
-    assign q_cls = q_class[2:1];
+    // {cls[1:0], wr, bsel[1:0], fold, fs}
+    function automatic [RT_W-1:0] rt_e(input [1:0] cls, input wr, input [1:0] bsel,
+                                       input fold, input fs);
+        rt_e = {cls, wr, bsel, fold, fs};
+    endfunction
+
+    // The bank side each RAM region takes: the old aux_mid/aux_sel mux, split
+    // one way per region so the address no longer enters it.  80STORE takes
+    // the text page - and the hires page with HIRES - away from RAMRD/RAMWRT
+    // and hands it to PAGE2; ALTZP owns the zero page, the stack and the
+    // language card.
+    wire side_zp    = altzp;
+    wire side_lc    = altzp;
+    wire side_txt_r = store80 ? page2 : ramrd;
+    wire side_txt_w = store80 ? page2 : ramwrt;
+    wire side_hgr_r = (store80 && hires) ? page2 : ramrd;
+    wire side_hgr_w = (store80 && hires) ? page2 : ramwrt;
+
+    // The internal ROM's three $Cxxx answers (UTAIIe 5-28, header), and the
+    // language card's window.  rom_ok is an input of the table, so a class is
+    // never ROM before the ROM has arrived.
+    wire cx_rom_l = rom_ok && intcxrom;                    // $C1,$C2,$C4-$C7
+    wire cx_rom_3 = rom_ok && (intcxrom || !slotc3rom);    // $C3
+    wire cx_rom_8 = rom_ok && (intcxrom || intc8rom);      // $C8-$CF
+    wire [1:0] lc_rd_cls = lc_ramrd ? CLS_LC : (rom_ok ? CLS_ROM : CLS_BUS);
+    wire [1:0] lc_wr_cls = lc_wren  ? CLS_LC : CLS_ROM;
+    wire [1:0] lc_rd_bs  = lc_ramrd ? (side_lc ? BS_AUX : BS_MAIN) : BS_ROM;
+    wire [1:0] lc_wr_bs  = lc_wren  ? (side_lc ? BS_AUX : BS_MAIN) : BS_ROM;
+
+    logic [RT_W-1:0] rt_r_n [0:NREG-1];
+    logic [RT_W-1:0] rt_w_n [0:NREG-1];
+    always_comb begin
+        // reads
+        rt_r_n[R_ZP ] = rt_e(CLS_RAM, 1'b0, side_zp    ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_r_n[R_TXT] = rt_e(CLS_RAM, 1'b0, side_txt_r ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_r_n[R_HGR] = rt_e(CLS_RAM, 1'b0, side_hgr_r ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_r_n[R_RAM] = rt_e(CLS_RAM, 1'b0, ramrd      ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_r_n[R_IO ] = rt_e(CLS_BUS, 1'b0, BS_MAIN, 1'b0, 1'b0);
+        rt_r_n[R_CXL] = rt_e(cx_rom_l ? CLS_ROM : CLS_BUS, 1'b0, BS_ROM, 1'b0, cx_rom_l);
+        // Page $C3 is front-servable only while INTC8ROM is SET: a $C3 access
+        // with the latch clear is what SETS it, and that one must ride the
+        // sequencer (header; rtl/iline.sv's excl()/kill_now).
+        rt_r_n[R_C3 ] = rt_e(cx_rom_3 ? CLS_ROM : CLS_BUS, 1'b0, BS_ROM, 1'b0,
+                             cx_rom_3 && intc8rom);
+        rt_r_n[R_C8 ] = rt_e(cx_rom_8 ? CLS_ROM : CLS_BUS, 1'b0, BS_ROM, 1'b0, cx_rom_8);
+        rt_r_n[R_LCD] = rt_e(lc_rd_cls, 1'b0, lc_rd_bs, lc_ramrd && !lc_bank2,
+                             lc_rd_cls != CLS_BUS);
+        rt_r_n[R_LCE] = rt_e(lc_rd_cls, 1'b0, lc_rd_bs, 1'b0, lc_rd_cls != CLS_BUS);
+        // writes
+        rt_w_n[R_ZP ] = rt_e(CLS_RAM, 1'b1, side_zp    ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_w_n[R_TXT] = rt_e(CLS_RAM, 1'b1, side_txt_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_w_n[R_HGR] = rt_e(CLS_RAM, 1'b1, side_hgr_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_w_n[R_RAM] = rt_e(CLS_RAM, 1'b1, ramwrt     ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_w_n[R_IO ] = rt_e(CLS_BUS, 1'b0, BS_MAIN, 1'b0, 1'b0);
+        rt_w_n[R_CXL] = rt_e(CLS_BUS, 1'b0, BS_MAIN, 1'b0, 1'b0);
+        rt_w_n[R_C3 ] = rt_e(CLS_BUS, 1'b0, BS_MAIN, 1'b0, 1'b0);
+        rt_w_n[R_C8 ] = rt_e(CLS_BUS, 1'b0, BS_MAIN, 1'b0, 1'b0);
+        rt_w_n[R_LCD] = rt_e(lc_wr_cls, lc_wren, lc_wr_bs, lc_wren && !lc_bank2, 1'b1);
+        rt_w_n[R_LCE] = rt_e(lc_wr_cls, lc_wren, lc_wr_bs, 1'b0, 1'b1);
+    end
+
+    // The tables and the physical bank an auxiliary access reaches, one clock
+    // behind the switches - the same clock map_changed rises on, so the two
+    // never disagree.  No reset: they follow the switch registers, which
+    // reset, and map_changed is held high through a reset anyway.
+    logic [RT_W-1:0] rt_r_q [0:NREG-1];
+    logic [RT_W-1:0] rt_w_q [0:NREG-1];
+    logic [7:0]      rwb_p1_q;
+    integer ri;
+    always_ff @(posedge clk) begin
+        for (ri = 0; ri < NREG; ri = ri + 1) begin
+            rt_r_q[ri] <= rt_r_n[ri];
+            rt_w_q[ri] <= rt_w_n[ri];
+        end
+        rwb_p1_q <= rw_bank + 8'd1;
+    end
+    assign rwb_p1 = rwb_p1_q;
+    genvar gr;
+    generate
+        for (gr = 0; gr < NREG; gr = gr + 1) begin : g_rt_flat
+            assign rt_rd_flat[gr*RT_W +: RT_W] = rt_r_q[gr];
+        end
+    endgenerate
+
+    // ---- the translation -------------------------------------------------------
+    // {cls[1:0], wr, fs, reg[3:0], ppn[15:0], fold}.  Every question this
+    // module answers - the presented op's, the sequencer's, both fronts' -
+    // goes through here, so they cannot drift apart.
+    localparam int XL_W = 25;
+    function automatic [XL_W-1:0] xlate(input [23:0] va, input rw);
+        logic [3:0]      r;
+        logic [RT_W-1:0] e;
+        logic [1:0]      cls;
+        logic            wr, fs, fold;
+        logic [7:0]      bank;
+        begin
+            r    = region(va[15:8]);
+            e    = rw ? rt_r_q[r] : rt_w_q[r];
+            cls  = e[6:5];
+            wr   = e[4];
+            fold = e[1];
+            fs   = e[0];
+            case (e[3:2])
+                BS_AUX:  bank = rwb_p1_q;
+                BS_ROM:  bank = 8'hFF;
+                default: bank = 8'd0;
+            endcase
+            // $CFFF is the bus's in every state - it is the INTC8ROM latch's
+            // clear strobe - a byte-level exception to its page's entry.
+            if (va[15:0] == 16'hCFFF) begin
+                cls = CLS_BUS; wr = 1'b0; fs = 1'b0; fold = 1'b0;
+            end
+            // A 65816's banks 2 and up are RAM no IIe switch touches: they are
+            // their own physical banks.  Nothing drives this yet (header).
+            if (va[23:16] != 8'd0) begin
+                r = R_RAM; cls = CLS_RAM; wr = !rw; fs = 1'b1; fold = 1'b0;
+                bank = va[23:16];
+            end
+            xlate = {cls, wr, fs, r, bank,
+                     fold ? {4'hC, va[11:8]} : va[15:8], fold};
+        end
+    endfunction
+
+    function automatic [1:0]  xl_cls (input [XL_W-1:0] x); xl_cls  = x[24:23]; endfunction
+    function automatic        xl_wr  (input [XL_W-1:0] x); xl_wr   = x[22];    endfunction
+    function automatic        xl_fs  (input [XL_W-1:0] x); xl_fs   = x[21];    endfunction
+    function automatic [3:0]  xl_reg (input [XL_W-1:0] x); xl_reg  = x[20:17]; endfunction
+    function automatic [15:0] xl_ppn (input [XL_W-1:0] x); xl_ppn  = x[16:1];  endfunction
+    function automatic        xl_fold(input [XL_W-1:0] x); xl_fold = x[0];     endfunction
+
+    wire [XL_W-1:0] q_x = xlate({8'd0, q_addr}, q_rw);
+    assign q_cls = xl_cls(q_x);
 
     // ---- the internalized ops' question, beside q_cls --------------------------
     // A shallow decode of the live address - range matches ANDed with
@@ -571,10 +773,14 @@ module apple_mmu (
     wire p_hi    = (p_addr[15:12] >= 4'hD);
     wire p_mid   = (store80 && p_text)           ? page2 :
                    (store80 && hires && p_hires) ? page2 : ramrd;
-    wire [2:0] p_class = classify(p_addr, 1'b1);
-    assign p_cls = p_class[2:1];
-    assign p_aux = (p_hi || p_zp) ? altzp : p_mid;
-    assign p_off = (p_d && !lc_bank2) ? {4'hC, p_addr[11:0]} : p_addr;
+    wire [XL_W-1:0] p_x = xlate({8'd0, p_addr}, 1'b1);
+    assign p_cls  = xl_cls(p_x);
+    assign p_aux  = (p_hi || p_zp) ? altzp : p_mid;
+    assign p_off  = (p_d && !lc_bank2) ? {4'hC, p_addr[11:0]} : p_addr;
+    assign p_ppn  = xl_ppn(p_x);
+    assign p_reg  = xl_reg(p_x);
+    assign p_fold = xl_fold(p_x);
+    assign p_fs   = xl_fs(p_x);
 
     // ---- the data front's query ---------------------------------------------------
     wire d_zp_w    = (d_addr[15:9]  == 7'd0);
@@ -585,18 +791,28 @@ module apple_mmu (
     wire d_mid_w   = (store80 && d_text_w)           ? page2 :
                      (store80 && hires && d_hires_w) ? page2 :
                      (d_rw ? ramrd : ramwrt);
-    wire [2:0] d_class = classify(d_addr, d_rw);
-    assign d_cls = d_class[2:1];
-    assign d_aux = (d_hi_w || d_zp_w) ? altzp : d_mid_w;
-    assign d_off = (d_d_w && !lc_bank2) ? {4'hC, d_addr[11:0]} : d_addr;
+    wire [XL_W-1:0] d_x = xlate({8'd0, d_addr}, d_rw);
+    assign d_cls  = xl_cls(d_x);
+    assign d_aux  = (d_hi_w || d_zp_w) ? altzp : d_mid_w;
+    assign d_off  = (d_d_w && !lc_bank2) ? {4'hC, d_addr[11:0]} : d_addr;
+    assign d_ppn  = xl_ppn(d_x);
+    assign d_reg  = xl_reg(d_x);
+    assign d_fold = xl_fold(d_x);
 
     // ---- the map's edge -----------------------------------------------------------
     // Everything classification reads, watched as one word; sw_state carries
     // the LC and every switch, and the bank register and INTC8ROM ride along.
     logic [20:0] map_q;
+    logic        map_s1, map_s2;
     always_ff @(posedge clk) begin
         map_q       <= {sw_state, intc8rom, rw_bank};
         map_changed <= rst || !res_sync || (map_q != {sw_state, intc8rom, rw_bank});
+        // ...and its three-clock stretch: map_changed, the clock a
+        // revalidation's stage 2 writes the valid bits, and the one after it
+        // in which every register derived from them stands.
+        map_s1       <= map_changed;
+        map_s2       <= map_s1;
+        map_settling <= map_changed || map_s1 || map_s2;
     end
 
     // ---- the driver's query ---------------------------------------------------------
@@ -631,10 +847,11 @@ module apple_mmu (
     // one mux on a registered switch, beside the fetch, not in front of it.
     assign pf_off = (in_d && !lc_bank2) ? {4'hC, op_addr[11:0]} : op_addr;
 
-    wire [2:0] n_class    = classify(op_addr, op_rw);
-    wire [1:0] n_cls      = n_class[2:1];
-    wire       n_wr_image = n_class[0];
+    wire [XL_W-1:0] n_x   = xlate({8'd0, op_addr}, op_rw);
+    wire [1:0] n_cls      = xl_cls(n_x);
+    wire       n_wr_image = xl_wr(n_x);
     wire       n_aux      = in_hi ? altzp : aux_sel;
+    assign     pf_ppn     = xl_ppn(n_x);
 
     // A posted write takes the classified stage only when no op is being
     // presented: the op's is the older claim on the pipeline.
@@ -651,6 +868,7 @@ module apple_mmu (
             cl_wr_image <= 1'b0;
             cl_posted   <= 1'b0;
             cl_wdata    <= 8'd0;
+            cl_ppn      <= 16'd0;
         end else begin
             cl_valid <= op_present || pw_take;
             if (op_present) begin
@@ -662,6 +880,7 @@ module apple_mmu (
                 cl_wr_image <= n_wr_image;
                 cl_posted   <= 1'b0;
                 cl_wdata    <= op_wdata;
+                cl_ppn      <= pf_ppn;
             end else if (pw_take) begin
                 cl_cls      <= CLS_RAM;      // the front posts RAM class only
                 cl_aux      <= pw_aux;
@@ -671,6 +890,10 @@ module apple_mmu (
                 cl_wr_image <= 1'b1;
                 cl_posted   <= 1'b1;
                 cl_wdata    <= pw_data;
+                // The posted entry was stamped in the OLD triple; until the
+                // data front stamps a PPN itself (Part 2) this is where the
+                // +1 happens.
+                cl_ppn      <= {pw_aux ? (pw_bank + 8'd1) : 8'd0, pw_off[15:8]};
             end
         end
     end

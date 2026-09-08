@@ -240,6 +240,7 @@ module reg_map_tb;
         .accel_cnt_clr (accel_cnt_clr),
         .accel_stat (32'h0000_0A11), .accel_fast (32'h0001_F00D), .accel_bus (32'h0000_0B05),
         .accel_cycles (32'h000C_0CE5), .accel_turbo (32'hCAFE0011), .accel_wait (32'h0000_0A17),
+        .accel_maps (32'h00BA_D0EE),
         .accel_cen_v (cen_v), .accel_cen_sel (cen_sel),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (7'b1010101), .fb_compared (32'h0004_2870), .fb_mismatch (32'h0000_0005),
@@ -1556,6 +1557,12 @@ module reg_map_tb;
                      out_mem[base+5], out_mem[base+8], out_mem[base+11], out_mem[base+14]);
             errors = errors + 1;
         end else $display("  ok: ACCEL_STAT, FAST, BUS, CYCLES and WAIT read straight through");
+        // ACCEL_MAPS, the memory rethink's first word, at 0x0100 (docs/MEMORY_REFACTOR.md).
+        base = out_n;
+        do_read(32'h8000_0100);
+        if (out_mem[base+2] !== 32'h00BA_D0EE) begin
+            $display("FAIL: ACCEL_MAPS reads %08x", out_mem[base+2]); errors = errors + 1;
+        end else $display("  ok: ACCEL_MAPS reads the map-change count at 0x0100");
         do_write(32'h8000_008C, 32'h0000_0000);
 
 

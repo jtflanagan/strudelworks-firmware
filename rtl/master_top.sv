@@ -298,7 +298,7 @@ module master_top #(
     wire        turbo_tick, tev_valid, tev_sync, ev_fast_room;
     wire [15:0] tev_addr;
     wire [7:0]  tev_data, i_din_w;
-    wire [31:0] accel_turbo, accel_dline;
+    wire [31:0] accel_turbo, accel_dline, accel_maps;
     wire        accel_cen_v;
     wire [2:0]  accel_cen_sel;
     wire [1:0]  p_cls;
@@ -420,6 +420,7 @@ module master_top #(
         .accel_cycles (accel_cycles), .accel_wait (accel_wait),
         .accel_turbo (accel_turbo),
         .accel_dline (accel_dline),
+        .accel_maps (accel_maps),
         .accel_cen_v (accel_cen_v), .accel_cen_sel (accel_cen_sel),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (fb_mode), .fb_compared (fb_compared), .fb_mismatch (fb_mismatch),
@@ -793,6 +794,8 @@ module master_top #(
         .state_o       (seq_state),
         .reset_seq_o   (accel_reset_seq),
         .fast_ops      (accel_fast),
+        .map_changed   (map_changed),
+        .maps          (accel_maps),
         .cen_v         (accel_cen_v),
         .cen_sel       (accel_cen_sel),
         .turbo_ops     (accel_turbo),
@@ -1117,6 +1120,17 @@ module master_top #(
     // override - and answers two questions of the address about to be
     // presented: the driver's (divert this write?) and the sequencer's (what
     // class is this op?).
+    // The physical space the memory rethink is built on (docs/PAGE_CACHE.md):
+    // the classified op's page and its preview, both fronts' physical
+    // identities, the packed read table and the settle window.  Nothing
+    // consumes them yet - the fronts and the page cache take them in the
+    // rungs that follow - but they are wired so the ports are real.
+    wire [15:0] cl_ppn_w, pf_ppn_w, p_ppn_w, d_ppn_w;
+    wire [3:0]  p_reg_w, d_reg_w;
+    wire        p_fold_w, p_fs_w, d_fold_w, map_settling;
+    wire [69:0] rt_rd_flat;
+    wire [7:0]  rwb_p1_w;
+
     apple_mmu u_mmu (
         .clk        (apple_clk),
         .rst        (apple_rst),
@@ -1145,6 +1159,8 @@ module master_top #(
         .pw_ready   (pw_ready_w),
         .pw_take    (pw_take_w),
         .pf_off     (pf_off),
+        .cl_ppn     (cl_ppn_w),
+        .pf_ppn     (pf_ppn_w),
         .sw_state   (mem_sw),
         .vid_sw     (vid_sw),
         .rw_bank    (mem_rw_bank),
@@ -1175,12 +1191,22 @@ module master_top #(
         .p_cls      (p_cls),
         .p_aux      (p_aux_w),
         .p_off      (p_off_w),
+        .p_ppn      (p_ppn_w),
+        .p_reg      (p_reg_w),
+        .p_fold     (p_fold_w),
+        .p_fs       (p_fs_w),
         .d_addr     (dq_addr_w),
         .d_rw       (dq_rw_w),
         .d_cls      (dcls_w),
         .d_aux      (daux_w),
         .d_off      (doff_w),
-        .map_changed (map_changed)
+        .d_ppn      (d_ppn_w),
+        .d_reg      (d_reg_w),
+        .d_fold     (d_fold_w),
+        .map_changed (map_changed),
+        .map_settling (map_settling),
+        .rt_rd_flat (rt_rd_flat),
+        .rwb_p1     (rwb_p1_w)
     );
 
     // Addressed at op_present, with the raw offset from $C000, so its byte

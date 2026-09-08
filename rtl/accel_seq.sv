@@ -233,6 +233,12 @@ module accel_seq (
     output wire [3:0]   state_o,
     output wire         reset_seq_o,    // the reset sequence is still on the bus
     output logic [31:0] fast_ops,
+    // ACCEL_MAPS: how often the memory map moved (rtl/apple_mmu.sv's
+    // map_changed).  Every one of them empties both fronts today, so this is
+    // the denominator the revalidation rungs are measured against
+    // (docs/PAGE_CACHE.md).
+    input  wire         map_changed,
+    output logic [31:0] maps,
     // THE CENSUS of the dispatcher's fast ops (ACCEL_FAST_*): what the two
     // fronts did NOT serve, so the next rung knows where to aim.  Seven
     // exclusive buckets that sum to fast_ops: instruction-stream fetches
@@ -489,8 +495,9 @@ module accel_seq (
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
             fev_addr <= 16'd0; fev_rw <= 1'b1; fev_data <= 8'd0; fev_sync <= 1'b0;
             fast_ops <= 32'd0; turbo_ops <= 32'd0; bus_ops <= 32'd0; cycles <= 32'd0;
-            wait_clocks <= 32'd0; retries <= 8'd0;
+            wait_clocks <= 32'd0; retries <= 8'd0; maps <= 32'd0;
         end else begin
+            if (map_changed) maps <= maps + 32'd1;
             // ---- the stream: what the bus carried ---------------------------
             if (bus_op_present) begin
                 u_present <= 1'b1;
@@ -632,7 +639,7 @@ module accel_seq (
 
             if (cnt_clr) begin
                 fast_ops <= 32'd0; turbo_ops <= 32'd0; bus_ops <= 32'd0; cycles <= 32'd0;
-                wait_clocks <= 32'd0; retries <= 8'd0;
+                wait_clocks <= 32'd0; retries <= 8'd0; maps <= 32'd0;
             end
         end
     end

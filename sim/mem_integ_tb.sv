@@ -154,7 +154,10 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .pw_ready (1'b0), .pw_take (),
         .sw_state (sw_state), .rw_bank (rw_bank),
         .q_addr (nxt_addr), .q_divert (q_divert),
-        .p_addr (16'd0), .p_cls (), .p_aux (), .p_off (), .map_changed ()
+        .p_addr (16'd0), .p_cls (), .p_aux (), .p_off (), .map_changed (),
+        // the physical space (docs/PAGE_CACHE.md); no consumer here yet
+        .cl_ppn (), .pf_ppn (), .p_ppn (), .p_reg (), .p_fold (), .p_fs (),
+        .d_ppn (), .d_reg (), .d_fold (), .map_settling (), .rt_rd_flat (), .rwb_p1 ()
     );
     apple_rom u_rom (
         .clk (clk), .rst (rst),
