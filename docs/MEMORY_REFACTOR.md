@@ -1,9 +1,12 @@
 # The physical memory rethink: a 24-bit page cache and switch-surviving fronts
 
-Status: **rung 1 (the region table) DONE and proven on hardware, 2026-09-08;
+Status: **rungs 1-3 DONE and proven on hardware, rung 4 (the physical page
+cache, standalone) DONE in simulation and out-of-context synthesis, 2026-09-08;
 branch `memory_refactor`, taken from master (fw `87cfbfa` / host `e9042c0`).
-Build TIMING MET wns=+0.046 whs=+0.046 fail=0/61015.  Rungs 2-6 not started.
-Not committed.**
+Last bitstream TIMING MET wns=+0.041 whs=+0.062 fail=0/62793 (rung 3; rung 4
+adds no RTL to it).  `sim/run_phys_cache_tb.sh` 52 checks / 0 errors at each of
+128x8, 64x10 and 64x8; the new block synthesises out of context at 2,746 LUTs
+/ 1,061 flops / 64 RAMB36 with WNS +1.425 at 10 ns.  Rungs 5-6 not started.**
 
 This is the run sheet for the user's 2026-09-07 decision to make the card's
 memory one PHYSICAL space.  `docs/PAGE_CACHE.md` still describes the two fixed
@@ -112,7 +115,7 @@ run; Verilator only.
 | 1 | Part 1: region table + PPN export + `ACCEL_MAPS`, RamWorks 254, host words | pure refactor: `run_mmu_xlate_tb.sh`, accel battery both sweeps, cpu_predict, boot bench 2/2, mmu_trace assert if a capture exists; HW: maps/s baseline on the animated Nox map | **DONE** |
 | 2 | Part 2 dline: revalidation, PPN stamps/seams, `DDROP/DREVIVE`, the `revaltest` phase, header rewrite | battery + revaltest's dline asserts, boot 2/2; HW census | **DONE** |
 | 3 | Part 2 iline: revalidation, settle 5, `IDROP/IREVIVE`, ISTREAM/CXXX text | battery + revaltest's iline asserts, boot 2/2; HW: Nox map before/after | **DONE, timing margin OPEN** |
-| 4 | Part 3 alone: `way_ram`, new `page_cache`, rewritten `sim/page_cache_tb.sv` sweeping the geometry, OOC synthesis | 128x8 / 64x10 / 64x8 pass, the il race sweep, the pressure round trip, the clean-victim path's ~30-clock answer | not started |
+| 4 | Part 3 alone: `way_ram`, the new cache as `phys_cache` beside the old, `sim/phys_cache_tb.sv` sweeping the geometry, OOC synthesis | 128x8 / 64x10 / 64x8 pass, the il race sweep, the pressure round trip, the clean-victim path's answer | **DONE** |
 | 5 | Part 3 integration: master_top, F_WAIT/C_WAIT, fb_sim tap, monitor, regfile, ROM as pages + host write path, `apple_rom` removed, mem_integ_tb | mem_integ 20 checks, battery, boot bench both images mode 0 vs 2 parity; the HW ladder | not started |
 | 6 | Part 4 + docs: PAGE_CACHE.md rewrite, MEMORY.md, DLINE.md, ISTREAM.md, CXXX.md, PROTOCOL.md, DDR3_USAGE.md; then the 64 x 8 build | | not started |
 
@@ -499,3 +502,232 @@ comfortably above it.
 Our deepest remaining chain is 16 levels; everything deeper in the design
 belongs to UberDDR3's controller, which is not ours.  The next lever, if more
 margin is wanted, is the data front's serve chain described above.
+
+## Rung 4, as built
+
+The physical page cache exists, passes its own bench at three geometries and
+has been through out-of-context synthesis.  It is NOT wired into the design:
+rung 4 builds it beside `rtl/page_cache.sv`, which still serves the machine,
+and rung 5 does the swap.
+
+**It is a new file, `rtl/phys_cache.sv`, not a rewrite of `page_cache.sv`.**
+The plan says "page_cache.sv rewritten", and it will be - at rung 5, where
+master_top changes anyway and the old file is deleted.  Rewriting it now would
+have taken the whole battery red for the length of a rung (accel_tb, boot_tb
+and mem_integ_tb all instantiate it), and rungs 1-3 are proven on hardware
+against a design that builds.  So `phys_cache` is the module's name until the
+integration renames it, and `sim/suite.sh battery` runs BOTH page caches.
+
+### What it is
+
+`SETS x WAYS` pages of 256 bytes - 128 x 8 = 1024 pages = 256 KB - physically
+indexed and physically tagged, one cache for instructions and data, the DDR3
+behind everything.  The set index is hashed, `ppn[6:0] ^ ppn[13:7]`, which is
+what spreads the machine thinly: two of bank 0's pages land in each set, two of
+bank 1's, and the ROM's sixty-four go one per set into half of them - five ways
+of eight at worst.  An ordinary IIe therefore fills the cache and never evicts.
+
+The pipeline is three clocks to a byte, the two-bank design's latency, and it
+gets there by running the tag compare BESIDE the row read rather than in front
+of it:
+
+| clock | |
+|---|---|
+| P0 | the hashed set indexes every way's port A and the directory; the tags, valid, dirty and replacement bits are registered |
+| P1 | WAYS tag compares against the entrant's page -> the one-hot hit way, the victim, registered.  **A write's decision is taken here** |
+| P2 | the rows are out; one WAYS:1 row mux, one byte select; **a write lands** on its hit way's port A |
+| P3 | `sub_en`/`sub_data` stand, `decided` pulses |
+
+**The decision moved a clock earlier than the two-bank design's**, which
+decided at P2 because it read its tag at P1.  Reading the directory at P0 - it
+is indexed by the same preview the block RAMs are - is what buys that clock,
+and the clock is what lets a write land at P2 as the plan asks.
+
+### The landing reservation, and who else could want that clock
+
+A write lands two clocks after its entrant, and no fill may read a page on the
+clock a write to it lands.  The reservation is a register (`wl_v`), so it
+refuses `il_ack` and `pw_take` with no cone at all.  What it does NOT refuse is
+`op_present`, and the plan does not say why it need not.  It need not because
+two guarantees already exist:
+
+- an op's own landing sits inside its `busy` window (P0..P2), so the sequencer
+  cannot present another op there; and
+- a POSTED write's landing is covered by `rtl/accel_seq.sv`'s `d_pending` -
+  **the sequencer dispatches nothing at all while the data front has a write
+  short of the cache**, and dline's `drain_sr` holds `pending` for three clocks
+  after `pw_take`.  A bus op cannot land there either: the front retires no
+  writes during a bus cycle, so the FIFO is empty for the whole of one.
+
+Both are invariants of other modules, so both are COUNTED here rather than
+assumed: `cnt_land_clash` counts an entrant on a landing clock and
+`cnt_ppn_clash` counts a classified op whose page is not the one its P0
+indexed.  The bench asserts both are zero; they are the two ways this
+structure could corrupt silently.
+
+### One row mux, two consumers
+
+The op's byte and a line request's row both need the WAYS:1 mux over the ways'
+outputs, and the plan budgeted one.  They can share one because their mux
+clocks can never coincide: a line request is refused on an op's P0, so its row
+comes out one clock either side of the op's, never on it.  The select is a
+single register written at every compare clock and read by whichever
+transaction owns the next one.  That is ~300 LUTs not spent twice.
+
+### The replacement tree at ten ways
+
+Tree pseudo-LRU as designed: one bit per internal node, the victim walk
+follows the bits, a touch walks the way's own index and flips the nodes it
+passes.  The point of the tree over a used-bits scheme is that an update's new
+bits are a function of the touched way ALONE - each set's bits need only an
+enable, never a read of their own state.
+
+`WAYS = 10` is in the sweep on purpose and is not a power of two, so the tree
+has more leaves than there are ways.  The surplus leaves fold back onto the low
+ways (`idx >= WAYS ? idx - WAYS : idx`).  That is a legal policy - every way
+stays reachable and none is starved by more than the fold - and the sweep's
+point is that the RTL builds and answers correctly at ten ways, not that ten
+ways replace optimally.
+
+### The directory in LUTRAM, and the invalidate walk
+
+**This is what out-of-context synthesis was for.**  The first cut held valid,
+dirty and the replacement bits in FLOPS, as the plan budgets them (2048 + 896),
+and priced out at **11,425 LUTs post-route against the plan's thousand** - a
+factor of eleven.  The flops are not the cost.  Each one needs its own
+next-state select fed by a DECODED set index, two or three writers deep, and
+that is two or three LUTs apiece: 2,944 flops bought about 8,000 LUTs of
+select logic.
+
+So the directory became one word per way per set in the distributed RAM that
+already held the tags - `{valid, dirty, tag[15:0]}` - plus the replacement
+tree in its own.  A write is then one addressed write and a read is the read
+the tags were already doing, and the whole structure costs what the tags cost.
+
+The price is that LUTRAM cannot be cleared in a clock, so **the invalidate is a
+WALK again**: one set per clock, `invalidating` high across it, and a reset
+walks it too.  That is not a new contract - it is `rtl/mem_cache.sv`'s, which
+`rtl/accel_seq.sv` still honours (`fast_ok` carries `mem_invalidating`), and
+which `page_cache.sv` tied low only because its valid bits were flops.
+Nothing is served under a walk; `late_fills` keeps its meaning and the
+walk's own refusals are counted separately (`cnt_iv_block`).
+
+### The bench
+
+`sim/phys_cache_tb.sv` holds a FULL MODEL of the cache - every set's tags,
+valid, dirty and replacement bits, and the 16 MB physical image - and asserts
+the DUT's directory equals it, way for way and bit for bit, at every phase
+boundary and every 250 random ops.  The replacement policy is therefore not
+merely plausible here: an eviction that chose a different victim, a dirty bit
+that did not set, a tag that did not retire, all fail on the access that caused
+them.  `sim/run_phys_cache_tb.sh` builds and runs it at **128 x 8, 64 x 10 and
+64 x 8**; `sim/suite.sh` has it as bench `phys_cache`, in the battery.
+
+Two of its phases are worth naming:
+
+- **The landing reservation, swept.**  A line request is offered on each of the
+  clocks k = -4 .. +4 around a write, where k is its clock relative to the op's
+  P0 and the landing is k = 2.  The bench asserts what each must do: refused at
+  k = 0 (the op's own P0) and k = 2 (the landing), granted everywhere else, and
+  the row it returns is the PRE-write one before the landing and the POST-write
+  one after.  That is the P+2 law in its new form, and it is where a fill would
+  silently read a stale line.
+- **The pressure round trip.**  `SETS*WAYS + 8` pages, each written with its own
+  signature and then read back whole.  At 128 x 8: 1032 pages, 1069 fills, 44
+  dirty flushes, every byte returned, and the DDR3 the stub holds equal to the
+  model everywhere the cache is not holding dirty data.
+
+### Rung 4's evidence
+
+Simulation, 2026-09-08:
+
+- `sim/run_phys_cache_tb.sh`: **52 checks, 0 errors at each of 128 x 8, 64 x 10
+  and 64 x 8.**
+- A cold read misses and answers in **19 clocks** with the stub at twelve
+  clocks of latency - no snapshot on a clean victim - against a 1 MHz budget of
+  ninety.  Every byte of a resident page stands **three clocks** after
+  op_present, and a line request's row **three clocks** after its ack.
+- The invalidate walks 128 sets in **127 clocks** with `invalidating` high
+  across it, and a reset does the same from cold - both far inside the DDR3's
+  calibration, which is what the machine actually waits for.
+- Over 2500 random ops across the whole 16 MB: hits, misses, `served`,
+  `MEM_FILLS` and `MEM_FLUSHES` all equal to the model's, `late_fills` zero,
+  `cnt_land_clash` and `cnt_ppn_clash` zero.
+- `sim/suite.sh battery` **35/35 PASS** - `accel_vl` 98 checks / 0 errors both
+  sweeps, `mem_integ` 20 / 0, the OLD `page_cache` 19 / 0 (it still serves the
+  machine and is untouched), `phys_cache` 52 / 0 at all three geometries,
+  `fb_sim_vl`.  `sim/lint.sh` clean, `tools/check_ports.py` clean.
+- No bitstream was built for this rung and none was needed: `phys_cache` is not
+  in `build/build.tcl`'s file lists yet, so the card's design is bit-identical
+  to rung 3's.
+
+Out-of-context synthesis, `xc7a100tfgg484-2` at the design's own 10 ns:
+
+| | LUTs | of those, LUTRAM | flops | RAMB36 | WNS | WHS |
+|---|---|---|---|---|---|---|
+| 128 x 8, the directory in FLOPS | 11,425 | 438 | 3,994 | 64 | +0.345 | +0.096 |
+| **128 x 8, the directory in LUTRAM** | **2,746** | 498 | **1,061** | 64 | **+1.425** | +0.116 |
+| 64 x 8, the directory in LUTRAM | 2,416 | 292 | 953 | 32 | +1.925 | +0.114 |
+
+The restructure paid twice: 8,679 LUTs and 2,933 flops out, and **a full
+nanosecond of setup slack back**.  Against the plan's budget - 64 RAMB36, ~3k
+flops, ~1k LUTs - the block RAM is exactly as predicted, the flops are a third
+of the estimate (the estimate assumed the directory was flops), and the LUTs
+are 2.7x it: the budget counted the tags, the compares, one row mux and the
+engine, and did not count the victim walk, the second row mux for port B, or
+twelve counters.
+
+**The DO-register question is settled: keep it.**  Both output registers on a
+way's port A earn their place - the row is 128 bits wide, the way mux and the
+byte select want a whole stage between them, and at 100 MHz the block will
+route at 10 ns with 1.4 ns to spare.  Nothing here is asking for the clock
+back.
+
+Note also what the 64 x 8 line is for: it is the same LUTs and half the block
+RAM, which is the cheap fallback if the integrated design turns out to want
+its RAMB36 elsewhere.
+
+### Three bugs this rung cost, all mine, all caught by the bench
+
+**`il_done` arrived a clock late.**  Written as a REGISTER off the third stage
+of the ack's shift register, it stood at ack+4 while the row stood at ack+3.
+The bench times the ack-to-done distance rather than merely waiting for it, so
+it said so on the first run.  It is combinational off the shift register now.
+A registered done would have cost the fronts a clock per line for nothing.
+
+**The bench committed before the bus's byte had settled.**  `data_sync` is
+compared REGISTERED (`data_q`) at `op_commit`, so the byte has to stand at
+least one clock before the commit; the task set both on the same negedge
+whenever the access was slow enough to have used up its cycle.  94 monitor
+mismatches on a coherent machine, all of them misses.  The old bench had three
+clocks between the two by construction and never said why; this one does, and
+says so.
+
+**The directory was compared while the engine was still filling.**  `decided`
+for a read miss pulses at the CRITICAL BEAT, fifteen beats before the retag,
+so a check that ran as soon as the op returned caught the victim cleared and
+the new tag not yet written.  `check_dir` waits for `busy` now.  Worth keeping
+because it is a real property, not a bench artefact: between a miss's answer
+and its retag the cache is one page short, and anything that reads the
+directory in that window - a front's line request included - must be able to
+take "not resident" for an answer.
+
+### What rung 5 has to wire
+
+- `master_top`: `phys_cache` in place of `page_cache` (and the module renamed
+  to `page_cache`, the old file deleted), `rtl/apple_rom.sv` and its `r2_*`
+  port gone, `way_ram.sv` into `build/build.tcl`'s file lists.
+- The fronts move from "`il_ok` with the ack" to "`il_done` at ack+3": iline's
+  `F_REQ -> F_WAIT` and dline's `C_REQ -> C_WAIT`, and the stale-done law
+  (page_cache holds `il_busy` until the front leaves its wait state).  `il_src`
+  is already booked per front here (`cnt_il_i`/`cnt_il_d`).
+- `pw_ppn`/`pw_off` go to the cache directly from dline's FIFO, beside
+  `pw_take` - apple_mmu needs no new preview for a posted write, which is why
+  the module takes them as its own ports.
+- `fb_sim`'s tap is already the right shape: `mw_stb` fires for every byte
+  landing in physical bank 0, the write miss's patch included.
+- `MEM_CTRL[27:24]` becomes `MEM_PAGES_LOG2` from a master_top parameter, and
+  `MEM_FILLS`/`MEM_FLUSHES`/`MEM_DECLINES` land at 0x8000_0114..
+- `accel_seq` already honours `mem_invalidating`; with the walk back it
+  matters again, and the reset walk (SETS clocks) finishes long before the
+  DDR3 calibrates.

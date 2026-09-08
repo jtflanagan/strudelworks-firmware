@@ -7,7 +7,7 @@
 #
 #   sim/suite.sh quick      lint + microcode check + every bench under ~10 s      (~1 min)
 #   sim/suite.sh cpu        cpu_tb, cpu_cycles, cpu_irq, cpu_predict                 (~2 min)
-#   sim/suite.sh battery    quick + accel_vl + mem_integ + page_cache + fb_sim_vl    (~6 min)
+#   sim/suite.sh battery    quick + accel_vl + mem_integ + page_cache(s) + fb_sim_vl  (~8 min)
 #   sim/suite.sh boot       run_boot_tb.sh --verilator per image, in parallel        (~4 min)
 #   sim/suite.sh all        battery + cpu + boot
 #
@@ -68,11 +68,12 @@ declare -A B=(
   [accel_iv]="sim/run_accel_tb.sh|^PASS$"
   [mem_integ]="sim/run_mem_integ_tb.sh|^PASS$"
   [page_cache]="sim/run_page_cache_tb.sh|^PASS$"
+  [phys_cache]="sim/run_phys_cache_tb.sh|^PASS$"
   [fb_sim_vl]="sim/run_fb_sim_vl.sh|^PASS$"
 )
 QUICK="lint microcode boot_hold bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
-BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"
+BATTERY="$QUICK accel_vl mem_integ page_cache phys_cache fb_sim_vl"
 [ "$iverilog" = 1 ] && BATTERY="$BATTERY accel_iv"
 
 pass=0; fail=0; failed=""

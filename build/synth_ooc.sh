@@ -7,6 +7,8 @@
 #   build/synth_ooc.sh --period 6.0          # ask for 166 MHz instead
 #   build/synth_ooc.sh --effort high         # trade runtime for Fmax
 #   build/synth_ooc.sh --top foo --src rtl/foo.sv
+#   build/synth_ooc.sh --top phys_cache --src rtl/phys_cache.sv --src rtl/way_ram.sv \
+#                      --generic SETS=64 --generic WAYS=8
 #
 # Same WSL plumbing as build/build.sh, and for the same two reasons: a .bat is
 # not directly executable from WSL (binfmt_misc interop only handles .exe), and
@@ -19,6 +21,7 @@ top="cpu65c02"
 srcs=()
 period="10.0"
 effort=""
+generics=()
 extra=()
 
 while [ $# -gt 0 ]; do
@@ -27,6 +30,7 @@ while [ $# -gt 0 ]; do
         --src)    shift; srcs+=("$1") ;;
         --period) shift; period="$1" ;;
         --effort) shift; effort="$1" ;;
+        --generic) shift; generics+=("$1") ;;
         *)        extra+=("$1") ;;
     esac
     shift
@@ -61,6 +65,10 @@ mkdir -p "$WORKDIR"
 
 args=(-top "$top" -period "$period" -outdir "$(wslpath -w "$WORKDIR")")
 [ -n "$effort" ] && args+=(-effort "$effort")
+# cmd.exe splits an argument at '=', so NAME=VALUE reaches Vivado as two
+# tokens and the generic binds to nothing (measured: "Parameter SETS bound to:
+# 0").  Send it with a colon and let the tcl put the '=' back.
+for g in "${generics[@]:-}"; do [ -n "$g" ] && args+=(-generic "${g/=/:}"); done
 for s in "${srcs[@]}"; do
     args+=(-src "$(wslpath -w "$s")")
 done

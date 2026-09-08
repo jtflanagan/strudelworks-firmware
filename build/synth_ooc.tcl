@@ -38,6 +38,7 @@ set top     ""
 set srcs    {}
 set period  10.0
 set effort  "default"
+set generics {}
 set outdir  [file join $root build ooc]
 
 for {set i 0} {$i < $argc} {incr i} {
@@ -49,6 +50,7 @@ for {set i 0} {$i < $argc} {incr i} {
         -part   { incr i; set part   [lindex $argv $i] }
         -period { incr i; set period [lindex $argv $i] }
         -effort { incr i; set effort [lindex $argv $i] }
+        -generic { incr i; set g [lindex $argv $i]; regsub {:} $g {=} g; lappend generics $g }
         -outdir { incr i; set outdir [lindex $argv $i] }
         default { puts "WARNING: ignoring unknown argument [lindex $argv $i]" }
     }
@@ -97,11 +99,16 @@ foreach f $srcs {
 # high-effort flow is what you want when you are asking how fast this thing can
 # actually go.  Mixing the two across a comparison is how you conclude that a
 # change helped when the directive did.
+# -generic NAME=VALUE overrides a parameter's default, which is how a
+# parameterised block is measured at more than one geometry without editing it.
+set gargs {}
+foreach g $generics { lappend gargs -generic ; lappend gargs $g }
+if {[llength $generics] > 0} { puts "generics: $generics" }
 if {$effort eq "high"} {
-    synth_design -top $top -part $part -mode out_of_context \
+    synth_design -top $top -part $part -mode out_of_context {*}$gargs \
         -directive PerformanceOptimized -flatten_hierarchy rebuilt
 } else {
-    synth_design -top $top -part $part -mode out_of_context
+    synth_design -top $top -part $part -mode out_of_context {*}$gargs
 }
 
 # The clock has to be declared AFTER synth_design in this flow - there is no
