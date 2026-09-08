@@ -271,44 +271,27 @@ Counters `ACCEL_DDROP` (0x8000_010C) and `ACCEL_DREVIVE` (0x8000_0110), plus
 segment - sixteen RAMRD flips over one address, a write to a line while it is
 out of service, and a RamWorks register move away and back.
 
-### A bench finding rung 2 turned up: the paddle at the 255 stop
+### RESOLVED: the paddle-3 check was testing an unconnected input
 
-`sim/accel_tb.sv`'s game-port check failed on the first rung-2 battery -
-`mode 2: paddle 3 read as 250, wanted 255` - and it is worth writing down
-what it was and what it was not.
+The game-port check failed on the first rung-2 battery - `mode 2: paddle 3
+read as 250, wanted 255` - and its reading then drifted with every rung: 255
+(rung 1), 250 and 252 (rung 2, the two differing only in unrelated program
+content on IDENTICAL RTL), 247 (rung 3).  Paddles 0/1/2 read exactly 39/120/0
+throughout and the card's own measurement of paddle 3 stayed 2804 bus cycles
+in every run.
 
-It is NOT a functional break.  Three runs, the card's own measurement of
-paddle 3 identical (2804 bus cycles) in all three:
+**Paddle 3 is not connected on the machine** (the user, 2026-09-08).  The card
+reads it saturated on hardware - `pdl 1215 1185 4000 4000`, and paddle 2 with
+it - so PREAD's count for it was measuring an unconnected input, and drift
+with no correlate in the connected paddles is exactly what that looks like.
+The check is removed rather than tolerated: `sim/accel_tb.sv` now asserts on
+paddles 0-2 only, at the original +/-2, and prints paddle 3's reading without
+judging it.
 
-| build | paddle 3 | paddles 0/1/2 |
-|---|---|---|
-| rung 1 (`3547dc5`, clean worktree) | 255 | 39, 120, 0 |
-| rung 2, before `revaltest` existed | 250 | 39, 120, 0 |
-| rung 2, with `revaltest` | 252 | 39, 120, 0 |
-
-The last two are the SAME RTL and differ only in unrelated program content,
-so the quantity is workload-sensitive at this operating point.  A paddle at
-the 255 stop runs a virtual timer of 2804 core cycles and PREAD counts
-eleven-cycle loops against it: 2804/11 = **254.9**, under one iteration of
-room inside a fixed +/-2 window.  The four paddles also share one strobe - a
-558 already running ignores a retrigger - so where paddle 3's timer stands
-when its own PREAD begins depends on what the earlier paddles' PREADs
-consumed, and that moves with the accelerated op mix, which is exactly what
-this rung changes.
-
-So the check's window was wrong, not the port: it is now two counts plus one
-per 64 of position, which still catches a functional break (those move a
-reading by tens) and stops the top of the range from being a tripwire for
-any change to the op mix.
-
-One theory was entertained and DISPROVED on the way, recorded so it is not
-re-derived: that `core_tick` double-counts because `(bus_tick && !op_dummy)`
-excludes dummy cycles the data front's last-byte path would tick.  It does
-not - `op_dummy` is `apple_bus_write`'s `drv_dummy`, "this cycle carries no
-op at all", the DRIVER's idle cycle rather than a 6502 dummy cycle, and
-excluding it is correct.  The exact mechanism behind the last few counts was
-not pinned down further, because the three measurements above already settle
-what the check should assert.
+The lesson worth keeping: two tolerance widenings went into that check before
+the question "is this signal connected to anything?" got asked.  A measurement
+that moves with unrelated changes while its neighbours stay exact is evidence
+about the measurement, not the thing measured.
 
 ### Rung 2's evidence
 
@@ -403,83 +386,116 @@ from the CAM.  It compares `{ppn, vtag[3:0]}` now.  This one cost promotes,
 never correctness - which is why only a counter, not a bench, would ever have
 caught it.
 
-### An open finding: the paddle at the top of its range
+### The paddle-3 check, removed
 
-`sim/accel_tb.sv`'s PREAD check for a paddle at position 255 has moved with
-every rung - **255** (rung 1), **250 and 252** (rung 2, the two differing only
-in unrelated program content on IDENTICAL RTL), **247** (rung 3) - while
-paddles 0/1/2 read exactly 39/120/0 throughout and the card's own measurement
-of paddle 3 stays 2804 bus cycles in every run.
+Rung 3 moved that reading again (247).  It is gone now - paddle 3 is not
+connected on the machine, so the check was asserting on an unconnected input.
+See "RESOLVED: the paddle-3 check was testing an unconnected input" above.
 
-So it tracks the accelerated op mix, and the virtual timer delivers a few
-percent fewer PREAD counts than its sample implies: 2804 core cycles over
-eleven-cycle loops is 254.9, and 247 is eight short of that.  The arithmetic
-leaves under one iteration of margin at the top of the range, which is why
-only that paddle shows it.
+### The long chains rungs 2-3 left, and what they cost
 
-This is not something the rethink introduced and it is not a memory-
-correctness question - but the trend is real and deserves its own look rather
-than a wider tolerance each time.  For now the check is +/-2 for every paddle
-and 12-low at the very top, which still fails a functional break (those move a
-reading by tens).  **Recorded as OPEN.**
+The user's steer, 2026-09-08: **look at the long logic chains rather than the
+slack, because a chain that manages to meet timing is still a cause of timing
+pressure.**  Counting chains at >= 12 levels (UberDDR3 excluded, it is not
+ours) found the pressure immediately:
 
-### Rung 3's evidence
+| source register | chains >= 12 levels |
+|---|---|
+| `u_cpu/pcl_reg[0]` | 88 (pre-existing: the CPU's own datapath) |
+| `u_card/source_real_reg` | 81 (pre-existing) |
+| `u_dline/dq_st_reg[3][1]` | 35 (the serve path) |
+| **`u_mmu/rwb_p1_q`** | **64 - every one of them ours** |
 
-Simulation: `accel_vl` **98 checks, 0 errors** on both sweeps (97 before, plus
-the instruction front's revalidation check), `SUITE boot` **2/2 PASS** with
-`bad 0 mism 0`.  The fronts' books in the mode-2 phase: D **5461 drops, 5153
-revives, 32081 revived-line serves**; I **783 drops, 489 revives**.
+And every single one of those 64 ended in a REVALIDATION COUNTER -
+`cnt_reval_drop[16:31]` and `cnt_reval_revive[16:31]`, both fronts.  Not one
+reached a valid bit or anything else functional.  The chain was `rwb_p1 -> the
+bank mux -> an eight-bit compare -> a thirty-two input popcount -> a 32-bit
+carry`: fifteen levels of logic to increment a statistic.
 
-Hardware, the animated Nox map, and this one needs no normalising:
+The fix is to root the books in registers.  `rv_ok`/`rv_c`/`rv_t*` and the
+valid bits are copied into flops every clock, the popcount and the counter add
+run off those copies a clock later, and the valid-bit update itself is
+untouched at `reval_q`.  Two flops per line.
 
-> **The instruction front's drop and revive counters do not move at all.**
-> `I drop 6,672,687 revive 3,019,448`, identical across three readings spanning
-> **1.8 million map changes**, while D drops climbed 17.7M -> 46.8M over the
-> same span.
+| | before | after |
+|---|---|---|
+| `rwb_p1_q` chains >= 12 levels | 64 | **0** |
+| max logic depth, whole design | 22 | **18** |
+| max logic depth, our RTL | 16 | **15** |
+| tail >= 14 levels | 233 | **164** |
+| WNS | +0.001 | **+0.024** |
 
-At the measurement screen the instruction front now loses ZERO of its ten
-lines to a map change.  Before this rung every valid one died on each of those
-1.8M map changes.  The cumulative I-drops are all from boot and game-load,
-where the ROM and language-card switches genuinely do change a line's class -
-which is where drops SHOULD happen.  The data front is unchanged: 16.1 drops
-per map, 95.7% revived.
+The counters count the same events to the bit afterwards - D 5461/5153/32081,
+I 783/489, unchanged - which is what says the change was free.
 
-There is a first sign of a speed effect.  Using the normalisation that made
-the rung-1/2 samples comparable - speed divided by maps-per-1000-cycles, a
-flat 1.67, 1.66, 1.66, 1.66 across all four of them - rung 3 reads **1.944,
-about +17%**.  That is evidence, not proof: it is a derived metric, and the
-matched A/B is still owed.  It is consistent with rung 2 moving the ratio not
-at all, since a data miss rides the dispatcher unclaimed and the second touch
-hits, while an instruction miss stalls the fetch stream.
+Finding one bug on the way: the per-slot increments in `iline`'s `reval_q`
+block were still there.  The patch that was supposed to remove them had two
+edits, the second one's assertion failed, and the script wrote the file only
+at the end - so the first, successful edit was silently discarded and the
+removal was reported as done when it had not happened.  It was harmless while
+both increments sat on the same clock (the later popcount assignment simply
+overwrote them, non-blocking), and moving the popcount to `reval_q2` split
+them across clocks and both started counting: I drops went 783 -> 882.  An
+unexplained counter change was worth chasing rather than accepting.
 
-### OPEN: rung 3 spends the timing margin
+### STILL OPEN: the data front's serve chain
 
-**Three builds: wns = +0.031, +0.002, +0.001** (whs +0.044 / +0.037 / +0.049,
-`fail=0/62697` in all three), against rung 1's +0.046 and +0.104.  Those
-distributions barely overlap, so this is a real cost of about 40-70 ps and not
-the build-to-build noise the rung-1 notes above describe.  **The plan's gate is
-WNS >= +0.039 and it is NOT met.**  Timing is MET - positive slack, no failing
-endpoints - but the margin is gone, and `docs/DERISK.md`'s history says
-marginal decision cones at corners are what past hardware glitches were made
-of.
+The deepest chain that remains in our RTL is fifteen levels,
+`u_dline/dq_st_reg[1][0] -> u_cpu/{a,x,y,md}_reg[6..7]`, and it splits in half:
 
-One cause was found and removed: the first cut gated the fill launches
+- **dline, 7 levels, 4.75 ns**: `dq_st` -> *1.067 ns of route* -> the tag
+  LUTRAM (RAMD32) -> two LUTs for the nine-bit tag compare -> `cam_hit` (the
+  four-way OR) -> `serve_hit` -> `d_din`.
+- **cpu65c02, 7 levels, ~4.4 ns**: `d_din` -> the ALU operand -> the carry
+  chain (`f_c_i_*`) -> the result mux -> the accumulator.
+
+Half of it is the CPU's own datapath from `din` to `A`, which is not dline's
+to shorten.  dline's half is close to minimal as it stands: a nine-bit tag
+compare needs two LUT6 levels, then one to OR the four ways and one for
+`serve_hit`.  The levers, none of them cheap:
+
+- **A narrower virtual tag.**  `TW = 16 - 4 - IW`, and at `IW = 3` that is 9
+  bits.  At `IW = 6` (64 sets) it would be 6 bits and compare in ONE level.
+  That is a geometry change, and `docs/DLINE.md` records a 64 x 2 LUTRAM shape
+  missing timing twice for a different reason (a 64:1 valid mux), so it wants
+  measuring rather than assuming.
+- **The 1.067 ns first hop** from `dq_st` to the tag LUTRAM at fanout 14 is
+  route, not logic - more per-way register copies is the technique
+  `docs/DLINE.md` already uses for exactly this.
+- **`d_din`'s `!serve_hit & accel_din` term** is what puts the fully-reduced
+  hit on the byte's cone.  It would go away if the sequencer's byte were zero
+  whenever the front serves, but the two can both be ready in one cycle and
+  `claim_q` is a clock behind, so that is real microarchitecture work.
+
+### Rung 3's timing margin: spent, then most of it recovered
+
+Rung 3 as first built spent the margin: three builds gave wns **+0.031,
++0.002, +0.001** against rung 1's +0.046 and +0.104, so the plan's >= +0.039
+gate was not met.  Two things were done about it, in this order.
+
+**The redundant launch gates.**  The first cut gated the fill launches
 (`promote_go`/`scan_go`/`sw_taken`/`ew_taken`) on `map_settling`, which made
-`miss_tag_q -> f_poff`'s clock enable the worst path.  Those gates were
-redundant - `f_restart` carries `map_changed` and every install sits behind
-it, so an install can never land on the clock stage 1's `rv1` would be stale -
-and removing them dropped max logic depth from 22 to 16 with the revalidation
+`miss_tag_q -> f_poff`'s clock enable the worst path in the design.  They were
+unnecessary - `f_restart` carries `map_changed` and every install sits behind
+it, so an install can never land on the clock stage 1's `rv1` would be stale.
+Removing them dropped max logic depth from 22 to 16 with the revalidation
 counts byte-identical.  It did NOT recover the slack.
 
-The limiter now is `u_dline/dq_st_reg[3][1] -> u_cpu/a_reg[5]`, the data
-front's serve path, **75% route delay** and a path rung 1's baseline already
-carried.  So what costs the margin is AREA, not a new cone: rung 2's per-line
-identity and revalidation added roughly 1k LUTs and 600 flops inside dline and
-congested the routing around its serve.
+**The counter chains** (the section above).  Rooting the revalidation books in
+registers deleted all 64 of the `rwb_p1_q` chains, and that is what moved the
+number:
 
-The cheapest fix, not yet built: store each line's 2-bit `bsel` instead of its
-8-bit `cbank`, and clear retained aux lines outright when the RamWorks bank
-register moves (a bus op, a handful a second).  That removes 32 eight-bit
-compares and 256 flops from dline and should hand the margin back.  Until it
-is done, treat this stack as functionally proven but not a bitstream to rely
-on.
+| build | wns |
+|---|---|
+| rung 3, first three builds | +0.031, +0.002, +0.001 |
+| after the counter fix | +0.024, **+0.041** |
+
+**The latest build MEETS the gate at +0.041** (whs +0.062, `fail=0/62793`).
+Be careful with one sample, though: build-to-build spread on identical source
+is about +/-30 ps here, so the honest reading is that the counter fix bought
+roughly 20-25 ps and the stack now sits *around* the gate rather than
+comfortably above it.
+
+Our deepest remaining chain is 16 levels; everything deeper in the design
+belongs to UberDDR3's controller, which is not ours.  The next lever, if more
+margin is wanted, is the data front's serve chain described above.

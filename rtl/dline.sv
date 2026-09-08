@@ -485,10 +485,8 @@ module dline #(
 
     logic [NSET-1:0] rv_ok [0:NWAY-1];
     logic [7:0]      rv_bank;
-    logic [5:0]      n_drop, n_rev;
     integer rc, rd_;
     always_comb begin
-        n_drop = 6'd0; n_rev = 6'd0;
         for (rc = 0; rc < NWAY; rc = rc + 1) begin
             for (rd_ = 0; rd_ < NSET; rd_ = rd_ + 1) begin
                 rv_bank = (rv1[rc][rd_][3:2] == BS_AUX) ? rwb_p1 :
@@ -498,10 +496,38 @@ module dline #(
                                   (rv1[rc][rd_][6:5] == CLS_LC)) &&
                                  (cbank[rc][rd_] == rv_bank) &&
                                  (cfold[rc][rd_] == rv1[rc][rd_][1]);
-                if ( cv[rc][rd_] && !rv_ok[rc][rd_]) n_drop = n_drop + 6'd1;
-                if (!cv[rc][rd_] &&  rv_ok[rc][rd_]) n_rev  = n_rev  + 6'd1;
             end
         end
+    end
+
+    // The books take a REGISTERED copy of the verdict, and are counted a
+    // clock later.  Straight off rv_ok the chain ran rwb_p1 -> the bank mux
+    // -> an eight-bit compare -> a thirty-two input popcount -> a 32-bit
+    // carry, fifteen levels ending in a counter, and it showed up as one of
+    // the design's longest chains (docs/MEMORY_REFACTOR.md, "the long chains
+    // rungs 2-3 left").  A counter has no reason to be on a chain like that:
+    // rooting it in registers cuts rwb_p1 out of it entirely and costs two
+    // flops per line.  cv is still written from rv_ok at reval_q, untouched.
+    logic [NSET-1:0] rv_ok_q [0:NWAY-1];
+    logic [NSET-1:0] cv_q    [0:NWAY-1];
+    logic            reval_q2;
+    integer rq;
+    always_ff @(posedge clk) begin
+        for (rq = 0; rq < NWAY; rq = rq + 1) begin
+            rv_ok_q[rq] <= rv_ok[rq];
+            cv_q[rq]    <= cv[rq];
+        end
+        reval_q2 <= reval_q && !rst;
+    end
+    logic [5:0] n_drop, n_rev;
+    integer pc_, pw_;
+    always_comb begin
+        n_drop = 6'd0; n_rev = 6'd0;
+        for (pw_ = 0; pw_ < NWAY; pw_ = pw_ + 1)
+            for (pc_ = 0; pc_ < NSET; pc_ = pc_ + 1) begin
+                if ( cv_q[pw_][pc_] && !rv_ok_q[pw_][pc_]) n_drop = n_drop + 6'd1;
+                if (!cv_q[pw_][pc_] &&  rv_ok_q[pw_][pc_]) n_rev  = n_rev  + 6'd1;
+            end
     end
 
     // A serve from a line that has come back from a map change at least
@@ -974,6 +1000,8 @@ module dline #(
                     cv[k]   <= rv_ok[k];
                     crev[k] <= crev[k] | (rv_ok[k] & ~cv[k]);
                 end
+            end
+            if (reval_q2) begin
                 cnt_reval_drop   <= cnt_reval_drop   + {26'd0, n_drop};
                 cnt_reval_revive <= cnt_reval_revive + {26'd0, n_rev};
             end

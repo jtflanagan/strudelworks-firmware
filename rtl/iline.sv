@@ -813,18 +813,35 @@ module iline (
         end
     end
 
-    // The revalidation's books, over the slots and the CAM together.
-    logic [4:0] n_idrop, n_irev;
+    // The revalidation's books, over the slots and the CAM together - off a
+    // REGISTERED copy of the verdict, and counted a clock later.  Straight
+    // off rv_* the chain ran rwb_p1 -> the bank mux -> an eight-bit compare
+    // -> a popcount -> a 32-bit carry, fifteen levels ending in a counter,
+    // and it was one of the design's longest (docs/MEMORY_REFACTOR.md).  The
+    // valid bits are still written from rv_* at reval_q, untouched.
+    logic [CAMN-1:0] rv_c_q, cam_v_q;
+    logic            rv_t0_q, rv_t1_q, v0_q, v1_q, reval_q2;
     integer nq;
+    always_ff @(posedge clk) begin
+        rv_c_q   <= rv_c;
+        rv_t0_q  <= rv_t0;
+        rv_t1_q  <= rv_t1;
+        v0_q     <= v[0];
+        v1_q     <= v[1];
+        for (nq = 0; nq < CAMN; nq = nq + 1) cam_v_q[nq] <= cam_v[nq];
+        reval_q2 <= reval_q && !rst;
+    end
+    logic [4:0] n_idrop, n_irev;
+    integer np;
     always_comb begin
         n_idrop = 5'd0; n_irev = 5'd0;
-        if ( v[0] && !rv_t0) n_idrop = n_idrop + 5'd1;
-        if (!v[0] &&  rv_t0) n_irev  = n_irev  + 5'd1;
-        if ( v[1] && !rv_t1) n_idrop = n_idrop + 5'd1;
-        if (!v[1] &&  rv_t1) n_irev  = n_irev  + 5'd1;
-        for (nq = 0; nq < CAMN; nq = nq + 1) begin
-            if ( cam_v[nq] && !rv_c[nq]) n_idrop = n_idrop + 5'd1;
-            if (!cam_v[nq] &&  rv_c[nq]) n_irev  = n_irev  + 5'd1;
+        if ( v0_q && !rv_t0_q) n_idrop = n_idrop + 5'd1;
+        if (!v0_q &&  rv_t0_q) n_irev  = n_irev  + 5'd1;
+        if ( v1_q && !rv_t1_q) n_idrop = n_idrop + 5'd1;
+        if (!v1_q &&  rv_t1_q) n_irev  = n_irev  + 5'd1;
+        for (np = 0; np < CAMN; np = np + 1) begin
+            if ( cam_v_q[np] && !rv_c_q[np]) n_idrop = n_idrop + 5'd1;
+            if (!cam_v_q[np] &&  rv_c_q[np]) n_irev  = n_irev  + 5'd1;
         end
     end
 
@@ -1141,16 +1158,15 @@ module iline (
             // valid bit is the new map's answer for the identity that line
             // was filled with, and a line whose region did not move never
             // stopped being servable (docs/MEMORY_REFACTOR.md, rung 3).
-            // Nothing else writes a valid bit on this clock: every launch is
-            // held off through map_settling, so no install can land here.
+            // Nothing else writes a valid bit on this clock: every install
+            // sits behind `if (f_restart)`, and f_restart carries
+            // map_changed, so none can land here.
             if (reval_q) begin
                 v[0] <= rv_t0;
                 v[1] <= rv_t1;
-                if ( v[0] && !rv_t0) cnt_reval_drop   <= cnt_reval_drop   + 32'd1;
-                if (!v[0] &&  rv_t0) cnt_reval_revive <= cnt_reval_revive + 32'd1;
-                if ( v[1] && !rv_t1) cnt_reval_drop   <= cnt_reval_drop   + 32'd1;
-                if (!v[1] &&  rv_t1) cnt_reval_revive <= cnt_reval_revive + 32'd1;
                 for (s = 0; s < CAMN; s = s + 1) cam_v[s] <= rv_c[s];
+            end
+            if (reval_q2) begin
                 cnt_reval_drop   <= cnt_reval_drop   + 32'(n_idrop);
                 cnt_reval_revive <= cnt_reval_revive + 32'(n_irev);
             end
