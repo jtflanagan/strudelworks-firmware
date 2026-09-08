@@ -187,9 +187,15 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // The data front between iline and the core, as in master_top.
     wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
     wire        d_pending_w, turbo_wr, dq_rw_w, cl_posted;
-    wire        pw_valid_w, pw_aux_w, pw_take_w, pw_ready_w, ws_valid_w, ws_aux_w;
-    wire [7:0]  pw_bank_w, pw_data_w, ws_bank_w, cl_wdata;
-    wire [15:0] pw_off_w, ws_off_w;
+    wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w, ws_aux_w;
+    wire [7:0]  pw_data_w, ws_bank_w, cl_wdata;
+    wire [15:0] ws_off_w;
+    // The physical seam (docs/MEMORY_REFACTOR.md, rung 2).
+    wire [15:0] pw_ppn_w, cl_ppn_w, d_ppn_w, p_ppn_w;
+    wire [7:0]  pw_off_w, rwb_p1_w;
+    wire [3:0]  d_reg_w, p_reg_w;
+    wire        d_fold_w, p_fold_w, p_fs_w, map_settling;
+    wire [69:0] rt_rd_flat;
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
     wire        dl_req_w, dl_aux_w;
@@ -344,17 +350,20 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .altzp (sw_state[3]),
         .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .rw_bank (rw_bank), .map_changed (map_changed),
+        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
+        .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w), .map_settling (map_settling),
         .dl_req (dl_req_w), .dl_aux (dl_aux_w), .dl_bank (dl_bank_w), .dl_line (dl_line_w),
         .dl_ack (il_ack && !il_req), .dl_ok (il_ok), .dl_row (il_row),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
-        .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off), .wdata (cl_wdata),
-        .pw_valid (pw_valid_w), .pw_aux (pw_aux_w), .pw_bank (pw_bank_w), .pw_off (pw_off_w),
+        .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata),
+        .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
         .pw_data (pw_data_w), .pw_take (pw_take_w),
         .ws_valid (ws_valid_w), .ws_aux (ws_aux_w), .ws_bank (ws_bank_w), .ws_off (ws_off_w),
         .inval (inval),
         .cnt_clr (cnt_clr),
         .cnt_serves (), .cnt_claims (), .cnt_splices (),
-        .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits ()
+        .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits (),
+        .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves ()
     );
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
@@ -417,7 +426,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .intc8rom (intc8rom),
         .cl_posted (cl_posted), .cl_wdata (cl_wdata),
-        .pw_valid (pw_valid_w), .pw_aux (pw_aux_w), .pw_bank (pw_bank_w), .pw_off (pw_off_w),
+        .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
         .pw_data (pw_data_w), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
@@ -432,8 +441,10 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .map_changed (map_changed),
         // the physical space (docs/PAGE_CACHE.md); no consumer here yet
-        .cl_ppn (), .pf_ppn (), .p_ppn (), .p_reg (), .p_fold (), .p_fs (),
-        .d_ppn (), .d_reg (), .d_fold (), .map_settling (), .rt_rd_flat (), .rwb_p1 ()
+        .cl_ppn (cl_ppn_w), .pf_ppn (),
+        .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
+        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
+        .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w)
     );
     apple_rom u_rom (
         .clk (clk), .rst (rst),

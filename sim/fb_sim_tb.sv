@@ -257,7 +257,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .pf_off (),
         .cl_posted (), .cl_wdata (),
-        .pw_valid (1'b0), .pw_aux (1'b0), .pw_bank (8'd0), .pw_off (16'd0), .pw_data (8'd0),
+        .pw_valid (1'b0), .pw_ppn (16'd0), .pw_off (8'd0), .pw_data (8'd0),
         .pw_ready (1'b0), .pw_take (),
         .sw_state (sw_state), .vid_sw (vid_sw), .rw_bank (),
         .q_addr (16'd0), .q_divert (),

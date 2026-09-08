@@ -110,7 +110,7 @@ run; Verilator only.
 | rung | what | gate | status |
 |---|---|---|---|
 | 1 | Part 1: region table + PPN export + `ACCEL_MAPS`, RamWorks 254, host words | pure refactor: `run_mmu_xlate_tb.sh`, accel battery both sweeps, cpu_predict, boot bench 2/2, mmu_trace assert if a capture exists; HW: maps/s baseline on the animated Nox map | **DONE** |
-| 2 | Part 2 dline: revalidation, PPN stamps/seams, `DDROP/DREVIVE`, the `revaltest` phase, header rewrite | battery + revaltest's dline asserts, boot 2/2; HW census | not started |
+| 2 | Part 2 dline: revalidation, PPN stamps/seams, `DDROP/DREVIVE`, the `revaltest` phase, header rewrite | battery + revaltest's dline asserts, boot 2/2; HW census | **DONE** |
 | 3 | Part 2 iline: revalidation, settle 5, `IDROP/IREVIVE`, ISTREAM/CXXX text | battery + revaltest's iline asserts, boot 2/2; HW: Nox map before/after | not started |
 | 4 | Part 3 alone: `way_ram`, new `page_cache`, rewritten `sim/page_cache_tb.sv` sweeping the geometry, OOC synthesis | 128x8 / 64x10 / 64x8 pass, the il race sweep, the pressure round trip, the clean-victim path's ~30-clock answer | not started |
 | 5 | Part 3 integration: master_top, F_WAIT/C_WAIT, fb_sim tap, monitor, regfile, ROM as pages + host write path, `apple_rom` removed, mem_integ_tb | mem_integ 20 checks, battery, boot bench both images mode 0 vs 2 parity; the HW ladder | not started |
@@ -219,3 +219,140 @@ the load said 11,453,040 for a machine that had executed nothing.
 - `sim/run_mmu_xlate_tb.sh` with `+quick` (bench `mmu_xlate`): 256 maps in
   seconds, in the quick set.  The full 16384-map sweep is the rung gate, run
   once.
+
+## Rung 2, as built
+
+`rtl/dline.sv`'s cache lines gained a RETAINED bit `cr` beside `cv`, and their
+PHYSICAL IDENTITY in flip-flops: the bank, the REGION they were classified in,
+and the language card's fold bit.  `map_changed` no longer empties the cache.
+One clock later, `reval_q`, every line's valid bit is recomputed:
+
+```
+stage 1, every clock:  rv1[line] <= rt_rd[creg[line]]      // a 10:1 mux
+stage 2, on reval_q:   cv[line]  <= cr[line] && fs && class-ok
+                                 && cbank[line] == bank(bsel)
+                                 && cfold[line] == fold
+```
+
+The line's ADDRESS never enters.  Its region was decided when it was filled,
+and a region's answer is a function of the switches alone - so a line whose
+region did not move keeps serving through the switch write, and a line whose
+region did move keeps its tags and its row and revives when the map returns.
+
+Why the serve compare may stay VIRTUAL through all this: the serve matches
+`vt == addr[15:7]`, and `region()` reads `addr[15:8]`, which `vt` contains.
+So a virtual-tag hit implies the line's stored region IS the region of the
+address being served, and revalidation has already checked that this region
+still translates to the bank and fold the line was filled with.  The physical
+translation of the line is therefore unchanged, and the whole classify cone
+stays out of the serve - the property `docs/DLINE.md` rung 2 was built on.
+
+Everything else that follows:
+
+- The tags are physical now: `pt` is `{ppn[15:0], addr[7]}`, 17 bits.  The set
+  is `addr[6:4]` and a page holds 16 lines, so page plus `addr[7:4]` is the
+  whole identity and `addr[7]` is the only bit the set leaves out.
+- **Snoops compare RETAINED lines**, not valid ones, so a line written while
+  it is out of service comes back holding the new byte.  That is the
+  stale-revive hazard, and `revaltest` part 2 is built to hit it.
+- The victim is an unRETAINED way first, then the round robin: a
+  retained-invalid line counts as occupied, so under AUXMOVE both banks'
+  copies of a set coexist and each toggle costs nothing.
+- The posted-write seam is `{pw_ppn, pw_off[7:0], pw_data}`, 32 bits in the
+  FIFO; `apple_mmu` derives the old `cl_aux/cl_bank/cl_off` from it with one
+  decrementer until Part 3.  `ws_*` still speaks the old triple - the
+  instruction front is rung 3's.
+- An in-flight claim still aborts on `map_changed`, and `live_cmiss` is held
+  off through `map_settling`, so no install can ever write `cv` on the clock
+  the revalidation does.
+
+Counters `ACCEL_DDROP` (0x8000_010C) and `ACCEL_DREVIVE` (0x8000_0110), plus
+`cnt_rev_serves` for the bench.  `sim/accel.s` gained `revaltest` in the ROM
+segment - sixteen RAMRD flips over one address, a write to a line while it is
+out of service, and a RamWorks register move away and back.
+
+### A bench finding rung 2 turned up: the paddle at the 255 stop
+
+`sim/accel_tb.sv`'s game-port check failed on the first rung-2 battery -
+`mode 2: paddle 3 read as 250, wanted 255` - and it is worth writing down
+what it was and what it was not.
+
+It is NOT a functional break.  Three runs, the card's own measurement of
+paddle 3 identical (2804 bus cycles) in all three:
+
+| build | paddle 3 | paddles 0/1/2 |
+|---|---|---|
+| rung 1 (`3547dc5`, clean worktree) | 255 | 39, 120, 0 |
+| rung 2, before `revaltest` existed | 250 | 39, 120, 0 |
+| rung 2, with `revaltest` | 252 | 39, 120, 0 |
+
+The last two are the SAME RTL and differ only in unrelated program content,
+so the quantity is workload-sensitive at this operating point.  A paddle at
+the 255 stop runs a virtual timer of 2804 core cycles and PREAD counts
+eleven-cycle loops against it: 2804/11 = **254.9**, under one iteration of
+room inside a fixed +/-2 window.  The four paddles also share one strobe - a
+558 already running ignores a retrigger - so where paddle 3's timer stands
+when its own PREAD begins depends on what the earlier paddles' PREADs
+consumed, and that moves with the accelerated op mix, which is exactly what
+this rung changes.
+
+So the check's window was wrong, not the port: it is now two counts plus one
+per 64 of position, which still catches a functional break (those move a
+reading by tens) and stops the top of the range from being a tripwire for
+any change to the op mix.
+
+One theory was entertained and DISPROVED on the way, recorded so it is not
+re-derived: that `core_tick` double-counts because `(bus_tick && !op_dummy)`
+excludes dummy cycles the data front's last-byte path would tick.  It does
+not - `op_dummy` is `apple_bus_write`'s `drv_dummy`, "this cycle carries no
+op at all", the DRIVER's idle cycle rather than a 6502 dummy cycle, and
+excluding it is correct.  The exact mechanism behind the last few counts was
+not pinned down further, because the three measurements above already settle
+what the check should assert.
+
+### Rung 2's evidence
+
+Simulation:
+
+- `sim/run_accel_vl.sh`, both sweeps: **97 checks, 0 errors** each (95 before,
+  plus the two revalidation checks).  The revalidation's own books, in the
+  mode-2 phase: **5461 drops, 5155 revives, 32062 reads served from a revived
+  line** at PHI0_HIGH 49, and 5462 / 5158 / 32069 at 47.  A front that flushed
+  on a map change cannot revive a line even once, so those counts are the
+  rung's proof.
+- `sim/suite.sh boot` **2/2 PASS**, `bad 0 mism 0` on ProDOS 2.4.3 and
+  nox_los.HDV.
+- `mem_integ` 20/0, `page_cache` 19/0, `fb_sim_vl` unchanged.
+
+Build: **TIMING MET wns=+0.039 whs=+0.056 fail=0/62425** - exactly the gate,
+with 1410 more endpoints than rung 1 (the per-line identity and the stage-1
+registers).  Max logic depth is 22 where it was 21, but every depth-22 path is
+inside UberDDR3's controller.  The one new deep tail in THIS change is
+`u_mmu/rwb_p1_q -> u_dline/cnt_reval_drop[24:31]`, the drop counter's popcount
+carry: books only, in no serve cone.  If a later rung needs the margin back,
+registering the popcount one stage costs nothing observable.
+
+Hardware, the animated Nox overworld map, reached by the user's route (reboot,
+wait for the main menu, RETURN, 1 - see the memory note `nox-measure-screen`):
+
+| | |
+|---|---|
+| lines dropped per map change | **16.1** of 32 |
+| of those, revived | **95.7%** |
+| net line refills per map change | **0.70** |
+| D drops/s, revives/s | 640,514 / 612,830 |
+| `mmismatch` | **5, plateaued** over 87.6M hits (unchanged across 8.8M) |
+
+That is the rung's result: a map change used to invalidate every valid line in
+the data cache, and now costs seven tenths of one refill.
+
+**The x-factor is NOT comparable between rungs from these samples, and no
+speed claim is made from them.**  Three rung-2 samples and the rung-1 sample
+all lie on one line - speed divided by maps-per-1000-cycles is 1.67, 1.66,
+1.66, 1.66 - so what these readings mostly measure is which of two program
+phases the game happened to be in (the AUXMOVE-heavy map redraw, or the
+keyboard poll loop), not what the gateware did.  The rung-1 figure was taken
+on a machine that had been sitting at the map for hours; rung 2's was taken
+minutes after loading the save.  A matched A/B - both bitstreams, the same
+route, the same elapsed time - is owed, and is best done after rung 3, when
+the instruction front stops flushing too and the whole benefit is in.

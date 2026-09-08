@@ -158,6 +158,11 @@ ver:    tya
         jsr bankfetch
         jcs fail
 
+        ; ---- 4c. the fronts keep lines a map change did not move, and bring
+        ; back the ones it did (docs/MEMORY_REFACTOR.md, rung 2)
+        jsr revaltest
+        jcs fail
+
         ; ---- 5. the RamWorks banks, from the ROM - once the card is serving.
         ; The machine the testbench models has no RamWorks; the card is it,
         ; and only its image can answer.  The testbench sets RWFLAG through
@@ -1173,6 +1178,93 @@ bf_aux:
         .byte $44                                                                    ; $1F80: aux's byte
         .res  $0F, $EA
         .byte $00
+
+; revaltest: a line the map change did not move must SURVIVE it, and a line
+; it did move must come back when the map comes back - the whole point of
+; docs/MEMORY_REFACTOR.md's rung 2.  Before it, every soft-switch write
+; emptied both fronts; on the animated Nox map that is ~51k flushes a
+; second, most of them of lines the switch never touched.
+;
+; In ROM, because it flips RAMRD and the program's RAM copy is in main.
+; Carry set on failure, every switch restored first.  Passes on its own
+; compares in every mode; the counters the testbench checks are mode 2's.
+revaltest:
+        ; main and aux hold different bytes at the SAME address
+        lda #$5A
+        sta $3000               ; RAMWRT is main here
+        sta $C005               ; RAMWRT aux
+        lda #$A5
+        sta $3000
+        sta $C004               ; RAMWRT main
+        ; ---- 1. eight flips over one address.  After the first pair each
+        ; read must come from a line RETAINED through the flip and revived,
+        ; not one refilled through the dispatcher.
+        ldy #8
+rv_loop:
+        lda $3000
+        cmp #$5A
+        jne rv_fail
+        sta $C003               ; RAMRD aux: the main line drops, retained
+        lda $3000
+        cmp #$A5
+        jne rv_failrd
+        sta $C002               ; RAMRD main: the aux line drops, main revives
+        dey
+        bne rv_loop
+        ; ---- 2. the stale-revive hazard.  A line out of service is still
+        ; SNOOPED: a write to it while it is invalid has to reach the row,
+        ; or the line revives holding the byte from before the write.
+        sta $C003               ; RAMRD aux: main's $3000 line is retained-invalid
+        lda #$3C
+        sta $3000               ; RAMWRT is main: this writes MAIN $3000
+        sta $C002               ; RAMRD main: the line revives
+        lda $3000
+        cmp #$3C                ; the NEW byte, never the retained $5A
+        jne rv_fail
+        lda #$5A
+        sta $3000               ; put it back for the next pass
+        ; ---- 3. the RamWorks register moves and comes back.  A line's
+        ; identity carries its PHYSICAL bank, so bank 0's aux line must drop
+        ; when the register names another bank and revive when it returns.
+        ; Only with the card serving: the modelled machine has no RamWorks.
+        lda RWFLAG
+        beq rv_done
+        ldx #1
+        stx $C073               ; bank 1
+        sta $C005               ; RAMWRT aux
+        lda #$B7
+        sta $3000               ; bank 1's own $3000
+        sta $C004               ; RAMWRT main
+        ldx #0
+        stx $C073               ; bank 0
+        sta $C003               ; RAMRD aux
+        lda $3000
+        cmp #$A5                ; bank 0's aux byte
+        jne rv_failrd
+        ldx #1
+        stx $C073               ; the line's bank no longer matches: it drops
+        lda $3000
+        cmp #$B7
+        jne rv_failbk
+        ldx #0
+        stx $C073               ; ...and back: it revives
+        lda $3000
+        cmp #$A5
+        jne rv_failbk
+        sta $C002               ; RAMRD main
+rv_done:
+        clc
+        rts
+rv_failbk:
+        ldx #0
+        stx $C073
+rv_failrd:
+        sta $C002
+rv_fail:
+        sta $C002
+        sta $C004
+        sec
+        rts
 
 ; The RamWorks: bank 0 is the regular auxiliary memory auxtest just used,
 ; banks 1-3 are their own; a bank that does not exist is ignored; ALTZP's

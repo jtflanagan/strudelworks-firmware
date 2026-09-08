@@ -167,6 +167,18 @@ module dline #(
     input  wire [15:0] d_off,
     input  wire [7:0]  rw_bank,
     input  wire        map_changed,
+    // The PHYSICAL identity of the same candidate, and the map's own state
+    // (docs/MEMORY_REFACTOR.md, Part 2): the page, the REGION it was
+    // classified in, the language card's fold bit, the ten packed read-table
+    // entries a held line is revalidated against, and the physical bank an
+    // auxiliary access reaches.  map_settling is map_changed stretched over
+    // the clocks the revalidation needs.
+    input  wire [15:0] d_ppn,
+    input  wire [3:0]  d_reg,
+    input  wire        d_fold,
+    input  wire [69:0] rt_rd_flat,
+    input  wire [7:0]  rwb_p1,
+    input  wire        map_settling,
 
     // The line-row port, arbitrated in the top behind iline's requests.
     output logic       dl_req,
@@ -185,16 +197,15 @@ module dline #(
     input  wire        cl_rw,
     input  wire        cl_wr_image,
     input  wire        cl_posted,
-    input  wire        cl_aux,
-    input  wire [7:0]  cl_bank,
-    input  wire [15:0] cl_off,
+    input  wire [15:0] cl_ppn,        // the classified write's PHYSICAL page
+    input  wire [15:0] cl_off,        // ...its folded offset; [7:0] is the byte
     input  wire [7:0]  wdata,         // the classified write's byte (cl_wdata)
 
-    // The posted FIFO's head, to the MMU's classified stage.
+    // The posted FIFO's head, to the MMU's classified stage: the page the
+    // write was stamped with at its retire, the byte in it, and the byte.
     output wire        pw_valid,
-    output wire        pw_aux,
-    output wire [7:0]  pw_bank,
-    output wire [15:0] pw_off,
+    output wire [15:0] pw_ppn,
+    output wire [7:0]  pw_off,
     output wire [7:0]  pw_data,
     input  wire        pw_take,       // the MMU registered it this clock
 
@@ -215,7 +226,14 @@ module dline #(
     output logic [31:0] cnt_cam_serves,
     output logic [31:0] cnt_lb_serves,
     output logic [31:0] cnt_posts,       // writes retired here
-    output logic [31:0] cnt_post_waits   // clocks a servable write waited for room
+    output logic [31:0] cnt_post_waits,  // clocks a servable write waited for room
+    // The revalidation's books (docs/MEMORY_REFACTOR.md): lines a map change
+    // took out of service, and lines a later map change put back.  A line
+    // that drops and revives cost nothing; a line that drops and is evicted
+    // before it revives cost a refill.
+    output logic [31:0] cnt_reval_drop,
+    output logic [31:0] cnt_reval_revive,
+    output logic [31:0] cnt_rev_serves   // serves from a line that had revived
 );
 
     localparam [1:0] CLS_RAM = 2'd1;
@@ -345,7 +363,11 @@ module dline #(
     localparam integer NWAY = 4;
     localparam integer IW   = 3;                // the set: addr[6:4]
     localparam integer TW   = 16 - 4 - IW;      // the virtual tag: addr[15:7]
-    localparam integer PTW  = 1 + 8 + TW;       // the physical tag: {aux, bank, off[15:7]}
+    // The physical tag is the line's PAGE and which of the page's two
+    // half-page halves the set index does not carry: {ppn[15:0], addr[7]}.
+    // The set is addr[6:4] and a page holds 16 lines, so page + addr[7:4] is
+    // the whole identity and addr[7] is the only bit the set leaves out.
+    localparam integer PTW  = 16 + 1;
     localparam integer WW   = 2;                // a way index
     wire [IW-1:0] sidx = dq_addr[IW+3:4];
     wire [TW-1:0] stag = dq_addr[15:IW+4];
@@ -354,6 +376,22 @@ module dline #(
     wire [7:0] want_bank    = d_aux ? rw_bank : 8'd0;
     integer k;
     logic [NSET-1:0] cv   [0:NWAY-1];           // valid, per line (flip-flops)
+    // RETAINED, beside valid: the tags and the row mean something and the
+    // line can be revived.  A map change no longer empties the cache - it
+    // recomputes every line's VALID bit from the line's stored identity
+    // against the map's new region table, and a line whose region did not
+    // move keeps serving.  A line only ever loses `r` to the image going
+    // away or to being replaced.  Snoops compare RETAINED lines, so a line
+    // written while invalid serves the new byte when it revives.
+    logic [NSET-1:0] cr   [0:NWAY-1];
+    logic [NSET-1:0] crev [0:NWAY-1];           // ...has revived at least once
+    // A line's IDENTITY, in flip-flops so a map change can read all of them
+    // at once: the physical bank, the region it was classified in, and
+    // whether the language card's fold applied.  The page's low byte and the
+    // line are in the LUTRAM tag beside the row.
+    logic [7:0]      cbank [0:NWAY-1][0:NSET-1];
+    logic [3:0]      creg  [0:NWAY-1][0:NSET-1];
+    logic            cfold [0:NWAY-1][0:NSET-1];
     logic [WW-1:0]   rrp  [0:NSET-1];           // the next victim, per set
     logic [NWAY-1:0] hitv;
     wire  [7:0]      wbyte [0:NWAY-1];
@@ -367,6 +405,9 @@ module dline #(
     logic            m_aux_q_t;
     logic [7:0]      m_bank_q_t;
     logic [11:0]     m_off_q_t, m_vt_q_t;
+    logic [15:0]     m_ppn_q_t;
+    logic [3:0]      m_reg_q_t;
+    logic            m_fold_q_t;
     wire  [127:0]    dl_row_w = dl_row;
     genvar gw;
     generate for (gw = 0; gw < NWAY; gw = gw + 1) begin : g_way
@@ -375,8 +416,10 @@ module dline #(
         logic [PTW-1:0] pt  [0:NSET-1];
         assign hitv[gw]  = cv[gw][dq_st[gw]] && (vt[dq_st[gw]] == stag);
         assign wbyte[gw] = {8{hitv[gw]}} & rows[dq_sx[gw]][dq_ix_cam[gw]*8 +: 8];
-        // The splice's cut: the write's set, its physical identity.
-        assign spc_hit[gw] = iw_v && cv[gw][spi] && (pt[spi] == spt);
+        // The splice's cut: the write's set, its physical identity - against
+        // every RETAINED line, valid or not, so a line written while it is
+        // out of service comes back holding the new byte.
+        assign spc_hit[gw] = iw_v && cr[gw][spi] && (pt[spi] == spt);
         // One write port: a splice's read-modify-write beats an install,
         // which drops (its valid bit stays clear) and reclaims.
         logic          we;
@@ -386,16 +429,88 @@ module dline #(
             we = spc_hit[gw] || inst_w[gw];
             wa = spc_hit[gw] ? spi : t_set;
             md = rows[wa];
-            md[iw_off[3:0]*8 +: 8] = iw_data;
+            md[iw_off8[3:0]*8 +: 8] = iw_data;
             wd = spc_hit[gw] ? md : dl_row_w;
         end
         always_ff @(posedge clk) if (we) rows[wa] <= wd;
         always_ff @(posedge clk) if (inst_w[gw]) begin
             vt[t_set] <= m_vt_q_t[11:IW];
-            pt[t_set] <= {m_aux_q_t, m_bank_q_t, m_off_q_t[11:IW]};
+            pt[t_set] <= {m_ppn_q_t, m_vt_q_t[3]};
         end
     end endgenerate
     wire cam_hit = dq_v && (hitv != '0);
+
+    // ---- the revalidation ---------------------------------------------------
+    // A map change no longer empties the cache.  Every line's VALID bit is
+    // recomputed instead, from the line's own stored identity against the
+    // map's new region table, in two register-rooted stages so nothing deep
+    // reaches a serve cone:
+    //
+    //   stage 1, EVERY clock:  rv1[line] <= rt_rd[creg[line]]
+    //   stage 2, on reval_q:   cv[line]  <= cr[line] && that entry still
+    //                          names this line's class, bank and fold
+    //
+    // The line's ADDRESS never enters.  Its REGION was decided when it was
+    // filled, and what a region answers is a function of the switches alone
+    // (rtl/apple_mmu.sv, THE REGION TABLE) - so a line whose region did not
+    // move stays valid through the switch write, and a line whose region did
+    // move keeps its tags and its row and revives when the map comes back.
+    // That is the whole point of the rung: on the animated Nox map the
+    // AUXMOVE dance moves RAMRD/RAMWRT ~51k times a second, and the caller
+    // in LC RAM and AUXMOVE itself in ROM live in regions those switches do
+    // not touch.
+    localparam integer RT_W = 7;      // {cls[1:0], wr, bsel[1:0], fold, fs}
+    localparam integer NREG = 10;
+    localparam [1:0] BS_AUX = 2'd1, BS_ROM = 2'd2;
+    wire [RT_W-1:0] rt_rd [0:15];
+    genvar gr;
+    generate for (gr = 0; gr < 16; gr = gr + 1) begin : g_rt
+        // Region numbers no line can carry are never front-servable, so a
+        // line that somehow held one would simply drop.
+        if (gr < NREG) begin : g_real
+            assign rt_rd[gr] = rt_rd_flat[gr*RT_W +: RT_W];
+        end else begin : g_none
+            assign rt_rd[gr] = '0;
+        end
+    end endgenerate
+
+    logic reval_q;
+    always_ff @(posedge clk) reval_q <= map_changed && !rst;
+
+    logic [RT_W-1:0] rv1 [0:NWAY-1][0:NSET-1];
+    integer ra, rb;
+    always_ff @(posedge clk)
+        for (ra = 0; ra < NWAY; ra = ra + 1)
+            for (rb = 0; rb < NSET; rb = rb + 1)
+                rv1[ra][rb] <= rt_rd[creg[ra][rb]];
+
+    logic [NSET-1:0] rv_ok [0:NWAY-1];
+    logic [7:0]      rv_bank;
+    logic [5:0]      n_drop, n_rev;
+    integer rc, rd_;
+    always_comb begin
+        n_drop = 6'd0; n_rev = 6'd0;
+        for (rc = 0; rc < NWAY; rc = rc + 1) begin
+            for (rd_ = 0; rd_ < NSET; rd_ = rd_ + 1) begin
+                rv_bank = (rv1[rc][rd_][3:2] == BS_AUX) ? rwb_p1 :
+                          (rv1[rc][rd_][3:2] == BS_ROM) ? 8'hFF : 8'd0;
+                rv_ok[rc][rd_] = cr[rc][rd_] && rv1[rc][rd_][0] &&
+                                 ((rv1[rc][rd_][6:5] == CLS_RAM) ||
+                                  (rv1[rc][rd_][6:5] == CLS_LC)) &&
+                                 (cbank[rc][rd_] == rv_bank) &&
+                                 (cfold[rc][rd_] == rv1[rc][rd_][1]);
+                if ( cv[rc][rd_] && !rv_ok[rc][rd_]) n_drop = n_drop + 6'd1;
+                if (!cv[rc][rd_] &&  rv_ok[rc][rd_]) n_rev  = n_rev  + 6'd1;
+            end
+        end
+    end
+
+    // A serve from a line that has come back from a map change at least
+    // once: the bench's proof that revival is real and not a refill.
+    logic [NWAY-1:0] crevv;
+    integer rv;
+    always_comb
+        for (rv = 0; rv < NWAY; rv = rv + 1) crevv[rv] = crev[rv][dq_st[rv]];
     // One-hot AND-OR across the ways (no two ways hold one line: a miss
     // sees them all before it claims).
     logic [7:0] cam_byte;
@@ -431,6 +546,12 @@ module dline #(
     logic        spl_v, spl_aux;
     logic [7:0]  spl_bank, spl_data;
     logic [15:0] spl_addr, spl_off;
+    // ...and the same write's PHYSICAL page and byte-in-page, which is what
+    // the cache's tags, the posted FIFO and the page cache now speak.  The
+    // triple above survives only as the instruction front's snoop port until
+    // that front is converted too (docs/MEMORY_REFACTOR.md, rung 3).
+    logic [15:0] spl_ppn;
+    logic [7:0]  spl_off8;
 
     // ---- the retire ---------------------------------------------------------
     // The candidate against the live cycle, gated by the leash.  The settle
@@ -530,6 +651,8 @@ module dline #(
             spl_aux  <= d_aux;
             spl_bank <= want_bank;
             spl_off  <= d_off;
+            spl_ppn  <= d_ppn;
+            spl_off8 <= dq_addr[7:0];   // the fold never touches a[11:4]
         end
     end
     assign ws_valid = spl_v;
@@ -546,7 +669,7 @@ module dline #(
     // everything (the image is going away);
     // RES' drops nothing - RAM survives the machine's reset, and so must
     // the writes on their way into it.
-    logic [32:0]     pf [0:PW_DEPTH-1];
+    logic [31:0]     pf [0:PW_DEPTH-1];
     logic [PW_AW-1:0] pf_wp, pf_rp;
     logic [PW_AW:0]   pf_cnt;
     wire pf_empty = (pf_cnt == '0);
@@ -556,7 +679,7 @@ module dline #(
             pf_wp <= '0; pf_rp <= '0; pf_cnt <= '0;
         end else begin
             if (spl_v) begin
-                pf[pf_wp] <= {spl_aux, spl_bank, spl_off, spl_data};
+                pf[pf_wp] <= {spl_ppn, spl_off8, spl_data};
                 pf_wp     <= pf_wp + 1'b1;
             end
             if (pw_take) pf_rp <= pf_rp + 1'b1;
@@ -564,7 +687,7 @@ module dline #(
         end
     end
     assign pw_valid = !pf_empty;
-    assign {pw_aux, pw_bank, pw_off, pw_data} = pf[pf_rp];
+    assign {pw_ppn, pw_off, pw_data} = pf[pf_rp];
 
 `ifndef SYNTHESIS
     // The ISA argument, checked: no data read of an address is served the
@@ -607,6 +730,9 @@ module dline #(
     logic       m_aux_q;
     logic [7:0] m_bank_q;
     logic [11:0] m_off_q, m_vt_q;
+    logic [15:0] m_ppn_q;
+    logic [3:0]  m_reg_q;
+    logic        m_fold_q;
 
     // The fill trigger's classify, registered one clock behind: the MMU
     // round trip is too deep to sit live in a miss cone, and a claim is
@@ -617,11 +743,17 @@ module dline #(
     logic       pc_ok_q, p_aux_q2, pq_fresh;
     logic [7:0] p_bank_q2;
     logic [11:0] p_off_q2;
+    logic [15:0] p_ppn_q2;
+    logic [3:0]  p_reg_q2;
+    logic        p_fold_q2;
     always_ff @(posedge clk) begin
         pc_ok_q   <= d_cls_ok;
         p_aux_q2  <= d_aux;
         p_bank_q2 <= want_bank;
         p_off_q2  <= d_off[15:4];
+        p_ppn_q2  <= d_ppn;
+        p_reg_q2  <= d_reg;
+        p_fold_q2 <= d_fold;
         pq_fresh  <= !cyc_en && !rst && !cpu_rst;
     end
 
@@ -630,7 +762,7 @@ module dline #(
                      !shv[cpu_addr[8:4]] && !inval;
     wire live_cmiss = turbo_en && d_cycle && dq_v && (dq_addr == cpu_addr) &&
                       pq_fresh && pc_ok_q && !in_sh_estate && !cam_hit &&
-                      !inval && !map_changed;
+                      !inval && !map_settling;
 
     // ---- the splice ---------------------------------------------------------
     // Every write that reaches the image, seen ONCE: the classified
@@ -642,23 +774,24 @@ module dline #(
     // spliced at retire.  The shadow's cut: main, offset in pages 0/1.
     // The CAM's cut: any entry whose physical tag matches - per-entry FF
     // rows, so every matching entry updates with no port to contend for.
-    wire        cl_w    = cl_valid && !cl_rw && cl_wr_image && !cl_posted;
-    wire        iw_v    = cl_w || spl_v;
-    wire        iw_aux  = spl_v ? spl_aux  : cl_aux;
-    wire [7:0]  iw_bank = spl_v ? spl_bank : (cl_aux ? cl_bank : 8'd0);
-    wire [15:0] iw_off  = spl_v ? spl_off  : cl_off;
-    wire [7:0]  iw_data = spl_v ? spl_data : wdata;
+    wire        cl_w     = cl_valid && !cl_rw && cl_wr_image && !cl_posted;
+    wire        iw_v     = cl_w || spl_v;
+    wire [15:0] iw_ppn   = spl_v ? spl_ppn  : cl_ppn;
+    wire [7:0]  iw_off8  = spl_v ? spl_off8 : cl_off[7:0];
+    wire [7:0]  iw_data  = spl_v ? spl_data : wdata;
 
-    wire sp_hit  = iw_v && !iw_aux && (iw_off[15:9] == 7'd0);
-    wire [4:0] sp_line = iw_off[8:4];
+    // The shadow's cut: physical main pages 0 and 1, the zero page and the
+    // stack, which is exactly PPN 0 and PPN 1.
+    wire sp_hit  = iw_v && (iw_ppn[15:1] == 15'd0);
+    wire [4:0] sp_line = {iw_ppn[0], iw_off8[7:4]};
 
     // The cache's cut: the write's own set, its physical identity against
     // every way there (spc_hit, in the generate above).
-    assign spi = iw_off[IW+3:4];
-    assign spt = {iw_aux, iw_bank, iw_off[15:IW+4]};
-    // ...and against an in-flight cache claim's target identity.
-    wire spc_flight = iw_v && (m_aux_q_t == iw_aux) && (m_bank_q_t == iw_bank) &&
-                      (m_off_q_t == iw_off[15:4]);
+    assign spi = iw_off8[IW+3:4];
+    assign spt = {iw_ppn, iw_off8[7]};
+    // ...and against an in-flight cache claim's target identity: its page and
+    // its line within that page.
+    wire spc_flight = iw_v && (m_ppn_q_t == iw_ppn) && (m_vt_q_t[3:0] == iw_off8[7:4]);
 
     // The shadow write port's one mux: a splice (the row it read, one byte
     // replaced) beats an install, which drops and reclaims - see C_W2 below.
@@ -666,7 +799,7 @@ module dline #(
     logic [127:0] sp_mod;
     always_comb begin
         sp_mod = shrow[sp_line];
-        sp_mod[iw_off[3:0]*8 +: 8] = iw_data;
+        sp_mod[iw_off8[3:0]*8 +: 8] = iw_data;
     end
     always_comb begin
         sh_we    = sp_write || (cst == C_W2 && !t_cam && !sp_hit && !rst && !inval);
@@ -700,20 +833,28 @@ module dline #(
         m_bank_q    <= p_bank_q2;
         m_off_q     <= p_off_q2;
         m_vt_q      <= dq_addr[15:4];
+        m_ppn_q     <= p_ppn_q2;
+        m_reg_q     <= p_reg_q2;
+        m_fold_q    <= p_fold_q2;
 
         if (rst || inval) begin
             shv <= 32'd0;
-            for (k = 0; k < NWAY; k = k + 1) cv[k] <= '0;
+            for (k = 0; k < NWAY; k = k + 1) begin
+                cv[k] <= '0; cr[k] <= '0; crev[k] <= '0;
+            end
             for (k = 0; k < NSET; k = k + 1) rrp[k] <= '0;
             cst <= C_IDLE; dl_req <= 1'b0; dl_line <= 12'd0; c_line <= 5'd0;
             dl_aux <= 1'b0; dl_bank <= 8'd0; t_cam <= 1'b0; t_way <= '0; t_set <= '0;
             m_aux_q_t <= 1'b0; m_bank_q_t <= 8'd0; m_off_q_t <= 12'd0;
+            m_ppn_q_t <= 16'd0; m_reg_q_t <= 4'd0; m_fold_q_t <= 1'b0;
             miss_q <= 1'b0; cmiss_q <= 1'b0;
             tick_q <= 1'b0; dev_valid <= 1'b0;
             if (rst) begin
                 cnt_serves <= 32'd0; cnt_claims <= 32'd0; cnt_splices <= 32'd0;
                 cnt_cam_serves <= 32'd0; cnt_lb_serves <= 32'd0;
                 cnt_posts <= 32'd0; cnt_post_waits <= 32'd0;
+                cnt_reval_drop <= 32'd0; cnt_reval_revive <= 32'd0;
+                cnt_rev_serves <= 32'd0;
                 dev_addr <= 16'd0; dev_data <= 8'd0; dev_rw <= 1'b1;
             end
         end else begin
@@ -745,14 +886,21 @@ module dline #(
                     // The victim: an empty way first, else the set's round robin.
                     t_cam     <= 1'b1;
                     t_set     <= m_vt_q[IW-1:0];
-                    t_way     <= !cv[0][m_vt_q[IW-1:0]] ? 2'd0 :
-                                 !cv[1][m_vt_q[IW-1:0]] ? 2'd1 :
-                                 !cv[2][m_vt_q[IW-1:0]] ? 2'd2 :
-                                 !cv[3][m_vt_q[IW-1:0]] ? 2'd3 : rrp[m_vt_q[IW-1:0]];
+                    // An EMPTY way first, then the round robin.  A retained
+                    // line that is merely invalid counts as occupied: under
+                    // AUXMOVE both banks' copies of a set coexist, one valid
+                    // at a time, and each switch write costs nothing.
+                    t_way     <= !cr[0][m_vt_q[IW-1:0]] ? 2'd0 :
+                                 !cr[1][m_vt_q[IW-1:0]] ? 2'd1 :
+                                 !cr[2][m_vt_q[IW-1:0]] ? 2'd2 :
+                                 !cr[3][m_vt_q[IW-1:0]] ? 2'd3 : rrp[m_vt_q[IW-1:0]];
                     m_aux_q_t <= m_aux_q;
                     m_bank_q_t <= m_bank_q;
                     m_off_q_t <= m_off_q;
                     m_vt_q_t  <= m_vt_q;
+                    m_ppn_q_t <= m_ppn_q;
+                    m_reg_q_t <= m_reg_q;
+                    m_fold_q_t <= m_fold_q;
                     dl_line   <= m_off_q;
                     dl_aux    <= m_aux_q;
                     dl_bank   <= m_bank_q;
@@ -784,7 +932,12 @@ module dline #(
                         // The row and the tags land through the ports above
                         // on this same edge (inst_w); here the books.
                         if (inst_w != '0) begin
-                            cv[t_way][t_set] <= 1'b1;
+                            cv[t_way][t_set]   <= 1'b1;
+                            cr[t_way][t_set]   <= 1'b1;
+                            crev[t_way][t_set] <= 1'b0;
+                            cbank[t_way][t_set] <= m_ppn_q_t[15:8];
+                            creg[t_way][t_set]  <= m_reg_q_t;
+                            cfold[t_way][t_set] <= m_fold_q_t;
                             rrp[t_set]       <= t_way + 1'b1;
                             cnt_claims       <= cnt_claims + 32'd1;
                         end
@@ -807,22 +960,37 @@ module dline #(
                 cst    <= C_IDLE;
             end
 
-            // The map moved: the CAM's foldings are of the old map.  Tags
-            // die, and an in-flight CAM claim dies with them.
-            // The map moved: the cache's foldings are of the old map.  Every
-            // line dies, and an in-flight cache claim dies with them.
+            // The map moved.  The lines STAY - an in-flight claim still
+            // dies, because its stamp was taken under the old map and the
+            // row it is about to read may not be the line it named.
             if (map_changed) begin
-                for (k = 0; k < NWAY; k = k + 1) cv[k] <= '0;
                 if (cst != C_IDLE && t_cam) begin
                     dl_req <= 1'b0;
                     cst    <= C_IDLE;
                 end
             end
+            // ...and one clock later every line's valid bit is the new map's
+            // answer for the identity that line was filled with.  This is
+            // the only writer of cv on this clock: no claim can install here
+            // (the abort above ran a clock ago, and live_cmiss is held off
+            // through map_settling).
+            if (reval_q) begin
+                for (k = 0; k < NWAY; k = k + 1) begin
+                    cv[k]   <= rv_ok[k];
+                    crev[k] <= crev[k] | (rv_ok[k] & ~cv[k]);
+                end
+                cnt_reval_drop   <= cnt_reval_drop   + {26'd0, n_drop};
+                cnt_reval_revive <= cnt_reval_revive + {26'd0, n_rev};
+            end
+            if (r_retire && cam_hit && ((hitv & crevv) != '0))
+                cnt_rev_serves <= cnt_rev_serves + 32'd1;
 
             if (cnt_clr) begin
                 cnt_serves <= 32'd0; cnt_claims <= 32'd0; cnt_splices <= 32'd0;
                 cnt_cam_serves <= 32'd0; cnt_lb_serves <= 32'd0;
                 cnt_posts <= 32'd0; cnt_post_waits <= 32'd0;
+                cnt_reval_drop <= 32'd0; cnt_reval_revive <= 32'd0;
+                cnt_rev_serves <= 32'd0;
             end
         end
     end

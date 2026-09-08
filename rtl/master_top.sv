@@ -282,9 +282,13 @@ module master_top #(
     // The data front, chained after the instruction front (rtl/dline.sv).
     wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
     wire        d_pending_w, turbo_wr, dq_rw_w, ev_fast_room_w;
-    wire        pw_valid_w, pw_aux_w, pw_take_w, pw_ready_w, ws_valid_w, ws_aux_w;
-    wire [7:0]  pw_bank_w, pw_data_w, ws_bank_w, cl_wdata;
-    wire [15:0] pw_off_w, ws_off_w;
+    wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w, ws_aux_w;
+    wire [7:0]  pw_data_w, ws_bank_w, cl_wdata;
+    // The posted write's seam is the PHYSICAL page and the byte in it now
+    // (docs/MEMORY_REFACTOR.md, rung 2); the instruction front's snoop still
+    // speaks the old triple until rung 3 converts it.
+    wire [15:0] pw_ppn_w, ws_off_w;
+    wire [7:0]  pw_off_w;
     wire        cl_posted;
     wire [15:0] cpu_d_pred, dev_addr;
     wire        cpu_d_pred_v, cpu_d_pred_rw;
@@ -299,6 +303,7 @@ module master_top #(
     wire [15:0] tev_addr;
     wire [7:0]  tev_data, i_din_w;
     wire [31:0] accel_turbo, accel_dline, accel_maps;
+    wire [31:0] accel_ddrop, accel_drevive;
     wire        accel_cen_v;
     wire [2:0]  accel_cen_sel;
     wire [1:0]  p_cls;
@@ -421,6 +426,8 @@ module master_top #(
         .accel_turbo (accel_turbo),
         .accel_dline (accel_dline),
         .accel_maps (accel_maps),
+        .accel_ddrop (accel_ddrop),
+        .accel_drevive (accel_drevive),
         .accel_cen_v (accel_cen_v), .accel_cen_sel (accel_cen_sel),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (fb_mode), .fb_compared (fb_compared), .fb_mismatch (fb_mismatch),
@@ -906,6 +913,12 @@ module master_top #(
         .d_cls         (dcls_w),
         .d_aux         (daux_w),
         .d_off         (doff_w),
+        .d_ppn         (d_ppn_w),
+        .d_reg         (d_reg_w),
+        .d_fold        (d_fold_w),
+        .rt_rd_flat    (rt_rd_flat),
+        .rwb_p1        (rwb_p1_w),
+        .map_settling  (map_settling),
         .rw_bank       (mem_rw_bank),
         .map_changed   (map_changed),
         .dl_req        (dl_req_w),
@@ -919,13 +932,11 @@ module master_top #(
         .cl_rw         (cl_rw),
         .cl_wr_image   (cl_wr_image),
         .cl_posted     (cl_posted),
-        .cl_aux        (cl_aux),
-        .cl_bank       (cl_bank),
+        .cl_ppn        (cl_ppn_w),
         .cl_off        (cl_off),
         .wdata         (cl_wdata),
         .pw_valid      (pw_valid_w),
-        .pw_aux        (pw_aux_w),
-        .pw_bank       (pw_bank_w),
+        .pw_ppn        (pw_ppn_w),
         .pw_off        (pw_off_w),
         .pw_data       (pw_data_w),
         .pw_take       (pw_take_w),
@@ -941,7 +952,10 @@ module master_top #(
         .cnt_cam_serves (),
         .cnt_lb_serves (),
         .cnt_posts     (),
-        .cnt_post_waits ()
+        .cnt_post_waits (),
+        .cnt_reval_drop   (accel_ddrop),
+        .cnt_reval_revive (accel_drevive),
+        .cnt_rev_serves   ()
     );
 
     // ---- the hold: the boot menu's door and the runtime menu's -------------
@@ -1152,8 +1166,7 @@ module master_top #(
         .cl_posted  (cl_posted),
         .cl_wdata   (cl_wdata),
         .pw_valid   (pw_valid_w),
-        .pw_aux     (pw_aux_w),
-        .pw_bank    (pw_bank_w),
+        .pw_ppn     (pw_ppn_w),
         .pw_off     (pw_off_w),
         .pw_data    (pw_data_w),
         .pw_ready   (pw_ready_w),

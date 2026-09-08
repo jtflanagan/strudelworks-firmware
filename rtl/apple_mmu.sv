@@ -224,8 +224,8 @@ module apple_mmu #(
 
     // The classified op, one clock after op_present - or a POSTED WRITE
     // from the data front (rtl/dline.sv, rung 3), taken from pw_* on a
-    // clock the op path is idle: it arrives already stamped {aux, bank,
-    // folded off} under the map of its retire, and is copied into cl_*
+    // clock the op path is idle: it arrives already stamped with its
+    // PHYSICAL PAGE under the map of its retire, and is copied into cl_*
     // as an image write with cl_posted set.  Nothing is re-classified:
     // the map cannot have moved since (every map-changing op waits for
     // the front's pending to clear).  cl_wdata carries the write's byte
@@ -241,9 +241,8 @@ module apple_mmu #(
     output logic [7:0]  cl_wdata,      // the write's byte
     // The posted FIFO's head, and the page cache's leave to take it.
     input  wire         pw_valid,
-    input  wire         pw_aux,
-    input  wire [7:0]   pw_bank,
-    input  wire [15:0]  pw_off,
+    input  wire [15:0]  pw_ppn,        // the entry's PHYSICAL page, stamped at its retire
+    input  wire [7:0]   pw_off,        // ...and the byte in it
     input  wire [7:0]   pw_data,
     input  wire         pw_ready,      // the page cache's pipeline is clear
     output wire         pw_take,       // pulse: cl_* carries it next clock
@@ -883,17 +882,20 @@ module apple_mmu #(
                 cl_ppn      <= pf_ppn;
             end else if (pw_take) begin
                 cl_cls      <= CLS_RAM;      // the front posts RAM class only
-                cl_aux      <= pw_aux;
-                cl_bank     <= pw_bank;
-                cl_off      <= pw_off;
+                // The old triple, derived from the page the front stamped:
+                // main is physical bank 0, RamWorks bank k is bank k+1, so
+                // the decrementer is the inverse of that convention.  It
+                // lands in a register and goes away with rtl/page_cache.sv's
+                // rewrite (docs/MEMORY_REFACTOR.md, Part 3); cl_bank is
+                // meaningless when cl_aux is clear, as it always was.
+                cl_aux      <= (pw_ppn[15:8] != 8'd0);
+                cl_bank     <= pw_ppn[15:8] - 8'd1;
+                cl_off      <= {pw_ppn[7:0], pw_off};
                 cl_rw       <= 1'b0;
                 cl_wr_image <= 1'b1;
                 cl_posted   <= 1'b1;
                 cl_wdata    <= pw_data;
-                // The posted entry was stamped in the OLD triple; until the
-                // data front stamps a PPN itself (Part 2) this is where the
-                // +1 happens.
-                cl_ppn      <= {pw_aux ? (pw_bank + 8'd1) : 8'd0, pw_off[15:8]};
+                cl_ppn      <= pw_ppn;
             end
         end
     end
