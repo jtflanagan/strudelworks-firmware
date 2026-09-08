@@ -248,6 +248,8 @@ module wb_regfile #(
     input  wire [31:0]     accel_maps,    // map changes (rtl/apple_mmu.sv's map_changed)
     input  wire [31:0]     accel_ddrop,   // lines a map change took out of service (rtl/dline.sv)
     input  wire [31:0]     accel_drevive, // ...and lines a later one put back
+    input  wire [31:0]     accel_idrop,   // the same pair for the instruction front
+    input  wire [31:0]     accel_irevive,
     input  wire            accel_cen_v,   // the census (rtl/fast_census.sv, below): a retired dispatcher op...
     input  wire [2:0]      accel_cen_sel, // ...and its bucket
 
@@ -378,8 +380,8 @@ module wb_regfile #(
     // reserved for the fronts' drop/revive counters, 'd69.. for the physical
     // page cache's; a word an older bitstream does not implement reads zero.
     localparam [13:0] R_ACCEL_MAPS      = 'd64; // 0x8000_0100, RO
-    localparam [13:0] R_ACCEL_IDROP     = 'd65; // 0x8000_0104, RO (rung 3)
-    localparam [13:0] R_ACCEL_IREVIVE   = 'd66; // 0x8000_0108, RO (rung 3)
+    localparam [13:0] R_ACCEL_IDROP     = 'd65; // 0x8000_0104, RO
+    localparam [13:0] R_ACCEL_IREVIVE   = 'd66; // 0x8000_0108, RO
     localparam [13:0] R_ACCEL_DDROP     = 'd67; // 0x8000_010C, RO
     localparam [13:0] R_ACCEL_DREVIVE   = 'd68; // 0x8000_0110, RO
 
@@ -1316,6 +1318,8 @@ module wb_regfile #(
                         R_ACCEL_TURBO: wb_dat_r <= accel_turbo;
                         R_ACCEL_DLINE: wb_dat_r <= accel_dline;
                         R_ACCEL_MAPS: wb_dat_r <= accel_maps;
+                        R_ACCEL_IDROP: wb_dat_r <= accel_idrop;
+                        R_ACCEL_IREVIVE: wb_dat_r <= accel_irevive;
                         R_ACCEL_DDROP: wb_dat_r <= accel_ddrop;
                         R_ACCEL_DREVIVE: wb_dat_r <= accel_drevive;
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;

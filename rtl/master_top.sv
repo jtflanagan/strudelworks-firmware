@@ -282,13 +282,13 @@ module master_top #(
     // The data front, chained after the instruction front (rtl/dline.sv).
     wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
     wire        d_pending_w, turbo_wr, dq_rw_w, ev_fast_room_w;
-    wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w, ws_aux_w;
-    wire [7:0]  pw_data_w, ws_bank_w, cl_wdata;
+    wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w;
+    wire [7:0]  pw_data_w, cl_wdata;
     // The posted write's seam is the PHYSICAL page and the byte in it now
     // (docs/MEMORY_REFACTOR.md, rung 2); the instruction front's snoop still
     // speaks the old triple until rung 3 converts it.
-    wire [15:0] pw_ppn_w, ws_off_w;
-    wire [7:0]  pw_off_w;
+    wire [15:0] pw_ppn_w, ws_ppn_w;
+    wire [7:0]  pw_off_w, ws_off8_w;
     wire        cl_posted;
     wire [15:0] cpu_d_pred, dev_addr;
     wire        cpu_d_pred_v, cpu_d_pred_rw;
@@ -303,7 +303,7 @@ module master_top #(
     wire [15:0] tev_addr;
     wire [7:0]  tev_data, i_din_w;
     wire [31:0] accel_turbo, accel_dline, accel_maps;
-    wire [31:0] accel_ddrop, accel_drevive;
+    wire [31:0] accel_ddrop, accel_drevive, accel_idrop, accel_irevive;
     wire        accel_cen_v;
     wire [2:0]  accel_cen_sel;
     wire [1:0]  p_cls;
@@ -428,6 +428,8 @@ module master_top #(
         .accel_maps (accel_maps),
         .accel_ddrop (accel_ddrop),
         .accel_drevive (accel_drevive),
+        .accel_idrop (accel_idrop),
+        .accel_irevive (accel_irevive),
         .accel_cen_v (accel_cen_v), .accel_cen_sel (accel_cen_sel),
         .fb_serve (fb_serve), .fb_cnt_clr (fb_cnt_clr), .fb_peek_addr (fb_peek_addr),
         .fb_mode (fb_mode), .fb_compared (fb_compared), .fb_mismatch (fb_mismatch),
@@ -802,6 +804,7 @@ module master_top #(
         .reset_seq_o   (accel_reset_seq),
         .fast_ops      (accel_fast),
         .map_changed   (map_changed),
+        .map_settling  (map_settling),
         .maps          (accel_maps),
         .cen_v         (accel_cen_v),
         .cen_sel       (accel_cen_sel),
@@ -844,6 +847,16 @@ module master_top #(
         .p_cls         (p_cls),
         .p_aux         (p_aux_w),
         .p_off         (p_off_w),
+        .p_ppn         (p_ppn_w),
+        .p_reg         (p_reg_w),
+        .p_fold        (p_fold_w),
+        .p_fs          (p_fs_w),
+        .cl_ppn        (cl_ppn_w),
+        .rt_rd_flat    (rt_rd_flat),
+        .rwb_p1        (rwb_p1_w),
+        .map_settling  (map_settling),
+        .idrop_o       (accel_idrop),
+        .irevive_o     (accel_irevive),
         .rw_bank       (mem_rw_bank),
         .map_changed   (map_changed),
         .intc8rom      (mem_intc8rom),
@@ -865,9 +878,8 @@ module master_top #(
         .cl_bank       (cl_bank),
         .cl_off        (cl_off),
         .ws_valid      (ws_valid_w),
-        .ws_aux        (ws_aux_w),
-        .ws_bank       (ws_bank_w),
-        .ws_off        (ws_off_w),
+        .ws_ppn        (ws_ppn_w),
+        .ws_off8       (ws_off8_w),
         .serve         (mem_serve),
         .inval         (mem_inval)
     );
@@ -941,9 +953,8 @@ module master_top #(
         .pw_data       (pw_data_w),
         .pw_take       (pw_take_w),
         .ws_valid      (ws_valid_w),
-        .ws_aux        (ws_aux_w),
-        .ws_bank       (ws_bank_w),
-        .ws_off        (ws_off_w),
+        .ws_ppn        (ws_ppn_w),
+        .ws_off8       (ws_off8_w),
         .inval         (mem_inval),
         .cnt_clr       (accel_cnt_clr),
         .cnt_serves    (accel_dline),   // ACCEL_DLINE: every retire, reads and writes

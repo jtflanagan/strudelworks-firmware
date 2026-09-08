@@ -134,6 +134,21 @@ module iline (
     input  wire [15:0] p_off,
     input  wire [7:0]  rw_bank,
     input  wire        map_changed,
+    // The PHYSICAL side of the same picture (docs/MEMORY_REFACTOR.md, rung 3):
+    // the picked line's page, the REGION it classifies in, the fold bit, and
+    // FS - "front-servable", which replaces `p_cls != BUS` and carries the
+    // page-$C3 rule.  rt_rd_flat is the ten packed read-table entries a held
+    // line is revalidated against, rwb_p1 the physical bank an auxiliary
+    // access reaches, map_settling map_changed stretched over the clocks a
+    // revalidation needs.
+    input  wire [15:0] p_ppn,
+    input  wire [3:0]  p_reg,
+    input  wire        p_fold,
+    input  wire        p_fs,
+    input  wire [15:0] cl_ppn,        // the classified write's page, for the snoop
+    input  wire [69:0] rt_rd_flat,
+    input  wire [7:0]  rwb_p1,
+    input  wire        map_settling,
     input  wire        intc8rom,      // apple_mmu's latch: page $C3 is servable while set
 
     // The page cache's line port (rtl/page_cache.sv).
@@ -161,10 +176,12 @@ module iline (
     // fetch, so this port cannot wait for the write to come round through
     // the classified stream at its drain (where it snoops again, harmlessly:
     // fills are held off while the write is in flight).
+    output wire [31:0] idrop_o,       // ACCEL_IDROP: lines a map change dropped
+    output wire [31:0] irevive_o,     // ACCEL_IREVIVE: ...and lines one put back
+
     input  wire        ws_valid,
-    input  wire        ws_aux,
-    input  wire [7:0]  ws_bank,
-    input  wire [15:0] ws_off,
+    input  wire [15:0] ws_ppn,        // the posted write's PHYSICAL page...
+    input  wire [7:0]  ws_off8,       // ...and the byte in it
     input  wire        cl_aux,
     input  wire [7:0]  cl_bank,
     input  wire [15:0] cl_off,
@@ -178,11 +195,22 @@ module iline (
 
     // ---- the two lines ------------------------------------------------------
     logic         v      [0:1];
+    // RETAINED, beside valid (docs/MEMORY_REFACTOR.md, rung 3): the tags and
+    // the bytes still mean something and the line can be revived.  A map
+    // change no longer empties the front - it recomputes each line's VALID
+    // bit from the line's stored identity against the map's new region
+    // table.  A line only loses `r` to a write's snoop, to the image going
+    // away, or to being replaced.
+    logic         r      [0:1];
     logic [11:0]  vtag   [0:1];       // pc_addr[15:4] of the line
     logic         t_rom  [0:1];       // served from the ROM, not the banks
-    logic         t_aux  [0:1];
-    logic [7:0]   t_bank [0:1];
-    logic [11:0]  t_poff [0:1];       // folded off[15:4], the snoop's identity
+    // The line's PHYSICAL IDENTITY: its page, the REGION it was classified
+    // in, and whether the language card's fold applied.  The page plus
+    // vtag[3:0] (the line within the page - the fold never touches a[11:4])
+    // is what a write's snoop compares.
+    logic [15:0]  t_ppn  [0:1];
+    logic [3:0]   t_reg  [0:1];
+    logic         t_fold [0:1];
     logic [127:0] ldata  [0:1];
     logic         cur;                // the slot execution is in
 
@@ -198,13 +226,24 @@ module iline (
     // write snoop by identity, ROM load traffic for ROM entries, a map
     // change, an invalidate, serving off.  A page engine eviction does not
     // invalidate, for the slots' reason: the bytes stay the bank's truth.
+    //
+    // Since rung 3 a map change no longer empties the CAM either: an entry
+    // is revalidated like a slot line.  Promotion still skips
+    // re-classification, by the new argument - an entry is VALID only if the
+    // region table says its stored identity is the map's answer for its
+    // region, so a valid entry's captured identity is the map's truth for
+    // its tag exactly as before.  The dedupe compares PHYSICAL identities,
+    // so main's and aux's copies of one virtual tag coexist (the AUXMOVE
+    // shape) with at most one of them valid - a same-vtag pair shares a
+    // region, so the table's bank answer picks exactly one.
     localparam integer CAMN = 8;
     logic               cam_v    [0:CAMN-1];
+    logic               cam_r    [0:CAMN-1];
     logic [11:0]        cam_vtag [0:CAMN-1];
     logic               cam_rom  [0:CAMN-1];
-    logic               cam_aux  [0:CAMN-1];
-    logic [7:0]         cam_bank [0:CAMN-1];
-    logic [11:0]        cam_poff [0:CAMN-1];
+    logic [15:0]        cam_ppn  [0:CAMN-1];
+    logic [3:0]         cam_reg  [0:CAMN-1];
+    logic               cam_fold [0:CAMN-1];
     logic [127:0]       cam_data [0:CAMN-1];   // the LUTRAM
     logic [2:0]         cam_wp;                // round-robin allocation
     logic [127:0]       f_cbuf;                // a CAM-only ROM fill's staging
@@ -467,29 +506,86 @@ module iline (
     // Two sources, each its own compare set (a mux in front of the
     // compares would sit in kill_now's cone; an OR behind them is free):
     // the classified stream's write, and the data front's posted write.
+    // Twenty bits flat: the page, and the line within it.  RETAINED lines
+    // are compared, not just valid ones - a line out of service must not
+    // revive holding a byte a write has since replaced, and the instruction
+    // front has no splice, so the write KILLS it outright.
     wire        snp = cl_valid && !cl_rw && cl_wr_image;
-    wire snp_kill0 = (snp && v[0] && !t_rom[0] && (t_aux[0] == cl_aux) &&
-                      (!cl_aux || t_bank[0] == cl_bank) && (t_poff[0] == cl_off[15:4])) ||
-                     (ws_valid && v[0] && !t_rom[0] && (t_aux[0] == ws_aux) &&
-                      (!ws_aux || t_bank[0] == ws_bank) && (t_poff[0] == ws_off[15:4]));
-    wire snp_kill1 = (snp && v[1] && !t_rom[1] && (t_aux[1] == cl_aux) &&
-                      (!cl_aux || t_bank[1] == cl_bank) && (t_poff[1] == cl_off[15:4])) ||
-                     (ws_valid && v[1] && !t_rom[1] && (t_aux[1] == ws_aux) &&
-                      (!ws_aux || t_bank[1] == ws_bank) && (t_poff[1] == ws_off[15:4]));
+    wire snp_kill0 = (snp && r[0] && !t_rom[0] &&
+                      (t_ppn[0] == cl_ppn) && (vtag[0][3:0] == cl_off[7:4])) ||
+                     (ws_valid && r[0] && !t_rom[0] &&
+                      (t_ppn[0] == ws_ppn) && (vtag[0][3:0] == ws_off8[7:4]));
+    wire snp_kill1 = (snp && r[1] && !t_rom[1] &&
+                      (t_ppn[1] == cl_ppn) && (vtag[1][3:0] == cl_off[7:4])) ||
+                     (ws_valid && r[1] && !t_rom[1] &&
+                      (t_ppn[1] == ws_ppn) && (vtag[1][3:0] == ws_off8[7:4]));
 
     // ...and against every CAM entry, the same terms: a retained line is a
     // held line for coherence purposes, however long it sits.
     wire [CAMN-1:0] cam_snp_kill;
     genvar gk;
     generate for (gk = 0; gk < CAMN; gk = gk + 1) begin : g_camsnp
-        assign cam_snp_kill[gk] = (snp && cam_v[gk] && !cam_rom[gk] &&
-                                   (cam_aux[gk] == cl_aux) &&
-                                   (!cl_aux || cam_bank[gk] == cl_bank) &&
-                                   (cam_poff[gk] == cl_off[15:4])) ||
-                                  (ws_valid && cam_v[gk] && !cam_rom[gk] &&
-                                   (cam_aux[gk] == ws_aux) &&
-                                   (!ws_aux || cam_bank[gk] == ws_bank) &&
-                                   (cam_poff[gk] == ws_off[15:4]));
+        assign cam_snp_kill[gk] = (snp && cam_r[gk] && !cam_rom[gk] &&
+                                   (cam_ppn[gk] == cl_ppn) &&
+                                   (cam_vtag[gk][3:0] == cl_off[7:4])) ||
+                                  (ws_valid && cam_r[gk] && !cam_rom[gk] &&
+                                   (cam_ppn[gk] == ws_ppn) &&
+                                   (cam_vtag[gk][3:0] == ws_off8[7:4]));
+    end endgenerate
+
+    // ---- the revalidation ---------------------------------------------------
+    // The data front's, over ten lines instead of thirty-two: the two slots
+    // and the eight CAM entries (docs/MEMORY_REFACTOR.md, rung 3).  Stage 1
+    // muxes the stored region's table entry every clock; stage 2, one clock
+    // after map_changed, recomputes VALID from the line's stored identity.
+    // Nothing here reaches a serve cone: both stages are register-rooted and
+    // land in the valid bits, which the serve already reads.
+    localparam integer RT_W = 7;      // {cls[1:0], wr, bsel[1:0], fold, fs}
+    localparam integer NREG = 10;
+    localparam [1:0] BS_AUX = 2'd1, BS_ROM = 2'd2;
+    localparam [1:0] CLS_RAM = 2'd1, CLS_LC = 2'd2;
+    wire [RT_W-1:0] rt_rd [0:15];
+    genvar gr;
+    generate for (gr = 0; gr < 16; gr = gr + 1) begin : g_rt
+        if (gr < NREG) begin : g_real
+            assign rt_rd[gr] = rt_rd_flat[gr*RT_W +: RT_W];
+        end else begin : g_none
+            assign rt_rd[gr] = '0;    // a region no line can carry
+        end
+    end endgenerate
+
+    logic reval_q;
+    always_ff @(posedge clk) reval_q <= map_changed && !rst;
+
+    // Stage 1: the entry each line's region names, registered.
+    logic [RT_W-1:0] rv1_t [0:1];
+    logic [RT_W-1:0] rv1_c [0:CAMN-1];
+    integer rr;
+    always_ff @(posedge clk) begin
+        for (rr = 0; rr < 2; rr = rr + 1)    rv1_t[rr] <= rt_rd[t_reg[rr]];
+        for (rr = 0; rr < CAMN; rr = rr + 1) rv1_c[rr] <= rt_rd[cam_reg[rr]];
+    end
+
+    // Stage 2, combinational into the always_ff below: does the entry still
+    // name this line?  A ROM line wants ROM class, a RAM/LC line wants
+    // RAM or LC - and both want the bank and the fold they were filled with.
+    function automatic logic rv_ok(input [RT_W-1:0] e, input is_rom,
+                                   input [7:0] bank, input fold);
+        logic [7:0] want;
+        begin
+            want = (e[3:2] == BS_AUX) ? rwb_p1 : (e[3:2] == BS_ROM) ? 8'hFF : 8'd0;
+            rv_ok = e[0] &&                                   // front-servable
+                    (is_rom ? (e[6:5] == CLS_ROM)
+                            : (e[6:5] == CLS_RAM || e[6:5] == CLS_LC)) &&
+                    (bank == want) && (fold == e[1]);
+        end
+    endfunction
+    wire rv_t0 = r[0] && rv_ok(rv1_t[0], t_rom[0], t_ppn[0][15:8], t_fold[0]);
+    wire rv_t1 = r[1] && rv_ok(rv1_t[1], t_rom[1], t_ppn[1][15:8], t_fold[1]);
+    wire [CAMN-1:0] rv_c;
+    generate for (gr = 0; gr < CAMN; gr = gr + 1) begin : g_rvc
+        assign rv_c[gr] = cam_r[gr] &&
+                          rv_ok(rv1_c[gr], cam_rom[gr], cam_ppn[gr][15:8], cam_fold[gr]);
     end endgenerate
 
     // The scanner's seams (rtl/iscan.sv, instantiated below).
@@ -499,7 +595,7 @@ module iline (
     wire        sc_slot;
     wire [3:0]  sc_off;
 
-    wire kill_now = map_changed || inval || !serve ||
+    wire kill_now = map_settling || inval || !serve ||
                     // The INTC8ROM latch read clear under a $C3 fetch: the
                     // serve is refused before map_changed's kill lands.
                     (pc_addr[15:8] == 8'hC3 && !intc8rom_q) ||
@@ -541,6 +637,12 @@ module iline (
     logic        f_cam;               // a CAM-only fill: the scanner's, no slot
     logic [7:0]  f_bank;
     logic [11:0] f_vtag, f_poff;
+    // ...and the identity the filled line will carry.  f_aux/f_bank/f_poff
+    // stay because the line-row request still speaks the old triple until
+    // Part 3 makes the page cache physical.
+    logic [15:0] f_ppn;
+    logic [3:0]  f_reg;
+    logic        f_fold;
     logic [127:0] f_buf;
     wire f_active = (fst != F_IDLE);
 
@@ -558,7 +660,10 @@ module iline (
     wire [11:0] p_tag  = want_pending ? want_tag[pick] :
                          pick_early   ? ew_tag : sw_tag;
     assign p_addr = {p_tag, 4'h0};
-    wire p_bus = (p_cls == CLS_BUS);
+    // FS replaces `p_cls != BUS`: it is the region table's own answer for
+    // whether this front may serve the line, and it carries the page-$C3
+    // rule (a $C3 line is servable only while INTC8ROM is set).
+    wire p_bus = !p_fs;
     localparam [1:0] CLS_ROM = 2'd3;
     wire p_rom = (p_cls == CLS_ROM);
 
@@ -566,8 +671,15 @@ module iline (
     // against the fill in flight (the allocation's dedupe).
     wire [CAMN-1:0] cam_m, cam_mf;
     generate for (gk = 0; gk < CAMN; gk = gk + 1) begin : g_cammatch
+        // The promote lookup is VIRTUAL and reads VALID entries: at most one
+        // entry per vtag is valid at a time, so it is unambiguous.  The
+        // dedupe is PHYSICAL and reads RETAINED ones, so main's and aux's
+        // copies of one vtag can both sit in the CAM.
         assign cam_m[gk]  = cam_v[gk] && (cam_vtag[gk] == p_tag);
-        assign cam_mf[gk] = cam_v[gk] && (cam_vtag[gk] == f_vtag);
+        // ...and the line WITHIN the page: a page holds sixteen of them, so
+        // comparing pages alone would call two different lines duplicates.
+        assign cam_mf[gk] = cam_r[gk] && (cam_ppn[gk] == f_ppn) &&
+                            (cam_vtag[gk][3:0] == f_vtag[3:0]);
     end endgenerate
     wire cam_hit = |cam_m;
     wire cam_dup = |cam_mf;
@@ -582,10 +694,10 @@ module iline (
     // write's grant-clock race is exactly this: a fill granted on the
     // write's retire clock read the banks before the write could reach
     // them, and the posted snoop a clock later restarts it.
-    wire snp_fill = (snp && f_active && !f_rom && (f_aux == cl_aux) &&
-                     (!cl_aux || f_bank == cl_bank) && (f_poff == cl_off[15:4])) ||
-                    (ws_valid && f_active && !f_rom && (f_aux == ws_aux) &&
-                     (!ws_aux || f_bank == ws_bank) && (f_poff == ws_off[15:4]));
+    wire snp_fill = (snp && f_active && !f_rom &&
+                     (f_ppn == cl_ppn) && (f_vtag[3:0] == cl_off[7:4])) ||
+                    (ws_valid && f_active && !f_rom &&
+                     (f_ppn == ws_ppn) && (f_vtag[3:0] == ws_off8[7:4]));
     // Everything that restarts or kills a fill.  A restart keeps the want:
     // the relaunch re-classifies and re-reads.
     wire f_restart = f_active && (map_changed || inval || snp_fill ||
@@ -660,6 +772,21 @@ module iline (
     // compare.  Latching first keeps the heavy enables on a registered
     // state bit; a kill racing the launch just clears cam_v, and F_CAM
     // sees it and retries down the fill path.
+    // These deliberately do NOT wait for the map to settle, and the reason
+    // matters because the first cut did and it cost 40-70 ps: the worst path
+    // in the design became miss_tag_q -> f_poff's clock enable, which is this
+    // cone.
+    //
+    // The hazard a settle-wide gate would cover is an INSTALL landing on
+    // map_changed's own clock: stage 1 registers rt_rd[reg] from the region a
+    // line held BEFORE the install, so a revalidation one clock later would
+    // judge the new line by the old line's region.  But an install can never
+    // land on that clock - every one of them sits inside `else case (fst)`
+    // behind `if (f_restart)`, and f_restart carries map_changed.  A promote
+    // landing the clock AFTER is safe either way: the revalidation either
+    // drops the fresh line (a refill, nothing worse) or keeps it, and keeping
+    // it is right, because it was stamped from the table that already stands.
+    // A launch during the settle stamps p_ppn/p_reg from that same new table.
     wire promote_go  = (fst == F_IDLE) && !f_restart && want_pending &&
                        !stale_own && !stale_other && cam_hit;
     wire scan_go     = (fst == F_IDLE) && !f_restart && (pick_early || pick_scan);
@@ -686,12 +813,31 @@ module iline (
         end
     end
 
+    // The revalidation's books, over the slots and the CAM together.
+    logic [4:0] n_idrop, n_irev;
+    integer nq;
+    always_comb begin
+        n_idrop = 5'd0; n_irev = 5'd0;
+        if ( v[0] && !rv_t0) n_idrop = n_idrop + 5'd1;
+        if (!v[0] &&  rv_t0) n_irev  = n_irev  + 5'd1;
+        if ( v[1] && !rv_t1) n_idrop = n_idrop + 5'd1;
+        if (!v[1] &&  rv_t1) n_irev  = n_irev  + 5'd1;
+        for (nq = 0; nq < CAMN; nq = nq + 1) begin
+            if ( cam_v[nq] && !rv_c[nq]) n_idrop = n_idrop + 5'd1;
+            if (!cam_v[nq] &&  rv_c[nq]) n_irev  = n_irev  + 5'd1;
+        end
+    end
+
     // The books, for the bench and the bring-up (hierarchy-visible).
     logic [31:0] cnt_promotes, cnt_cam_fills, cnt_scan_fills, cnt_loop_hold;
     logic [31:0] cnt_scan_block;      // clocks a slot want waited on a scan fill
     logic [31:0] cnt_cam_serves;      // retires whose byte came from the CAM
     logic [31:0] cnt_tgt_serves;      // zero-stall branch-target serves
     logic [31:0] cnt_slow_i;          // I-stream cycles the sequencer still serves
+    // The revalidation's books, exported: ACCEL_IDROP / ACCEL_IREVIVE.
+    logic [31:0] cnt_reval_drop, cnt_reval_revive;
+    assign idrop_o   = cnt_reval_drop;
+    assign irevive_o = cnt_reval_revive;
     always_ff @(posedge clk) begin
         if (rst) begin
             cnt_promotes <= 32'd0; cnt_cam_fills <= 32'd0;
@@ -760,19 +906,22 @@ module iline (
 
         if (rst) begin
             v[0] <= 1'b0; v[1] <= 1'b0;
+            r[0] <= 1'b0; r[1] <= 1'b0;
             vtag[0] <= 12'd0; vtag[1] <= 12'd0;
             t_rom[0] <= 1'b0; t_rom[1] <= 1'b0;
-            t_aux[0] <= 1'b0; t_aux[1] <= 1'b0;
-            t_bank[0] <= 8'd0; t_bank[1] <= 8'd0;
-            t_poff[0] <= 12'd0; t_poff[1] <= 12'd0;
+            t_ppn[0] <= 16'd0; t_ppn[1] <= 16'd0;
+            t_reg[0] <= 4'd0; t_reg[1] <= 4'd0;
+            t_fold[0] <= 1'b0; t_fold[1] <= 1'b0;
             cur <= 1'b0;
             want_v[0] <= 1'b0; want_v[1] <= 1'b0;
             want_tag[0] <= 12'd0; want_tag[1] <= 12'd0;
             fst <= F_IDLE;
             f_slot <= 1'b0; f_rom <= 1'b0; f_aux <= 1'b0; f_cam <= 1'b0;
             f_bank <= 8'd0; f_vtag <= 12'd0; f_poff <= 12'd0;
+            f_ppn <= 16'd0; f_reg <= 4'd0; f_fold <= 1'b0;
             tick_q <= 1'b0; tev_valid <= 1'b0;
-            for (s = 0; s < CAMN; s = s + 1) cam_v[s] <= 1'b0;
+            for (s = 0; s < CAMN; s = s + 1) begin cam_v[s] <= 1'b0; cam_r[s] <= 1'b0; end
+            cnt_reval_drop <= 32'd0; cnt_reval_revive <= 32'd0;
             cam_wp <= 3'd0;
         end else begin
             // ---- the engine ------------------------------------------------
@@ -805,9 +954,9 @@ module iline (
                         f_cam    <= 1'b0;
                         f_vtag   <= p_tag;
                         f_rom    <= cam_rom[cam_idx];
-                        f_aux    <= cam_aux[cam_idx];
-                        f_bank   <= cam_bank[cam_idx];
-                        f_poff   <= cam_poff[cam_idx];
+                        f_ppn    <= cam_ppn[cam_idx];
+                        f_reg    <= cam_reg[cam_idx];
+                        f_fold   <= cam_fold[cam_idx];
                         cam_pidx <= cam_idx;
                         want_v[pick] <= 1'b0;
                         fst <= F_CAM;
@@ -821,6 +970,9 @@ module iline (
                         f_aux  <= !p_rom && p_aux;
                         f_bank <= rw_bank;
                         f_poff <= p_off[15:4];
+                        f_ppn  <= p_ppn;
+                        f_reg  <= p_reg;
+                        f_fold <= p_fold;
                         want_v[pick] <= 1'b0;
                         fst <= p_rom ? F_R0 : F_REQ;
                     end
@@ -838,6 +990,9 @@ module iline (
                         f_aux  <= !p_rom && p_aux;
                         f_bank <= rw_bank;
                         f_poff <= p_off[15:4];
+                        f_ppn  <= p_ppn;
+                        f_reg  <= p_reg;
+                        f_fold <= p_fold;
                         fst    <= p_rom ? F_R0 : F_REQ;
                     end
                 end
@@ -849,10 +1004,11 @@ module iline (
                         ldata[f_slot]  <= cam_data[cam_pidx];
                         v[f_slot]      <= 1'b1;
                         vtag[f_slot]   <= f_vtag;
+                        r[f_slot]      <= 1'b1;
                         t_rom[f_slot]  <= f_rom;
-                        t_aux[f_slot]  <= f_aux;
-                        t_bank[f_slot] <= f_bank;
-                        t_poff[f_slot] <= f_poff;
+                        t_ppn[f_slot]  <= f_ppn;
+                        t_reg[f_slot]  <= f_reg;
+                        t_fold[f_slot] <= f_fold;
                     end else begin
                         want_v[f_slot]   <= 1'b1;
                         want_tag[f_slot] <= f_vtag;
@@ -868,11 +1024,12 @@ module iline (
                     if (!f_cam) begin
                         if (!f_rom) ldata[f_slot] <= il_row;
                         v[f_slot]      <= 1'b1;
+                        r[f_slot]      <= 1'b1;
                         vtag[f_slot]   <= f_vtag;
                         t_rom[f_slot]  <= 1'b0;
-                        t_aux[f_slot]  <= f_aux;
-                        t_bank[f_slot] <= f_bank;
-                        t_poff[f_slot] <= f_poff;
+                        t_ppn[f_slot]  <= f_ppn;
+                        t_reg[f_slot]  <= f_reg;
+                        t_fold[f_slot] <= f_fold;
                     end
                     // EVERY committed line is retained: the CAM records it,
                     // deduplicated - a live entry with this tag keeps its
@@ -881,11 +1038,12 @@ module iline (
                         cam_data[cam_wp] <= f_rom ? (f_cam ? f_cbuf : ldata[f_slot])
                                                   : il_row;
                         cam_v[cam_wp]    <= 1'b1;
+                        cam_r[cam_wp]    <= 1'b1;
                         cam_vtag[cam_wp] <= f_vtag;
                         cam_rom[cam_wp]  <= f_rom;
-                        cam_aux[cam_wp]  <= f_aux;
-                        cam_bank[cam_wp] <= f_bank;
-                        cam_poff[cam_wp] <= f_poff;
+                        cam_ppn[cam_wp]  <= f_ppn;
+                        cam_reg[cam_wp]  <= f_reg;
+                        cam_fold[cam_wp] <= f_fold;
                         cam_wp <= cam_wp + 3'd1;
                     end
                     fst <= F_IDLE;
@@ -919,25 +1077,31 @@ module iline (
             end
             if (fst == F_W2 && f_rom && !f_cam) begin
                 t_rom[f_slot] <= 1'b1;             // overrides F_W2's clear
-                t_aux[f_slot] <= 1'b0;
             end
 
             // ---- the train and the rotation --------------------------------
+            // A slot the train or the rotation re-aims is about to hold a
+            // different line: its retention goes with its valid bit.  (The
+            // CAM still holds the bytes, so this costs nothing but a
+            // promote.)
             if (miss_q && !wanted_now) begin
                 want_v[cur]   <= 1'b1;
                 want_tag[cur] <= miss_tag_q;
                 v[cur]        <= 1'b0;
+                r[cur]        <= 1'b0;
                 if (!(v[!cur] && vtag[!cur] == miss_tag_q + 12'd1) &&
                     !(f_active && f_vtag == miss_tag_q + 12'd1)) begin
                     want_v[!cur]   <= 1'b1;
                     want_tag[!cur] <= miss_tag_q + 12'd1;
                     v[!cur]        <= 1'b0;
+                    r[!cur]        <= 1'b0;
                 end
             end
             if (cross0) begin
                 cur <= 1'b0;
                 if (rot0) begin
                     v[1] <= 1'b0;
+                    r[1] <= 1'b0;
                     want_v[1]   <= 1'b1;
                     want_tag[1] <= vtag[0] + 12'd1;
                     if (f_active && !f_cam && f_slot == 1'b1) fst <= F_IDLE;   // abort the stale fill
@@ -947,6 +1111,7 @@ module iline (
                 cur <= 1'b1;
                 if (rot1) begin
                     v[0] <= 1'b0;
+                    r[0] <= 1'b0;
                     want_v[0]   <= 1'b1;
                     want_tag[0] <= vtag[1] + 12'd1;
                     if (f_active && !f_cam && f_slot == 1'b0) fst <= F_IDLE;
@@ -954,27 +1119,50 @@ module iline (
             end
 
             // ---- the kills, last: they beat every commit above -------------
-            if (snp_kill0) v[0] <= 1'b0;
-            if (snp_kill1) v[1] <= 1'b0;
+            // A write kills a held line outright - valid AND retained.  The
+            // instruction front has no splice, so a line a write touched can
+            // never be revived: its bytes are stale for good.
+            if (snp_kill0) begin v[0] <= 1'b0; r[0] <= 1'b0; end
+            if (snp_kill1) begin v[1] <= 1'b0; r[1] <= 1'b0; end
             for (s = 0; s < CAMN; s = s + 1)
-                if (cam_snp_kill[s]) cam_v[s] <= 1'b0;
+                if (cam_snp_kill[s]) begin cam_v[s] <= 1'b0; cam_r[s] <= 1'b0; end
             // The wants survive a map change (the retry re-classifies); an
-            // emptied front with serving off wants nothing.  The CAM does
-            // NOT survive one: promotion trusts the captured identity, and
-            // that trust is exactly as old as the map.
-            if (map_changed || inval || !serve) begin
+            // emptied front with serving off wants nothing.  The image going
+            // away, or serving stopping, takes the lines outright - valid
+            // AND retained: their bytes are no longer anybody's truth.
+            if (inval || !serve) begin
                 v[0] <= 1'b0; v[1] <= 1'b0;
-                for (s = 0; s < CAMN; s = s + 1) cam_v[s] <= 1'b0;
+                r[0] <= 1'b0; r[1] <= 1'b0;
+                for (s = 0; s < CAMN; s = s + 1) begin
+                    cam_v[s] <= 1'b0; cam_r[s] <= 1'b0;
+                end
+            end
+            // A MAP CHANGE takes nothing.  One clock later every line's
+            // valid bit is the new map's answer for the identity that line
+            // was filled with, and a line whose region did not move never
+            // stopped being servable (docs/MEMORY_REFACTOR.md, rung 3).
+            // Nothing else writes a valid bit on this clock: every launch is
+            // held off through map_settling, so no install can land here.
+            if (reval_q) begin
+                v[0] <= rv_t0;
+                v[1] <= rv_t1;
+                if ( v[0] && !rv_t0) cnt_reval_drop   <= cnt_reval_drop   + 32'd1;
+                if (!v[0] &&  rv_t0) cnt_reval_revive <= cnt_reval_revive + 32'd1;
+                if ( v[1] && !rv_t1) cnt_reval_drop   <= cnt_reval_drop   + 32'd1;
+                if (!v[1] &&  rv_t1) cnt_reval_revive <= cnt_reval_revive + 32'd1;
+                for (s = 0; s < CAMN; s = s + 1) cam_v[s] <= rv_c[s];
+                cnt_reval_drop   <= cnt_reval_drop   + 32'(n_idrop);
+                cnt_reval_revive <= cnt_reval_revive + 32'(n_irev);
             end
             if (!serve) begin
                 want_v[0] <= 1'b0; want_v[1] <= 1'b0;
                 fst <= F_IDLE;
             end
             if (r2_busy) begin
-                if (t_rom[0]) v[0] <= 1'b0;
-                if (t_rom[1]) v[1] <= 1'b0;
+                if (t_rom[0]) begin v[0] <= 1'b0; r[0] <= 1'b0; end
+                if (t_rom[1]) begin v[1] <= 1'b0; r[1] <= 1'b0; end
                 for (s = 0; s < CAMN; s = s + 1)
-                    if (cam_rom[s]) cam_v[s] <= 1'b0;
+                    if (cam_rom[s]) begin cam_v[s] <= 1'b0; cam_r[s] <= 1'b0; end
             end
         end
     end

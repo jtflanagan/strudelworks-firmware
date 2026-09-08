@@ -238,6 +238,7 @@ module accel_seq (
     // the denominator the revalidation rungs are measured against
     // (docs/PAGE_CACHE.md).
     input  wire         map_changed,
+    input  wire         map_settling,
     output logic [31:0] maps,
     // THE CENSUS of the dispatcher's fast ops (ACCEL_FAST_*): what the two
     // fronts did NOT serve, so the next rung knows where to aim.  Seven
@@ -386,24 +387,34 @@ module accel_seq (
     // "The switch writes").  So a switch-changing synthetic commit holds
     // turbo_ok and the dispatcher's `settled` for four clocks: the commit's
     // own, the shadow's, map_changed's, and one more for anything derived
-    // from map_changed (rtl/dline.sv's zero-page shadow).  Only an op that
-    // can move a switch holds: a $C00x write, or a $C05x/$C08x read or
+    // from map_changed (rtl/dline.sv's zero-page shadow).  FIVE since the
+    // fronts REVALIDATE rather than flush (docs/MEMORY_REFACTOR.md, rung 3):
+    // the region tables stand one clock behind the switches, the
+    // revalidation's stage 2 writes the valid bits the clock after that, and
+    // the fronts' registered lookups are clean the clock after THAT.  The
+    // cost is one more clock per switch flip, about 0.06% of clocks on the
+    // animated Nox map, against the tens of line refills it saves.  Only an
+    // op that can move a switch holds: a $C00x write, or a $C05x/$C08x read or
     // write - and not a QUIET one.  A keyboard or status-page read ($C00x/
     // $C01x, u_addr[7:5] clear) changes nothing and holds nothing; the
     // first cut held on those too and cost the ProDOS boot bench 12% in
     // Bitsy Bye's poll loop.  The cost is four clocks per switch flip,
     // against the bus cycle each one used to be.
-    logic [2:0] swi_sq;
+    logic [3:0] swi_sq;
     // ...exactly the ops that can move a switch: a $C00x write, a $C05x or
     // $C08x access.  Not the keyboard or status page, not the speaker ($C03x,
     // a toggle and nothing of the map's), not a slot's.
     wire swi_change = swi_commit && !quiet_q && !slot_q && (u_addr[15:8] == 8'hC0) &&
                       ((!u_rw && u_addr[7:4] == 4'h0) || (u_addr[7:4] == 4'h5) || (u_addr[7:4] == 4'h8));
-    always_ff @(posedge clk) swi_sq <= rst ? 3'd0 : {swi_sq[1:0], swi_change};
+    always_ff @(posedge clk) swi_sq <= rst ? 4'd0 : {swi_sq[2:0], swi_change};
     wire swi_settling = swi_change || (|swi_sq);
 
+    // ...and map_settling covers every OTHER way the map can move - a bus
+    // op's commit, the bank register, INTC8ROM, a reset - which swi_change
+    // above does not see.  One more registered term in an AND.
     assign turbo_ok = turbo_en_q && !stall_q && (st == S_DECIDE) && !ovr_en && !op_inflight &&
-                      !busy && mem_image_ready && can_pay && !fev_valid && !swi_settling;
+                      !busy && mem_image_ready && can_pay && !fev_valid && !swi_settling &&
+                      !map_settling;
 
     // What the dispatcher will charge for on this edge, for the governor's
     // one writer: exactly the two dispatching branches below.

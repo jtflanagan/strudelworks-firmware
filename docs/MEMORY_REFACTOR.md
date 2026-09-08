@@ -111,7 +111,7 @@ run; Verilator only.
 |---|---|---|---|
 | 1 | Part 1: region table + PPN export + `ACCEL_MAPS`, RamWorks 254, host words | pure refactor: `run_mmu_xlate_tb.sh`, accel battery both sweeps, cpu_predict, boot bench 2/2, mmu_trace assert if a capture exists; HW: maps/s baseline on the animated Nox map | **DONE** |
 | 2 | Part 2 dline: revalidation, PPN stamps/seams, `DDROP/DREVIVE`, the `revaltest` phase, header rewrite | battery + revaltest's dline asserts, boot 2/2; HW census | **DONE** |
-| 3 | Part 2 iline: revalidation, settle 5, `IDROP/IREVIVE`, ISTREAM/CXXX text | battery + revaltest's iline asserts, boot 2/2; HW: Nox map before/after | not started |
+| 3 | Part 2 iline: revalidation, settle 5, `IDROP/IREVIVE`, ISTREAM/CXXX text | battery + revaltest's iline asserts, boot 2/2; HW: Nox map before/after | **DONE, timing margin OPEN** |
 | 4 | Part 3 alone: `way_ram`, new `page_cache`, rewritten `sim/page_cache_tb.sv` sweeping the geometry, OOC synthesis | 128x8 / 64x10 / 64x8 pass, the il race sweep, the pressure round trip, the clean-victim path's ~30-clock answer | not started |
 | 5 | Part 3 integration: master_top, F_WAIT/C_WAIT, fb_sim tap, monitor, regfile, ROM as pages + host write path, `apple_rom` removed, mem_integ_tb | mem_integ 20 checks, battery, boot bench both images mode 0 vs 2 parity; the HW ladder | not started |
 | 6 | Part 4 + docs: PAGE_CACHE.md rewrite, MEMORY.md, DLINE.md, ISTREAM.md, CXXX.md, PROTOCOL.md, DDR3_USAGE.md; then the 64 x 8 build | | not started |
@@ -356,3 +356,130 @@ on a machine that had been sitting at the map for hours; rung 2's was taken
 minutes after loading the save.  A matched A/B - both bitstreams, the same
 route, the same elapsed time - is owed, and is best done after rung 3, when
 the instruction front stops flushing too and the whole benefit is in.
+
+## Rung 3, as built
+
+The instruction front's two slots and eight CAM entries now carry a RETAINED
+bit and the same physical identity the data front's lines do, and a map change
+revalidates all ten rather than emptying them - the data front's pipeline over
+ten lines instead of thirty-two.
+
+- A write's snoop compares RETAINED lines and kills them OUTRIGHT, valid and
+  retained together: this front has no splice, so a line a write touched can
+  never be revived.  The compare is twenty bits flat, `{ppn, vtag[3:0]}`.
+- The CAM's dedupe is PHYSICAL and its promote lookup stays VIRTUAL.  Main's
+  and aux's copies of one virtual tag therefore coexist - the AUXMOVE shape -
+  with at most one of them valid, because a same-vtag pair shares a region and
+  the table's bank answer picks exactly one.  Promotion still skips
+  re-classification, by the new argument: an entry is valid only if the region
+  table says its stored identity is the map's answer for its region.
+- `p_bus` becomes `!p_fs`, the region table's own answer, which carries the
+  page-$C3 rule.
+- The settle grows from four clocks to five (`accel_seq`'s `swi_sq`), and
+  `turbo_ok` gains `!map_settling`, which covers every map change `swi_change`
+  cannot see - a bus op's commit, the bank register, INTC8ROM, a reset.
+- `ws_*` speaks the physical space, retiring the data front's last old-triple
+  registers.
+
+`ACCEL_IDROP` (0x8000_0104) and `ACCEL_IREVIVE` (0x8000_0108).
+
+### Two bugs this rung cost, both mine, both worth keeping
+
+**`map_settling` started one clock late.**  It was written as a REGISTERED OR
+of `map_changed` and its two delays, which makes it high at C+1..C+3 rather
+than C..C+2 - so replacing `kill_now`'s `map_changed` with it REMOVED the
+protection on `map_changed`'s own clock, the exact clock a front's valid bits
+still describe the old map.  `sim/accel.s`'s bankfetch caught it immediately:
+`turbo read $1f03: core got e8, the reference says ca` - main's INX served
+where aux's DEX was due after `STA $C003`, which is the 2026-09-04 Nox splash
+lockup exactly.  `map_settling` is combinational over its two delays now.  The
+same mistake was latent in rung 2's `live_cmiss` gate, where dline's separate
+claim abort on `map_changed` had been covering for it.
+
+**The CAM's dedupe compared pages, not lines.**  `cam_mf` matched on
+`cam_ppn == f_ppn` alone, but a page holds sixteen lines, so two different
+lines in one page were called duplicates and the second was silently dropped
+from the CAM.  It compares `{ppn, vtag[3:0]}` now.  This one cost promotes,
+never correctness - which is why only a counter, not a bench, would ever have
+caught it.
+
+### An open finding: the paddle at the top of its range
+
+`sim/accel_tb.sv`'s PREAD check for a paddle at position 255 has moved with
+every rung - **255** (rung 1), **250 and 252** (rung 2, the two differing only
+in unrelated program content on IDENTICAL RTL), **247** (rung 3) - while
+paddles 0/1/2 read exactly 39/120/0 throughout and the card's own measurement
+of paddle 3 stays 2804 bus cycles in every run.
+
+So it tracks the accelerated op mix, and the virtual timer delivers a few
+percent fewer PREAD counts than its sample implies: 2804 core cycles over
+eleven-cycle loops is 254.9, and 247 is eight short of that.  The arithmetic
+leaves under one iteration of margin at the top of the range, which is why
+only that paddle shows it.
+
+This is not something the rethink introduced and it is not a memory-
+correctness question - but the trend is real and deserves its own look rather
+than a wider tolerance each time.  For now the check is +/-2 for every paddle
+and 12-low at the very top, which still fails a functional break (those move a
+reading by tens).  **Recorded as OPEN.**
+
+### Rung 3's evidence
+
+Simulation: `accel_vl` **98 checks, 0 errors** on both sweeps (97 before, plus
+the instruction front's revalidation check), `SUITE boot` **2/2 PASS** with
+`bad 0 mism 0`.  The fronts' books in the mode-2 phase: D **5461 drops, 5153
+revives, 32081 revived-line serves**; I **783 drops, 489 revives**.
+
+Hardware, the animated Nox map, and this one needs no normalising:
+
+> **The instruction front's drop and revive counters do not move at all.**
+> `I drop 6,672,687 revive 3,019,448`, identical across three readings spanning
+> **1.8 million map changes**, while D drops climbed 17.7M -> 46.8M over the
+> same span.
+
+At the measurement screen the instruction front now loses ZERO of its ten
+lines to a map change.  Before this rung every valid one died on each of those
+1.8M map changes.  The cumulative I-drops are all from boot and game-load,
+where the ROM and language-card switches genuinely do change a line's class -
+which is where drops SHOULD happen.  The data front is unchanged: 16.1 drops
+per map, 95.7% revived.
+
+There is a first sign of a speed effect.  Using the normalisation that made
+the rung-1/2 samples comparable - speed divided by maps-per-1000-cycles, a
+flat 1.67, 1.66, 1.66, 1.66 across all four of them - rung 3 reads **1.944,
+about +17%**.  That is evidence, not proof: it is a derived metric, and the
+matched A/B is still owed.  It is consistent with rung 2 moving the ratio not
+at all, since a data miss rides the dispatcher unclaimed and the second touch
+hits, while an instruction miss stalls the fetch stream.
+
+### OPEN: rung 3 spends the timing margin
+
+**Three builds: wns = +0.031, +0.002, +0.001** (whs +0.044 / +0.037 / +0.049,
+`fail=0/62697` in all three), against rung 1's +0.046 and +0.104.  Those
+distributions barely overlap, so this is a real cost of about 40-70 ps and not
+the build-to-build noise the rung-1 notes above describe.  **The plan's gate is
+WNS >= +0.039 and it is NOT met.**  Timing is MET - positive slack, no failing
+endpoints - but the margin is gone, and `docs/DERISK.md`'s history says
+marginal decision cones at corners are what past hardware glitches were made
+of.
+
+One cause was found and removed: the first cut gated the fill launches
+(`promote_go`/`scan_go`/`sw_taken`/`ew_taken`) on `map_settling`, which made
+`miss_tag_q -> f_poff`'s clock enable the worst path.  Those gates were
+redundant - `f_restart` carries `map_changed` and every install sits behind
+it, so an install can never land on the clock stage 1's `rv1` would be stale -
+and removing them dropped max logic depth from 22 to 16 with the revalidation
+counts byte-identical.  It did NOT recover the slack.
+
+The limiter now is `u_dline/dq_st_reg[3][1] -> u_cpu/a_reg[5]`, the data
+front's serve path, **75% route delay** and a path rung 1's baseline already
+carried.  So what costs the margin is AREA, not a new cone: rung 2's per-line
+identity and revalidation added roughly 1k LUTs and 600 flops inside dline and
+congested the routing around its serve.
+
+The cheapest fix, not yet built: store each line's 2-bit `bsel` instead of its
+8-bit `cbank`, and clear retained aux lines outright when the RamWorks bank
+register moves (a bus op, a handful a second).  That removes 32 eight-bit
+compares and 256 flops from dline and should hand the margin back.  Until it
+is done, treat this stack as functionally proven but not a bitstream to rely
+on.

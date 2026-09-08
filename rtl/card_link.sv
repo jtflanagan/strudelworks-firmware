@@ -272,8 +272,10 @@ module card_link #(
     input  wire [31:0]  accel_turbo,
     input  wire [31:0]  accel_dline,
     input  wire [31:0]  accel_maps,    // ACCEL_MAPS (docs/MEMORY_REFACTOR.md)
-    input  wire [31:0]  accel_ddrop,   // ...and the data front's revalidation
+    input  wire [31:0]  accel_ddrop,   // ...and the two fronts' revalidation
     input  wire [31:0]  accel_drevive,
+    input  wire [31:0]  accel_idrop,
+    input  wire [31:0]  accel_irevive,
     input  wire         accel_cen_v,
     input  wire [2:0]   accel_cen_sel,
     // The game port's samples, for GAME_STAT (rtl/game_port.sv); a
@@ -1058,6 +1060,8 @@ module card_link #(
         .accel_maps        (accel_maps),
         .accel_ddrop       (accel_ddrop),
         .accel_drevive     (accel_drevive),
+        .accel_idrop       (accel_idrop),
+        .accel_irevive     (accel_irevive),
         .accel_cen_v       (accel_cen_v),
         .accel_cen_sel     (accel_cen_sel),
         .game_pb           (game_pb),

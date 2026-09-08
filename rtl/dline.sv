@@ -211,9 +211,8 @@ module dline #(
 
     // The retire+1 snoop, to the instruction front.
     output wire        ws_valid,
-    output wire        ws_aux,
-    output wire [7:0]  ws_bank,
-    output wire [15:0] ws_off,
+    output wire [15:0] ws_ppn,
+    output wire [7:0]  ws_off8,
 
     // The image.
     input  wire        inval,
@@ -543,13 +542,13 @@ module dline #(
     // the splice into the shadow and the CAM, the claim abort, the
     // instruction front's snoop, the push onto the posted FIFO, and the
     // one-clock read fence (spl_blk).  A retire fills it; it holds one.
-    logic        spl_v, spl_aux;
-    logic [7:0]  spl_bank, spl_data;
-    logic [15:0] spl_addr, spl_off;
-    // ...and the same write's PHYSICAL page and byte-in-page, which is what
-    // the cache's tags, the posted FIFO and the page cache now speak.  The
-    // triple above survives only as the instruction front's snoop port until
-    // that front is converted too (docs/MEMORY_REFACTOR.md, rung 3).
+    // The write's stamp: its address (for the simulation assertion below),
+    // its byte, and its PHYSICAL page and byte-in-page - which is all the
+    // cache's tags, the posted FIFO, the page cache and the instruction
+    // front's snoop speak since rung 3.
+    logic        spl_v;
+    logic [7:0]  spl_data;
+    logic [15:0] spl_addr;
     logic [15:0] spl_ppn;
     logic [7:0]  spl_off8;
 
@@ -648,17 +647,13 @@ module dline #(
         if (w_retire) begin
             spl_addr <= dq_addr;
             spl_data <= cpu_dout;
-            spl_aux  <= d_aux;
-            spl_bank <= want_bank;
-            spl_off  <= d_off;
             spl_ppn  <= d_ppn;
             spl_off8 <= dq_addr[7:0];   // the fold never touches a[11:4]
         end
     end
     assign ws_valid = spl_v;
-    assign ws_aux   = spl_aux;
-    assign ws_bank  = spl_bank;
-    assign ws_off   = spl_off;
+    assign ws_ppn   = spl_ppn;
+    assign ws_off8  = spl_off8;
 
     // ---- the posted FIFO ----------------------------------------------------
     // Filled from the splice register, drained by the MMU's take.  The

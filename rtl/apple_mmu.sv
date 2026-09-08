@@ -362,7 +362,7 @@ module apple_mmu #(
     // itself and the two after it, by which time every front's valid bits
     // and the registers derived from them stand under the new map.  The
     // sequencer's turbo leash and the fronts' fill triggers hold on this.
-    output logic       map_settling,
+    output wire        map_settling,
     // The read table, packed ten entries of RT_W bits, and the PHYSICAL bank
     // a RamWorks access reaches (rw_bank + 1), both registered: a front
     // recomputes a held line's validity from its stored region against
@@ -806,13 +806,17 @@ module apple_mmu #(
     always_ff @(posedge clk) begin
         map_q       <= {sw_state, intc8rom, rw_bank};
         map_changed <= rst || !res_sync || (map_q != {sw_state, intc8rom, rw_bank});
-        // ...and its three-clock stretch: map_changed, the clock a
-        // revalidation's stage 2 writes the valid bits, and the one after it
-        // in which every register derived from them stands.
-        map_s1       <= map_changed;
-        map_s2       <= map_s1;
-        map_settling <= map_changed || map_s1 || map_s2;
+        // ...and its three-clock stretch's two delays.  map_settling itself
+        // is COMBINATIONAL over them, so it covers map_changed's OWN clock:
+        // registering the OR would start it one clock late, and that clock
+        // is exactly the one a front must not serve a line on - its valid
+        // bits still describe the old map until the revalidation lands.
+        // (Found the hard way: with the OR registered, sim/accel.s's
+        // bankfetch read main's INX at $1F03 where aux's DEX was due.)
+        map_s1 <= map_changed;
+        map_s2 <= map_s1;
     end
+    assign map_settling = map_changed || map_s1 || map_s2;
 
     // ---- the driver's query ---------------------------------------------------------
     wire q_zp    = (q_addr[15:9]  == 7'd0);

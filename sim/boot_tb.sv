@@ -187,9 +187,10 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // The data front between iline and the core, as in master_top.
     wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
     wire        d_pending_w, turbo_wr, dq_rw_w, cl_posted;
-    wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w, ws_aux_w;
-    wire [7:0]  pw_data_w, ws_bank_w, cl_wdata;
-    wire [15:0] ws_off_w;
+    wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w;
+    wire [7:0]  pw_data_w, cl_wdata;
+    wire [15:0] ws_ppn_w;
+    wire [7:0]  ws_off8_w;
     // The physical seam (docs/MEMORY_REFACTOR.md, rung 2).
     wire [15:0] pw_ppn_w, cl_ppn_w, d_ppn_w, p_ppn_w;
     wire [7:0]  pw_off_w, rwb_p1_w;
@@ -308,7 +309,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .fev_valid (fev_valid), .fev_addr (fev_addr), .fev_rw (fev_rw), .fev_data (fev_data),
         .fev_sync (fev_sync),
         .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
-        .fast_ops (fast_ops), .map_changed (map_changed), .maps (accel_maps), .cen_v (), .cen_sel (), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
+        .fast_ops (fast_ops), .map_changed (map_changed), .map_settling (map_settling), .maps (accel_maps), .cen_v (), .cen_sel (), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
         .cycles (cycles), .wait_clocks (wait_clocks),
         .retries (retries)
     );
@@ -325,13 +326,16 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .tev_valid (tev_valid), .tev_addr (tev_addr), .tev_data (tev_data),
         .tev_sync (tev_sync), .ev_room (1'b1),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
+        .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
+        .cl_ppn (cl_ppn_w), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
+        .map_settling (map_settling), .idrop_o (), .irevive_o (),
         .rw_bank (rw_bank), .map_changed (map_changed), .intc8rom (intc8rom),
         .il_req (il_req), .il_aux (il_aux_w), .il_bank (il_bank_w), .il_line (il_line_w),
         .il_ack (il_ack && il_req), .il_ok (il_ok), .il_row (il_row),
         .r2_en (rom_r2_en), .r2_addr (rom_r2_addr), .r2_data (rom_r2_data), .r2_busy (rom_r2_busy),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
         .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
-        .ws_valid (ws_valid_w), .ws_aux (ws_aux_w), .ws_bank (ws_bank_w), .ws_off (ws_off_w),
+        .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .serve (serve), .inval (inval)
     );
 
@@ -358,7 +362,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata),
         .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
         .pw_data (pw_data_w), .pw_take (pw_take_w),
-        .ws_valid (ws_valid_w), .ws_aux (ws_aux_w), .ws_bank (ws_bank_w), .ws_off (ws_off_w),
+        .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .inval (inval),
         .cnt_clr (cnt_clr),
         .cnt_serves (), .cnt_claims (), .cnt_splices (),
