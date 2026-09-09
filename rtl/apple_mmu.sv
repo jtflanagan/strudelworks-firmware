@@ -280,6 +280,13 @@ module apple_mmu #(
     input  wire [7:0]   pw_data,
     input  wire         pw_ready,      // the page cache's pipeline is clear
     output wire         pw_take,       // pulse: cl_* carries it next clock
+    // THE SHADOW DUPLICATE'S ENTRANT, for the same reason pw_take is one:
+    // it sets cl_valid a clock later exactly as a posted write does, so the
+    // cache must open a P0 for it or it arrives with no directory read of
+    // its own (docs/GS.md rung 3e).
+    output wire         shd_take_o,
+    output wire [15:0]  shd_ppn_o,
+    output wire [7:0]   shd_off_o,
     // The INTC8ROM latch, for MEM_STAT.
     output logic        intc8rom,
     // cl_off's combinational preview, valid with op_present: the banks'
@@ -1301,6 +1308,9 @@ module apple_mmu #(
 
     wire shd_new  = cl_valid && !cl_rw && cl_wr_image && cl_sh;
     wire shd_take = shd_valid && pw_ready && !op_present && !rst;
+    assign shd_take_o = shd_take;
+    assign shd_ppn_o  = shd_ppn;
+    assign shd_off_o  = shd_off;
 
     // The duplicate is offered before the front's posted write: it belongs to
     // an op that has already been classified, and holding it back behind a

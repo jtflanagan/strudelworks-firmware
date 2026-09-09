@@ -103,6 +103,18 @@ module page_cache #(
     input  wire        pw_take,
     input  wire [15:0] pw_ppn,
     input  wire [7:0]  pw_off,
+    // ...AND A SHADOW DUPLICATE'S (docs/GS.md rung 3e).  apple_mmu emits one
+    // a clock behind a shadowed write, down the same path a posted write
+    // takes - it sets cl_valid exactly as pw_take does - so it needs an
+    // entrant here exactly as pw_take does.  Without one no P0 runs for it:
+    // the directory is never read for ITS page, so the hit compare, the
+    // victim, the victim's tag and dirty bit, and the row its byte lands in
+    // all belong to whatever op went before.  On the IIgs that evicted a
+    // page under another page's tag and flushed it over a third.  Low on the
+    // IIe build, which emits no duplicates.
+    input  wire        shd_take,
+    input  wire [15:0] shd_ppn,
+    input  wire [7:0]  shd_off,
 
     // ---- the op itself -----------------------------------------------------
     input  wire [15:0] op_addr,
@@ -276,15 +288,18 @@ module page_cache #(
     wire il_busy = il_sr[0] || il_sr[1];
     // The landing reservation and the patch: no line request may read a page
     // on a clock a write to it lands, and E_PATCH is a write landing on port B.
-    assign il_ack = il_req && !op_present && !pw_take && !wl_v && !il_busy &&
+    assign il_ack = il_req && !op_present && !pw_take && !shd_take && !wl_v && !il_busy &&
                     !pw_pending && !iv_run && (state != E_PATCH);
 
     wire            e_op  = op_present;
     wire            e_pw  = pw_take;
+    wire            e_sh  = shd_take;
     wire            e_il  = il_ack;
-    wire            e_any = e_op || e_pw || e_il;
-    wire [15:0]     en_ppn = e_op ? pf_ppn      : e_pw ? pw_ppn      : il_ppn;
-    wire [3:0]      en_ln  = e_op ? pf_off[7:4] : e_pw ? pw_off[7:4] : il_line;
+    wire            e_any = e_op || e_pw || e_sh || e_il;
+    wire [15:0]     en_ppn = e_op ? pf_ppn      : e_pw ? pw_ppn      :
+                             e_sh ? shd_ppn     : il_ppn;
+    wire [3:0]      en_ln  = e_op ? pf_off[7:4] : e_pw ? pw_off[7:4] :
+                             e_sh ? shd_off[7:4] : il_line;
     wire [SIDX-1:0] en_set = set_of(en_ppn);
     wire [AW-1:0]   en_row = {en_set, en_ln};
 
@@ -336,7 +351,7 @@ module page_cache #(
 
     always_ff @(posedge clk) begin
         e1_v  <= e_any && !rst;
-        e1_op <= (e_op || e_pw) && !rst;
+        e1_op <= (e_op || e_pw || e_sh) && !rst;
         e1_il <= e_il && !rst;
         if (e_any) begin
             e1_ppn  <= en_ppn;

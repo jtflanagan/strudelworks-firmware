@@ -77,6 +77,17 @@
 // WHAT IS NOT IMPLEMENTED: MLB and ABORT.  VDA/VPA/VPB are outputs, from a
 // microcode field and the vector address sources; sim/run_cpu816_trace.sh
 // checks them against the suite.  See docs/UCODE816.md.
+//
+// A CYCLE WITH VDA LOW IS NOT A MEMORY ACCESS, AND ITS ADDRESS MEANS NOTHING.
+// This is the part's own rule and an integrator MUST apply it: gate the write
+// with VDA - `rw | ~vda` - before anything downstream sees it.  `rw` alone is
+// not enough, because the part drives R/W LOW through the internal cycle of a
+// read-modify-write (the 6502's dummy write, which the reference's cycle list
+// shows), and the address this core leaves on the pins for that cycle is the
+// operand's PLUS ONE on the M-sized RMWs: their read slot is shared with the
+// 16-bit path, which has already stepped forward, and the 8-bit tail steps
+// back a cycle later.  Trusting the bare R/W is what made the IIgs boot ask
+// its disk for block $0203 where it meant 3 - docs/GS.md rung 3e.
 //////////////////////////////////////////////////////////////////////////////////
 
 module cpu65816 #(

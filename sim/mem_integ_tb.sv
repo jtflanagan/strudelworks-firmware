@@ -147,6 +147,11 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [19:0] pq_line;
     wire [127:0] pq_wdata, pr_data;
 
+    // The map's shadow duplicate, as its own entrant into the cache
+    // (docs/GS.md rung 3e).
+    wire        shd_take_w;
+    wire [15:0] shd_ppn_w;
+    wire [7:0]  shd_off_w;
     apple_mmu u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_bank (8'd0), .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
@@ -157,6 +162,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_posted (cl_posted), .cl_wdata (cl_wdata),
         .pw_valid (rl_pw_valid), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
         .pw_data (rl_pw_data), .pw_ready (pw_ready), .pw_take (pw_take),
+        .shd_take_o (shd_take_w), .shd_ppn_o (shd_ppn_w), .shd_off_o (shd_off_w),
         .sw_state (sw_state), .rw_bank (rw_bank),
         .gs_shadow_o (), .gs_cyareg_o (), .gs_sltrom_o (), .gs_state_o (),
         .q_addr ({8'd0, nxt_addr}), .q_divert (q_divert),
@@ -180,6 +186,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_posted (cl_posted), .pw_pending (1'b0), .pw_ready (pw_ready),
         .pf_ppn (pf_ppn), .pf_off (pf_off[7:0]),
         .pw_take (pw_take), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
+        .shd_take (shd_take_w), .shd_ppn (shd_ppn_w), .shd_off (shd_off_w),
         .op_addr (op_addr),
         .op_present (op_present), .op_commit (op_commit), .op_divert (op_divert), .data_sync (data_sync),
         .sub_en (sub_en), .sub_data (sub_data),

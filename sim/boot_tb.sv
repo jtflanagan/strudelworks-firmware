@@ -293,6 +293,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_bank (cpu_bank), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
+        .cyc_int (1'b0),   // a 65C02 has no internal cycle: rtl/accel_seq.sv
         .cyc_en (seq_cyc_en), .cpu_din (cpu_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok),
         .turbo_commit (turbo_commit), .d_commit (d_commit_w),
@@ -423,6 +424,11 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     reg  [7:0] hd_rom [0:255];
 
+    // The map's shadow duplicate, as its own entrant into the cache
+    // (docs/GS.md rung 3e).
+    wire        shd_take_w;
+    wire [15:0] shd_ppn_w;
+    wire [7:0]  shd_off_w;
     apple_mmu u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_bank (u_bank), .op_addr (u_addr), .op_rw (u_rw), .op_wdata (u_wdata),
@@ -433,6 +439,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_posted (cl_posted), .cl_wdata (cl_wdata),
         .pw_valid (pw_any_valid), .pw_ppn (pw_any_ppn), .pw_off (pw_any_off),
         .pw_data (pw_any_data), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
+        .shd_take_o (shd_take_w), .shd_ppn_o (shd_ppn_w), .shd_off_o (shd_off_w),
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .gs_shadow_o (), .gs_cyareg_o (), .gs_sltrom_o (), .gs_state_o (),
@@ -479,6 +486,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .pw_pending (d_pending_w), .pw_ready (pw_ready_w),
         .pf_ppn (pf_ppn_w), .pf_off (pf_off[7:0]),
         .pw_take (pw_take_w), .pw_ppn (pw_any_ppn), .pw_off (pw_any_off),
+        .shd_take (shd_take_w), .shd_ppn (shd_ppn_w), .shd_off (shd_off_w),
         .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),

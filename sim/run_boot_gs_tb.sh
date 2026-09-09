@@ -20,6 +20,11 @@
 #     --tag=NAME       names the log and the trace
 #     --hdv=FILE       the SmartPort image to boot from (slot 7)
 #     --hdrom=FILE     its slot ROM (default ../strudelworks-host/assets/hdc_smartport.bin)
+#     --disktrace      name every $C0Fx write and every $40-$47 write from the
+#                      first EXECUTE on (docs/GS.md rung 3e)
+#     --lctrace        name every $C08x touch with the state it left
+#     --watch=A:B      print every CPU cycle between instructions A and B
+#     --engtrace       name every page-cache fill and victim in the ROM's pages
 #     --iverilog       use iverilog (Verilator is the default here)
 set -euo pipefail
 
@@ -27,7 +32,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/boot_work"
 mkdir -p "$work"
 
-instrs=20000 clks=400000000 mode=2 target=0 tag=gs vl=1 ref="" floor=""
+instrs=20000 clks=400000000 mode=2 target=0 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport.bin"
 hdv=""
@@ -45,6 +50,10 @@ for a in "$@"; do
         --floor=*) floor="${a#*=}" ;;
         --trace=*) trace="${a#*=}" ;;
         --tag=*) tag="${a#*=}" ;;
+        --disktrace) disktrace=1 ;;
+        --lctrace) lctrace=1 ;;
+        --engtrace) engtrace=1 ;;
+        --watch=*) wfrom="${a#*=}"; wto="${wfrom#*:}"; wfrom="${wfrom%%:*}" ;;
         --iverilog) vl=0 ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
@@ -119,6 +128,10 @@ if [ "$vl" = 1 ]; then
         -GHDVF="\"$work/hdv_$tag.hex\"" \
         -GHDV_BLOCKS="$blocks" \
         -GHAS_HDV="$has_hdv" \
+        -GDISK_TRACE="$disktrace" \
+        -GLC_TRACE="$lctrace" \
+        -GWATCH_FROM="$wfrom" -GWATCH_TO="$wto" \
+        -GENG_TRACE="$engtrace" \
         -Mdir "$obj" "${srcs[@]}" \
         -o boot_gs_tb > "$work/verilator_gs_$tag.log" 2>&1 || {
             echo "verilator build failed:" >&2; tail -40 "$work/verilator_gs_$tag.log" >&2; exit 1; }

@@ -248,7 +248,7 @@ parity check on every rung that touches shared RTL.
 | 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro, the map registers and the clock done, 41,877 -> 67,398 events |
 | 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face) and the host side: the GS map in the mirror, `machine = iigs`, `gs_rom` | the ROM runs past the chipset with no spin; the host's map agrees with the card's | **DONE 2026-09-09** - see below |
 | 3d | `hd_card` in `boot_gs_tb` with the bench playing host, so the scan has something to find | the ROM finds slot 7, runs its firmware and reads blocks | **DONE 2026-09-09** - and the boot block runs; see below |
-| 3e | Why the third block read asks for $0203 instead of $0003 (the high byte of the block number); then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | |
+| 3e | Why the third block read asks for $0203 instead of $0003 (the high byte of the block number); then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | **THE IMAGE BOOTS 2026-09-09.** The $0203 was an internal cycle (VDA and VPA both low) being taken as an access - as a WRITE (`INC $46` put the old byte in $47) and as a STROBE ($C083 after $C082 undid the language card). The eviction pressure that uncovered turned up a real page-cache bug: the shadow duplicate reached `cl_valid` with no entrant in `e_any`, so no P0 ran for it and it evicted pages under another page's tag - `cnt_ppn_clash` had been counting it since the day it was written. Then the IWM's handshake had to stop saying "a write is in progress" for ever. ProDOS 2.4.3 now boots off the slot-7 SmartPort to its BYE selector. STILL TO DO: ADB_KEY, `mock_card` speaking a GS stream, the battery RAM down to `gs_clock`, the mirror replayed |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
 | 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | |
@@ -680,6 +680,213 @@ op stream, and a stale or missed high byte would look exactly like this.  That
 is rung 3e's first question.  The bench now names every EXEC, every READ and
 every REFUSAL with its reason, which is what turned "the boot fails" into a
 one-line fact.
+
+## Rung 3e: an internal cycle is not an access (2026-09-09)
+
+The high byte was not stale and was not missed.  **The machine really did
+write `$02` into `$47`**, and the instrument that says so is one more line of
+the bench: every `$C0Fx` write the driver makes, and every write to the ProDOS
+block-driver parameters at `$40-$47`, each with the PC that did it
+(`--disktrace`).
+
+    zp:  $0046 <= $02 from 00/0871   ($46 = block 2, $47 = 0)
+    disk: READ block 2 -> $0c00
+    zp:  $0047 <= $02 from 00/0882      <-- ONE INSTRUCTION, TWO WRITES
+    zp:  $0046 <= $03 from 00/0882
+    reg: $c0f9 <= $03   reg: $c0f9 <= $02
+    disk: REFUSED block 515 -> $0e00
+
+`$00/0882` is `E6 46`, **`INC $46`** - the boot block stepping to the next
+directory block.  One instruction, two writes: the new value at `$46`, and the
+OLD value at `$47`.  The driver then read the pair back honestly and asked for
+`$0203`.
+
+**WHY.**  The 65816 drives R/W LOW through the internal cycle of a
+read-modify-write - the 6502's dummy write - and SingleStepTests agrees, so
+this is not a core bug in the ordinary sense:
+
+    [60394, 250, 'd--remxl']   read dp
+    [60394, 250, '---wemxl']   internal: WRITE, and VDA is LOW
+    [60394, 251, 'd--wemxl']   write dp
+
+**VDA IS LOW on that cycle**, so on a real machine no decoder sees it and
+nothing is written; its address is not architectural.  This core leaves the
+operand's address PLUS ONE there on the M-sized RMWs, because their read slot
+is shared with the 16-bit path, which has already stepped forward, and the
+8-bit tail steps back a cycle later (`acc_rmw` in `sim/gen_microcode816.py`;
+the address mux has no AGU source, deliberately, so the step cannot be moved).
+That is legal, and the dispatcher was never given VDA - so it took the bare
+R/W and committed the write.  Every `ASL/LSR/ROL/ROR/INC/DEC/TSB/TRB` on
+memory in emulation mode was quietly clobbering the byte above its operand.
+Not only RAM: the first one the ROM does is at `00/FA64` and would have
+written `$01` into **`$C02A`**.
+
+**THE FIX** is one wire, at the place a 65816 system has always put it:
+
+    wire cpu_rw_eff = cpu_rw | ~cpu_vda;
+
+and everything downstream of the core - the dispatcher, `apple_bus_write`, the
+map's classify query, `gs_io`'s - takes THAT, never the raw pin.
+`rtl/cpu65816.sv`'s header now states the contract so rung 4's `master_top`
+wires it the same way.  The bench counts what the gate stops (250 in a
+900,000-instruction run) and prints the first few.
+
+**WHY 981,610 CPU TESTS DID NOT SEE IT.**  Because the harness modelled a
+machine that does not exist: it applied `if (!rw) mem[addr] = dout` on every
+cycle, internal ones included, and then compared only the addresses the suite
+itself lists - and the suite lists only what the reference touched, so a write
+to dp+1 landed in no list and was never looked at.  `cpu816_trace_main.cpp`
+now uses **VDA as its write enable**, the way a real system does; compares
+VDA/VPA/VPB **by default** (they were an option, and they pass - the write
+enable is only worth what the flags are worth); and fails a test that writes
+any address the reference does not write.
+
+**THE SECOND HALF: A READ IS A STROBE TOO.**  The write was only one
+direction.  An internal cycle was still being presented as a READ at that
+same stale address, and `$C0xx` reads are strobes.  Two instructions after
+ProDOS's `LDA $C082` (read the ROM), an internal cycle carrying **`$C083`**
+switched the language card back to RAM, and `JSR $FE84` read `$00` from empty
+LC RAM and BRKed.  The same mechanism was strobing `$C08C` after `$C08B` and
+`$C02A` after `$C029`.
+
+So the rule is stated once, at the top of the machine, and `accel_seq` is told:
+`cyc_int` (VDA and VPA BOTH low - an operand fetch has VDA low too, so VDA
+alone is not the test) takes a new `S_NULL` arm in `S_DECIDE`, AFTER the
+governor is paid and BEFORE `needs_bus`.  The cycle costs its credit and
+retires with **no op on the stream, no bus cycle, and no access of any kind**.
+The address going to `apple_bus_write` is parked at `$0000` besides, in the
+same idiom and for the same reason as that module's dummy, so mode 0 on real
+hardware puts nothing dangerous on the backplane either.
+
+## Rung 3e, part 2: the shadow duplicate had no P0 (2026-09-09)
+
+Suppressing those cycles changed which pages the cache evicts, and that turned
+up something much worse underneath.  **32 of the ROM's 1024 pages came back
+from DDR3 as zeros**, and the machine fetched `$00` from one of them at
+`$FF/F882`.
+
+Four instruments, each one narrowing it:
+
+1. **The ROM oracle.**  Banks `$FC-$FF` ARE the ROM, so every byte the core
+   reads from one must be the byte in the file.  `ff/f882 gave $00 where the
+   image has $f4`, at instruction 178,776.
+2. **The page sweep.**  32 pages wrong, all NOT RESIDENT - so it is what DDR3
+   gave back, not a corrupt line in the cache.
+3. **The write-back census**, per physical page.  Every bad page had been
+   given exactly **32** line writes: flushed TWICE, and still wrong.
+4. **The flush oracle**, in the DDR3 stub: a write-back of a ROM page that is
+   not the image is a bad flush, caught at the clock it is issued.  It wrote
+   **all zeros**.
+
+Then the engine's own history for one page said it outright:
+
+    eng 401422:  fill ppn $fc7c, victim $0000 clean, set 4 way 01   <- the load
+    eng 5880386: fill ppn $0004, victim $fc7c DIRTY, set 4 way 01
+    eng 5880469: fill ppn $e004, victim $fc7c DIRTY, set 4 way 01   <- AGAIN
+    BAD FLUSH at 5880533: ROM page $fc7c wrote $00
+
+The same page is the victim twice, in the same way, 83 clocks apart - and the
+directory was innocent: watching `dir[way0][set4]` shows it cleared at
+5880386, retagged to `$0004` at 5880448, cleared again at 5880469.  It said
+`$0004`.  The ENGINE said `$fc7c`.
+
+**THE CAUSE.**  `apple_mmu` sets `cl_valid` for a shadow duplicate exactly as
+it does for a posted write - but `page_cache`'s entrant term is
+`e_any = op_present || pw_take || il_ack`, **and there is no term for the
+duplicate**.  So no P0 ever ran for it: the directory was never read for ITS
+page, and the hit compare, the victim, the victim's tag and dirty bit, and the
+row its byte lands in all belonged to whatever op went before.  The cache has
+counted this since it was written - `cnt_ppn_clash`, "a `cl_*` whose page is
+not the one P1 read the directory for" - and nothing had ever looked at it:
+
+    ppn_clash 56   shadow duplicates taken 56
+
+Exactly equal.  Every duplicate was a clash.  It is GS-only, which is why the
+IIe battery never saw it: the IIe emits no duplicates and that counter has sat
+at zero since the day it was added.
+
+**THE FIX.**  `apple_mmu` exports the duplicate's entrant (`shd_take_o`,
+`shd_ppn_o`, `shd_off_o`) and `page_cache` takes it as a fourth term in
+`e_any` with its own `en_ppn`/`en_ln`, and in `e1_op`; `il_ack` excludes it as
+it already excludes `pw_take`, so two entrants never share a P0.  After it:
+`ppn_clash 0`, the ROM intact all 256 KB, every write-back carrying the
+image's bytes, and every byte read from `$FC-$FF` the image's.
+
+**WHY THE PRESSURE WAS THERE AT ALL**, and worth fixing separately: ROM 3 is
+256 KB, the page cache is 128 sets x 8 ways x 256 B = 256 KB, and the ROM's
+page numbers hash to **exactly 8 pages in every one of the 128 sets**.  It
+fills the cache perfectly before a single byte of RAM.  Worse, the loader
+writes it through the posted-write seam, so all 1024 pages are DIRTY for ever
+and only ~32 KB of it is ever in DDR3: every RAM page the machine touches
+evicts a dirty ROM page and pays a 16-beat write-back of bytes that cannot
+have changed.  The map DOES write-protect the ROM against the machine
+(`gs_rom` banks classify `wr = 0`, so `cl_wr_image` is low and an ordinary
+write lands nowhere); it is only the loader's posted writes that get in, by
+design.  Making those pages CLEAN - the ROM in the backing store, the cache
+holding it read-only - would remove 1024 permanently-dirty pages and all of
+that write-back traffic.  Not done.
+
+## Rung 3e, part 3: the IWM had to be skipped, not modelled (2026-09-09)
+
+With both halves of the internal cycle fixed, the machine stalled at
+**`$FF/57BC`** - 93,630 reads of `$C0EC` and no exit:
+
+    57B7  LDA $C08C,X      ; X = $60, so $C0EC
+    57BA  AND #$40
+    57BC  BNE $57B7        ; spin while bit 6 is SET
+
+**That was not a regression, it was the machine being honest.**  The loop used
+to end because the internal cycle after each `LDA $C0EC` read `$C0ED`, and
+`$C0ED` FLIPS Q6, so the next read returned `status_byte`, whose bit 6 is
+clear by construction.  The same artefact was setting the phase lines and the
+motor: the census shows them going as it goes - `$C0EC` 69 -> 93,630 reads,
+`$C0ED` 69 -> 4, `$C0E9` 23 -> 4, `$C0E7` 38 -> 3.
+
+The state at the stall is `q7 = 1, q6 = 0, enable2 = 0` (`phases 0011`), which
+is the HANDSHAKE arm without ENABLE2 - and that arm returned a **constant
+`$C0`**.  The reference says why that is wrong: KEGS's `read_iwm` case `0x02`
+starts from `0xc0` and CLEARS BIT 6 (`status & 0xbf`) as soon as the head has
+moved more than eight bits past the last bit written - **bit 6 is the WRITE
+UNDERRUN**, and on a machine with nothing writing it is always clear.  A
+constant `$C0` says "a write is in progress and keeping up", for ever.
+
+The reference trace settles it outright: **KEGS visits `$FF/57B7` ONCE in five
+million instructions and reads `$80` there**, falling straight through to a
+bounded `DEY`/`BEQ` retry.  So `gs_iwm`'s handshake without ENABLE2 is `$80`,
+by the same argument as the motor above - there is no drive, so there is
+nothing to underrun (docs/GS.md's decision: the IWM's only job is to be
+SKIPPED; it is never modelled as a drive, and the machine boots from the
+emulated SmartPort in slot 7).
+
+## Rung 3e: THE IMAGE BOOTS (2026-09-09)
+
+    ---- the text screen (main page 1) ----
+      |S7,D1:/PRODOS.2.4.3                     |
+      |----------------------------------------|
+      |A VIEW.README       !                   |
+      |- BITSY.BOOT        !                   |
+      |- QUIT.SYSTEM       !                   |
+      |- BASIC.SYSTEM      !     BITSY  BYE    |
+      ...
+      |RETURN:SELECT   ESC:BACK   TAB,#:NEW VOL|
+
+The IIgs ROM scans, finds the slot-7 SmartPort, reads its boot block, loads
+PRODOS, relocates it into the language card and runs it, and ProDOS's BYE
+selector is on the text screen naming the volume on **S7,D1** - the emulated
+card.  55 blocks read, 54 checked intact where the machine looks for them, the
+ROM still the image in all 256 KB, and no op reaching the cache without its
+own directory read.  `sim/boot_gs_tb.sv` reads the text page out of the card's
+memory the way the host's `screen` does, so the machine says this itself.
+
+The landing check had to learn the language card to say it: ProDOS DMAs blocks
+to `$DC00`, and `$D000-$DFFF` folds onto physical `$Cx` in bank 1 with `altzp`
+choosing the aux bank, so the LC state is captured as each block lands and the
+check uses it.
+
+The end-of-run landing check went with it.  Rung 3d could snapshot `$0800` at
+the end because the boot stalled there; a boot that gets going relocates over
+it, so each block is now checked at the moment the machine asks the card for
+the next thing - still the machine's newest, and 38 of the 39 get checked.
 
 ## Verification
 

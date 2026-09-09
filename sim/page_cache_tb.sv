@@ -103,6 +103,9 @@ module page_cache_tb;
         .cl_posted (cl_posted), .pw_pending (pw_pending), .pw_ready (pw_ready),
         .pf_ppn (pf_ppn), .pf_off (pf_off),
         .pw_take (pw_take), .pw_ppn (pw_ppn), .pw_off (pw_off),
+        // No map here, so no shadow duplicate; the GS bench covers that
+        // entrant (docs/GS.md rung 3e).
+        .shd_take (1'b0), .shd_ppn (16'd0), .shd_off (8'd0),
         .op_addr (op_addr), .op_present (op_present), .op_commit (op_commit),
         .op_divert (op_divert), .data_sync (data_sync),
         .sub_en (sub_en), .sub_data (sub_data), .decided (decided), .busy (busy),

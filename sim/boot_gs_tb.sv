@@ -73,7 +73,25 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // outcome rather than a failure.
                     parameter integer HAS_HDV = 0,
                     parameter integer HD_SLOT = 7,
-                    parameter integer HOST_DELAY = 2000);
+                    parameter integer HOST_DELAY = 2000,
+                    // Name every $C0Fx write and every write to the ProDOS
+                    // block-driver parameters at $40-$47, from the first
+                    // EXECUTE on; see "the block number" below.
+                    parameter integer DISK_TRACE = 0,
+                    // Name every $C08x touch with the state it left, and
+                    // census what is ever written into the language card;
+                    // see "the language card" below.
+                    parameter integer LC_TRACE = 0,
+                    // Print every CPU cycle - address, direction, VDA/VPA,
+                    // the byte handed back - between two instruction
+                    // numbers.  The general form of the probes that answered
+                    // rung 3e: a divergence index names an instruction, and
+                    // this says what the machine did around it.
+                    parameter integer WATCH_FROM = 0,
+                    parameter integer WATCH_TO   = 0,
+                    // The page-cache engine's fills and victims, for the
+                    // ROM's pages; see "the engine's history" below.
+                    parameter integer ENG_TRACE = 0);
 
     localparam integer T_PRESENT = 2, T_EMIT = 2, T_DIN = 44, T_CYCEN = 45;
     localparam integer PHI0_LOW = 98 - PHI0_HIGH, CYCLE = 98;
@@ -176,6 +194,36 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .emu (cpu_emu), .halted (cpu_halted)
     );
 
+    // AN INTERNAL CYCLE IS NOT AN ACCESS, and this is where a 65816 system
+    // says so.  VDA AND VPA BOTH LOW is the part's own encoding for "this
+    // cycle touches nothing" - an operand fetch has VDA low too, so VDA
+    // alone is not the test - and the address it leaves on the pins is
+    // whatever the last address step happened to put there.  For this core
+    // that is very often THE LAST OPERAND'S ADDRESS PLUS ONE: the M-sized
+    // slots share their first cycle with the 16-bit path, which walks
+    // forward, and the 8-bit tail walks back a cycle later.
+    //
+    // Handed downstream as it comes off the pins, that cycle is a real
+    // access, and it cost this bench both halves of a boot:
+    //   - as a WRITE, because the part drives R/W LOW through the internal
+    //     cycle of a read-modify-write (the 6502's dummy write, and the
+    //     reference's cycle list agrees): `INC $46` in the ProDOS boot block
+    //     put the old $02 into $47, and the boot asked for block $0203;
+    //   - as a READ, because $C0xx reads are strobes: two instructions after
+    //     ProDOS's `LDA $C082` an internal cycle carrying $C083 switched the
+    //     language card back to RAM, and `JSR $FE84` read $00.
+    //
+    // So the cycle is PARKED, in the same idiom and for the same reason as
+    // rtl/apple_bus_write.sv's dummy: $0000 is RAM on every Apple II, so a
+    // read of it disturbs nothing even if something downstream decodes it.
+    // Everything downstream of the core takes THESE, never the raw pins.
+    // docs/GS.md rung 3e; rung 4's master_top must wire it the same way.
+    wire        cyc_internal = !cpu_vda && !cpu_vpa;
+    wire        cpu_rw_eff   = cpu_rw | cyc_internal;
+    wire [23:0] cpu_a24_eff  = cyc_internal ? 24'h000000 : cpu_a24;
+    wire [15:0] cpu_addr_eff = cpu_a24_eff[15:0];
+    wire [7:0]  cpu_bank_eff = cpu_a24_eff[23:16];
+
     // ---- the dispatcher ----------------------------------------------------------
     reg  [1:0]  mode = 2'd0;
     reg  [15:0] target = 16'd0;
@@ -219,8 +267,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .stall (1'b0),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
-        .cpu_addr (cpu_addr), .cpu_bank (cpu_bank), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout),
-        .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
+        .cpu_addr (cpu_addr_eff), .cpu_bank (cpu_bank_eff), .cpu_rw (cpu_rw_eff), .cpu_dout (cpu_dout),
+        .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i), .cyc_int (cyc_internal),
         .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
         .turbo_en (), .turbo_ok (),
         .turbo_commit (1'b0), .d_commit (1'b0), .turbo_claim (1'b0),
@@ -247,7 +295,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
         .master_active (master_active), .park_kbd (1'b0), .park_addr (16'h0000),
         .bus_owns (bus_owns), .core_valid (core_valid),
-        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
+        .cpu_addr (cpu_addr_eff), .cpu_rw (cpu_rw_eff), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync),
         .drv_sync (drv_sync), .cyc_en (drv_cyc_done), .cpu_din (drv_din),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
@@ -363,6 +411,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     assign mem_image_ready = image_ready;
     assign mem_invalidating = invalidating;
 
+    // The map's shadow duplicate, as its own entrant into the cache
+    // (docs/GS.md rung 3e).
+    wire        shd_take_w;
+    wire [15:0] shd_ppn_w;
+    wire [7:0]  shd_off_w;
     apple_mmu #(.GS (1'b1)) u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_bank (u_bank), .op_addr (u_addr), .op_rw (u_rw), .op_wdata (u_wdata),
@@ -373,11 +426,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .cl_posted (cl_posted), .cl_sh (cl_sh), .shd_drops (shd_drops), .cl_wdata (cl_wdata),
         .pw_valid (rl_pw_valid), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
         .pw_data (rl_pw_data), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
+        .shd_take_o (shd_take_w), .shd_ppn_o (shd_ppn_w), .shd_off_o (shd_off_w),
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
         .gs_shadow_o (gs_shadow_w), .gs_cyareg_o (gs_cyareg_w),
         .gs_sltrom_o (gs_sltrom_w), .gs_state_o (gs_state_w),
-        .q_addr ({cpu_bank, nxt_addr}), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
+        .q_addr ({cpu_bank_eff, nxt_addr}), .q_divert (q_divert), .q_rw (cpu_rw_eff), .q_cls (q_cls),
         // Nothing is internalized on the GS build yet: $C0xx is BUS class and
         // rides a real cycle until rtl/gs_io.sv answers it (rung 3b).
         .swi_on (1'b0), .swi_kbd_ok (1'b0), .swi_fb_ok (1'b0),
@@ -402,7 +456,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // mux (rtl/gs_io.sv, "the two faces of an op").
     gs_io u_gsio (
         .clk (clk), .rst (rst), .res_sync (res_sync),
-        .q_addr ({cpu_bank, nxt_addr}), .q_rw (cpu_rw), .claim (gsio_claim),
+        .q_addr ({cpu_bank_eff, nxt_addr}), .q_rw (cpu_rw_eff), .claim (gsio_claim),
         .u_bank (u_bank), .u_addr (u_addr), .u_rw (u_rw), .u_wdata (u_wdata),
         .u_commit (swi_commit),
         .gs_shadow (gs_shadow_w), .gs_cyareg (gs_cyareg_w),
@@ -440,6 +494,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .pw_pending (1'b0), .pw_ready (pw_ready_w),
         .pf_ppn (pf_ppn_w), .pf_off (pf_off[7:0]),
         .pw_take (pw_take_w), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
+        .shd_take (shd_take_w), .shd_ppn (shd_ppn_w), .shd_off (shd_off_w),
         .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
@@ -507,6 +562,15 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     reg [127:0] wb_rdata_r = 0;
     reg [3:0]   wb_aux_r = 0;
     integer     ddr_range_bad = 0;
+    // How many 16-byte line write-backs the DDR3 was ever given per physical
+    // page: a page that comes back wrong having been given none was evicted
+    // with no write-back at all.
+    integer     bad_flush = 0;
+    reg [15:0]  wb_pg;
+    integer     wb_ri;
+    integer     wb_lines [0:65535];
+    integer     wbi;
+    initial for (wbi = 0; wbi < 65536; wbi = wbi + 1) wb_lines[wbi] = 0;
     assign wb_ack = wb_ack_r; assign wb_rdata = wb_rdata_r; assign wb_rdata_aux = wb_aux_r;
     assign wb_stall = s_stall;
     function automatic [23:0] wb_to_byte(input [23:0] a);
@@ -524,6 +588,29 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             if (wb_we) begin
                 for (i = 0; i < 16; i = i + 1)
                     if (wb_sel[i]) smem[wb_to_byte(wb_addr) + i] <= wb_data[8*i +: 8];
+                // rtl/page_client.sv line_to_wb: a[22:10] is ppn[15:3] and
+                // a[6:0] is {ppn[2:0], line[3:0]}, so the page is both halves.
+                wb_lines[{wb_addr[22:10], wb_addr[6:4]}] =
+                    wb_lines[{wb_addr[22:10], wb_addr[6:4]}] + 1;
+                // THE FLUSH ORACLE.  A page in the ROM's physical range can
+                // never have changed - nothing in the machine can write it
+                // (apple_mmu gives banks $FC-$FF wr = 0) and the loader is
+                // long done - so a write-back of one that is not the image
+                // is a BAD FLUSH, caught here at the clock it is issued
+                // rather than a hundred thousand instructions later when
+                // something fetches from it.  docs/GS.md rung 3e.
+                wb_pg = {wb_addr[22:10], wb_addr[6:4]};
+                if (wb_pg >= 16'hFC00) begin
+                    wb_ri = (int'(wb_pg) - 16'hFC00) * 256 + int'(wb_addr[3:0]) * 16;
+                    for (i = 0; i < 16; i = i + 1)
+                        if (wb_sel[i] && wb_data[8*i +: 8] !== rom_img[wb_ri + i]) begin
+                            bad_flush = bad_flush + 1;
+                            if (bad_flush <= 8)
+                                $display("    BAD FLUSH at %0d clocks: ROM page $%04X line %0d byte %0d wrote $%02X, the image has $%02X",
+                                         now, wb_pg, wb_addr[3:0], i,
+                                         wb_data[8*i +: 8], rom_img[wb_ri + i]);
+                        end
+                end
                 dl_d[dl_wp % DL] <= 128'd0;
             end else begin
                 for (i = 0; i < 16; i = i + 1)
@@ -676,12 +763,29 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     reg [7:0]  q_blk [0:QN-1][0:511];
     integer    qw = 0, qr = 0;
     integer    host_execs = 0, host_reads = 0, host_writes = 0, host_statuses = 0;
+    // The block most recently DMA'd in, waiting to be checked: see the
+    // EXECUTE below and the checker under card_byte.
+    reg        pend_valid = 1'b0, chk_go = 1'b0;
+    reg [15:0] pend_addr = 16'd0;
+    // The language card's state AS THE BLOCK LANDED: $D000-$DFFF folds onto
+    // physical $Cx in bank 1 of the card (apple_mmu "if (fold) pg = {4'hC,
+    // va[11:8]}"), and altzp puts the whole region in the aux bank - so where
+    // the machine will look for a block DMA'd into the LC is not its virtual
+    // address.  Captured here because the switches may move before the check.
+    reg        pend_b2 = 1'b0, pend_azp = 1'b0;
+    integer    pend_blk = 0, blocks_verified = 0;
 
     task automatic hm_io_read0;
         integer u, r, k;
         begin
             if (hm_armed) begin                             // else: a poll
                 hm_armed = 0;
+                // The block the LAST command brought in, checked now: the
+                // machine has finished with it and is asking for the next
+                // thing, so it is still where the host put it.  Checking at
+                // the end of the run instead only worked while the boot
+                // stalled - a boot that gets going relocates over $0800.
+                if (pend_valid) chk_go = 1;
                 host_execs = host_execs + 1;
                 u = hm_resolve();
                 $display("    disk: EXEC cmd $%02X unit $%02X -> resolved %0d at instruction %0d",
@@ -717,6 +821,194 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         if (op_commit && !op_ovr && op_rw && op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
             if (op_addr[3:0] == 4'h0) hm_io_read0();
     end
+    // ---- rung 3e: the block number, byte by byte, on its way to the card ----------
+    // The third read asks for block $0203 where it means $0003, so the two
+    // places the high byte can go wrong are named here: what the DRIVER wrote
+    // into the card's registers, and what the boot block had in $46/$47 for
+    // the driver to read.  Both with the PC that did it.  DISK_TRACE turns
+    // them on from the first EXECUTE, which is where the interesting window
+    // starts and keeps the ROM's own scan out of the log.
+    always @(posedge clk) if (DISK_TRACE != 0 && host_execs > 0) begin
+        if (op_present && !op_ovr && !op_rw &&
+            op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
+            $display("    reg: $%04X <= $%02X from %02X/%04X at instruction %0d",
+                     op_addr, op_wdata, last_sync[23:16], last_sync[15:0], trace_instrs);
+        if (u_present && !u_rw && u_bank == 8'h00 &&
+            u_addr >= 16'h0040 && u_addr <= 16'h0047)
+            $display("    zp:  $%04X <= $%02X from %02X/%04X at instruction %0d",
+                     u_addr, u_wdata, last_sync[23:16], last_sync[15:0], trace_instrs);
+    end
+
+    // The window the divergence index names, cycle by cycle.
+    always @(posedge clk)
+        if (WATCH_TO != 0 && cpu_cyc_en &&
+            trace_instrs >= WATCH_FROM && trace_instrs <= WATCH_TO)
+            $display("    cyc %0d: %06X rw=%0d vda=%0d vpa=%0d sync=%0d din=$%02X dout=$%02X (pc %02X/%04X)",
+                     trace_instrs, cpu_a24, cpu_rw, cpu_vda, cpu_vpa, cpu_sync,
+                     cpu_din, cpu_dout, last_sync[23:16], last_sync[15:0]);
+
+    // The page-cache engine's history for the ROM's pages: every miss that
+    // names one as the page being filled or as the victim, with the way, the
+    // set and whether the victim was believed dirty.  There are only a
+    // hundred-odd in a run, so all of them fit, and the pair of lines that
+    // name the SAME page as victim twice is what found rung 3e's second bug.
+    reg [3:0] eng_prev = 4'd15;
+    always @(posedge clk) if (ENG_TRACE != 0) begin
+        eng_prev <= u_cache.state;
+        if (u_cache.state != eng_prev && eng_prev == u_cache.E_IDLE &&
+            (u_cache.e_ppn >= 16'hFC00 || u_cache.e_old >= 16'hFC00))
+            $display("    eng %0d: fill ppn $%04X, victim $%04X %0s, set %0d way %02X",
+                     now, u_cache.e_ppn, u_cache.e_old,
+                     u_cache.e_dirty ? "DIRTY" : "clean",
+                     u_cache.e_set, u_cache.e_way);
+    end
+
+    // The cache's own clash counter, which nothing has ever looked at: it
+    // counts a cl_* arriving whose page is NOT the one the P1 stage read the
+    // directory for.  A shadow duplicate is exactly that - apple_mmu sets
+    // cl_valid for it, but page_cache's e_any (op_present | pw_take | il_ack)
+    // has no term for it, so no P0 ever runs and the compare, the victim and
+    // the landing row all belong to whatever op went before.
+    // THE TEXT SCREEN, out of the card's own memory - the same habit as the
+    // host's `screen`: ask the machine what it decided, never guess.  Main
+    // text page 1, the Apple II's interleave, high ASCII folded down.
+    task dump_text;
+        integer row, col, base;
+        reg [7:0] b;
+        string    line;
+        begin
+            $display("    ---- the text screen (main page 1) ----");
+            for (row = 0; row < 24; row = row + 1) begin
+                base = 16'h0400 + (row % 8) * 16'h80 + (row / 8) * 16'h28;
+                line = "";
+                for (col = 0; col < 40; col = col + 1) begin
+                    b = card_byte({8'd0, 8'((base + col) >> 8)}, 8'(base + col));
+                    b = b & 8'h7F;
+                    if (b < 8'h20) b = b + 8'h40;
+                    line = {line, string'(b)};
+                end
+                $display("      |%0s|", line);
+            end
+        end
+    endtask
+
+    task dump_iwm;
+        begin
+            $display("    the IWM at the end: motor %0d enable2 %0d q6 %0d q7 %0d phases %04b mode %02b%03b apple35 %0d",
+                     u_gsio.u_iwm.motor_on, u_gsio.u_iwm.enable2,
+                     u_gsio.u_iwm.q6, u_gsio.u_iwm.q7, u_gsio.u_iwm.phases,
+                     u_gsio.u_iwm.mode[4:3], u_gsio.u_iwm.mode[2:0],
+                     u_gsio.u_iwm.apple35_sel);
+        end
+    endtask
+    task dump_clash;
+        begin
+            $display("    the cache's clash counters: ppn_clash %0d, land_clash %0d, posted %0d, posted_miss %0d",
+                     u_cache.cnt_ppn_clash, u_cache.cnt_land_clash,
+                     u_cache.cnt_posted, u_cache.cnt_posted_miss);
+            $display("    the map's shadow duplicates: %0d taken, %0d dropped", shd_taken, shd_drops);
+        end
+    endtask
+    integer shd_taken = 0;
+    always @(posedge clk) if (u_mmu.shd_take) shd_taken = shd_taken + 1;
+
+    // THE ROM, HELD TO THE IMAGE THE HOST SENT.  Banks $FC-$FF ARE the ROM
+    // on a IIgs - there is nothing else they can be - so every byte the core
+    // reads from one must be the byte in the file, and a memory path that
+    // ever answers otherwise has lost it.  Cheap, and it names the fetch
+    // rather than the instruction that fell over three cycles later.
+    integer rom_bad = 0, rom_bad_first = -1;
+    reg [23:0] rom_bad_at = 24'd0;
+    reg [7:0]  rom_bad_got = 8'd0, rom_bad_want = 8'd0;
+    always @(posedge clk)
+        if (boot_go && cpu_cyc_en && cpu_rw && (cpu_vda || cpu_vpa) &&
+            cpu_bank >= 8'hFC) begin
+            if (cpu_din !== rom_img[{cpu_bank - 8'hFC, cpu_addr}]) begin
+                rom_bad = rom_bad + 1;
+                if (rom_bad_first < 0) begin
+                    rom_bad_first = trace_instrs;
+                    rom_bad_at   = cpu_a24;
+                    rom_bad_got  = cpu_din;
+                    rom_bad_want = rom_img[{cpu_bank - 8'hFC, cpu_addr}];
+                end
+            end
+        end
+
+    // THE INVARIANT, COUNTED.  How many cycles the park above took out of
+    // the machine's reach, and how many of those would have been a WRITE or
+    // a STROBE of an I/O register - the two that each cost this bench a
+    // boot, and neither of which any instruction in the code asks for.
+    integer internal_cycles = 0, internal_writes = 0, internal_io = 0;
+    wire internal_pair = (cpu_bank == 8'h00) || (cpu_bank == 8'h01) ||
+                         (cpu_bank == 8'hE0) || (cpu_bank == 8'hE1);
+    always @(posedge clk) if (boot_go && cpu_cyc_en && cyc_internal) begin
+        internal_cycles = internal_cycles + 1;
+        if (!cpu_rw) internal_writes = internal_writes + 1;
+        if (internal_pair && cpu_addr[15:8] == 8'hC0) internal_io = internal_io + 1;
+        if (DISK_TRACE != 0 && internal_cycles <= 4)
+            $display("    parked an internal cycle: %06X rw=%0d (pc %02X/%04X)",
+                     cpu_a24, cpu_rw, last_sync[23:16], last_sync[15:0]);
+    end
+
+    // ---- rung 3e: the language card ------------------------------------------------
+    // Where ProDOS stops: it relocates, then calls `JSR $FE84` and reads $00
+    // there.  Two things decide what $00/$D000-$FFFF answers - the $C08x
+    // switches, and whether anything was ever written into the RAM behind
+    // them - so both are named here.  sw_state is
+    // {prewrite, wren, ramrd, bank2, ...} (rtl/apple_mmu.sv).
+    integer lc_wr [0:47];               // per page, $D0..$FF of bank 0
+    integer lc_writes = 0, lc_first = -1, lc_last = -1, lc_touches = 0;
+    integer lci;
+    initial for (lci = 0; lci < 48; lci = lci + 1) lc_wr[lci] = 0;
+    wire lc_pair = (u_bank == 8'h00) || (u_bank == 8'h01) ||
+                   (u_bank == 8'hE0) || (u_bank == 8'hE1);
+    always @(posedge clk) if (boot_go) begin
+        if (u_present && lc_pair && u_addr[15:4] == 12'hC08) begin
+            lc_touches = lc_touches + 1;
+            if (LC_TRACE != 0)
+                $display("    lc:  $%04X %0s from %02X/%04X at instruction %0d -> bank%0d %0s read, write %0s",
+                         u_addr, u_rw ? "read " : "write",
+                         last_sync[23:16], last_sync[15:0], trace_instrs,
+                         sw_state[8] ? 2 : 1, sw_state[9] ? "RAM" : "ROM",
+                         sw_state[10] ? "enabled" : "protected");
+        end
+        // ...and the CYCLES underneath, so a touch that no instruction in
+        // the code makes can be told from one that is really there.
+        if (LC_TRACE != 0 && cpu_cyc_en && cpu_a24[15:4] == 12'hC08)
+            $display("    lc cyc: %06X rw=%0d vda=%0d vpa=%0d sync=%0d (pc %02X/%04X)",
+                     cpu_a24, cpu_rw, cpu_vda, cpu_vpa, cpu_sync,
+                     last_sync[23:16], last_sync[15:0]);
+        // What lands in the RAM behind the switches, in bank 0.
+        if (u_present && !u_rw && u_bank == 8'h00 && u_addr[15:12] >= 4'hD) begin
+            lc_wr[u_addr[15:8] - 8'hD0] = lc_wr[u_addr[15:8] - 8'hD0] + 1;
+            lc_writes = lc_writes + 1;
+            if (lc_first < 0) lc_first = trace_instrs;
+            lc_last = trace_instrs;
+        end
+    end
+    task dump_lc_census;
+        integer k, lo, hi;
+        begin
+            $display("    ---- the language card: %0d $C08x touches, %0d writes into $00/D000-FFFF ----",
+                     lc_touches, lc_writes);
+            if (lc_writes > 0) begin
+                lo = -1; hi = -1;
+                for (k = 0; k < 48; k = k + 1) if (lc_wr[k] != 0) begin
+                    if (lo < 0) lo = k;
+                    hi = k;
+                end
+                $display("      pages $%02X-$%02X, first at instruction %0d, last at %0d",
+                         8'hD0 + lo[7:0], 8'hD0 + hi[7:0], lc_first, lc_last);
+                for (k = 0; k < 48; k = k + 1)
+                    if (lc_wr[k] != 0) $write(" $%02X:%0d", 8'hD0 + k[7:0], lc_wr[k]);
+                $display("");
+            end
+            $display("      the state it ended in: bank%0d, %0s read, write %0s, altzp %0d",
+                     sw_state[8] ? 2 : 1, sw_state[9] ? "RAM" : "ROM",
+                     sw_state[10] ? "enabled" : "protected", sw_state[3]);
+        end
+    endtask
+
     // RES' drops what the card drops.
     reg res_prev = 1'b1;
     always @(posedge clk) begin
@@ -872,6 +1164,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                                 $display("    disk: READ block %0d -> $%04X at instruction %0d",
                                          diskblock, memblock, trace_instrs);
                                 host_reads = host_reads + 1;
+                                pend_addr = memblock; pend_blk = diskblock;
+                                pend_b2 = sw_state[8]; pend_azp = sw_state[3];
+                                pend_valid = 1'b1;
                             end
                             hm_uerr[r] = err;
                             push_done(status_byte(err), memblock, size16);
@@ -1103,31 +1398,55 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         end
     endfunction
 
-    // Did the blocks the host sent actually land?  A boot that reads the
-    // right blocks and then gives up is either being told the wrong bytes or
-    // reading them from the wrong place, and this tells the two apart.
-    task check_landed(input [15:0] addr, input integer blk, input string what);
+    function automatic integer card_resident(input [15:0] ppn);
+        int st, w;
+        begin
+            st = int'(ppn[SIDX-1:0] ^ ppn[2*SIDX-1 -: SIDX]);
+            card_resident = 0;
+            for (w = 0; w < MEM_WAYS; w = w + 1)
+                if (u_cache.dir[w][st][17] && u_cache.dir[w][st][15:0] == ppn) card_resident = 1;
+        end
+    endfunction
+
+    // Every block the host sent, checked where the machine will look for it,
+    // at the moment the machine asks the card for the next thing.
+    // The physical page a virtual address in bank 0 lands on, for the LC
+    // state that was in force: see pend_b2/pend_azp above.
+    function automatic [15:0] land_ppn(input [15:0] va, input b2, input azp);
+        reg [7:0] pg;
+        begin
+            pg = (va[15:12] == 4'hD && !b2) ? {4'hC, va[11:8]} : va[15:8];
+            land_ppn = {(va[15:12] >= 4'hD && azp) ? 8'd1 : 8'd0, pg};
+        end
+    endfunction
+    task verify_landed(input [15:0] addr, input integer blk);
         integer k, bad, first;
-        reg [7:0] got, wnt;
+        reg [7:0] got;
         begin
             bad = 0; first = -1;
             for (k = 0; k < 512; k = k + 1) begin
-                got = card_byte({8'd0, 16'(addr + k) >> 8}, 8'(16'(addr + k)));
-                wnt = himg[blk * 512 + k];
-                if (got !== wnt) begin
+                got = card_byte(land_ppn(16'(addr + k), pend_b2, pend_azp),
+                                8'(16'(addr + k)));
+                if (got !== himg[blk * 512 + k]) begin
                     bad = bad + 1;
                     if (first < 0) first = k;
                 end
             end
-            if (bad == 0) ok($sformatf("%0s: block %0d is intact at $%04X", what, blk, addr));
-            else begin
-                fail($sformatf("%0s: %0d of 512 bytes wrong at $%04X, first at +%0d (got $%02X, want $%02X)",
-                               what, bad, addr, first,
-                               card_byte({8'd0, 16'(addr + first) >> 8}, 8'(16'(addr + first))),
+            if (bad != 0)
+                fail($sformatf("block %0d did not land at $%04X: %0d of 512 bytes wrong, first at +%0d (got $%02X, want $%02X)",
+                               blk, addr, bad, first,
+                               card_byte(land_ppn(16'(addr + first), pend_b2, pend_azp),
+                                         8'(16'(addr + first))),
                                himg[blk * 512 + first]));
-            end
+            else
+                blocks_verified = blocks_verified + 1;
         end
     endtask
+    always @(posedge clk) if (chk_go) begin
+        chk_go = 1'b0;
+        verify_landed(pend_addr, pend_blk);
+        pend_valid = 1'b0;
+    end
 
     // ---- the run -----------------------------------------------------------------
     integer a, c;
@@ -1186,6 +1505,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         dump_io_census();
         dump_slot_census();
         dump_config();
+        dump_lc_census();
+        dump_clash();
+        dump_iwm();
+        dump_text();
 
         $display("    the disk: %0d blocks read, %0d written, %0d statuses, %0d execs",
                  hd_blocks_read, hd_blocks_written, host_statuses, host_execs);
@@ -1199,12 +1522,18 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             fail("no block was ever read: the scan did not boot from slot 7");
         else begin
             ok($sformatf("%0d blocks read from the slot-7 SmartPort", hd_blocks_read));
-            // The two the boot takes: the boot block at $0800 - which is TEXT
-            // PAGE 2, a shadowed region on this machine - and the volume
-            // directory at $0C00, which is not.
-            check_landed(16'h0800, 0, "the boot block");
-            check_landed(16'h0C00, 2, "the volume directory");
+            // Not the end-of-run snapshot rung 3d took: a boot that gets
+            // going relocates over $0800 long before this point, so each
+            // block is checked while it is still the machine's newest, and
+            // all that is left here is that it happened.
+            if (blocks_verified == 0 && hd_blocks_read > 1)
+                fail("no block was ever checked where the machine would look for it");
+            else
+                ok($sformatf("%0d blocks landed intact where the machine looks for them",
+                             blocks_verified));
         end
+        $display("    parked %0d internal cycles: %0d would have written, %0d would have hit $C0xx",
+                 internal_cycles, internal_writes, internal_io);
 
         // The machine itself, not the ROM's opinion of it.
         if (trace_instrs == 0) fail("the core executed nothing");
@@ -1218,6 +1547,68 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         if (ddr_range_bad != 0)
             fail($sformatf("%0d DDR3 addresses outside the image", ddr_range_bad));
         if (cpu_halted) fail("the core executed STP");
+        // A COUNTER THAT IS NEVER ASSERTED ON IS NOT A GATE.  This one had
+        // been counting every shadow duplicate since the day it was written
+        // (docs/GS.md rung 3e part 2); it is a check now.
+        if (u_cache.cnt_ppn_clash != 0)
+            fail($sformatf("%0d ops reached the cache whose page the directory was never read for (cnt_ppn_clash)",
+                           u_cache.cnt_ppn_clash));
+        else ok("every op that reached the cache had its own directory read");
+        // ...and the ROM as it now sits in the machine's memory, page by
+        // page: a byte read wrong is either a page that went bad or a serve
+        // that glitched, and this tells the two apart.
+        begin : rom_sweep
+            integer bad, k, p0, badpg, res, shown;
+            reg [7:0] got;
+            bad = 0; badpg = 0; shown = 0;
+            for (k = 0; k < 262144; k = k + 256) begin : pg
+                integer j, n;
+                n = 0;
+                for (j = 0; j < 256; j = j + 1) begin
+                    got = card_byte(16'hFC00 + 16'(k >> 8), 8'(j));
+                    if (got !== rom_img[k + j]) n = n + 1;
+                end
+                if (n != 0) begin
+                    bad = bad + n; badpg = badpg + 1;
+                    res = card_resident(16'hFC00 + 16'(k >> 8));
+                    if (shown < 6) begin
+                        $display("      ROM page $%04X: %0d of 256 bytes wrong, %0s, DDR3 was given %0d line writes",
+                                 16'hFC00 + 16'(k >> 8), n,
+                                 res ? "RESIDENT in the cache" : "not resident: this is what DDR3 gave back",
+                                 wb_lines[16'hFC00 + 16'(k >> 8)]);
+                        shown = shown + 1;
+                    end
+                end
+            end
+            if (badpg != 0)
+                $display("      %0d ROM pages of 1024 are wrong", badpg);
+            // How much write-back actually reached the DDR3, against what
+            // the flush count says was sent: 16 line writes per flush.
+            p0 = 0; res = 0;
+            for (k = 0; k < 65536; k = k + 1)
+                if (wb_lines[k] != 0) begin p0 = p0 + wb_lines[k]; res = res + 1; end
+            $display("      the DDR3 was given %0d line writes over %0d pages; %0d flushes x 16 = %0d",
+                     p0, res, mem_flushes, mem_flushes * 16);
+            // ...and how much of it the DDR3 behind the cache actually
+            // holds.  A ROM page that is only ever resident is lost the
+            // moment it is evicted.
+            p0 = 0;
+            for (k = 0; k < 262144; k = k + 1)
+                if (smem[{16'hFC00 + 16'(k >> 8), 8'(k)}] !== rom_img[k]) p0 = p0 + 1;
+            $display("    the ROM behind the cache: %0d of 262144 bytes differ from the image", p0);
+            if (bad != 0)
+                fail($sformatf("%0d of 262144 ROM bytes are no longer the image's in the card's memory", bad));
+            else
+                ok("the ROM in the card's memory is still the image, all 256 KB");
+        end
+        if (bad_flush != 0)
+            fail($sformatf("%0d bytes were written BACK to the ROM's pages that are not the image's", bad_flush));
+        else ok("every write-back of a ROM page carried the image's bytes");
+        if (rom_bad != 0)
+            fail($sformatf("the core read %0d bytes from banks $FC-$FF that are not the ROM's; first at instruction %0d, %02X/%04X gave $%02X where the image has $%02X",
+                           rom_bad, rom_bad_first, rom_bad_at[23:16], rom_bad_at[15:0],
+                           rom_bad_got, rom_bad_want));
+        else ok("every byte read from banks $FC-$FF was the ROM image's");
 
         $display("%0d checks, %0d errors", checks, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL");

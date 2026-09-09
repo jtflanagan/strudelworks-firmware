@@ -62,6 +62,7 @@ module mmu_xlate_tb;
         .cl_posted (cl_posted), .cl_wdata (cl_wdata),
         .pw_valid (1'b0), .pw_ppn (16'd0), .pw_off (8'd0),
         .pw_data (8'd0), .pw_ready (1'b1), .pw_take (pw_take),
+        .shd_take_o (), .shd_ppn_o (), .shd_off_o (),
         .intc8rom (intc8rom), .pf_off (pf_off), .cl_ppn (cl_ppn), .pf_ppn (pf_ppn),
         .sw_state (sw_state), .vid_sw (vid_sw), .rw_bank (rw_bank),
         .gs_shadow_o (), .gs_cyareg_o (), .gs_sltrom_o (), .gs_state_o (),

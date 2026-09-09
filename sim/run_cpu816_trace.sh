@@ -8,7 +8,7 @@
 #   sim/run_cpu816_trace.sh                    # every sampled opcode, both modes
 #   sim/run_cpu816_trace.sh --opcodes ea,a9    # a subset
 #   sim/run_cpu816_trace.sh --limit 200        # tests per opcode file
-#   sim/run_cpu816_trace.sh --flags            # also compare vda/vpa/vpb
+#   sim/run_cpu816_trace.sh --no-flags         # stop comparing vda/vpa/vpb
 #
 # Needs sim/fetch_65816_tests.sh's samples (sim/cpu816_work/samples).
 set -euo pipefail
@@ -24,6 +24,7 @@ while [ $# -gt 0 ]; do
         --opcodes) opcodes="$2"; shift 2;;
         --limit) limit="$2"; shift 2;;
         --flags) flags="--flags"; shift;;
+        --no-flags) flags="--no-flags"; shift;;
         --detail) detail="$2"; shift 2;;
         *) echo "unknown argument $1" >&2; exit 1;;
     esac

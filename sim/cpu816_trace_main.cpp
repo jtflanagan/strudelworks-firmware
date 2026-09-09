@@ -10,8 +10,12 @@
 // it until the next opcode fetch, and compares:
 //
 //   - every cycle's address (on cycles the suite marks VDA or VPA - an
-//     internal cycle's address is not architectural and is not compared),
+//     internal cycle's address is not architectural, is not compared, and
+//     THIS CORE'S IS NOT THE REFERENCE'S: docs/GS.md rung 3e),
 //     direction, and data (dout on writes, the byte the model handed on reads)
+//   - VDA/VPA/VPB every cycle, by default, because the memory model below
+//     uses VDA as its write enable the way a real system does
+//   - that every address the core writes is one the reference writes
 //   - the cycle COUNT, by where the next fetch lands
 //   - the final registers, and every byte the suite lists afterwards
 //
@@ -34,6 +38,7 @@
 #include <vector>
 #include <unordered_map>
 #include <map>
+#include <set>
 
 struct Regs { unsigned pc, s, p, a, x, y, dbr, d, pbr, e; };
 struct Cyc  { unsigned addr, val, flags; };
@@ -119,13 +124,19 @@ int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     const char *tests = nullptr, *hex = nullptr;
     unsigned detail = 3;        // failures printed in full per opcode/mode
-    bool cmpflags = false;      // compare the core's vda/vpa/vpb (needs the ports)
+    // VDA/VPA/VPB are compared BY DEFAULT.  They are not decoration: the
+    // harness's memory below is written only on a cycle the core marks VDA,
+    // which is how a real 65816 system enables a write, so the flags have to
+    // be held to the reference for that to mean anything.  --no-flags is for
+    // bringing a new opcode up, not for a gate.
+    bool cmpflags = true;       // compare the core's vda/vpa/vpb (needs the ports)
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a.rfind("--tests=", 0) == 0) tests = argv[i] + 8;
         else if (a.rfind("--hex=", 0) == 0) hex = argv[i] + 6;
         else if (a.rfind("--detail=", 0) == 0) detail = strtoul(argv[i] + 9, nullptr, 10);
         else if (a == "--flags") cmpflags = true;
+        else if (a == "--no-flags") cmpflags = false;
     }
     if (!tests || !hex) { fprintf(stderr, "need --tests= and --hex=\n"); return 2; }
     if (!load_fetch_word(hex)) { fprintf(stderr, "cannot read %s\n", hex); return 2; }
@@ -154,6 +165,11 @@ int main(int argc, char **argv) {
 
         std::string err;
         char m[256];
+        // Every byte the core writes must be a byte the reference wrote.  The
+        // final-memory check cannot say this on its own: the suite lists only
+        // the addresses IT touched, so a write anywhere else lands in no
+        // list and is never compared.
+        std::set<unsigned> core_wrote, ref_wrote;
         bool parked = !t.cyc.empty() && t.cyc.back().flags == 0 && t.cyc.back().addr == 0xFFFFFFFFu;
         // A block move's test is cut at 100 cycles with the state as of that
         // point, so it too ends by count rather than by the next fetch.
@@ -171,9 +187,11 @@ int main(int argc, char **argv) {
             // those syncs are inside the test.
             if (k > 0 && sync && k >= ncyc && !bycount) break;
             if (k >= ncyc + 2) { err += "runaway: no fetch after " + std::to_string(k) + " cycles\n"; break; }
+            bool access = false;
             if (k < ncyc) {
                 const Cyc &c = t.cyc[k];
-                bool access = (c.flags & 3) != 0;
+                access = (c.flags & 3) != 0;
+                if (!((c.flags >> 3) & 1) && access) ref_wrote.insert(c.addr);
                 unsigned want_rw = (c.flags >> 3) & 1;
                 if (k == 0 && !sync) { snprintf(m, sizeof m, "cycle 0: no sync\n"); err += m; }
                 if (rw != want_rw) { snprintf(m, sizeof m, "cycle %u: rw %u want %u\n", k, rw, want_rw); err += m; }
@@ -185,7 +203,14 @@ int main(int argc, char **argv) {
                     if (got != (c.flags & 7)) { snprintf(m, sizeof m, "cycle %u: vda/vpa/vpb %u want %u\n", k, got, c.flags & 7); err += m; }
                 }
             }
-            if (!rw) mem[addr] = dout;
+            // AN INTERNAL CYCLE CHANGES NOTHING.  The part drives R/W low
+            // through the internal cycle of a read-modify-write - the 6502's
+            // dummy write - with VDA low, so no decoder ever sees it, and
+            // the address on the pins is whatever the last address step left
+            // there.  Writing it into this model made the harness a machine
+            // that does not exist, and hid the core's dp+1 there for
+            // 981,610 tests (docs/GS.md rung 3e).
+            if (!rw && dut->vda) { mem[addr] = dout; core_wrote.insert(addr); }
             tick(); cycles_run++;
             k++;
             if (bycount && k >= ncyc) break;
@@ -211,6 +236,10 @@ int main(int argc, char **argv) {
         if (g.dbr != w.dbr) { snprintf(m, sizeof m, "final dbr %02x want %02x\n", g.dbr, w.dbr); err += m; }
         if (g.d != w.d) { snprintf(m, sizeof m, "final d %04x want %04x\n", g.d, w.d); err += m; }
         if (g.e != w.e) { snprintf(m, sizeof m, "final e %u want %u\n", g.e, w.e); err += m; }
+        for (unsigned a : core_wrote)
+            if (!ref_wrote.count(a)) {
+                snprintf(m, sizeof m, "wrote %06x, which the reference never writes\n", a); err += m;
+            }
         for (auto &e : t.ram_f) {
             auto it = mem.find(e.first);
             unsigned have = (it == mem.end()) ? 0 : it->second;

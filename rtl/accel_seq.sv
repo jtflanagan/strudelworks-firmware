@@ -130,6 +130,14 @@ module accel_seq #(
     input  wire [7:0]  cpu_dout,
     input  wire        cpu_sync,
     input  wire        cyc_is_i,       // the core's cycle is an instruction-stream fetch (the census)
+    // THE CORE'S CYCLE IS INTERNAL: VDA and VPA BOTH LOW, which is the
+    // 65816's own encoding for a cycle that touches nothing.  It still takes
+    // a cycle of the machine's time - so it is charged for like any other -
+    // but it must not become an op: the address on the pins is whatever the
+    // last address step left there, and both directions of taking it at face
+    // value cost the IIgs bench a boot (docs/GS.md rung 3e).  Only read at
+    // GS = 1; a 65C02 has no such cycle and its callers tie this low.
+    input  wire        cyc_int,
     output wire        cyc_en,
     output wire [7:0]  cpu_din,
 
@@ -280,7 +288,8 @@ module accel_seq #(
         S_DECIDE,   // the core has an op up; dispatch it when it can go
         S_FAST,     // on the card; waiting for the cache's decision
         S_BUS,      // offered to the driver; waiting for its cycle to end
-        S_HELD      // the bus is an override's; waiting for it to let go
+        S_HELD,     // the bus is an override's; waiting for it to let go
+        S_NULL      // the core's internal cycle: paid for, and nothing else
     } state_t;
     state_t st;
     assign state_o = {1'b0, st};
@@ -443,8 +452,9 @@ module accel_seq #(
 
     // What the dispatcher will charge for on this edge, for the governor's
     // one writer: exactly the two dispatching branches below.
+    wire go_null  = GS && cyc_int;
     wire disp_pay = (st == S_DECIDE) && settled && !d_pending && !dq_ovr && !turbo_claim && !stall_q &&
-                    can_pay && (needs_bus || fast_ok) && !off &&
+                    can_pay && (go_null || needs_bus || fast_ok) && !off &&
                     !cpu_rst && master_active;
 
     // A fast op's decision: the byte is there, or it is not.  An
@@ -484,7 +494,8 @@ module accel_seq #(
     end
 
     // ---- the core's side ----------------------------------------------------
-    assign cyc_en     = off_q ? cyc_done : (st == S_BUS) ? cyc_done : fast_hit;
+    assign cyc_en     = off_q ? cyc_done : (st == S_BUS) ? cyc_done
+                      : (fast_hit || (st == S_NULL));
     assign cpu_din    = (off_q || st == S_BUS) ? drv_din
                       : swi_q ? swi_byte_q : mem_sub_data;
     assign bus_owns   = off_q || bus_owns_q;
@@ -621,6 +632,15 @@ module accel_seq #(
                             // hold, bounded by its fill.
                         end else if (!can_pay) begin
                             // Wait for credit.
+                        end else if (go_null) begin
+                            // AN INTERNAL CYCLE IS NOT AN ACCESS.  It has
+                            // been paid for above like any other cycle of
+                            // the machine's time, and that is all it gets:
+                            // no op on the stream, no bus cycle, no read or
+                            // write of anything.  See cyc_int.
+                            st <= S_NULL;
+                            bus_owns_q   <= 1'b0;
+                            core_valid_q <= 1'b0;
                         end else if (needs_bus) begin
                             st <= S_BUS;
                             bus_owns_q   <= 1'b1;
@@ -646,6 +666,10 @@ module accel_seq #(
                             u_ovr     <= 1'b0;
                             u_divert  <= 1'b0;
                         end
+                    end
+
+                    S_NULL: begin
+                        st <= S_DECIDE;
                     end
 
                     S_FAST: begin

@@ -776,6 +776,9 @@ module master_top #(
         .cpu_dout      (cpu_dout),
         .cpu_sync      (cpu_sync),
         .cyc_is_i      (cpu_cyc_is_i),
+        // A 65C02 has no internal cycle - VDA/VPA are a 65816's - so this
+        // build never has one to skip.  rtl/accel_seq.sv, docs/GS.md rung 3e.
+        .cyc_int       (1'b0),
         .cyc_en        (seq_cyc_en),
         .cpu_din       (seq_din),
         .turbo_en      (turbo_en),
@@ -1173,6 +1176,11 @@ module master_top #(
     wire [103:0] rt_rd_flat;
     wire [7:0]  rwb_p1_w;
 
+    // The map's shadow duplicate, as its own entrant into the cache
+    // (docs/GS.md rung 3e).
+    wire        shd_take_w;
+    wire [15:0] shd_ppn_w;
+    wire [7:0]  shd_off_w;
     apple_mmu u_mmu (
         .clk        (apple_clk),
         .rst        (apple_rst),
@@ -1200,6 +1208,7 @@ module master_top #(
         .pw_data    (pw_any_data),
         .pw_ready   (pw_ready_w),
         .pw_take    (pw_take_w),
+        .shd_take_o (shd_take_w), .shd_ppn_o (shd_ppn_w), .shd_off_o (shd_off_w),
         .pf_off     (pf_off),
         .cl_ppn     (cl_ppn_w),
         .pf_ppn     (pf_ppn_w),
@@ -1315,6 +1324,10 @@ module master_top #(
         .pf_ppn      (pf_ppn_w),
         .pf_off      (pf_off[7:0]),
         .pw_take     (pw_take_w),
+        // The map's shadow duplicate needs its own P0 (docs/GS.md rung 3e).
+        .shd_take    (shd_take_w),
+        .shd_ppn     (shd_ppn_w),
+        .shd_off     (shd_off_w),
         .pw_ppn      (pw_any_ppn),
         .pw_off      (pw_any_off),
         .op_addr     (u_addr),

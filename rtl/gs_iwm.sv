@@ -187,7 +187,22 @@ module gs_iwm (
                                  : motor_on ? data_byte
                                             : 8'hFF;
                 2'b01:   rd_byte = status_byte;
-                2'b10:   rd_byte = enable2 ? handshake : 8'hC0;
+                // THERE IS NO DRIVE, SO THERE IS NOTHING TO UNDERRUN, which
+                // is the same argument as the motor's above.  Bit 7 of the
+                // handshake is "data register ready" and BIT 6 IS THE WRITE
+                // UNDERRUN, which KEGS CLEARS (`status & 0xbf`, iwm.c case
+                // 0x02) as soon as the head has moved more than eight bits
+                // past the last bit written - so on a machine with nothing
+                // writing it is always clear.  A constant $C0 says "a write
+                // is in progress and keeping up", for ever, and the ROM's
+                // SmartPort probe spins on exactly that:
+                //
+                //     FF/57B7  LDA $C08C,X / AND #$40 / BNE $57B7
+                //
+                // The reference trace visits $FF/57B7 ONCE in five million
+                // instructions and reads $80 there, falling straight through
+                // to a bounded retry.  So does this now.
+                2'b10:   rd_byte = enable2 ? handshake : 8'h80;
                 default: rd_byte = 8'h00;
             endcase
         end
