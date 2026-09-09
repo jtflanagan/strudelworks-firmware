@@ -168,6 +168,11 @@ module mmu_xlate_tb;
         end
     endfunction
 
+    // The regions, modelled independently of the RTL.  Three of them -
+    // R_TXT2 $08-$0B, R_HGR2 $40-$5F, R_SHR $60-$9F - are ordinary RAM on a
+    // IIe and are split out only because each is a SHADOW bit of its own on
+    // the IIgs (docs/GS.md).  Their entries must therefore be IDENTICAL to
+    // R_RAM's here, which every other check below is what proves.
     function automatic [3:0] reg_exp(input [15:0] a);
         logic [7:0] pg;
         begin
@@ -175,7 +180,11 @@ module mmu_xlate_tb;
             if (pg[7:4] < 4'hC) begin
                 if      (pg[7:1] == 7'd0)      reg_exp = 4'd0;   // R_ZP
                 else if (pg[7:2] == 6'b000001) reg_exp = 4'd1;   // R_TXT
+                else if (pg[7:2] == 6'b000010) reg_exp = 4'd10;  // R_TXT2
                 else if (pg[7:5] == 3'b001)    reg_exp = 4'd2;   // R_HGR
+                else if (pg[7:5] == 3'b010)    reg_exp = 4'd11;  // R_HGR2
+                else if (pg[7:5] == 3'b011)    reg_exp = 4'd12;  // R_SHR
+                else if (pg[7:5] == 3'b100)    reg_exp = 4'd12;  // R_SHR
                 else                           reg_exp = 4'd3;   // R_RAM
             end else if (pg[7:4] == 4'hC) begin
                 if      (pg[3])                reg_exp = 4'd7;   // R_C8

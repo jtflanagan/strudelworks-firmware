@@ -200,11 +200,24 @@
 // region table.  Nothing drives a bank above 0 yet.
 //////////////////////////////////////////////////////////////////////////////////
 module apple_mmu #(
+    // THE MACHINE.  0 = the Apple IIe this card lives in; 1 = the IIgs the
+    // soft 65816 runs (docs/GS.md).  At GS = 0 every GS-only register reads
+    // zero, every GS-only term folds away, and the map is bit-for-bit the
+    // one the IIe sweep has always checked - which is the parity gate.
+    parameter bit GS   = 1'b0,
     // The region table's shape.  Not meant to be overridden: they are here
-    // so the packed table can be a port.  Entry = {cls[1:0], wr, bsel[1:0],
-    // fold, fs}.
-    parameter int NREG = 10,
-    parameter int RT_W = 7
+    // so the packed table can be a port.  Entry = {sh, cls[1:0], wr,
+    // bsel[1:0], fold, fs}.
+    parameter int NREG = 13,
+    parameter int RT_W = 8,
+    // The GS's RAM, in banks: $00 up to GS_RAM_BANKS - 1 are real memory.
+    // 128 is 8 MB, the most a ROM 3 addresses without the >8 MB patch.
+    parameter int GS_RAM_BANKS = 128,
+    // The first ROM bank: $FC for a 256 KB ROM 3, $FE for a 128 KB ROM 01.
+    parameter logic [7:0] GS_ROM_BASE = 8'hFC,
+    // Where a read of an unpopulated bank lands.  One page, write-protected,
+    // so the ROM's memory sizing finds no memory there twice running.
+    parameter logic [7:0] GS_VOID_BANK = 8'hFB
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -392,6 +405,28 @@ module apple_mmu #(
                        altzp, ramwrt, ramrd, store80};
     assign vid_sw   = {col80, mixed, text};
 
+    // ---- the IIgs registers (docs/GS.md; KEGS moremem.c) ---------------------
+    // All four are inert at GS = 0: the strobes below are gated on GS, so
+    // the registers hold their reset value and every term they feed folds
+    // away.  A IIe access to $C035 or $C068 is an ordinary bus cycle.
+    //
+    //   $C035 SHADOW   a SET bit INHIBITS shadowing.  [0] text page 1,
+    //                  [1] hires page 1, [2] hires page 2, [3] Super Hi-Res,
+    //                  [4] the auxiliary bank's hires, [5] text page 2,
+    //                  [6] I/O and the language card in banks $00/$01.
+    //   $C036 CYAREG   [7] fast, [4] shadow in all banks.  The speed bit is
+    //                  read by the governor, not by the map.
+    //   $C068 STATEREG the IIe switches as ONE register, exactly as the real
+    //                  FPI has them: [7] ALTZP, [6] PAGE2, [5] RAMRD,
+    //                  [4] RAMWRT, [3] RDROM, [2] LCBANK2, [1] ROMBANK,
+    //                  [0] INTCXROM.  Writing it moves seven switches at
+    //                  once; reading it composes them back.
+    //   $C02D SLOTROMSEL  bit n = slot n answers $Cn00-$CnFF rather than the
+    //                  internal ROM.  Bits 0 and 3 are not slots.
+    logic [6:0] gs_shadow;
+    logic [7:0] gs_cyareg;
+    logic [7:0] gs_sltrom;
+
     wire io_page = (op_addr[15:8] == 8'hC0);
     wire sw_c00x = io_page && (op_addr[7:4] == 4'h0);      // $C000-$C00F
     wire sw_c05x = io_page && (op_addr[7:4] == 4'h5);      // $C050-$C05F
@@ -399,6 +434,10 @@ module apple_mmu #(
     wire sw_rwbk = io_page && (op_addr[7:4] == 4'h7) &&
                    (op_addr[3:0] == 4'h1 || op_addr[3:0] == 4'h3);
     wire sw_c08x = io_page && (op_addr[7:4] == 4'h8);      // $C080-$C08F
+    wire gs_shadow_w = GS && io_page && (op_addr[7:0] == 8'h35) && !op_rw;
+    wire gs_cyareg_w = GS && io_page && (op_addr[7:0] == 8'h36) && !op_rw;
+    wire gs_state_w  = GS && io_page && (op_addr[7:0] == 8'h68) && !op_rw;
+    wire gs_sltrom_w = GS && io_page && (op_addr[7:0] == 8'h2D) && !op_rw;
 
     always_ff @(posedge clk) begin
         if (rst || !res_sync) begin
@@ -419,7 +458,29 @@ module apple_mmu #(
             lc_wren     <= 1'b1;
             lc_prewrite <= 1'b0;
             rw_bank     <= 8'd0;       // by decision: see the header
+            // The GS's own registers.  SHADOW clear means everything is
+            // shadowed, which is the state the ROM's reset code expects
+            // (KEGS do_reset: $C035 = 0).  CYAREG's power-on bit is the
+            // host's to set; the map does not read it.
+            gs_shadow   <= 7'd0;
+            gs_cyareg   <= 8'd0;
+            gs_sltrom   <= 8'd0;
         end else if (op_commit) begin
+            if (gs_shadow_w) gs_shadow <= op_wdata[6:0];
+            if (gs_cyareg_w) gs_cyareg <= op_wdata;
+            if (gs_sltrom_w) gs_sltrom <= op_wdata;
+            // STATEREG moves seven switches at once.  It is the same state
+            // the individual strobes below reach, so it is written here and
+            // nowhere else: two writers of one register is how they drift.
+            if (gs_state_w) begin
+                altzp    <= op_wdata[7];
+                page2    <= op_wdata[6];
+                ramrd    <= op_wdata[5];
+                ramwrt   <= op_wdata[4];
+                lc_ramrd <= !op_wdata[3];   // RDROM is the complement of "read the RAM"
+                lc_bank2 <= op_wdata[2];
+                intcxrom <= op_wdata[0];
+            end
             // $C000-$C00F: write strobes, the address selects the switch, A0
             // the value.
             if (sw_c00x && !op_rw) begin
@@ -477,16 +538,44 @@ module apple_mmu #(
     // REGISTERED, and translation is a mux, a fold and a bank select.
     localparam [3:0] R_ZP  = 4'd0, R_TXT = 4'd1, R_HGR = 4'd2, R_RAM = 4'd3,
                      R_IO  = 4'd4, R_CXL = 4'd5, R_C3  = 4'd6, R_C8  = 4'd7,
-                     R_LCD = 4'd8, R_LCE = 4'd9;
+                     R_LCD = 4'd8, R_LCE = 4'd9,
+                     // The three the IIe never needed: on the GS each is a
+                     // SHADOW bit of its own ($C035), so each needs an entry
+                     // that can differ from plain RAM's.  On the IIe they
+                     // ARE plain RAM - 80STORE reaches only text page 1 and
+                     // hires page 1 - and their entries are built to equal
+                     // R_RAM's, which is what keeps the IIe sweep exact.
+                     R_TXT2 = 4'd10,   // $0800-$0BFF, text page 2
+                     R_HGR2 = 4'd11,   // $4000-$5FFF, hires page 2
+                     R_SHR  = 4'd12;   // $6000-$9FFF, the rest of the SHR range
     // An entry's bank side.  BS_ROM is physical bank $FF.
     localparam [1:0] BS_MAIN = 2'd0, BS_AUX = 2'd1, BS_ROM = 2'd2;
+
+    // ---- the GS's bank classes -------------------------------------------------
+    // A pair is $00/$01 or $E0/$E1: the two banks the IIe's switches, the
+    // language card and the I/O window live in.  Bit 17 of the address tells
+    // the fast pair from the Mega II pair, bit 16 the even bank from the odd.
+    function automatic gs_pair(input [7:0] bk);
+        gs_pair = (bk == 8'h00) || (bk == 8'h01) || (bk == 8'hE0) || (bk == 8'hE1);
+    endfunction
+    function automatic gs_rom(input [7:0] bk);
+        gs_rom = (bk >= GS_ROM_BASE);
+    endfunction
+    // Everything that is neither a pair, nor the ROM, nor populated RAM.
+    function automatic gs_void(input [7:0] bk);
+        gs_void = !gs_pair(bk) && !gs_rom(bk) && (bk >= GS_RAM_BANKS[7:0]);
+    endfunction
 
     function automatic [3:0] region(input [7:0] pg);
         begin
             if (pg[7:4] < 4'hC) begin
                 if      (pg[7:1] == 7'd0)      region = R_ZP;    // $0000-$01FF
                 else if (pg[7:2] == 6'b000001) region = R_TXT;   // $0400-$07FF
+                else if (pg[7:2] == 6'b000010) region = R_TXT2;  // $0800-$0BFF
                 else if (pg[7:5] == 3'b001)    region = R_HGR;   // $2000-$3FFF
+                else if (pg[7:5] == 3'b010)    region = R_HGR2;  // $4000-$5FFF
+                else if (pg[7:5] == 3'b011)    region = R_SHR;   // $6000-$7FFF
+                else if (pg[7:5] == 3'b100)    region = R_SHR;   // $8000-$9FFF
                 else                           region = R_RAM;
             end else if (pg[7:4] == 4'hC) begin
                 if      (pg[3])                region = R_C8;    // $C800-$CFFF
@@ -498,10 +587,27 @@ module apple_mmu #(
         end
     endfunction
 
-    // {cls[1:0], wr, bsel[1:0], fold, fs}
+    // {sh, cls[1:0], wr, bsel[1:0], fold, fs}
+    //
+    // `sh` is the NEW bit and it goes at the TOP, not the bottom, so that
+    // every field below it keeps the bit position it has always had: xlate()
+    // and both fronts decode this entry, and a shift would have moved all
+    // three at once.
+    //
+    // `sh` is the GS's SHADOW ($C035): a write to this region in banks
+    // $00/$01 ALSO lands in the matching Mega II bank, $E0 or $E1
+    // (docs/GS.md).  It is zero for every region at GS = 0 and for every
+    // READ entry always - shadowing is a property of writes.
     function automatic [RT_W-1:0] rt_e(input [1:0] cls, input wr, input [1:0] bsel,
                                        input fold, input fs);
-        rt_e = {cls, wr, bsel, fold, fs};
+        rt_e = {1'b0, cls, wr, bsel, fold, fs};
+    endfunction
+    // ...and the same with the shadow bit set, for the write entries that
+    // take one.  A separate constructor rather than an argument on rt_e, so
+    // that every existing call site keeps saying exactly what it said.
+    function automatic [RT_W-1:0] rt_es(input [1:0] cls, input wr, input [1:0] bsel,
+                                        input fold, input fs, input sh);
+        rt_es = {sh, cls, wr, bsel, fold, fs};
     endfunction
 
     // The bank side each RAM region takes: the old aux_mid/aux_sel mux, split
@@ -527,6 +633,30 @@ module apple_mmu #(
     wire [1:0] lc_rd_bs  = lc_ramrd ? (side_lc ? BS_AUX : BS_MAIN) : BS_ROM;
     wire [1:0] lc_wr_bs  = lc_wren  ? (side_lc ? BS_AUX : BS_MAIN) : BS_ROM;
 
+    // ---- SHADOW, per region (docs/GS.md; KEGS moremem.c) ---------------------
+    // A SET bit in $C035 INHIBITS, so every term is a negation.  These are
+    // the entries' `sh` bits, and each is ANDed with GS so the IIe's table is
+    // untouched.  The SIDE is not here: which Mega II bank a shadowed write
+    // reaches - $E0 or $E1 - is the address's own bank, applied in xlate().
+    //
+    // The aux-hires inhibit ([4]) is a SECOND veto on the hires pages, and it
+    // applies to the auxiliary bank alone; a bank-$00 write is not subject to
+    // it.  Since the side is out of the table, the veto is applied in xlate()
+    // with the side, and what the table carries is the bank-$00 answer.
+    wire sh_txt1 = GS && !gs_shadow[0];
+    wire sh_hgr1 = GS && !gs_shadow[1];
+    wire sh_hgr2 = GS && !gs_shadow[2];
+    wire sh_txt2 = GS && !gs_shadow[5];
+    // $6000-$9FFF is Super Hi-Res and nothing else, so it has one veto.
+    wire sh_shr  = GS && !gs_shadow[3];
+    // SHADOW[6] inhibits I/O AND the language card in banks $00/$01: with it
+    // set, $C000-$FFFF there is plain RAM and the machine's own I/O window is
+    // gone.  This is the `flat` view docs/MEMORY_REFACTOR.md anticipated, and
+    // the fold must be OFF under it - with the fold on, a write to $D000
+    // would land in page $C0, which under this bit is ordinary RAM someone
+    // else owns.
+    wire gs_flat = GS && gs_shadow[6];
+
     logic [RT_W-1:0] rt_r_n [0:NREG-1];
     logic [RT_W-1:0] rt_w_n [0:NREG-1];
     always_comb begin
@@ -546,10 +676,16 @@ module apple_mmu #(
         rt_r_n[R_LCD] = rt_e(lc_rd_cls, 1'b0, lc_rd_bs, lc_ramrd && !lc_bank2,
                              lc_rd_cls != CLS_BUS);
         rt_r_n[R_LCE] = rt_e(lc_rd_cls, 1'b0, lc_rd_bs, 1'b0, lc_rd_cls != CLS_BUS);
+        // The three regions the IIe does not distinguish.  On a READ they are
+        // plain RAM in every machine: nothing about SHADOW touches reads, and
+        // 80STORE reaches only text page 1 and hires page 1.  Written this way
+        // rather than shared with R_RAM so the write entries below, which DO
+        // differ on the GS, sit beside them.
+        rt_r_n[R_TXT2] = rt_e(CLS_RAM, 1'b0, ramrd ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_r_n[R_HGR2] = rt_e(CLS_RAM, 1'b0, ramrd ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
+        rt_r_n[R_SHR ] = rt_e(CLS_RAM, 1'b0, ramrd ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
         // writes
         rt_w_n[R_ZP ] = rt_e(CLS_RAM, 1'b1, side_zp    ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
-        rt_w_n[R_TXT] = rt_e(CLS_RAM, 1'b1, side_txt_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
-        rt_w_n[R_HGR] = rt_e(CLS_RAM, 1'b1, side_hgr_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
         rt_w_n[R_RAM] = rt_e(CLS_RAM, 1'b1, ramwrt     ? BS_AUX : BS_MAIN, 1'b0, 1'b1);
         rt_w_n[R_IO ] = rt_e(CLS_BUS, 1'b0, BS_MAIN, 1'b0, 1'b0);
         rt_w_n[R_CXL] = rt_e(CLS_BUS, 1'b0, BS_MAIN, 1'b0, 1'b0);
@@ -557,6 +693,14 @@ module apple_mmu #(
         rt_w_n[R_C8 ] = rt_e(CLS_BUS, 1'b0, BS_MAIN, 1'b0, 1'b0);
         rt_w_n[R_LCD] = rt_e(lc_wr_cls, lc_wren, lc_wr_bs, lc_wren && !lc_bank2, 1'b1);
         rt_w_n[R_LCE] = rt_e(lc_wr_cls, lc_wren, lc_wr_bs, 1'b0, 1'b1);
+        rt_w_n[R_TXT2] = rt_es(CLS_RAM, 1'b1, ramwrt ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_txt2);
+        rt_w_n[R_HGR2] = rt_es(CLS_RAM, 1'b1, ramwrt ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_hgr2);
+        rt_w_n[R_SHR ] = rt_es(CLS_RAM, 1'b1, ramwrt ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_shr);
+        // ...and the shadow bit on the two the IIe already had.  Everything
+        // else about these entries is unchanged, which is what the IIe sweep
+        // checks.
+        rt_w_n[R_TXT] = rt_es(CLS_RAM, 1'b1, side_txt_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_txt1);
+        rt_w_n[R_HGR] = rt_es(CLS_RAM, 1'b1, side_hgr_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_hgr1);
     end
 
     // The tables and the physical bank an auxiliary access reaches, one clock
@@ -610,9 +754,45 @@ module apple_mmu #(
             if (va[15:0] == 16'hCFFF) begin
                 cls = CLS_BUS; wr = 1'b0; fs = 1'b0; fold = 1'b0;
             end
-            // A 65816's banks 2 and up are RAM no IIe switch touches: they are
-            // their own physical banks.  Nothing drives this yet (header).
-            if (va[23:16] != 8'd0) begin
+            // ---- the bank classes (docs/GS.md) ---------------------------
+            // On the IIe only bank 0 exists and none of this is reached.  On
+            // the GS the bank byte picks one of four treatments BEFORE the
+            // region table's answer is used.
+            if (GS) begin
+                if (gs_pair(va[23:16])) begin
+                    // $00/$01 and $E0/$E1: the IIe switches apply, exactly as
+                    // the table computed them - but only to the EVEN bank of
+                    // the pair.  An odd bank named directly IS the auxiliary
+                    // memory, so it is itself, and the switches that would
+                    // have redirected it do not.
+                    if (va[16] && cls == CLS_RAM) bank = {va[23:17], 1'b1};
+                    else if (cls == CLS_RAM || cls == CLS_LC)
+                        bank = {va[23:17], bank[0] | va[16]};
+                    // The Mega II banks' RAM is theirs; only $00/$01 carry
+                    // the language card and the I/O window, and SHADOW[6]
+                    // takes even those away.
+                    if (gs_flat && !va[17] && (r >= R_IO) && (r <= R_LCE)) begin
+                        cls = CLS_RAM; wr = !rw; fs = 1'b1; fold = 1'b0;
+                        bank = {va[23:17], va[16]};
+                    end
+                end else if (gs_rom(va[23:16])) begin
+                    // $FC-$FF (ROM 3) or $FE-$FF (ROM 01): the ROM, itself.
+                    r = R_RAM; cls = CLS_ROM; wr = 1'b0; fs = 1'b1; fold = 1'b0;
+                    bank = va[23:16];
+                end else if (gs_void(va[23:16])) begin
+                    // A bank with no RAM behind it.  Reads answer from one
+                    // write-protected page, writes land nowhere - so the
+                    // ROM's memory sizing finds the memory that exists and
+                    // stops there.
+                    r = R_RAM; cls = CLS_RAM; wr = 1'b0; fs = 1'b1; fold = 1'b0;
+                    bank = GS_VOID_BANK;
+                end else begin
+                    // $02-$7F: ordinary RAM, its own bank, no switch on it.
+                    r = R_RAM; cls = CLS_RAM; wr = !rw; fs = 1'b1; fold = 1'b0;
+                    bank = va[23:16];
+                end
+            end else if (va[23:16] != 8'd0) begin
+                // The IIe build: banks 2 and up are RAM no switch touches.
                 r = R_RAM; cls = CLS_RAM; wr = !rw; fs = 1'b1; fold = 1'b0;
                 bank = va[23:16];
             end

@@ -133,7 +133,7 @@ module iline (
     // The PHYSICAL side of the same picture (docs/MEMORY_REFACTOR.md, rung 3):
     // the picked line's page, the REGION it classifies in, the fold bit, and
     // FS - "front-servable", which replaces `p_cls != BUS` and carries the
-    // page-$C3 rule.  rt_rd_flat is the ten packed read-table entries a held
+    // page-$C3 rule.  rt_rd_flat is the thirteen packed read-table entries a held
     // line is revalidated against, rwb_p1 the physical bank an auxiliary
     // access reaches, map_settling map_changed stretched over the clocks a
     // revalidation needs.
@@ -142,7 +142,7 @@ module iline (
     input  wire        p_fold,
     input  wire        p_fs,
     input  wire [15:0] cl_ppn,        // the classified write's page, for the snoop
-    input  wire [69:0] rt_rd_flat,
+    input  wire [103:0] rt_rd_flat,
     input  wire [7:0]  rwb_p1,
     input  wire        map_settling,
     input  wire        intc8rom,      // apple_mmu's latch: page $C3 is servable while set
@@ -530,8 +530,10 @@ module iline (
     // after map_changed, recomputes VALID from the line's stored identity.
     // Nothing here reaches a serve cone: both stages are register-rooted and
     // land in the valid bits, which the serve already reads.
-    localparam integer RT_W = 7;      // {cls[1:0], wr, bsel[1:0], fold, fs}
-    localparam integer NREG = 10;
+    // {sh, cls[1:0], wr, bsel[1:0], fold, fs} - the shadow bit is the IIgs's
+    // and sits at the TOP, so every field this front reads is where it was.
+    localparam integer RT_W = 8;
+    localparam integer NREG = 13;
     localparam [1:0] BS_AUX = 2'd1, BS_ROM = 2'd2;
     localparam [1:0] CLS_RAM = 2'd1, CLS_LC = 2'd2;
     wire [RT_W-1:0] rt_rd [0:15];

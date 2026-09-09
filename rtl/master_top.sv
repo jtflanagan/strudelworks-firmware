@@ -1157,7 +1157,7 @@ module master_top #(
     wire [15:0] cl_ppn_w, pf_ppn_w, p_ppn_w, d_ppn_w;
     wire [3:0]  p_reg_w, d_reg_w;
     wire        p_fold_w, p_fs_w, d_fold_w, map_settling;
-    wire [69:0] rt_rd_flat;
+    wire [103:0] rt_rd_flat;
     wire [7:0]  rwb_p1_w;
 
     apple_mmu u_mmu (

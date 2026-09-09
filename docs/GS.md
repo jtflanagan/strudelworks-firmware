@@ -1,7 +1,9 @@
 # Apple IIgs on the card: the run sheet
 
-Status: **RUNGS 0 AND 1 DONE, 2026-09-08; next rung 1b (64-bit event records)
-and rung 2 (the GS map), independent of each other.** Branch `gs_emulation` in both
+Status: **RUNGS 0, 1 AND 1b DONE, 2026-09-08 (1b proven on hardware); rung 2
+part 1 in - the MMU's GS scaffolding, with the IIe map proven unchanged.  The
+GS path itself is UNTESTED: its oracle sweep is the next thing to write, and
+nothing about the GS map should be believed until it exists.** Branch `gs_emulation` in both
 repos, taken from master at fw `62b21ab` / host `98d46d2` (the
 `memory_refactor` merge). No bitstream yet; the IIe design is untouched and
 stays bit-identical at `GS=0`.
@@ -187,6 +189,20 @@ dline's `pending` include `shd_valid` so nothing reads $E0/$E1 past the dup.
 Cost ~8 seam clocks per shadowed write, ~40 flops. `fb_sim`'s tap moves to
 $E0/$E1 landings.
 
+**The pair side stays OUT of the region table.**  On the IIe a region's
+answer is a function of the switches alone, which is what lets the table be
+one entry per region and lets a front revalidate a held line from a stored
+4-bit region index.  On the GS that breaks: bank $00 and bank $01 at $2000
+are the same region under the same switches, but they land in different
+physical banks and shadow to different destinations ($E0 against $E1).  The
+side is therefore applied in `xlate()` AFTER the table lookup - an odd bank
+named directly is itself, an even bank goes through the switches - which
+keeps `rt_rd_flat` and the fronts' index exactly as they are.  The price is
+recorded here rather than discovered later: WHEN THE FRONTS ARE TURNED ON
+FOR THE GS (rung 6) the side must join their revalidation index, because a
+line filled in bank $01 must not revalidate against bank $00's entry.  The
+fronts are off in the GS build until then.
+
 **Fronts with a bank byte (rung 6, after the Finder).** From the microcode's
 bank sources (ZERO, DBR, PBR, DIN, AGU): the ROM and assembly code are
 ZERO/DBR-dominated; long addressing (DIN) rides the dispatcher, counted.
@@ -219,7 +235,7 @@ parity check on every rung that touches shared RTL.
 | 0 | Merge, branch, ROM import, this sheet, KEGS with a per-instruction trace to a file (its `Pc_log` ring streamed) and the clock pinned, so a deterministic reference trace of ROM 3 from reset exists for `trace_diff` | reference trace produced | **DONE** - `tools/kegs/` (patch, `trace_rom.sh`, `decode_trace.py`, README); 5M-instruction ROM 3 trace regenerates in seconds: starts at `00/FA62`, after 5M instructions (7.6M cycles) the ROM sits in the startup-device poll loop at `FF/CFA2..CFDC` calling `E1/0000` |
 | 1 | 65816 core complete: ALU/flags/decimal, MVN/MVP, vectors, E-mode stack rules, VDA/VPA/VPB. `sim/run_cpu816_trace.sh` (`cpu816_trace_main.cpp` + `cpu816_tests.py`) drives SingleStepTests cases: state in, one instruction, every cycle's address/direction/data/VDA/VPA/VPB, the count, the final registers and memory. `gen_cycle_table816.py` carries over; the pipeline-equivalence bench is retired (its reference predates the ROM format). OOC synth on the 100T | sampled tests pass with the bus lines compared; OOC WNS >= 0 at 10 ns | **DONE 2026-09-08**: 981,610 tests (1 MB per opcode file, both modes) 0 failures; OOC on xc7a100t-2: 1004 LUTs, 282 flops, 8 RAMB36, 119.9 MHz at a 7.5 ns push. Thirty-odd bugs found and fixed, listed in docs/UCODE816.md. FULL=1 (2.9 GB) not yet run. |
 | 1b | Wire format v6, 64-bit event records, on the IIe build first (PROTOCOL.md "The event record"). Card: `apple_bus_read.sv`, `synth_bus_events.sv`, `event_merge.sv` (class 1 fast / 2 dummy), `bus_event_filter.sv` (SKIP = a record), `bus_event_capture.sv` (64-bit FIFO, 127 records a frame, two words each, `captured` in records); the ring and the link move words and needed nothing. Host: `proto::Record`, `BusEvent` + bank/cls/cpu, the parser assembles records and faults on an odd payload, the ring, the trace writer (file version 2, 8-byte records; version-1 files refused), the sparse filter, the sources, the mock card, every `apply()`, the three trace tools; the firmware's two `.swbt` readers likewise. | IIe battery unchanged; host tests pass; HW: `mem_test.sh`, `fb_test.sh`, `accel_test.sh` green, mirror mismatches unchanged, full capture at 1 MHz sustained | **DONE 2026-09-08.** Sims: battery 34/34 (accel_vl 98/0), filter and capture benches reworked, trace self-test passing; host 36/36 on the Pi (`tools/pi_tests.sh`, new: ships and runs the cross-built suite). Build: timing met, 0 failing endpoints, and 28,941 LUTs against 32,179 BEFORE the change - the merge-queue rewrite saved more than the wider record cost. HW: boots to Applesoft and computes correctly at 1x and at 48x; 149,781,258 fast-op records delivered with the mirror's mismatch count frozen and zero merge overflows, drops, torn messages or unknown types. |
-| 2 | GS map on the MMU, bench-only: bank classes, 13 regions, `sh`, the shadow dup register, STATEREG/SHADOW/SLOTROMSEL, `$C071-$C07F`, the VOID page, the MEM_ROM page message. `mmu_xlate_gs_tb`: a KEGS-derived oracle (`setup_pageinfo`/fixups ported) swept over switch states x SHADOW x bank classes x 256 pages, read and write. `mem_integ_tb` gains a cross-bank write, a dup landing, a read-after-shadowed-write ordering check | 0 mismatches; IIe sweep unchanged (16384 maps, 0); battery at GS=0 unchanged | |
+| 2 | GS map on the MMU, bench-only: bank classes, 13 regions, `sh`, the shadow dup register, STATEREG/SHADOW/SLOTROMSEL, `$C071-$C07F`, the VOID page, the MEM_ROM page message. `mmu_xlate_gs_tb`: a KEGS-derived oracle (`setup_pageinfo`/fixups ported) swept over switch states x SHADOW x bank classes x 256 pages, read and write. `mem_integ_tb` gains a cross-bank write, a dup landing, a read-after-shadowed-write ordering check | 0 mismatches; IIe sweep unchanged (16384 maps, 0); battery at GS=0 unchanged | **PART 1 DONE 2026-09-08** (the scaffolding, parity proven): a `GS` parameter; the region set 10 -> 13, splitting text page 2, hires page 2 and the rest of the SHR range out of plain RAM; the entry's new `sh` bit at the TOP so xlate and both fronts decode unchanged; the $C035/$C036/$C068/$C02D registers, inert at GS=0; the four bank classes (PAIR, RAM, VOID, ROM) in `xlate()`. Gate met: IIe sweep 16384 maps / 33,347,584 checks / 0 mismatches, battery 34/34. **STILL TO DO:** the shadow duplicate write on the seam, `$C071-$C07F` reading ROM, the MEM_ROM page message, and the GS oracle sweep - the GS path has NO test of its own yet, so nothing about it is proven. |
 | 3 | `--gs` build boots ROM 3 in Verilator: the 65816 through the dispatcher (no fronts), `gs_io.sv` (VGC regs, `gs_intc`, `gs_adb`, `gs_clock`, IWM stub, SCC stub, sound GLU face), `boot_gs_tb` from reset with ROM 3 through the seam, `trace_diff816.py` against the KEGS trace to the startup-device scan. Host: wire v6, GS classify, ROM load, `machine = iigs`, ADB_KEY, mock_card | zero divergence to the scan; the host mirror equals the bench image | |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |

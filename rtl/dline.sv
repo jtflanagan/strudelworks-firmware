@@ -176,7 +176,7 @@ module dline #(
     input  wire [15:0] d_ppn,
     input  wire [3:0]  d_reg,
     input  wire        d_fold,
-    input  wire [69:0] rt_rd_flat,
+    input  wire [103:0] rt_rd_flat,
     input  wire [7:0]  rwb_p1,
     input  wire        map_settling,
 
@@ -467,8 +467,10 @@ module dline #(
     // AUXMOVE dance moves RAMRD/RAMWRT ~51k times a second, and the caller
     // in LC RAM and AUXMOVE itself in ROM live in regions those switches do
     // not touch.
-    localparam integer RT_W = 7;      // {cls[1:0], wr, bsel[1:0], fold, fs}
-    localparam integer NREG = 10;
+    // {sh, cls[1:0], wr, bsel[1:0], fold, fs} - the shadow bit is the IIgs's
+    // and sits at the TOP, so every field this front reads is where it was.
+    localparam integer RT_W = 8;
+    localparam integer NREG = 13;
     localparam [1:0] BS_AUX = 2'd1, BS_ROM = 2'd2;
     wire [RT_W-1:0] rt_rd [0:15];
     genvar gr;
