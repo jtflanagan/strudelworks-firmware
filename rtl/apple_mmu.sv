@@ -251,6 +251,11 @@ module apple_mmu #(
     output logic        cl_rw,
     output logic        cl_wr_image,   // a write that lands in the image
     output logic        cl_posted,     // a posted write draining, not an op
+    // The IIgs's SHADOW ($C035): this write ALSO lands in the matching Mega
+    // II bank.  The destination is {8'hE0 | cl_ppn[8], cl_ppn[7:0]} - the
+    // same page in $E0 or $E1 by the side the write landed on - so only the
+    // bit needs carrying.  Always 0 at GS = 0.
+    output logic        cl_sh,
     output logic [7:0]  cl_wdata,      // the write's byte
     // The posted FIFO's head, and the page cache's leave to take it.
     input  wire         pw_valid,
@@ -286,7 +291,11 @@ module apple_mmu #(
     // header.  q_addr is the address the driver is about to latch, so this is
     // decided on the switches as they stood before the cycle - the same
     // switches the classifier below will use for that op.
-    input  wire [15:0] q_addr,
+    // 24 BITS.  Every query port takes a full physical-space address, because
+    // on the IIgs the bank is part of the question and the same 16 bits mean
+    // different memory in different banks (docs/GS.md).  The IIe's callers
+    // zero-extend, which is exactly what they mean.
+    input  wire [23:0] q_addr,
     output wire        q_divert,
     // ...and the sequencer's: what class would an op at q_addr, read or
     // write, be if presented now?  Same switches, same function as the
@@ -340,7 +349,7 @@ module apple_mmu #(
     // p_addr - a line about to be prefetched - into its class, its bank side
     // and its folded offset, on the switches as they stand.  Combinational,
     // same functions again; the wanted RamWorks bank is rw_bank above.
-    input  wire [15:0] p_addr,
+    input  wire [23:0] p_addr,
     output wire [1:0]  p_cls,
     output wire        p_aux,
     output wire [15:0] p_off,
@@ -358,7 +367,7 @@ module apple_mmu #(
     // this cone runs through the serve cycle, never on d_pred's late cone.
     // d_rw picks the bank side a write would take (rung 3 stamps posted
     // writes through this same port); the wanted RamWorks bank is rw_bank.
-    input  wire [15:0] d_addr,
+    input  wire [23:0] d_addr,
     input  wire        d_rw,
     output wire [1:0]  d_cls,
     output wire        d_aux,
@@ -366,6 +375,8 @@ module apple_mmu #(
     output wire [15:0] d_ppn,
     output wire [3:0]  d_reg,
     output wire        d_fold,
+    // ...and the write query's shadow answer, the same bit for d_addr.
+    output wire        d_sh,
     // One pulse whenever anything that feeds classification moved - a soft
     // switch, the language card, the bank register, INTC8ROM, a reset.  The
     // front's held lines die on it: their classification was captured when
@@ -634,21 +645,41 @@ module apple_mmu #(
     wire [1:0] lc_wr_bs  = lc_wren  ? (side_lc ? BS_AUX : BS_MAIN) : BS_ROM;
 
     // ---- SHADOW, per region (docs/GS.md; KEGS moremem.c) ---------------------
-    // A SET bit in $C035 INHIBITS, so every term is a negation.  These are
-    // the entries' `sh` bits, and each is ANDed with GS so the IIe's table is
-    // untouched.  The SIDE is not here: which Mega II bank a shadowed write
-    // reaches - $E0 or $E1 - is the address's own bank, applied in xlate().
+    // A SET bit in $C035 INHIBITS, so every term is a negation.  Every one is
+    // ANDed with GS, so the IIe's table is untouched.
     //
-    // The aux-hires inhibit ([4]) is a SECOND veto on the hires pages, and it
-    // applies to the auxiliary bank alone; a bank-$00 write is not subject to
-    // it.  Since the side is out of the table, the veto is applied in xlate()
-    // with the side, and what the table carries is the bank-$00 answer.
-    wire sh_txt1 = GS && !gs_shadow[0];
-    wire sh_hgr1 = GS && !gs_shadow[1];
-    wire sh_hgr2 = GS && !gs_shadow[2];
-    wire sh_txt2 = GS && !gs_shadow[5];
-    // $6000-$9FFF is Super Hi-Res and nothing else, so it has one veto.
-    wire sh_shr  = GS && !gs_shadow[3];
+    // THE VETO FOLLOWS WHERE THE WRITE LANDS, not which bank the CPU named.
+    // KEGS's fixup_shadow_shr is what settles it: bank $00's $6000-$9FFF takes
+    // the $E1 destination ONLY when RAMWRT sent the write to auxiliary memory,
+    // and takes no shadow at all when it landed in main - because Super Hi-Res
+    // is auxiliary memory and main's $6000-$9FFF is not part of it.  So each
+    // region has TWO answers, and the one that applies is chosen by the bank
+    // side the write reaches.  That side is already in the table's own bsel
+    // for the $00/$E0 path, and is auxiliary by construction for an odd bank
+    // named directly.
+    //
+    // The aux-hires inhibit ([4]) is a second veto that applies only to the
+    // auxiliary landing, and Super Hi-Res ([3]) is an alternative route to
+    // shadowing the same pages - which is why the hires answers are an OR of
+    // two conditions rather than a single bit.
+    wire sh_txt1_m = GS && !gs_shadow[0];
+    wire sh_txt1_a = GS && !gs_shadow[0];
+    wire sh_txt2_m = GS && !gs_shadow[5];
+    wire sh_txt2_a = GS && !gs_shadow[5];
+    wire sh_hgr1_m = GS && !gs_shadow[1];
+    wire sh_hgr1_a = GS && ((!gs_shadow[1] && !gs_shadow[4]) || !gs_shadow[3]);
+    wire sh_hgr2_m = GS && !gs_shadow[2];
+    wire sh_hgr2_a = GS && ((!gs_shadow[2] && !gs_shadow[4]) || !gs_shadow[3]);
+    // Main's $6000-$9FFF is not Super Hi-Res and shadows nowhere.
+    wire sh_shr_m  = 1'b0;
+    wire sh_shr_a  = GS && !gs_shadow[3];
+
+    // The table's entry carries the answer for the side ITS OWN bsel names;
+    // xlate() substitutes the auxiliary answer when an odd bank is named
+    // directly.  Both are exported so it can.
+    function automatic sh_pick(input m, input a, input [1:0] bs);
+        sh_pick = (bs == BS_AUX) ? a : m;
+    endfunction
     // SHADOW[6] inhibits I/O AND the language card in banks $00/$01: with it
     // set, $C000-$FFFF there is plain RAM and the machine's own I/O window is
     // gone.  This is the `flat` view docs/MEMORY_REFACTOR.md anticipated, and
@@ -693,14 +724,19 @@ module apple_mmu #(
         rt_w_n[R_C8 ] = rt_e(CLS_BUS, 1'b0, BS_MAIN, 1'b0, 1'b0);
         rt_w_n[R_LCD] = rt_e(lc_wr_cls, lc_wren, lc_wr_bs, lc_wren && !lc_bank2, 1'b1);
         rt_w_n[R_LCE] = rt_e(lc_wr_cls, lc_wren, lc_wr_bs, 1'b0, 1'b1);
-        rt_w_n[R_TXT2] = rt_es(CLS_RAM, 1'b1, ramwrt ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_txt2);
-        rt_w_n[R_HGR2] = rt_es(CLS_RAM, 1'b1, ramwrt ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_hgr2);
-        rt_w_n[R_SHR ] = rt_es(CLS_RAM, 1'b1, ramwrt ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_shr);
+        rt_w_n[R_TXT2] = rt_es(CLS_RAM, 1'b1, ramwrt ? BS_AUX : BS_MAIN, 1'b0, 1'b1,
+                               sh_pick(sh_txt2_m, sh_txt2_a, ramwrt ? BS_AUX : BS_MAIN));
+        rt_w_n[R_HGR2] = rt_es(CLS_RAM, 1'b1, ramwrt ? BS_AUX : BS_MAIN, 1'b0, 1'b1,
+                               sh_pick(sh_hgr2_m, sh_hgr2_a, ramwrt ? BS_AUX : BS_MAIN));
+        rt_w_n[R_SHR ] = rt_es(CLS_RAM, 1'b1, ramwrt ? BS_AUX : BS_MAIN, 1'b0, 1'b1,
+                               sh_pick(sh_shr_m,  sh_shr_a,  ramwrt ? BS_AUX : BS_MAIN));
         // ...and the shadow bit on the two the IIe already had.  Everything
         // else about these entries is unchanged, which is what the IIe sweep
         // checks.
-        rt_w_n[R_TXT] = rt_es(CLS_RAM, 1'b1, side_txt_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_txt1);
-        rt_w_n[R_HGR] = rt_es(CLS_RAM, 1'b1, side_hgr_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1, sh_hgr1);
+        rt_w_n[R_TXT] = rt_es(CLS_RAM, 1'b1, side_txt_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1,
+                              sh_pick(sh_txt1_m, sh_txt1_a, side_txt_w ? BS_AUX : BS_MAIN));
+        rt_w_n[R_HGR] = rt_es(CLS_RAM, 1'b1, side_hgr_w ? BS_AUX : BS_MAIN, 1'b0, 1'b1,
+                              sh_pick(sh_hgr1_m, sh_hgr1_a, side_hgr_w ? BS_AUX : BS_MAIN));
     end
 
     // The tables and the physical bank an auxiliary access reaches, one clock
@@ -730,20 +766,38 @@ module apple_mmu #(
     // {cls[1:0], wr, fs, reg[3:0], ppn[15:0], fold}.  Every question this
     // module answers - the presented op's, the sequencer's, both fronts' -
     // goes through here, so they cannot drift apart.
-    localparam int XL_W = 25;
+    // {sh, cls[1:0], wr, fs, reg[3:0], ppn[15:0], fold} - `sh` at the TOP, so
+    // every accessor below keeps the bit it had.
+    localparam int XL_W = 26;
     function automatic [XL_W-1:0] xlate(input [23:0] va, input rw);
         logic [3:0]      r;
         logic [RT_W-1:0] e;
         logic [1:0]      cls;
-        logic            wr, fs, fold;
+        logic            wr, fs, fold, sh;
         logic [7:0]      bank;
+        logic [7:0]      pg;      // the page in the physical bank
+        logic            gs_side; // the pair side the access lands on
+        // Which pair: $00/$01 or the Mega II's $E0/$E1.  BIT 7 of the bank,
+        // not bit 1 - $E0 is 1110_0000 and its bit 1 is zero, the same as
+        // bank $00's, so a guard written on bit 1 never fires at all.  The
+        // GS sweep caught exactly that: $E0 writes claiming to shadow.
+        logic            gs_mega;
         begin
+            gs_side = 1'b0;
+            gs_mega = va[23];
             r    = region(va[15:8]);
             e    = rw ? rt_r_q[r] : rt_w_q[r];
+            pg   = va[15:8];
             cls  = e[6:5];
             wr   = e[4];
             fold = e[1];
             fs   = e[0];
+            sh   = e[7];
+            // The fold is the region table's answer and is applied here; every
+            // bank class below that overrides the class must therefore restore
+            // the page as well as clearing the fold, or a bank with no language
+            // card in it inherits the fold of one that has.
+            if (fold) pg = {4'hC, va[11:8]};
             case (e[3:2])
                 BS_AUX:  bank = rwb_p1_q;
                 BS_ROM:  bank = 8'hFF;
@@ -752,12 +806,26 @@ module apple_mmu #(
             // $CFFF is the bus's in every state - it is the INTC8ROM latch's
             // clear strobe - a byte-level exception to its page's entry.
             if (va[15:0] == 16'hCFFF) begin
-                cls = CLS_BUS; wr = 1'b0; fs = 1'b0; fold = 1'b0;
+                cls = CLS_BUS; wr = 1'b0; fs = 1'b0; fold = 1'b0; sh = 1'b0;
             end
             // ---- the bank classes (docs/GS.md) ---------------------------
             // On the IIe only bank 0 exists and none of this is reached.  On
             // the GS the bank byte picks one of four treatments BEFORE the
             // region table's answer is used.
+            // A READ of $C071-$C07F is the ROM's on a IIgs (KEGS moremem.c:
+            // g_rom_fc_ff_ptr at $FF/$C0xx), where on a IIe it is the game
+            // port's strobe.  A WRITE there is still the bus's - two of them
+            // are the RamWorks bank register.
+            //
+            // THE ORDER BELOW IS LOAD-BEARING.  This runs before the bank
+            // classes, and they overwrite it exactly where they should: a
+            // bank with no I/O window at all ($02 and up) makes $C071
+            // ordinary RAM, and the I/O inhibit does the same to $00/$01.
+            // It survives only where an I/O window exists.
+            if (GS && rw && (va[15:4] == 12'hC07)) begin
+                r = R_IO; cls = CLS_ROM; wr = 1'b0; fs = 1'b1; fold = 1'b0;
+                sh = 1'b0; bank = 8'hFF; pg = va[15:8];
+            end
             if (GS) begin
                 if (gs_pair(va[23:16])) begin
                     // $00/$01 and $E0/$E1: the IIe switches apply, exactly as
@@ -765,39 +833,95 @@ module apple_mmu #(
                     // the pair.  An odd bank named directly IS the auxiliary
                     // memory, so it is itself, and the switches that would
                     // have redirected it do not.
-                    if (va[16] && cls == CLS_RAM) bank = {va[23:17], 1'b1};
-                    else if (cls == CLS_RAM || cls == CLS_LC)
-                        bank = {va[23:17], bank[0] | va[16]};
-                    // The Mega II banks' RAM is theirs; only $00/$01 carry
-                    // the language card and the I/O window, and SHADOW[6]
-                    // takes even those away.
-                    if (gs_flat && !va[17] && (r >= R_IO) && (r <= R_LCE)) begin
-                        cls = CLS_RAM; wr = !rw; fs = 1'b1; fold = 1'b0;
-                        bank = {va[23:17], va[16]};
+                    // THE SIDE THE ACCESS LANDS ON.  Taken from the table's
+                    // own bank-select, NOT from the bank it computed: on the
+                    // IIe BS_AUX means RamWorks bank k+1, and bit 0 of that
+                    // is only accidentally 1 when the bank register is zero.
+                    // A IIgs has no RamWorks - auxiliary memory IS bank $01
+                    // of the pair - so the side is the select itself, or the
+                    // address naming the odd bank directly.
+                    gs_side = va[16] || (e[3:2] == BS_AUX);
+                    if (va[16] && cls == CLS_RAM) begin
+                        bank = {va[23:17], 1'b1};
+                        // An odd bank named directly always LANDS in auxiliary
+                        // memory, so the auxiliary veto is the one that
+                        // applies - not the answer the table computed for
+                        // whichever side its own bsel happened to name.
+                        case (r)
+                            R_TXT:  sh = sh_txt1_a;
+                            R_TXT2: sh = sh_txt2_a;
+                            R_HGR:  sh = sh_hgr1_a;
+                            R_HGR2: sh = sh_hgr2_a;
+                            R_SHR:  sh = sh_shr_a;
+                            default: sh = 1'b0;
+                        endcase
+                        sh = sh & !rw;
+                    end else if (cls == CLS_RAM || cls == CLS_LC)
+                        bank = {va[23:17], gs_side};
+                    // The Mega II banks are the DESTINATION of a shadowed
+                    // write, never a source: a write there duplicates
+                    // nowhere.  (KEGS routes $E0/$E1 writes through its
+                    // shadow stub too, but only to keep its own video
+                    // change-tracking bitmap - not because the hardware
+                    // copies anything.)
+                    if (gs_mega) sh = 1'b0;
+                    // SHADOW[6] takes the I/O window and the language card
+                    // away from banks $00/$01 - and NOT from $E0/$E1, which
+                    // is why bit 17 is in the guard (KEGS fixup_shadow_iolc
+                    // loops k < 2).
+                    //
+                    // IT IS NOT PLAIN IDENTITY RAM, which is the trap.  The
+                    // two windows are SWAPPED: CPU $C000-$CFFF reads the
+                    // image's $D000 - language card bank 2 - and CPU
+                    // $D000-$DFFF reads the image's $C000 - bank 1, where the
+                    // fold has always put it.  Both $D000 images are
+                    // therefore visible at once, which is exactly what this
+                    // mode is for: sixteen more kilobytes with no I/O in the
+                    // way.  $E000-$FFFF is itself.
+                    //
+                    // ALTZP still steers, and only the two upper windows:
+                    // KEGS applies it after the $C0 fixup, so $C000-$CFFF
+                    // stays in the bank the address named while $D000-$FFFF
+                    // follows ALTZP out of bank $00.
+                    if (gs_flat && !gs_mega && (r >= R_IO) && (r <= R_LCE)) begin
+                        cls = CLS_RAM; wr = !rw; fs = 1'b1; sh = 1'b0;
+                        if (r == R_IO || r == R_CXL || r == R_C3 || r == R_C8) begin
+                            pg   = {4'hD, va[11:8]};
+                            fold = 1'b1;
+                            bank = {va[23:17], va[16]};
+                        end else begin
+                            pg   = (r == R_LCD) ? {4'hC, va[11:8]} : va[15:8];
+                            fold = (r == R_LCD);
+                            bank = {va[23:17], va[16] | (!va[16] && altzp)};
+                        end
                     end
+                    // A write that lands nowhere duplicates nowhere.
+                    sh = sh & wr;
                 end else if (gs_rom(va[23:16])) begin
                     // $FC-$FF (ROM 3) or $FE-$FF (ROM 01): the ROM, itself.
                     r = R_RAM; cls = CLS_ROM; wr = 1'b0; fs = 1'b1; fold = 1'b0;
-                    bank = va[23:16];
+                    sh = 1'b0; bank = va[23:16]; pg = va[15:8];
                 end else if (gs_void(va[23:16])) begin
                     // A bank with no RAM behind it.  Reads answer from one
                     // write-protected page, writes land nowhere - so the
                     // ROM's memory sizing finds the memory that exists and
                     // stops there.
                     r = R_RAM; cls = CLS_RAM; wr = 1'b0; fs = 1'b1; fold = 1'b0;
-                    bank = GS_VOID_BANK;
+                    sh = 1'b0; bank = GS_VOID_BANK; pg = va[15:8];
                 end else begin
                     // $02-$7F: ordinary RAM, its own bank, no switch on it.
+                    // Shadowing is banks $00/$01's alone; $C036 bit 4's
+                    // shadow-in-all-banks is not built (docs/GS.md, later).
                     r = R_RAM; cls = CLS_RAM; wr = !rw; fs = 1'b1; fold = 1'b0;
-                    bank = va[23:16];
+                    sh = 1'b0; bank = va[23:16]; pg = va[15:8];
                 end
             end else if (va[23:16] != 8'd0) begin
                 // The IIe build: banks 2 and up are RAM no switch touches.
                 r = R_RAM; cls = CLS_RAM; wr = !rw; fs = 1'b1; fold = 1'b0;
-                bank = va[23:16];
+                sh = 1'b0; bank = va[23:16]; pg = va[15:8];
             end
-            xlate = {cls, wr, fs, r, bank,
-                     fold ? {4'hC, va[11:8]} : va[15:8], fold};
+            if (!GS) sh = 1'b0;
+            xlate = {sh, cls, wr, fs, r, bank, pg, fold};
         end
     endfunction
 
@@ -807,8 +931,9 @@ module apple_mmu #(
     function automatic [3:0]  xl_reg (input [XL_W-1:0] x); xl_reg  = x[20:17]; endfunction
     function automatic [15:0] xl_ppn (input [XL_W-1:0] x); xl_ppn  = x[16:1];  endfunction
     function automatic        xl_fold(input [XL_W-1:0] x); xl_fold = x[0];     endfunction
+    function automatic        xl_sh  (input [XL_W-1:0] x); xl_sh   = x[25];    endfunction
 
-    wire [XL_W-1:0] q_x = xlate({8'd0, q_addr}, q_rw);
+    wire [XL_W-1:0] q_x = xlate(q_addr, q_rw);
     assign q_cls = xl_cls(q_x);
 
     // ---- the internalized ops' question, beside q_cls --------------------------
@@ -952,10 +1077,10 @@ module apple_mmu #(
     wire p_hi    = (p_addr[15:12] >= 4'hD);
     wire p_mid   = (store80 && p_text)           ? page2 :
                    (store80 && hires && p_hires) ? page2 : ramrd;
-    wire [XL_W-1:0] p_x = xlate({8'd0, p_addr}, 1'b1);
+    wire [XL_W-1:0] p_x = xlate(p_addr, 1'b1);
     assign p_cls  = xl_cls(p_x);
     assign p_aux  = (p_hi || p_zp) ? altzp : p_mid;
-    assign p_off  = (p_d && !lc_bank2) ? {4'hC, p_addr[11:0]} : p_addr;
+    assign p_off  = (p_d && !lc_bank2) ? {4'hC, p_addr[11:0]} : p_addr[15:0];
     assign p_ppn  = xl_ppn(p_x);
     assign p_reg  = xl_reg(p_x);
     assign p_fold = xl_fold(p_x);
@@ -970,11 +1095,12 @@ module apple_mmu #(
     wire d_mid_w   = (store80 && d_text_w)           ? page2 :
                      (store80 && hires && d_hires_w) ? page2 :
                      (d_rw ? ramrd : ramwrt);
-    wire [XL_W-1:0] d_x = xlate({8'd0, d_addr}, d_rw);
+    wire [XL_W-1:0] d_x = xlate(d_addr, d_rw);
     assign d_cls  = xl_cls(d_x);
     assign d_aux  = (d_hi_w || d_zp_w) ? altzp : d_mid_w;
-    assign d_off  = (d_d_w && !lc_bank2) ? {4'hC, d_addr[11:0]} : d_addr;
+    assign d_off  = (d_d_w && !lc_bank2) ? {4'hC, d_addr[11:0]} : d_addr[15:0];
     assign d_ppn  = xl_ppn(d_x);
+    assign d_sh   = xl_sh(d_x);
     assign d_reg  = xl_reg(d_x);
     assign d_fold = xl_fold(d_x);
 
@@ -1032,6 +1158,7 @@ module apple_mmu #(
 
     wire [XL_W-1:0] n_x   = xlate({8'd0, op_addr}, op_rw);
     wire [1:0] n_cls      = xl_cls(n_x);
+    wire       n_sh       = xl_sh(n_x);
     wire       n_wr_image = xl_wr(n_x);
     wire       n_aux      = in_hi ? altzp : aux_sel;
     assign     pf_ppn     = xl_ppn(n_x);
@@ -1052,6 +1179,7 @@ module apple_mmu #(
             cl_posted   <= 1'b0;
             cl_wdata    <= 8'd0;
             cl_ppn      <= 16'd0;
+            cl_sh       <= 1'b0;
         end else begin
             cl_valid <= op_present || pw_take;
             if (op_present) begin
@@ -1064,6 +1192,7 @@ module apple_mmu #(
                 cl_posted   <= 1'b0;
                 cl_wdata    <= op_wdata;
                 cl_ppn      <= pf_ppn;
+                cl_sh       <= n_sh;
             end else if (pw_take) begin
                 cl_cls      <= CLS_RAM;      // the front posts RAM class only
                 // The old triple, derived from the page the front stamped:
@@ -1079,7 +1208,12 @@ module apple_mmu #(
                 cl_wr_image <= 1'b1;
                 cl_posted   <= 1'b1;
                 cl_wdata    <= pw_data;
+                // A posted write was already classified at its retire and
+                // carries its page; its shadow is the front's to stamp when
+                // the fronts serve a IIgs (docs/GS.md, rung 6).  Nothing
+                // posts on the GS build yet.
                 cl_ppn      <= pw_ppn;
+                cl_sh       <= 1'b0;
             end
         end
     end

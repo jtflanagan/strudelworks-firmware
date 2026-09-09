@@ -260,8 +260,8 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         .pw_valid (1'b0), .pw_ppn (16'd0), .pw_off (8'd0), .pw_data (8'd0),
         .pw_ready (1'b0), .pw_take (),
         .sw_state (sw_state), .vid_sw (vid_sw), .rw_bank (),
-        .q_addr (16'd0), .q_divert (),
-        .p_addr (16'd0), .p_cls (), .p_aux (), .p_off (), .map_changed (),
+        .q_addr (24'd0), .q_divert (),
+        .p_addr (24'd0), .p_cls (), .p_aux (), .p_off (), .map_changed (),
         // the physical space (docs/PAGE_CACHE.md); no consumer here yet
         .cl_ppn (), .pf_ppn (), .p_ppn (), .p_reg (), .p_fold (), .p_fs (),
         .d_ppn (), .d_reg (), .d_fold (), .map_settling (), .rt_rd_flat (), .rwb_p1 ()

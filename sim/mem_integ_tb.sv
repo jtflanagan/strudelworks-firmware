@@ -158,8 +158,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .pw_valid (rl_pw_valid), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
         .pw_data (rl_pw_data), .pw_ready (pw_ready), .pw_take (pw_take),
         .sw_state (sw_state), .rw_bank (rw_bank),
-        .q_addr (nxt_addr), .q_divert (q_divert),
-        .p_addr (16'd0), .p_cls (), .p_aux (), .p_off (), .map_changed (),
+        .q_addr ({8'd0, nxt_addr}), .q_divert (q_divert),
+        .p_addr (24'd0), .p_cls (), .p_aux (), .p_off (), .map_changed (),
         .cl_ppn (cl_ppn), .pf_ppn (pf_ppn), .p_ppn (), .p_reg (), .p_fold (), .p_fs (),
         .d_ppn (), .d_reg (), .d_fold (), .map_settling (), .rt_rd_flat (), .rwb_p1 ()
     );

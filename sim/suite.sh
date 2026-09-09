@@ -58,6 +58,7 @@ declare -A B=(
   [no_slot_clock]="sim/run_no_slot_clock_tb.sh|^PASS: "
   [reg_map]="sim/run_reg_map_tb.sh|^PASS$"
   [mmu_xlate]="sim/run_mmu_xlate_tb.sh +quick|^PASS$"
+  [mmu_xlate_gs]="sim/run_mmu_xlate_gs_tb.sh +quick|^PASS$"
   [ports]="python3 tools/check_ports.py|^PASS: 0 unknown"
   [report]="sim/run_report_tb.sh|^REPORT OK"
   [ssi263]="sim/run_ssi263_tb.sh|^PASS$"
@@ -74,9 +75,9 @@ declare -A B=(
   [page_cache]="sim/run_page_cache_tb.sh|^PASS$"
   [fb_sim_vl]="sim/run_fb_sim_vl.sh|^PASS$"
 )
-QUICK="lint microcode boot_hold bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest"
+QUICK="lint microcode boot_hold bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
-GS="microcode816 cpu816_cycles cpu816_trace"
+GS="microcode816 cpu816_cycles cpu816_trace mmu_xlate_gs"
 BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"
 [ "$iverilog" = 1 ] && BATTERY="$BATTERY accel_iv"
 
