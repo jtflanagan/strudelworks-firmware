@@ -83,6 +83,16 @@ module gs_io (
     output wire        u_claim,
     output logic [7:0] rd_byte,
 
+    // Host -> card messages as ft601_msg_rx decodes them, for the battery
+    // RAM the host ships down to gs_clock (docs/GS.md, "The battery RAM the
+    // host ships").  Nothing else in here wants them yet.
+    input  wire        msg_valid,
+    input  wire [7:0]  msg_type,
+    input  wire [7:0]  msg_len,
+    input  wire [31:0] pay_data,
+    input  wire        pay_valid,
+    output wire        bram_ok,
+
     // One pulse per video frame, in the machine's own time (rtl/vbeam.sv):
     // the interrupt controller's only clock.
     input  wire        frame_tick,
@@ -233,6 +243,9 @@ module gs_io (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
         .rd_byte (clk_rd), .seed_time (seed_time), .border (border),
+        // The host's battery RAM image, straight through (docs/GS.md).
+        .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
+        .pay_data (pay_data), .pay_valid (pay_valid), .bram_ok (bram_ok),
         .cnt_strobes (clk_cnt_strobes), .cnt_bad (clk_cnt_bad)
     );
 

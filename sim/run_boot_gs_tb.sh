@@ -25,6 +25,10 @@
 #     --lctrace        name every $C08x touch with the state it left
 #     --watch=A:B      print every CPU cycle between instructions A and B
 #     --engtrace       name every page-cache fill and victim in the ROM's pages
+#     --bram=SLOTS     ship a battery RAM naming these slots "Your Card"
+#                      (tools/gs_bram.py), e.g. --bram=6,7 or --bram=none.
+#                      OFF by default: KEGS boots with an all-zero battery RAM,
+#                      so shipping one parts the two machines at once
 #     --iverilog       use iverilog (Verilator is the default here)
 set -euo pipefail
 
@@ -32,7 +36,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/boot_work"
 mkdir -p "$work"
 
-instrs=20000 clks=400000000 mode=2 target=0 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0
+instrs=20000 clks=400000000 mode=2 target=0 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram=
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport.bin"
 hdv=""
@@ -53,6 +57,7 @@ for a in "$@"; do
         --disktrace) disktrace=1 ;;
         --lctrace) lctrace=1 ;;
         --engtrace) engtrace=1 ;;
+        --bram=*) bram="${a#*=}" ;;
         --watch=*) wfrom="${a#*=}"; wto="${wfrom#*:}"; wfrom="${wfrom%%:*}" ;;
         --iverilog) vl=0 ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
@@ -96,6 +101,13 @@ if [ -n "$hdv" ]; then
 else
     : > "$work/hdv_$tag.hex"
 fi
+has_bram=0
+if [ -n "$bram" ] && [ "$bram" != none ]; then
+    has_bram=1
+    python3 "$root/tools/gs_bram.py" --slots "$bram" --hex "$work/gsbram_$tag.hex"
+else
+    : > "$work/gsbram_$tag.hex"
+fi
 [ -f "$hdrom" ] || { echo "no slot ROM at $hdrom" >&2; exit 2; }
 xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
 
@@ -132,6 +144,7 @@ if [ "$vl" = 1 ]; then
         -GLC_TRACE="$lctrace" \
         -GWATCH_FROM="$wfrom" -GWATCH_TO="$wto" \
         -GENG_TRACE="$engtrace" \
+        -GBRAMF="\"$work/gsbram_$tag.hex\"" -GHAS_BRAM="$has_bram" \
         -Mdir "$obj" "${srcs[@]}" \
         -o boot_gs_tb > "$work/verilator_gs_$tag.log" 2>&1 || {
             echo "verilator build failed:" >&2; tail -40 "$work/verilator_gs_$tag.log" >&2; exit 1; }

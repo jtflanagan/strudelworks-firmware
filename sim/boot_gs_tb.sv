@@ -91,7 +91,16 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     parameter integer WATCH_TO   = 0,
                     // The page-cache engine's fills and victims, for the
                     // ROM's pages; see "the engine's history" below.
-                    parameter integer ENG_TRACE = 0);
+                    parameter integer ENG_TRACE = 0,
+                    // THE BATTERY RAM THE HOST SHIPS (docs/GS.md).  Off by
+                    // default and it must stay that way for the reference
+                    // comparison: KEGS boots with an all-zero battery RAM
+                    // when its config names no `bram` lines, so the ROM finds
+                    // an invalid checksum on both machines and initialises it
+                    // the same way.  Ship one and the two part company at
+                    // once - correctly, and not at the floor.
+                    parameter BRAMF = "gsbram.hex",
+                    parameter integer HAS_BRAM = 0);
 
     localparam integer T_PRESENT = 2, T_EMIT = 2, T_DIN = 44, T_CYCEN = 45;
     localparam integer PHI0_LOW = 98 - PHI0_HIGH, CYCLE = 98;
@@ -467,6 +476,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // 1904) so its trace is the same every run; the card must believe the
         // same seconds or the two disagree about a byte the ROM checksums.
         .seed_time (SEED_TIME), .border (),
+        // The battery RAM the host ships, sent before RES' is released.
+        .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
+        .pay_data (pay_data), .pay_valid (pay_valid), .bram_ok (bram_landed),
         .frame_tick (frame_tick),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
@@ -1290,7 +1302,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             for (r = 0; r < 16; r = r + 1) begin
                 line = $sformatf("      %02X:", r * 16);
                 for (k = 0; k < 16; k = k + 1)
-                    line = $sformatf("%s %02X", line, u_gsio.u_clock.bram[r*16 + k]);
+                    line = $sformatf("%s %02X", line, card_bram(8'(r*16 + k)));
                 $display("%0s", line);
             end
         end
@@ -1366,6 +1378,37 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             while (rom_busy) @(negedge clk);
         end
     endtask
+
+    // The battery RAM the host ships, as one GS_BRAM: 64 words, four bytes a
+    // word, low byte first, taken all or nothing (rtl/gs_clock.sv).
+    reg [7:0] bram_img [0:255];
+    task send_bram;
+        integer k;
+        begin
+            @(negedge clk);
+            msg_valid <= 1'b1; msg_type <= 8'h2E; msg_len <= 8'd64;
+            @(negedge clk);
+            msg_valid <= 1'b0; pay_valid <= 1'b1;
+            for (k = 0; k < 64; k = k + 1) begin
+                pay_data <= {bram_img[4*k + 3], bram_img[4*k + 2],
+                             bram_img[4*k + 1], bram_img[4*k]};
+                @(negedge clk);
+            end
+            pay_valid <= 1'b0;
+            @(negedge clk);
+        end
+    endtask
+    // The card's battery RAM, out of its four banks (rtl/gs_clock.sv).
+    function automatic [7:0] card_bram(input [7:0] i);
+        begin
+            case (i[1:0])
+                2'd0: card_bram = u_gsio.u_clock.bram0[i[7:2]];
+                2'd1: card_bram = u_gsio.u_clock.bram1[i[7:2]];
+                2'd2: card_bram = u_gsio.u_clock.bram2[i[7:2]];
+                default: card_bram = u_gsio.u_clock.bram3[i[7:2]];
+            endcase
+        end
+    endfunction
 
     // ---- reading the card's memory back (boot_tb's, verbatim) ---------------------
     // Hash the physical page to its set, scan the ways, take the one that
@@ -1469,6 +1512,23 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         if (rom_overruns != 0)
             fail($sformatf("%0d ROM chunks were dropped: the load outran the seam", rom_overruns));
 
+        // The battery RAM, before RES' is released, so the ROM's first read
+        // of it is the host's image and not the zeros it comes up with.
+        if (HAS_BRAM != 0) begin : ship_bram
+            integer k, bad;
+            $readmemh(BRAMF, bram_img);
+            send_bram();
+            if (!bram_landed) fail("the battery RAM did not land");
+            else begin
+                bad = 0;
+                for (k = 0; k < 256; k = k + 1)
+                    if (card_bram(8'(k)) !== bram_img[k]) bad = bad + 1;
+                if (bad != 0)
+                    fail($sformatf("the battery RAM landed wrong: %0d of 256 bytes", bad));
+                else ok("the host's battery RAM landed whole in the card's clock chip");
+            end
+        end
+
         // The slot ROM the card answers $C700-$C7FF from, as the host sends
         // it.  The GS ROM has no slot-7 firmware of its own - bank $FF's
         // $C700 is 256 zero bytes - so this IS what the scan finds.
@@ -1508,6 +1568,20 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         dump_lc_census();
         dump_clash();
         dump_iwm();
+        // A shipped image the ROM ACCEPTS is one it does not rewrite: it
+        // checksums the battery RAM at startup and writes its own defaults
+        // over an image it does not believe (docs/GS.md, "The battery RAM the
+        // host ships").  So this is the whole point of shipping one.
+        if (HAS_BRAM != 0) begin : kept_bram
+            integer k, bad;
+            bad = 0;
+            for (k = 0; k < 256; k = k + 1)
+                if (card_bram(8'(k)) !== bram_img[k]) bad = bad + 1;
+            if (bad != 0)
+                fail($sformatf("the ROM rewrote %0d of the battery RAM's 256 bytes: it did not believe the image",
+                               bad));
+            else ok("the ROM kept the host's battery RAM: it checksummed and believed it");
+        end
         dump_text();
 
         $display("    the disk: %0d blocks read, %0d written, %0d statuses, %0d execs",

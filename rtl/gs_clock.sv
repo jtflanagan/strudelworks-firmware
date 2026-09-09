@@ -44,7 +44,9 @@
 // reason: `rd_byte` is combinational on the registered op and must be stable
 // across the clocks the dispatcher takes to serve it.
 //////////////////////////////////////////////////////////////////////////////////
-module gs_clock (
+module gs_clock #(
+    parameter [7:0] T_GS_BRAM = 8'h2E
+) (
     input  wire        clk,
     input  wire        rst,
     input  wire        res_sync,       // synchronised RES', ACTIVE LOW
@@ -63,6 +65,19 @@ module gs_clock (
 
     // The border colour, $C034[3:0], for the host to paint.
     output wire [3:0]  border,
+
+    // THE BATTERY RAM THE HOST SHIPS (docs/GS.md, "The battery RAM the host
+    // ships").  Host -> card messages as ft601_msg_rx decodes them: a
+    // GS_BRAM carries the whole 256 bytes as 64 words, four bytes a word,
+    // low byte first, and is taken ALL OR NOTHING - a partial image is worse
+    // than none, because the ROM would checksum it, find it wrong and write
+    // its own defaults over the slot settings the host was trying to ship.
+    input  wire        msg_valid,
+    input  wire [7:0]  msg_type,
+    input  wire [7:0]  msg_len,
+    input  wire [31:0] pay_data,
+    input  wire        pay_valid,
+    output logic       bram_ok,        // an image has landed whole
 
     // Diagnostics.
     output logic [7:0] cnt_strobes,
@@ -83,9 +98,77 @@ module gs_clock (
     // than cleared in the reset arm because a 256-entry clear in one clock
     // makes Vivado infer flops instead of LUTRAM; an initial block becomes
     // the INIT values, which is what a real battery RAM's contents are.
-    (* ram_style = "distributed" *) logic [7:0] bram [0:255];
+    //
+    // FOUR BYTE-WIDE BANKS, chosen by the index's low two bits.  The host's
+    // image arrives four bytes at a time - one message word a clock, and the
+    // link will not wait - and a byte-wide array cannot take four writes in a
+    // clock; four banks can, one each.  The machine still sees one 256-byte
+    // battery RAM: its index picks the bank with its low two bits and the
+    // entry with the rest.
+    (* ram_style = "distributed" *) logic [7:0] bram0 [0:63];
+    (* ram_style = "distributed" *) logic [7:0] bram1 [0:63];
+    (* ram_style = "distributed" *) logic [7:0] bram2 [0:63];
+    (* ram_style = "distributed" *) logic [7:0] bram3 [0:63];
     integer bi;
-    initial for (bi = 0; bi < 256; bi = bi + 1) bram[bi] = 8'd0;
+    initial for (bi = 0; bi < 64; bi = bi + 1) begin
+        bram0[bi] = 8'd0; bram1[bi] = 8'd0; bram2[bi] = 8'd0; bram3[bi] = 8'd0;
+    end
+    wire [5:0] bram_e = reg1[7:2];
+    wire [7:0] bram_q = (reg1[1:0] == 2'd0) ? bram0[bram_e] :
+                        (reg1[1:0] == 2'd1) ? bram1[bram_e] :
+                        (reg1[1:0] == 2'd2) ? bram2[bram_e] : bram3[bram_e];
+
+    // ---- the host's image, as ft601_msg_rx decodes it ----------------------
+    // vidhd_card's shape: a header names the type and the length, the words
+    // follow, and the message counts only if it is the WHOLE image.
+    logic [7:0] rx_type, rx_idx, rx_left;
+    wire rx_word   = pay_valid && (rx_left != 8'd0);
+    wire rx_last   = rx_word && (rx_left == 8'd1);
+    wire hdr_bram  = msg_valid && (msg_type == T_GS_BRAM);
+    wire word_bram = rx_word && (rx_type == T_GS_BRAM);
+
+    // One write port a bank.  The host's image wins a clock it shares with
+    // the machine's byte, which cannot happen in practice - the image lands
+    // before RES' is released - and is stated rather than left to chance.
+    always_ff @(posedge clk) begin
+        if (word_bram) begin
+            bram0[rx_idx[5:0]] <= pay_data[7:0];
+            bram1[rx_idx[5:0]] <= pay_data[15:8];
+            bram2[rx_idx[5:0]] <= pay_data[23:16];
+            bram3[rx_idx[5:0]] <= pay_data[31:24];
+        end else if (mach_wr) begin
+            case (reg1[1:0])
+                2'd0: bram0[bram_e] <= c033;
+                2'd1: bram1[bram_e] <= c033;
+                2'd2: bram2[bram_e] <= c033;
+                default: bram3[bram_e] <= c033;
+            endcase
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            rx_type <= 8'd0;
+            rx_idx  <= 8'd0;
+            rx_left <= 8'd0;
+            bram_ok <= 1'b0;
+        end else begin
+            if (msg_valid) begin
+                rx_type <= msg_type;
+                rx_idx  <= 8'd0;
+                rx_left <= msg_len;
+                // A battery RAM message is only one if it is the whole 256
+                // bytes: a partial image is worse than none, because the ROM
+                // would checksum it, find it wrong, and write its own
+                // defaults over the slot settings this was shipping.
+                if (hdr_bram && msg_len != 8'd64) rx_type <= 8'd0;
+            end else if (rx_word) begin
+                rx_idx  <= rx_idx + 8'd1;
+                rx_left <= rx_left - 8'd1;
+                if (word_bram && rx_last) bram_ok <= 1'b1;
+            end
+        end
+    end
 
     assign border = c034[3:0];
 
@@ -108,6 +191,12 @@ module gs_clock (
     wire wr_c034 = act && !op_rw && (op_lo == 8'h34);
     wire strobe  = wr_c034 && op_wdata[7];
     wire xfer_rd = op_wdata[6];
+    // The machine's own byte write into the battery RAM: the transfer strobe
+    // of a BRAM1 whose direction agrees with the command's.  Derived here
+    // rather than inside the state machine because the banks below have one
+    // write port each and the host's image writes them too.
+    wire mach_wr = !rst && res_sync && strobe && (mode == M_BRAM1) &&
+                   !xfer_rd && !clk_read;
 
     always_ff @(posedge clk) begin
         if (rst || !res_sync) begin
@@ -181,9 +270,8 @@ module gs_clock (
                         // The transfer itself.  The direction the command
                         // announced and the direction of this strobe must
                         // agree; KEGS halts when they do not, so this counts.
-                        if (xfer_rd && clk_read)        c033 <= bram[reg1];
-                        else if (!xfer_rd && !clk_read) bram[reg1] <= c033;
-                        else                            cnt_bad <= cnt_bad + 8'd1;
+                        if (xfer_rd && clk_read)        c033 <= bram_q;
+                        else if (!(!xfer_rd && !clk_read)) cnt_bad <= cnt_bad + 8'd1;
                         mode <= M_IDLE;
                     end
 

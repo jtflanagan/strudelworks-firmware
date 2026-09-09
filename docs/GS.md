@@ -248,7 +248,7 @@ parity check on every rung that touches shared RTL.
 | 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro, the map registers and the clock done, 41,877 -> 67,398 events |
 | 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face) and the host side: the GS map in the mirror, `machine = iigs`, `gs_rom` | the ROM runs past the chipset with no spin; the host's map agrees with the card's | **DONE 2026-09-09** - see below |
 | 3d | `hd_card` in `boot_gs_tb` with the bench playing host, so the scan has something to find | the ROM finds slot 7, runs its firmware and reads blocks | **DONE 2026-09-09** - and the boot block runs; see below |
-| 3e | Why the third block read asks for $0203 instead of $0003 (the high byte of the block number); then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | **THE IMAGE BOOTS 2026-09-09.** The $0203 was an internal cycle (VDA and VPA both low) being taken as an access - as a WRITE (`INC $46` put the old byte in $47) and as a STROBE ($C083 after $C082 undid the language card). The eviction pressure that uncovered turned up a real page-cache bug: the shadow duplicate reached `cl_valid` with no entrant in `e_any`, so no P0 ran for it and it evicted pages under another page's tag - `cnt_ppn_clash` had been counting it since the day it was written. Then the IWM's handshake had to stop saying "a write is in progress" for ever. ProDOS 2.4.3 now boots off the slot-7 SmartPort to its BYE selector. STILL TO DO: ADB_KEY, `mock_card` speaking a GS stream, the battery RAM down to `gs_clock`, the mirror replayed |
+| 3e | Why the third block read asks for $0203 instead of $0003 (the high byte of the block number); then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | **THE IMAGE BOOTS 2026-09-09.** The $0203 was an internal cycle (VDA and VPA both low) being taken as an access - as a WRITE (`INC $46` put the old byte in $47) and as a STROBE ($C083 after $C082 undid the language card). The eviction pressure that uncovered turned up a real page-cache bug: the shadow duplicate reached `cl_valid` with no entrant in `e_any`, so no P0 ran for it and it evicted pages under another page's tag - `cnt_ppn_clash` had been counting it since the day it was written. Then the IWM's handshake had to stop saying "a write is in progress" for ever. ProDOS 2.4.3 now boots off the slot-7 SmartPort to its BYE selector. The battery RAM now ships too (GS_BRAM `0x2E`), and the ROM believes it: `$C02D` comes out naming the host's slots. STILL TO DO: ADB_KEY, `mock_card` speaking a GS stream, the mirror replayed |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
 | 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | |
@@ -877,6 +877,49 @@ card.  55 blocks read, 54 checked intact where the machine looks for them, the
 ROM still the image in all 256 KB, and no op reaching the cache without its
 own directory read.  `sim/boot_gs_tb.sv` reads the text page out of the card's
 memory the way the host's `screen` does, so the machine says this itself.
+
+## Rung 3e: the battery RAM ships (2026-09-09)
+
+The host built a correct image at 6ba6eb2 and had no way to hand it over.
+Now it does: **GS_BRAM (`0x2E`)**, host→card, the whole 256 bytes as 64 words,
+taken ALL OR NOTHING by `rtl/gs_clock.sv` - a partial image is worse than
+none, because the ROM checksums it, finds it wrong, and writes its own
+defaults over the slot settings it was shipping.
+
+The battery RAM became FOUR BYTE-WIDE BANKS chosen by the index's low two
+bits.  A message word carries four bytes, one a clock, and the link will not
+wait; a byte-wide array cannot take four writes in a clock and four banks can,
+one each.  The machine still sees one 256-byte battery RAM - its index picks
+the bank with its low two bits and the entry with the rest.
+
+The host sends one at start when `machine = iigs`, naming every slot it has
+put a card in - the floppy, the VidHD, the mouse, the Uthernet II, the
+printer, the hard disk and the Mockingboard - because the host is the only
+thing that knows which those are.  `machine` had never been plumbed past the
+config file; it is now.
+
+**IT WORKS, and the ROM says so.**  Shipping an image that names slots 6 and 7:
+
+    ok: the host's battery RAM landed whole in the card's clock chip
+      $C02D SLOTROMSEL = $c0  (a SET bit gives that page to the slot)
+        slot 6: the SLOT's card
+        slot 7: the SLOT's card
+    ok: the ROM kept the host's battery RAM: it checksummed and believed it
+
+`$C02D` came out `$C0` where the ROM's own defaults give `$80` - slot 7 alone.
+The second check is the one that matters: an image the ROM does not believe is
+silently replaced, so "it did not rewrite it" is the whole proof.
+
+**OFF BY DEFAULT, and it has to be.**  KEGS boots with an all-zero battery RAM
+when its config names no `bram` lines, so the ROM finds an invalid checksum on
+both machines and initialises it the same way.  Ship one and the two part
+company at once - correctly, and not at the floor.  `--bram=6,7` opts in;
+`sim/suite.sh gs` does not, and the floor is unmoved at 67,398.
+
+`tools/gs_bram.py` builds the bench's image and is DELIBERATELY a second
+implementation of the host's `src/gs_bram.cpp`, written from this sheet rather
+than from that code.  Both agree with the machine: `--slots 7` reproduces the
+ROM's own image byte for byte, checksum `$2D36` / `$879C` included.
 
 The landing check had to learn the language card to say it: ProDOS DMAs blocks
 to `$DC00`, and `$D000-$DFFF` folds onto physical `$Cx` in bank 1 with `altzp`

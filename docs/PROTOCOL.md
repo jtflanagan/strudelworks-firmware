@@ -80,7 +80,8 @@ host reads; the receiver carries parser state across all of them.
 | `0x2A` | U2_RX | Host→card. Bytes to append at a socket's RX write pointer, the W5100's header in front. `free` = `{bytes[11:0], 0, 0, sock[1:0]}`; payload the bytes packed four a word. The card moves `Sn_RX_WR` and adds to `Sn_RX_RSR` at the last word. |
 | `0x2B` | U2_STAT | Host→card. `free` = `{sr[7:0], 0, sock[1:0]}`: the socket's `Sn_SR`, at once; payload none, or two words `[DIPR][{MSSR, DPORT}]` (the socket's register words 3 and 4) for an accepted LISTEN's peer. |
 | `0x2C` | AUDIO_FRAMES | Card→host, **unsolicited once asked** (AUDIO_CTRL on). The sound on the card (AUDIO.md): n samples at the play rate, three words each - `{ay0, spk}`, `{ay2, ay1}`, `{seq, ay3}` - the speaker's and each AY chip's box average over one sample window (0..32767) and a running sample count. `free` = `{drops[7:0], n[7:0]}`, n = 32; `len` = 3n. A gap in `seq` is that many samples the card's FIFO dropped. |
-| `0x2E`–`0xFF` | — | Application, unassigned. |
+| `0x2E` | GS_BRAM | Host→card. Payload 64 words: the IIgs's 256-byte battery RAM, four bytes a word, low byte first. Taken ALL OR NOTHING by `rtl/gs_clock.sv` - a partial image is worse than none, because the ROM checksums it, finds it wrong, and writes its own defaults over the slot settings it was shipping. The host sends one at start when `machine = iigs`, naming every slot it has put an emulated card in. See GS.md. |
+| `0x2F`–`0xFF` | — | Application, unassigned. |
 
 ### The event record (wire format v6, 2026-09-08)
 
