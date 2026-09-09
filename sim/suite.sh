@@ -9,6 +9,7 @@
 #   sim/suite.sh cpu        cpu_tb, cpu_cycles, cpu_irq, cpu_predict                 (~2 min)
 #   sim/suite.sh battery    quick + accel_vl + mem_integ + page_cache + fb_sim_vl    (~8 min)
 #   sim/suite.sh boot       run_boot_tb.sh --verilator per image, in parallel        (~4 min)
+#   sim/suite.sh gs         the 65816: microcode check, cycle table, SingleStepTests sample (~3 min)
 #   sim/suite.sh all        battery + cpu + boot
 #
 #   --iverilog      add the iverilog accel battery (run_accel_tb.sh, ~2 min) - the
@@ -34,6 +35,9 @@ cd "$root"
 declare -A B=(
   [lint]="sim/lint.sh|^(lint clean|all OK)|LINTEXIT"
   [microcode]="python3 sim/gen_microcode.py --check|microcode up to date"
+  [microcode816]="python3 sim/gen_microcode816.py --check|microcode up to date"
+  [cpu816_cycles]="python3 sim/gen_cycle_table816.py|every observed cycle count is reachable"
+  [cpu816_trace]="sim/run_cpu816_trace.sh --limit 400 --flags|^PASS$"
   [boot_hold]="sim/run_boot_hold_tb.sh|^PASS$"
   [bus_event_filter]="sim/run_bus_event_filter_tb.sh|^PASS$"
   [bus_snoop]="sim/run_bus_snoop_tb.sh|^PASS$"
@@ -72,6 +76,7 @@ declare -A B=(
 )
 QUICK="lint microcode boot_hold bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
+GS="microcode816 cpu816_cycles cpu816_trace"
 BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"
 [ "$iverilog" = 1 ] && BATTERY="$BATTERY accel_iv"
 
@@ -130,10 +135,11 @@ run_boot() {
 case "$suite" in
     quick)   for b in $QUICK; do run_bench "$b"; done ;;
     cpu)     for b in $CPU; do run_bench "$b"; done ;;
+    gs)      for b in $GS; do run_bench "$b"; done ;;
     battery) for b in $BATTERY; do run_bench "$b"; done ;;
     boot)    run_boot ;;
     all)     for b in $BATTERY; do run_bench "$b"; done; for b in cpu_tb cpu_predict; do run_bench "$b"; done; run_boot ;;
-    *)       echo "unknown suite '$suite': quick|cpu|battery|boot|all" >&2; exit 1 ;;
+    *)       echo "unknown suite '$suite': quick|cpu|gs|battery|boot|all" >&2; exit 1 ;;
 esac
 total=$((pass+fail))
 if [ "$fail" = 0 ]; then echo "SUITE $suite: $pass/$total PASS"; exit 0

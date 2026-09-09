@@ -102,7 +102,7 @@ def cond_value(cond, st):
         COND["EPAGE"]:  (e == 1) and st["page"],
         COND["EMU"]:    e == 1,
         COND["NOTEMU"]: e == 0,
-        COND["MVMORE"]: st["mvmore"],
+        COND["MVDONE"]: st["mvdone"],
     }[cond]
 
 
@@ -143,7 +143,7 @@ def predict(slots):
                             for dec in (0, 1):
                                 st = dict(e=e, m=m, x=x, dl=dl, carry=carry,
                                           taken=taken, dec=dec, page=carry,
-                                          mvmore=False)
+                                          mvdone=False)
                                 got = walk(slots, st)
                                 if got is not None:
                                     out[(e, m, x, dl)].add(got)

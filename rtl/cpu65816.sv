@@ -4,14 +4,13 @@
 //////////////////////////////////////////////////////////////////////////////////
 // cpu65816 - a microcoded 65C816, built around the bus cycle.
 //
-// STATUS: EXPLORATORY.  This core exists to answer three questions that had no
-// answer - what a cycle-accurate 65816 costs in area on this part, how fast it
-// runs and what limits it, and what can verify one - and it is not on the
-// project's development plan.  Its cycle STRUCTURE is checked against ground
-// truth for all 252 fixed-length opcodes (sim/gen_cycle_table816.py).  Its ALU
-// semantics are a first cut and are NOT verified: this is a verified skeleton
-// with unverified flesh, enough to trust the area and speed numbers and nowhere
-// near enough to run code.  See docs/UCODE816.md.
+// STATUS: VERIFIED AGAINST SingleStepTests/65816 (2026-09-08): 981,610 cases,
+// native and emulated, every cycle's address, direction, data and VDA/VPA/VPB,
+// the count, and the state after - sim/run_cpu816_trace.sh.  The cycle
+// STRUCTURE is also held to the suite's counts by sim/gen_cycle_table816.py.
+// Not covered by the suite: reset, IRQ, NMI, ABORT entry and MLB.  The GS
+// programme's core (docs/GS.md rung 1); the exploration that produced it is
+// docs/UCODE816.md.
 //
 // THE INVARIANT.  Every microinstruction is exactly one bus cycle, and every bus
 // cycle is one microinstruction.  An instruction's cycle count is the number of
@@ -75,9 +74,9 @@
 // just after the edge that begins their cycle and are stable across it; din is
 // sampled by the edge that ends it.
 //
-// WHAT IS NOT IMPLEMENTED: VDA/VPA/VPB/MLB, ABORT, and the emulation-mode stack
-// wrapping corners.  The suite records all four signals, so a testbench that
-// checks addresses will want them.  See docs/UCODE816.md.
+// WHAT IS NOT IMPLEMENTED: MLB and ABORT.  VDA/VPA/VPB are outputs, from a
+// microcode field and the vector address sources; sim/run_cpu816_trace.sh
+// checks them against the suite.  See docs/UCODE816.md.
 //////////////////////////////////////////////////////////////////////////////////
 
 module cpu65816 #(
@@ -99,6 +98,9 @@ module cpu65816 #(
     input  wire         nmi_n,      // edge sensitive, active low
 
     output wire         sync,       // high during an opcode fetch
+    output wire         vda,        // valid data address
+    output wire         vpa,        // valid program address (both on a fetch)
+    output wire         vpb,        // vector pull, active high here
     output wire         emu,        // E flag: 1 = 6502 emulation mode
     output wire         halted      // STP executed; only rst clears it
 );
@@ -199,14 +201,16 @@ module cpu65816 #(
     wire [1:0] f_ld_adl = uc[UCP_LD_ADL   +: 2];
     wire [1:0] f_ld_adh = uc[UCP_LD_ADH   +: 2];
     wire [2:0] f_ld_bk  = uc[UCP_LD_BK    +: 3];
-    wire [2:0] f_ld_pc  = uc[UCP_LD_PC    +: 3];
-    wire [1:0] f_ld_s   = uc[UCP_LD_S     +: 2];
+    wire [3:0] f_ld_pc  = uc[UCP_LD_PC    +: 4];
+    wire [2:0] f_ld_s   = uc[UCP_LD_S     +: 3];
     wire [4:0] f_dout   = uc[UCP_DOUT     +: 5];
     wire [4:0] f_alu_op = uc[UCP_ALU_OP   +: 5];
     wire [2:0] f_alu_a  = uc[UCP_ALU_A    +: 3];
     wire [4:0] f_wb     = uc[UCP_WB       +: 5];
     wire [1:0] f_fl     = uc[UCP_FL       +: 2];
     wire       f_seti   = uc[UCP_SETI];
+    wire       f_ew     = uc[UCP_EW];
+    wire [1:0] f_bus    = uc[UCP_BUS      +: 2];
     wire [3:0] f_cond   = uc[UCP_COND     +: 4];
     wire [3:0] f_alt    = uc[UCP_ALT      +: 4];
 
@@ -225,17 +229,22 @@ module cpu65816 #(
 
     wire [7:0] pcl = pc[7:0], pch = pc[15:8];
 
-    // In emulation mode the stack lives in page one and the index registers are
-    // eight bits.  Forcing that here rather than at every use keeps the
-    // emulation rules in one place.
-    wire [15:0] s_eff = f_e ? {8'h01, s[7:0]} : s;
+    // In emulation mode the index registers are eight bits.  The stack pointer
+    // is NOT forced here: its page-one confinement is a property of the
+    // 6502-era stack steps (LD_S INC/DEC), and the 65816-only instructions
+    // really do run it through $00FF mid-instruction - so the address bus and
+    // the sr,S adder take S as it is.  It is always $01xx at an instruction's
+    // start in emulation mode, which the steps and NORM guarantee.
+    wire [15:0] s_eff = s;
     wire [15:0] x_eff = f_x ? {8'h00, x[7:0]} : x;
     wire [15:0] y_eff = f_x ? {8'h00, y[7:0]} : y;
 
     // B is a property of the PUSH, not a register.  In emulation mode bit 4 is
-    // the break flag; in native mode it is X.
+    // the break flag - set for everything a program does (BRK, COP, PHP) and
+    // clear only for a hardware interrupt, which is the one case where ir is
+    // $00 without int_brk; in native mode it is X.
     wire [7:0] p_bits = {f_n, f_v, f_m, f_x, f_d, f_i, f_z, f_c};
-    wire [7:0] p_push = f_e ? {f_n, f_v, 1'b1, int_brk | (ir == 8'h00),
+    wire [7:0] p_push = f_e ? {f_n, f_v, 1'b1, int_brk | (ir != 8'h00),
                                f_d, f_i, f_z, f_c}
                             : p_bits;
 
@@ -251,7 +260,7 @@ module cpu65816 #(
             UC_LO_A_SL:   lo_a = s_eff[7:0];
             UC_LO_A_MDL:  lo_a = md[7:0];
             UC_LO_A_ZERO: lo_a = 8'h00;
-            UC_LO_A_MDH:  lo_a = md[15:8];
+            UC_LO_A_DIN:  lo_a = din;
             UC_LO_A_ADH:  lo_a = adh;
             UC_LO_A_DL:   lo_a = d[7:0];
             default:      lo_a = adl;
@@ -261,10 +270,11 @@ module cpu65816 #(
     // The interrupt vector low byte.  Native and emulation mode have separate
     // vectors for every source, which is the one place the 65816's interrupt
     // handling is genuinely different rather than just wider.
-    wire [7:0] vec_lo = in_rst  ? 8'hFC :
-                        int_nmi ? (f_e ? 8'hFA : 8'hEA) :
-                        int_brk ? (f_e ? 8'hFE : 8'hE6) :
-                                  (f_e ? 8'hFE : 8'hEE);
+    wire [7:0] vec_lo = in_rst          ? 8'hFC :
+                        int_nmi         ? (f_e ? 8'hFA : 8'hEA) :
+                        (ir == 8'h02)   ? (f_e ? 8'hF4 : 8'hE4) :   // COP
+                        int_brk         ? (f_e ? 8'hFE : 8'hE6) :
+                                          (f_e ? 8'hFE : 8'hEE);
 
     always_comb begin
         case (f_lo_b)
@@ -307,7 +317,12 @@ module cpu65816 #(
         endcase
     end
 
+    // LIVEW: the 6502's direct-page wrap.  In emulation mode with DL zero the
+    // carry out of the low byte is dropped, so dp,X and a (dp) pointer's
+    // second byte stay inside the page.
+    wire dp_wrap  = f_e & (d[7:0] == 8'h00);
     wire hi_carry = (f_hi_c == UC_HI_C_LIVE)  ? agu_co :
+                    (f_hi_c == UC_HI_C_LIVEW) ? (agu_co & ~dp_wrap) :
                     (f_hi_c == UC_HI_C_SAVED) ? agu_c  : 1'b0;
     wire hi_dec   = (f_hi_d == UC_HI_D_ONE)   ? 1'b1   :
                     (f_hi_d == UC_HI_D_SIGN)  ? adl[7] : 1'b0;
@@ -319,10 +334,14 @@ module cpu65816 #(
 
     // The bank half is only ever a register plus a carry - a 65816 index can
     // run off the end of a bank, but nothing ever ADDS a second bank operand.
+    // For a decrement (ad_dec: low + $FF, high + carry - 1) the high half's
+    // ninth bit is set exactly when the high byte wrapped below zero, so
+    // BORROW is bank - agu_hco.
     wire [7:0] bk_a = (f_bk_a == UC_BK_A_DIN) ? din : bank;
     wire bk_carry = (f_bk_c == UC_BK_C_LIVE)  ? agu_hco :
                     (f_bk_c == UC_BK_C_SAVED) ? agu_hc  : 1'b0;
-    wire [7:0] agu_bk = bk_a + {7'd0, bk_carry};
+    wire [7:0] agu_bk = (f_bk_c == UC_BK_C_BORROW) ? (bk_a - {7'd0, agu_hco})
+                                                   : (bk_a + {7'd0, bk_carry});
 
     // ---- PC incrementer -----------------------------------------------------
     // Its own unit, so the AGU stays free to compute an effective address in
@@ -351,8 +370,15 @@ module cpu65816 #(
     assign addr   = addr_mux;
     // Reset runs the interrupt microcode but must not write: the stack cycles
     // become reads.  Cheaper and less error-prone than a second sequence.
-    assign rw     = f_rw | in_rst;
+    // Reset runs the interrupt microcode but must not write.  An RMW's
+    // internal cycle is a dummy write in emulation mode (ew), VDA low.
+    assign rw     = (f_rw & ~(f_ew & f_e)) | in_rst;
     assign sync   = f_sync;
+    // The bus class is a microcode field; an internal cycle is neither.  The
+    // vector pull follows the two vector address sources.
+    assign vpa    = f_bus[0];
+    assign vda    = f_bus[1];
+    assign vpb    = (f_asel == UC_ADDR_VEC) || (f_asel == UC_ADDR_VEC1);
     assign emu    = f_e;
     assign halted = hlt;
 
@@ -389,28 +415,41 @@ module cpu65816 #(
     // follows M, the index registers follow X, and S and D have no 8-bit form.
     wire op_wide = (f_wb == UC_WB_A16 || f_wb == UC_WB_MD16) ? ~f_m :
                    (f_wb == UC_WB_X16 || f_wb == UC_WB_Y16)  ? ~f_x :
-                   (f_wb == UC_WB_S16 || f_wb == UC_WB_D16)  ? 1'b1 : 1'b0;
+                   (f_wb == UC_WB_S16 || f_wb == UC_WB_D16 ||
+                    f_wb == UC_WB_AF16)                      ? 1'b1 : 1'b0;
 
     // The 8-bit arithmetic core.
     wire [7:0] add_m   = (f_alu_op == UC_OP_SBC) ? ~din : din;
     wire [8:0] bin_sum = {1'b0, acc8} + {1'b0, add_m} + {8'd0, f_c};
+    // V comes from the binary sum, except in decimal ADC where the part takes
+    // it from the sum after the LOW nibble's adjust and before the high one -
+    // which is what the suite shows.  Decimal SBC keeps the binary V.
     wire [7:0] add_vv  = ~(acc8 ^ add_m) & (acc8 ^ bin_sum[7:0]);
-    wire       add_v   = add_vv[7];
+    wire       add_v_bin = add_vv[7];
 
-    wire [8:0] cmp_a = {1'b0, acc8} - {1'b0, din};
-    wire [8:0] cmp_x = {1'b0, xr8}  - {1'b0, din};
-    wire [8:0] cmp_y = {1'b0, yr8}  - {1'b0, din};
+    // The high pass of a 16-bit compare owes the low pass its borrow, which
+    // the low pass left in C.
+    wire       cmp_bi = hi_pass & ~f_c;
+    wire [8:0] cmp_a = {1'b0, acc8} - {1'b0, din} - {8'd0, cmp_bi};
+    wire [8:0] cmp_x = {1'b0, xr8}  - {1'b0, din} - {8'd0, cmp_bi};
+    wire [8:0] cmp_y = {1'b0, yr8}  - {1'b0, din} - {8'd0, cmp_bi};
 
     // Decimal ADC/SBC, nibble at a time, on the pass's own byte.
     wire [3:0] a_lo = acc8[3:0], a_hi = acc8[7:4];
     wire [3:0] m_lo = din[3:0],  m_hi = din[7:4];
 
+    // A nibble sum above nine carries whether or not the +6 fits in the
+    // adjusted nibble's bits - test the sum, not the adjusted value.
     wire [4:0] adc_lo0 = {1'b0, a_lo} + {1'b0, m_lo} + {4'd0, f_c};
-    wire [4:0] adc_lo1 = (adc_lo0 > 5'd9) ? (adc_lo0 + 5'd6) : adc_lo0;
-    wire [5:0] adc_hi0 = {1'b0, a_hi} + {1'b0, m_hi} + {5'd0, adc_lo1[4]};
-    wire [5:0] adc_hi1 = (adc_hi0 > 6'd9) ? (adc_hi0 + 6'd6) : adc_hi0;
+    wire       adc_lc  = (adc_lo0 > 5'd9);
+    wire [4:0] adc_lo1 = adc_lc ? (adc_lo0 + 5'd6) : adc_lo0;
+    wire [5:0] adc_hi0 = {1'b0, a_hi} + {1'b0, m_hi} + {5'd0, adc_lc};
+    wire       dadc_c  = (adc_hi0 > 6'd9);
+    wire [5:0] adc_hi1 = dadc_c ? (adc_hi0 + 6'd6) : adc_hi0;
     wire [7:0] dadc_res = {adc_hi1[3:0], adc_lo1[3:0]};
-    wire       dadc_c   = (adc_hi1 > 6'd15);
+    wire [7:0] dadc_pre = {adc_hi0[3:0], adc_lo1[3:0]};
+    wire       dadc_v   = ~(acc8[7] ^ din[7]) & (acc8[7] ^ dadc_pre[7]);
+    wire       add_v    = (f_d & (f_alu_op == UC_OP_ADC)) ? dadc_v : add_v_bin;
 
     wire [4:0] sbc_lo0 = {1'b0, a_lo} - {1'b0, m_lo} - {4'd0, ~f_c};
     wire [5:0] sbc_hi0 = {1'b0, a_hi} - {1'b0, m_hi} - {5'd0, sbc_lo0[4]};
@@ -462,8 +501,8 @@ module cpu65816 #(
         UC_OP_TCS:       alu_res = alu_m16;                      // no flags
         UC_OP_XBA: begin
             alu_res = {alu_m16[7:0], alu_m16[15:8]};
-            alu_n   = alu_m16[7];                                // flags on the
-            alu_z   = (alu_m16[7:0] == 8'h00);                   // NEW low byte
+            alu_n   = alu_m16[15];                               // flags on the
+            alu_z   = (alu_m16[15:8] == 8'h00);                  // NEW low byte
         end
         UC_OP_AND: begin alu_res = {8'h00, acc8 & din}; alu_n = alu_res[7]; alu_z = (alu_res[7:0] == 8'h00); end
         UC_OP_ORA: begin alu_res = {8'h00, acc8 | din}; alu_n = alu_res[7]; alu_z = (alu_res[7:0] == 8'h00); end
@@ -493,8 +532,10 @@ module cpu65816 #(
         UC_OP_ROR: begin alu_res = ror16; alu_c = lsb; alu_n = neg16(ror16); alu_z = zero16(ror16); end
         UC_OP_INC: begin alu_res = inc16; alu_n = neg16(inc16); alu_z = zero16(inc16); end
         UC_OP_DEC: begin alu_res = dec16; alu_n = neg16(dec16); alu_z = zero16(dec16); end
-        UC_OP_TRB: begin alu_res = {8'h00, din & ~acc8}; alu_z = ((acc8 & din) == 8'h00); end
-        UC_OP_TSB: begin alu_res = {8'h00, din |  acc8}; alu_z = ((acc8 & din) == 8'h00); end
+        // The operand is in MD (an RMW's internal cycle has no din); Z is the
+        // test of A against it, over the width being written.
+        UC_OP_TRB: begin alu_res = alu_m16 & ~a; alu_z = zero16(alu_m16 & a); end
+        UC_OP_TSB: begin alu_res = alu_m16 |  a; alu_z = zero16(alu_m16 & a); end
         default: ;
         endcase
     end
@@ -552,9 +593,11 @@ module cpu65816 #(
     // added no matter what the low half did.
     wire idx_fix = ~f_x | agu_co;
 
-    // A block move ends when A wraps through $FFFF, so "one more byte" is
-    // simply A not being zero yet.
-    wire mv_more = (a != 16'h0000);
+    // A block move moves A+1 bytes, decrementing A per byte, so it is done
+    // when A has wrapped to $FFFF.  Tested a cycle early like every other
+    // condition: A was decremented on the write cycle, two cycles before the
+    // slot that carries the test.
+    wire mv_done = (a == 16'hFFFF);
 
     // ---- the NEXT microinstruction's sequencing ------------------------------
     // `urom` is the block RAM output during this cycle, and it holds the
@@ -607,7 +650,7 @@ module cpu65816 #(
             UC_COND_IDX:    cond_next = ~f_x | early_co;
             UC_COND_EPAGE:  cond_next = f_e & early_page;
             UC_COND_NOTEMU: cond_next = ~f_e;
-            UC_COND_MVMORE: cond_next = mv_more;
+            UC_COND_MVDONE: cond_next = mv_done;
             default:        cond_next = 1'b1;
         endcase
     end
@@ -733,12 +776,22 @@ module cpu65816 #(
                     UC_LD_PC_JMP:    pc <= {din, md[7:0]};
                     UC_LD_PC_JMPL:   pc <= {md[15:8], md[7:0]};
                     UC_LD_PC_MD:     pc <= md;
+                    // The block moves' rewind, and the only conditional
+                    // register load in the core: PC back to the opcode while
+                    // the move has more to do.  Gated on THIS register alone.
+                    UC_LD_PC_M3C:    if (~mv_done) pc <= pc - 16'd3;
                     default: ;
                 endcase
+                // The 6502-era steps stay in page one in emulation mode; the
+                // 65816-only instructions' steps (INCN/DECN) run through all
+                // sixteen bits, and NORM restores the page on their last cycle.
                 case (f_ld_s)
-                    UC_LD_S_INC: s <= s + 16'd1;
-                    UC_LD_S_DEC: s <= s - 16'd1;
-                    UC_LD_S_AGU: s <= {agu_hi, agu_lo};
+                    UC_LD_S_INC:  s <= f_e ? {8'h01, s[7:0] + 8'd1} : s + 16'd1;
+                    UC_LD_S_DEC:  s <= f_e ? {8'h01, s[7:0] - 8'd1} : s - 16'd1;
+                    UC_LD_S_INCN: s <= s + 16'd1;
+                    UC_LD_S_DECN: s <= s - 16'd1;
+                    UC_LD_S_NORM: if (f_e) s[15:8] <= 8'h01;
+                    UC_LD_S_AGU:  s <= {agu_hi, agu_lo};
                     default: ;
                 endcase
 
@@ -761,7 +814,7 @@ module cpu65816 #(
                     UC_WB_A16: if (op_wide) a <= alu_res; else a[7:0] <= alu_res[7:0];
                     UC_WB_X16: if (op_wide) x <= alu_res; else x <= {8'h00, alu_res[7:0]};
                     UC_WB_Y16: if (op_wide) y <= alu_res; else y <= {8'h00, alu_res[7:0]};
-                    UC_WB_S16: s <= alu_res;
+                    UC_WB_S16: s <= f_e ? {8'h01, alu_res[7:0]} : alu_res;
                     UC_WB_D16: d <= alu_res;
                     UC_WB_MD16: md <= alu_res;
                     // The block-move count is 16 bits whatever M says.
@@ -771,8 +824,12 @@ module cpu65816 #(
                         f_d <= din[3]; f_i <= din[2];
                         f_z <= din[1]; f_c <= din[0];
                         // M and X only exist in native mode; pulling P in
-                        // emulation mode cannot clear them.
-                        if (~f_e) begin f_m <= din[5]; f_x <= din[4]; end
+                        // emulation mode cannot clear them.  Setting X
+                        // truncates the index registers to eight bits.
+                        if (~f_e) begin
+                            f_m <= din[5]; f_x <= din[4];
+                            if (din[4]) begin x[15:8] <= 8'h00; y[15:8] <= 8'h00; end
+                        end
                     end
                     default: ;
                 endcase
@@ -781,10 +838,11 @@ module cpu65816 #(
                     UC_FL_B8: begin
                         f_n <= alu_n; f_v <= alu_v; f_z <= alu_z; f_c <= alu_c;
                     end
-                    // The low pass of a 16-bit operation: Z is provisional and
-                    // the high pass will AND into it; C has to carry across.
+                    // The low pass of a 16-bit operation, which is ALSO the
+                    // whole of an 8-bit one: every flag is set, and the high
+                    // pass, if there is one, overwrites N/V/C and ANDs into Z.
                     UC_FL_L16: begin
-                        f_z <= alu_z; f_c <= alu_c;
+                        f_n <= alu_n; f_v <= alu_v; f_z <= alu_z; f_c <= alu_c;
                     end
                     UC_FL_H16: begin
                         f_n <= alu_n; f_v <= alu_v; f_c <= alu_c;
@@ -827,7 +885,10 @@ module cpu65816 #(
                     if (din[0]) f_c <= 1'b1;
                     if (~f_e) begin
                         if (din[5]) f_m <= 1'b1;
-                        if (din[4]) f_x <= 1'b1;
+                        if (din[4]) begin
+                            f_x <= 1'b1;
+                            x[15:8] <= 8'h00; y[15:8] <= 8'h00;
+                        end
                     end
                 end
 
@@ -852,6 +913,10 @@ module cpu65816 #(
                     f_i <= 1'b1;
                     f_d <= 1'b0;
                 end
+
+                // Entering emulation mode (XCE with C set) pins the stack to
+                // page one; the stack steps above keep it there.
+                if (f_alu_op == UC_OP_XCE && f_c) s[15:8] <= 8'h01;
             end
 
             // The vector fetch ends the reset/interrupt sequence.  PBR is

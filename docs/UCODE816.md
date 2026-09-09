@@ -1,9 +1,18 @@
 # A microcoded 65816: first stab at the problem space
 
-**Status: exploration, on branch `ucode_65816`. Not on the development plan, and
-not expected to be picked up soon.** This document exists so that whoever comes
-back to it — probably the person who wrote it, months later — starts from
-measurements rather than from scratch.
+Status: **VERIFIED AGAINST THE SUITE, 2026-09-08, branch `gs_emulation`** -
+981,610 SingleStepTests/65816 cases (a 1 MB prefix of every opcode file, native
+and emulated) pass with every cycle's address, direction, data and VDA/VPA/VPB
+compared, the cycle count, the final registers and memory.  Out of context on
+xc7a100tfgg484-2: 1004 LUTs, 282 flops, 8 RAMB36, 119.9 MHz at a 7.5 ns push
+(build/synth_ooc.sh --board pt_v2).  Rung 1 of docs/GS.md.  The sections below
+from "The three questions" on are the original exploration, kept as written;
+section 5 ("Verified, and not") is SUPERSEDED by "The suite run" at the end.
+
+**Original status, 2026-09:** exploration on branch `ucode_65816`, not on the
+development plan.  This document exists so that whoever comes back to it -
+probably the person who wrote it, months later - starts from measurements
+rather than from scratch.
 
 ## The intended use, because it decides everything
 
@@ -438,3 +447,73 @@ Reconstructing the measurements: every row in the section 3 table is a commit on
 this branch, and the two probe variants (pipelined ROM output, forced ROM
 duplication) are described in section 3 but were not committed — they are
 five-line edits to `rtl/cpu65816.sv`.
+
+## The suite run, 2026-09-08
+
+The trace-checking testbench section 6 asked for exists: `sim/cpu816_tests.py`
+packs the suite's JSON into a flat binary, `sim/cpu816_trace_main.cpp` (a
+Verilated harness with `--public-flat-rw`) parks the core at an opcode fetch by
+poking the initial state straight into its registers and `uc_q` (the FETCH
+word), runs one instruction, and compares the bus cycle by cycle and the state
+after.  `sim/run_cpu816_trace.sh` builds and runs it; `sim/suite.sh gs` runs a
+400-tests-per-file sample.  Two conventions of the suite worth knowing: S in
+emulation mode is reported as $01xx, and a block move's record is cut at 100
+cycles with the state as of that point.
+
+The pipeline-equivalence bench (`run_cpu816_equiv.sh`) is retired: its
+reference was a git-historical copy of the core with the old ROM format, which
+the fields added here (bus class, `ew`, a wider `ld_s` and `ld_pc`) make
+unreadable.  The suite is strictly stronger.
+
+Bugs the suite found, in the order they fell.  "The flesh", as section 5 put
+it: every one is in the semantics the cycle-count check could not see.
+
+1. An 8-bit memory operand ran as the LOW PASS of a 16-bit read, and that
+   pass set only Z and C - so no 8-bit LDA/ADC/CMP ever set N or V.
+2. dp,X and dp,Y never added the index's low byte: the AGU had no DIN operand
+   on its low-A side.  LO_A's unused MDH became DIN.
+3. A native-mode branch never adjusted PCH: the high add lived in the cycle
+   only emulation mode grants.  The whole sign-extended add now runs in the
+   one cycle every mode has; the emulation-mode page-cross cycle is empty.
+4. A 16-bit compare's high pass ignored the low pass's borrow.
+5. JSR pushed the address AFTER the instruction and JSL one past that: the
+   last operand read advanced PC.  RTL returned to the pulled address, not
+   the one after.
+6. TSC, TDC and XBA followed M; they are sixteen bits regardless.
+7. A register operation "sized by M" used the high-pass flag mode and ANDed
+   Z into the previous Z; a 16-bit RMW's internal cycle did the same.
+8. TRB/TSB read `din` in an internal cycle that has none, at 8 bits.
+9. COP vectored through IRQ's vector.
+10. Every pull read one below the stepped S (the step went with the read
+    rather than before it); RTI's PBR pull was a step behind as well.
+11. The block moves: no source/destination addressing at all (the known gap),
+    the loop sense inverted, PC never rewound, the refetch did not advance PC.
+    Seven cycles a byte now, with the one conditional register load in the
+    core - PC - 3 while the count has not wrapped.
+12. In emulation mode an RMW's internal cycle is a dummy WRITE with VDA low
+    (the 6502's), where a 65C02 reads.  A new `ew` field.
+13. The 65C02's extra decimal cycle does not exist on the 65816.
+14. Decimal ADC lost the low nibble's carry - the adjusted nibble was five
+    bits wide and $1C + 6 does not fit - and takes V from the sum after the
+    low adjust and before the high one.
+15. The P pushed in emulation mode has bit 4 set for COP and PHP as well as
+    BRK; only a hardware interrupt clears it.
+16. The emulation-mode stack.  The 6502-era pushes and pulls wrap inside page
+    one; the 65816-only ones (PEA, PEI, PER, PHD, PLD, PLB, JSL, RTL) step S
+    through all sixteen bits mid-instruction - PEI at $0100 writes $0100 then
+    $00FF - and the high byte reads $01 again at the end.  Three step kinds
+    (INC/DEC, INCN/DECN, NORM), and the address bus takes S as it is.
+17. SEP, PLP and RTI setting the X flag truncate the index registers.
+18. WDM's second cycle is internal, not an operand read.
+19. dp,X and the 6502-era (dp) pointers page-wrap in emulation mode with DL
+    zero; PEI's pointer does not.  HI_C gained LIVEW.
+20. A 16-bit DBR- or long-addressed operand at $FFFF continues in the next
+    bank, and a 16-bit RMW's walk back borrows from it; direct page, stack
+    and stack-relative stay in bank zero.  BK_C gained BORROW.
+21. VDA, VPA and VPB are outputs now, from a two-bit bus-class field and the
+    vector address sources.
+
+Not covered by the suite, and still open: reset, IRQ, NMI and ABORT entry
+(the boot bench of rung 3 covers the first two), MLB, and a (dp) pointer at
+$FF with DL zero in emulation mode (not in the sample; the datasheet's wrap is
+implemented).  The FULL=1 run of all 2.9 GB has not been done.
