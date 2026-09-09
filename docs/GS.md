@@ -1,20 +1,47 @@
 # Apple IIgs on the card: the run sheet
 
-Status: **RUNGS 0, 1, 1b, 2 AND 3a DONE; 3b's TRACE GATE MET, 2026-09-09** (1b
-proven on hardware; the rest in simulation, which is what those rungs are).
-The IIgs memory map is built and swept against a model taken from KEGS: 3584
-maps, 67,092,493 checks, 0 mismatches.  **The soft 65816 boots the real ROM 3
-on the card's memory path and agrees with KEGS for 67,398 collapsed
-instruction events - 202,308 instructions, zero divergence - all the way to
-the STARTUP-DEVICE SLOT SCAN**, which is where rung 3's gate put the end of the
-comparison: past it KEGS boots its own emulated cards and this machine boots
-the ones it has.  **NEXT is the rest of the chipset** (VGC registers,
-`gs_intc`, the IWM and SCC stubs), built against KEGS's behaviour directly
-rather than against the index, and the card's own slot 6 and slot 7 in the
-bench.  Nothing of the GS has run on hardware yet.  Branch `gs_emulation` in
-both repos, taken from master at fw `62b21ab` / host `98d46d2` (the
-`memory_refactor` merge).  No bitstream yet; the IIe design is untouched and
-stays bit-identical at `GS=0`.
+Status: **RUNG 3 IS CLOSED, 2026-09-09** - rungs 0, 1, 1b, 2 and 3a-3e all
+done (1b proven on hardware; the rest in simulation, which is what those rungs
+are).  **THE MACHINE BOOTS AN OPERATING SYSTEM.**  The soft 65816 runs ROM 3
+on the card's memory path with the whole chipset answering on the card, finds
+the emulated SmartPort in slot 7, reads its boot block, loads ProDOS 2.4.3,
+relocates it into the language card and runs it - and an ADB Return pressed
+into the micro at ProDOS's BYE selector launches a file:
+
+    S7,D1:/PRODOS.2.4.3
+    - BASIC.SYSTEM      !     BITSY  BYE
+    RETURN:SELECT   ESC:BACK   TAB,#:NEW VOL
+
+(The key is the bench's, through the same ADB_KEY message the host sends.  The
+Pi's own keyboard feeds that message on the host side and is unit-tested
+there, but the two have never met: there is no hardware yet.)
+
+Four oracles hold it, and each has found bugs the others could not.  The map
+is swept against a model taken from KEGS (3584 maps, 67,092,493 checks, 0
+mismatches).  The 65816 is held to SingleStepTests cycle by cycle (981,610
+tests, 0 failures).  The trace agrees with KEGS for **67,398 collapsed
+instruction events - 202,308 instructions, zero divergence - to the
+STARTUP-DEVICE SLOT SCAN**, which is as far as a reference can be one: past it
+KEGS boots its own emulated cards and this machine boots the ones it has.  And
+the host's memory mirror is replayed against a REAL BOOT of the bench -
+1,817,727 ops, 481 written pages, **zero bytes different** - which is the only
+one of the four that is not a model arguing with a model.
+
+**NEXT IS RUNG 4: FIRST LIGHT ON HARDWARE.**  `build.sh --gs`, a bitstream,
+the text screen on HDMI from $E0, the Control Panel through the Pi's keyboard
+and the real IIe one.  **Nothing of the GS has run on hardware yet** and there
+is no GS bitstream: everything above is simulation.  The IIe design is
+untouched and stays bit-identical at `GS=0`, which the 35-bench battery checks
+on every rung.  Branch `gs_emulation` in both repos, taken from master at fw
+`62b21ab` / host `98d46d2` (the `memory_refactor` merge).
+
+**KNOWN AND NOT FIXED**, found by the mirror replay: the page cache can hold a
+previous tenant's bytes in lines a page never had written - page $0001 took
+17,865 writes with the lowest offset ever written $70, and the cache holds
+junk below that where DDR3 correctly holds zeros.  Nothing wrote them and
+nothing reads them, but cache and backing store disagree there, so an eviction
+and refill would change bytes under the machine.  See "the mirror against the
+machine" below.
 
 The plan itself (inventory, decisions, memory-path design, rung ladder) was
 written with the user on 2026-09-08 and is reproduced here so the sheet stands
@@ -1043,11 +1070,22 @@ the next thing - still the machine's newest, and 38 of the 39 get checked.
 
 ## Verification
 
-- `sim/suite.sh` gains `gs` (the GS xlate sweep, a cpu816_trace sample,
-  boot_gs); the IIe suites keep their counts. `tools/check_ports.py` and
+- `sim/suite.sh gs` is **7/7**: the microcode check, the ADB keymap's
+  `--check`, `gs_adb` (the micro driven directly, 23 checks), the cycle
+  table, a `cpu816_trace` sample, the GS map sweep, and `boot_gs` against the
+  KEGS trace with the floor at 67,398 events.  The IIe suites keep their
+  counts - the battery is 35/35 on every rung. `tools/check_ports.py` and
   `sim/lint.sh` every rung.
-- Host: `tests/gs_memory_test` (replay against the GS oracle), `shr_test` for
-  the $E1 source, `mock_card` speaks v6; cross-build via the pi5 preset.
+- Host: **40/40 on the Pi**. `gs_memory_test` (the map against a second
+  model), `gs_bram_test` (the battery RAM against the ROM's own checksum),
+  `adbmap_test` (evdev to ADB keycodes), `gs_stream_test` (`mock_card`
+  speaking a GS stream through the real link parser into the mirror),
+  `shr_test` for the $E1 source; cross-build via the pi5 preset.
+- **The mirror against the machine**: `tools/gs_mirror_test.sh` runs the boot
+  bench with `--mirror`, ships the op stream and the written pages to the Pi
+  and replays them through `AppleMemory`.  Not in the default suite - the
+  stream is tens of megabytes - and the only oracle here taken from a boot
+  that actually happened.
 - Hardware: `tools/gs_test.sh` in the `*_test.sh` shape (own conf, Apple on,
   wait/idle discipline), asserting on `screen`/`peek` from the mirror; MCP
   `screenshot` for SHR.
@@ -1058,7 +1096,14 @@ the next thing - still the machine's newest, and 38 of the 39 get checked.
 - Timing lives in rung 6 (the fronts), which milestone 1 does not depend on.
 - Block RAM: 49 RAMB36 free; the 65816 takes 8, the DOC 16, side copies a
   few; ~20 spare. The cache cannot grow; GS working sets will evict.
-- The shadow dup doubles seam traffic for shadowed writes; bounded, measured.
+- The shadow dup doubles seam traffic for shadowed writes; MEASURED at 2.0% of
+  ops and 21% of writes on a boot (2026-09-09), most of it one SHR clear.  The
+  duplicate is kept rather than aliasing the two address regions to one
+  memory: aliasing cannot express `$C035` turning a region off, gets the
+  direction wrong (a write to $E0 does not appear at $00), and would put us
+  off the KEGS reference that every oracle here is built from.
+- The page cache can leave a previous tenant's bytes in lines a page never had
+  written (see the status block).  Not a map disagreement; its own rung.
 - A 65816 in emulation mode is not the 65C02 cycle for cycle; a real slot
   card in the IIe sees a GS-like CPU, which is what a real GS gives it.
 - GS/OS image sourcing is host-side work with KEGS as the installer.
