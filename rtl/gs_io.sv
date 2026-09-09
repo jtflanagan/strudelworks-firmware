@@ -77,7 +77,11 @@ module gs_io (
     output wire        u_claim,
     output logic [7:0] rd_byte,
 
-    // Into gs_intc, when there is one.
+    // One pulse per video frame, in the machine's own time (rtl/vbeam.sv):
+    // the interrupt controller's only clock.
+    input  wire        frame_tick,
+
+    // The one interrupt line into the core.
     output wire        irq
 );
 
@@ -93,11 +97,18 @@ module gs_io (
     // One function, asked of the live address for the claim and of the
     // registered one for the effect, so the two can never drift apart.
     function automatic mine(input [7:0] lo);
-        mine = (lo == 8'h25) || (lo == 8'h26) || (lo == 8'h27)    // the ADB micro
+        mine = (lo == 8'h21) || (lo == 8'h22) || (lo == 8'h23)    // the VGC
+            || (lo == 8'h24) || (lo == 8'h25) || (lo == 8'h26) || (lo == 8'h27)  // ADB
+            || (lo == 8'h29) || (lo == 8'h2A) || (lo == 8'h2B) || (lo == 8'h2C)  // the VGC
             || (lo == 8'h2D)                                       // SLOTROMSEL
+            || (lo == 8'h31) || (lo == 8'h32)                      // DISKREG, SCANINT
             || (lo == 8'h33) || (lo == 8'h34)                      // the clock and battery RAM
-            || (lo == 8'h35) || (lo == 8'h36) || (lo == 8'h37)     // SHADOW, CYAREG, and $C037
-            || (lo == 8'h68);                                      // STATEREG
+            || (lo == 8'h35) || (lo == 8'h36) || (lo == 8'h37)     // SHADOW, CYAREG, $C037
+            || (lo[7:2] == 6'b001110)                              // $C038-$C03B, the SCC
+            || (lo[7:2] == 6'b001111)                              // $C03C-$C03F, the sound GLU
+            || (lo == 8'h41) || (lo == 8'h46) || (lo == 8'h47)     // the interrupt controller
+            || (lo == 8'h68) || (lo == 8'h69)                      // STATEREG, and a reserved zero
+            || (lo[7:4] == 4'hE);                                   // $C0E0-$C0EF, the IWM
     endfunction
 
     wire q_io = pair_bank(q_addr[23:16]) && (q_addr[15:8] == 8'hC0);
@@ -136,16 +147,70 @@ module gs_io (
     // where the BYTE comes from and nothing about where the write goes.
     always_comb begin
         case (u_addr[7:0])
+            8'h21:   rd_byte = {c021_mono, 7'd0};
+            8'h22:   rd_byte = c022_color;
+            8'h23,
+            8'h41,
+            8'h46,
+            8'h47:   rd_byte = intc_rd;
+            8'h29:   rd_byte = c029_newvideo;
+            8'h2A:   rd_byte = 8'h00;   // reads zero on a IIgs (moremem.c:1086)
+            8'h2B:   rd_byte = c02b_langsel;
+            8'h2C:   rd_byte = 8'h00;   // the character-ROM test port, out of test mode
             8'h2D:   rd_byte = gs_sltrom;
+            8'h31:   rd_byte = c031_diskreg;
+            8'h32:   rd_byte = 8'h00;   // SCANINT reads zero (moremem.c:1112)
             8'h33,
             8'h34:   rd_byte = clk_rd;
             8'h35:   rd_byte = gs_shadow;
             8'h36:   rd_byte = gs_cyareg;
             8'h37:   rd_byte = 8'h00;
+            8'h38:   rd_byte = scc_reg_rd;
+            8'h39:   rd_byte = scc_reg_rd;
+            8'h3A,
+            8'h3B:   rd_byte = 8'h00;   // the SCC's data ports: nothing received
+            8'h3C:   rd_byte = doc_ctl;
+            8'h3D:   rd_byte = doc_saved;
+            8'h3E:   rd_byte = doc_ptr[7:0];
+            8'h3F:   rd_byte = doc_ptr[15:8];
             8'h68:   rd_byte = gs_state;
+            8'h69:   rd_byte = 8'h00;   // reserved, reads zero (moremem.c:1328)
+            8'hE0, 8'hE1, 8'hE2, 8'hE3, 8'hE4, 8'hE5, 8'hE6, 8'hE7,
+            8'hE8, 8'hE9, 8'hEA, 8'hEB, 8'hEC, 8'hED, 8'hEE, 8'hEF:
+                     rd_byte = iwm_rd;
             default: rd_byte = adb_rd;
         endcase
     end
+    // ---- the VGC's latches, the SCC and IWM stubs, the sound GLU face -------
+    // These are registers and nothing else: what the ROM writes it reads back,
+    // and the HOST acts on the writes it sees in the stream (docs/GS.md: the
+    // video is drawn on the Pi).  Each is named with the KEGS case it comes
+    // from.
+    logic       c021_mono;          // $C021 bit 7: monochrome
+    logic [7:0] c022_color;         // $C022: text colour in 7:4, background in 3:0
+    logic [7:0] c029_newvideo;      // $C029: bit 7 SHR, bit 6 linearise, bit 5 bandwidth
+    logic [7:0] c02b_langsel;       // $C02B: language and NTSC/PAL
+    logic [7:0] c031_diskreg;       // $C031: bit 7 APPLE35SEL, bit 6 drive select
+    logic [7:0] scc_ptr;            // the SCC's write-register pointer, per channel-pair
+    logic [7:0] doc_ctl;            // $C03C: bit 6 RAM/register, bit 5 auto-increment, 3:0 volume
+    logic [7:0] doc_saved;          // $C03D's ONE-ACCESS READ DELAY: the previous fetch
+    logic [15:0] doc_ptr;           // $C03E/$C03F: the DOC's 16-bit address
+
+    // The SCC's reset values, from KEGS scc.c's scc_read_reg (line 655) and
+    // scc_reset: RR0 is $60 with CTS and the transmit buffer empty, plus $08
+    // when DCD is asserted - and DCD IS PER CHANNEL, `1 - i`, so channel A
+    // has carrier and channel B does not (scc.c:128).  RR1 reads $07, "all
+    // sent"; RR15 reads $F8 after a reset.  Everything else is zero.  The ROM
+    // reads RR0 and wants a believable answer or its port scan does not end.
+    // $C039 is CHANNEL A and $C038 is CHANNEL B (moremem.c: scc_write_reg's
+    // port argument is 0 for $C039 and 1 for $C038).
+    wire scc_chan_a = (u_addr[7:0] == 8'h39) || (u_addr[7:0] == 8'h3B);
+    wire [7:0] scc_rr0 = 8'h60 | 8'h04 | (scc_chan_a ? 8'h08 : 8'h00);
+    wire [7:0] scc_reg_rd = (scc_ptr == 8'd0)  ? scc_rr0
+                          : (scc_ptr == 8'd1)  ? 8'h07
+                          : (scc_ptr == 8'd15) ? 8'hF8
+                                               : 8'h00;
+
     wire [7:0] clk_rd;
     wire [7:0] clk_cnt_strobes, clk_cnt_bad;
     gs_clock u_clock (
@@ -155,7 +220,78 @@ module gs_io (
         .cnt_strobes (clk_cnt_strobes), .cnt_bad (clk_cnt_bad)
     );
 
-    assign irq = adb_irq_data || adb_irq_mouse;
+    // ---- the IWM, a stub with no drive behind it -----------------------------
+    wire [7:0] iwm_rd, iwm_cnt_mode_wr;
+    gs_iwm u_iwm (
+        .clk (clk), .rst (rst), .res_sync (res_sync),
+        .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
+        .rd_byte (iwm_rd), .apple35_sel (c031_diskreg[7]), .c031_ctrl (c031_diskreg[6]),
+        .cnt_mode_wr (iwm_cnt_mode_wr)
+    );
+
+    // ---- the interrupt controller -------------------------------------------
+    wire [7:0] intc_rd;
+    gs_intc u_intc (
+        .clk (clk), .rst (rst), .res_sync (res_sync),
+        .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
+        .rd_byte (intc_rd), .frame_tick (frame_tick),
+        .irq_adb (adb_irq_data || adb_irq_mouse), .irq_scan (1'b0),
+        .irq (irq)
+    );
+
+    // ---- the latches above, written on the op's commit -----------------------
+    // The DOC's data port is the one with behaviour: a read returns the
+    // PREVIOUS fetch and starts a new one (KEGS doc_read_c03d, "one-access
+    // read delay"), and both a read and a write step the pointer when the
+    // control register's auto-increment bit is set.  There is no DOC behind it
+    // yet - the oscillators and their 64 KB are rung 7 - so a fetch returns
+    // zero; what the ROM's boot needs is the FACE.
+    always_ff @(posedge clk) begin
+        if (rst || !res_sync) begin
+            c021_mono <= 1'b0;
+            c022_color <= 8'hF0;        // white on black, the ROM's own default
+            c029_newvideo <= 8'h01;     // bit 0 reads back set (KEGS halts if clear)
+            c02b_langsel <= 8'h00;
+            c031_diskreg <= 8'h00;
+            scc_ptr <= 8'd0;
+            doc_ctl <= 8'd0;
+            doc_saved <= 8'd0;
+            doc_ptr <= 16'd0;
+        end else if (act) begin
+            if (!u_rw) begin
+                case (u_addr[7:0])
+                    8'h21: c021_mono <= u_wdata[7];
+                    8'h22: c022_color <= u_wdata;
+                    8'h29: c029_newvideo <= (u_wdata & 8'hA0) | 8'h01;
+                    8'h2B: c02b_langsel <= u_wdata;
+                    8'h31: c031_diskreg <= u_wdata & 8'hC0;
+                    // The SCC's write-register pointer protocol: a write to
+                    // the command port selects a register, and the write
+                    // after it goes there and returns the pointer to 0.
+                    8'h38, 8'h39: scc_ptr <= (scc_ptr == 8'd0) ? (u_wdata & 8'h0F) : 8'd0;
+                    8'h3C: doc_ctl <= u_wdata;
+                    8'h3D: begin
+                        doc_saved <= u_wdata;
+                        if (doc_ctl[5]) doc_ptr <= doc_ptr + 16'd1;
+                    end
+                    8'h3E: doc_ptr[7:0]  <= u_wdata;
+                    8'h3F: doc_ptr[15:8] <= u_wdata;
+                    default: ;
+                endcase
+            end else begin
+                case (u_addr[7:0])
+                    // A read of the command port returns the pointer to 0 too.
+                    8'h38, 8'h39: scc_ptr <= 8'd0;
+                    8'h3D: begin
+                        // The delayed fetch: nothing behind it yet.
+                        doc_saved <= 8'h00;
+                        if (doc_ctl[5]) doc_ptr <= doc_ptr + 16'd1;
+                    end
+                    default: ;
+                endcase
+            end
+        end
+    end
 
     // q_rw is not consulted yet: every address claimed here answers both a
     // read and a write.  It is a port because the registers that do not -

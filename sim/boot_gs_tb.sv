@@ -92,6 +92,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     end
     integer bus_cycles = 0;
     always @(posedge clk) if (fall) bus_cycles = bus_cycles + 1;
+    // The IIgs frame is the IIe's: 262 lines x 65 cycles = 17030 bus cycles at
+    // 59.92 Hz (docs/GS.md).  One pulse per frame is the interrupt
+    // controller's whole clock; on the card it comes from rtl/vbeam.sv, which
+    // counts the machine's own cycles so an accelerated program sees the same
+    // number of VBLs per program-second.
+    reg frame_tick = 1'b0;
+    always @(posedge clk)
+        frame_tick <= fall && (bus_cycles % 17030 == 17029);
 
     // ---- the backplane, the reader and the driver --------------------------------
     reg  res_n = 1'b1;
@@ -144,7 +152,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     cpu65816 #(.UCODE_FILE (UCODE), .UCODE0_FILE (UCODE0), .USEQ0_FILE (USEQ0)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_a24), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
-        .irq_n (1'b1), .nmi_n (1'b1),
+        // The chipset's one interrupt line, active low into the core.
+        .irq_n (!gsio_irq), .nmi_n (1'b1),
         .sync (cpu_sync), .vda (cpu_vda), .vpa (cpu_vpa), .vpb (cpu_vpb),
         .emu (cpu_emu), .halted (cpu_halted)
     );
@@ -313,6 +322,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // 1904) so its trace is the same every run; the card must believe the
         // same seconds or the two disagree about a byte the ROM checksums.
         .seed_time (SEED_TIME), .border (),
+        .frame_tick (frame_tick),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
 

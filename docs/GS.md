@@ -246,7 +246,8 @@ parity check on every rung that touches shared RTL.
 | 2 | GS map on the MMU, bench-only: bank classes, 13 regions, `sh`, the shadow dup register, STATEREG/SHADOW/SLOTROMSEL, `$C071-$C07F`, the VOID page, the MEM_ROM page message. `mmu_xlate_gs_tb`: a KEGS-derived oracle (`setup_pageinfo`/fixups ported) swept over switch states x SHADOW x bank classes x 256 pages, read and write. `mem_integ_tb` gains a cross-bank write, a dup landing, a read-after-shadowed-write ordering check | 0 mismatches; IIe sweep unchanged (16384 maps, 0); battery at GS=0 unchanged | **DONE 2026-09-09** - part 1 the scaffolding, part 2 the map itself with its own oracle. Part 1 (2026-09-08): a `GS` parameter; the region set 10 -> 13, splitting text page 2, hires page 2 and the rest of the SHR range out of plain RAM; the entry's new `sh` bit at the TOP so xlate and both fronts decode unchanged; the $C035/$C036/$C068/$C02D registers, inert at GS=0; the four bank classes (PAIR, RAM, VOID, ROM) in `xlate()`. Gate met: IIe sweep 16384 maps / 33,347,584 checks / 0 mismatches, battery 34/34. Part 2 (2026-09-09): the query ports widened to 24 bits, `sh` exported on the classified op and the write query, `$C071-$C07F` reading ROM, the I/O-and-language-card inhibit, and **`sim/mmu_xlate_gs_tb.sv`** - a model written from KEGS's own fixups, not from the RTL, sweeping 12 banks x 256 pages x read/write over all 128 SHADOW states and the language card's: **3584 maps, 67,092,480 checks, 0 mismatches**, with the IIe sweep still 16384/33,347,584/0 and the battery 34/34. The oracle found three bugs in the RTL it was written against - the two windows of the I/O inhibit implemented the wrong way round, a Mega II test written on bank bit 1 (which is 0 for $E0 as it is for $00, so the guard never fired), and the region table's fold inherited by bank classes that have no language card. Part 3 (2026-09-09) closes it: `$C02D` read by the map (a slot page is the INTERNAL ROM's unless its bit is SET, or INTCXROM overrides - so a IIgs comes up with every slot page internal where a IIe comes up with them the slots'; bit 3 IS SLOTC3ROM, one register with the $C00A/B strobe, which is why the IIe's $C3 rule falls out of the IIgs's); the SHADOW DUPLICATE, emitted one clock behind its op down the same path a posted write takes, one deep with a drop counter a bench asserts is zero; and `rtl/rom_loader.sv` parameterised on `N_CHUNKS`/`ROM_PPN0` so one message loads any run of physical pages, with the host's chunk count following the ROM's size. Final: GS sweep **3584 maps, 67,092,493 checks, 0 mismatches** including twelve duplicate-landing cases; IIe sweep 16384/33,347,584/0; battery 35/35; host 36/36 on the Pi. |
 | 3a | The machine exists and fetches: the bank byte on the unified op stream and into the classifier's 24 bits, the 65816 on the dispatcher at `GS=1` (no fronts), `sim/boot_gs_tb.sv` booting ROM 3 through the seam, `tools/trace_diff816.py` | the ROM runs; the divergence index measured and pinned; the IIe unmoved | **DONE 2026-09-09** - see below |
 | 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro, the map registers and the clock done, 41,877 -> 67,398 events |
-| 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face), the card's own slot 6 and slot 7 in `boot_gs_tb`, and the host side: wire v6 GS classify, ROM load, `machine = iigs`, ADB_KEY, `mock_card` | the ROM reaches its startup-device poll; the host mirror equals the bench image | trace gate MET at 3b (see below) |
+| 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face) and the host side: the GS map in the mirror, `machine = iigs`, `gs_rom` | the ROM runs past the chipset with no spin; the host's map agrees with the card's | **DONE 2026-09-09** - see below |
+| 3d | The IWM's motor TIMING (the one-second motor-off and the 3.5" motor latch - where 3c stops), the card's own slot 6 and slot 7 in `boot_gs_tb`, ADB_KEY, `mock_card` speaking a GS stream, and the mirror replayed against the bench image | the ROM reaches its startup-device poll and boots from the HDC | |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
 | 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | |
@@ -457,6 +458,95 @@ index cannot usefully move further, so the remaining chipset - the VGC
 registers, `gs_intc`, the IWM and SCC stubs - is built against KEGS's
 behaviour directly rather than against the index, and the next thing the BENCH
 needs is the card's own slots in it.
+
+## Rung 3c, as built (2026-09-09)
+
+**The interrupt controller (`rtl/gs_intc.sv`)** is two register pairs that are
+not the same machine, and the ROM uses both: the Mega II's `$C041`/`$C046`/
+`$C047` for the VBL and quarter-second interrupts, and the VGC's `$C023`/
+`$C032` for the one-second and scan-line ones.  Two details are the
+reference's and would not have been guessed: `$C046`'s READ IS DESTRUCTIVE -
+it copies bit 7 down into bit 6 and clears bit 7, which is how the ROM tells
+"an interrupt happened" from "one is happening" - and `$C032` CLEARS BY
+WRITING A ZERO to the status bit, the inverted sense.  The timers run from one
+pulse per video frame in the machine's own time, so an accelerated program
+sees the same number of VBLs per program-second.  The scan-line comparator is
+not wired: its enable, status and clear all behave, and nothing sets it.
+
+**The VGC, the SCC stub and the sound GLU face** are latches in `gs_io`, each
+named with the KEGS case it came from.  The SCC's reset values are per
+channel: RR0 is `$60` with CTS and the transmit buffer empty, plus `$08` for
+DCD, and DCD IS ASSERTED ON CHANNEL A AND NOT ON B (`scc.c:128`, `1 - i`) - a
+single constant for both would have been wrong.  The sound GLU has the
+behaviour: `$C03D` returns the PREVIOUS fetch, not the current one, and both a
+read and a write step the 16-bit pointer when `$C03C` bit 5 is set.  There is
+no DOC behind it - the oscillators and their 64 KB are rung 7 - so a fetch
+reads zero; what the ROM's boot needs is the face.
+
+**AND THE IWM IS NOT OPTIONAL (`rtl/gs_iwm.sv`).**  Running the bench past five
+million instructions found the PC had not moved since the first million: the
+machine was spinning at `$FF/4720`, writing the IWM's mode register and
+reading it back until the low five bits agreed, against a backplane that
+answers `$00`.  That loop is unreachable from the trace comparison - it is
+long past the slot scan - and only a long run finds it.  **Three things about
+this stub had to be read from KEGS rather than reasoned out, and each one cost
+a run:**
+
+1. **A seven-bit concatenation into an eight-bit wire.**  `{wr_prot,
+   motor_on, mode}` is 7 bits; Verilator zero-extends, so WRITE-PROTECT LANDED
+   IN BIT 6 and the ROM's `BMI` tested a bit that was always clear.  KEGS
+   composes `((write_prot & 1) << 7) | (state & 0x3f)`, and bit 6 is outside
+   that mask - the byte is `{wr_prot, 1'b0, motor_on, mode}`.  `-Wall` caught
+   it as WIDTHEXPAND; it would otherwise have looked like a logic bug.
+2. **The 3.5" status is a MULTIPLEXER, not a bit.**  The phase lines and
+   `$C031` bit 6 select which of sixteen sense lines bit 7 carries, and the
+   answers differ - "no disk" is 1, "at track 0" is 0, "not stepping" is 1.
+   A single constant is what made the second attempt worse than the first.
+   The whole mux is spelled out with the answers a machine with NO 3.5" drive
+   gives, which is the decision this programme made; KEGS says a drive 0
+   exists because it emulates one, and this says neither does.
+3. **The data register must VARY with no disk.**  At `$FF/57B7` the SmartPort
+   routine reads `$C08C,X` and waits for a byte with bit 6 clear.  A real IWM
+   with no disk still has a head over a spinning surface; KEGS returns
+   `((fbit_pos * 25) >> 11) & 0xff` from the head position.  A constant `$FF`
+   waits for ever.  A position that advances on every read ends the loop.
+
+**AND ONE OF THOSE RUNS WAS MISREAD.**  Between (1) and (2) the trace appeared
+to show the machine executing in banks `$24` and `$A4` - off in unpopulated
+RAM - and it had not: the analysis seeked a BYTE offset from the end of a file
+the simulator was still writing, so every twenty-byte record decoded shifted
+and the banks were fragments of neighbouring fields.  The machine had never
+left the ROM.  Read a record-structured file at a record boundary, and take a
+size from `os.path.getsize` rather than from `seek(0, 2)` on a live writer.
+
+**WHERE IT STOPS, AND WHAT THAT COSTS.**  With the IWM answering, the machine
+runs 1.65 MILLION instructions of real work - `boot_gs_tb`'s tail went from
+three distinct PCs to 1,657, across banks $FF and $FC - and then reaches
+another wait, at $FF/5B71:
+
+    FF/5B6E  LDA $C08D,X    ; Q6 = 1
+    FF/5B71  LDA $C08E,X    ; read the status: $A0
+    FF/5B74  AND #$20       ; the MOTOR bit
+    FF/5B76  BNE $5B71      ; loop while the motor is still on
+
+The ROM turned the motor on and is waiting for it to report itself off.  On a
+real machine that comes from the IWM's ONE-SECOND MOTOR-OFF TIMER and the
+3.5" drive's own motor latch (KEGS: `$C0E8` sets a pending flag and
+`motor_off_vbl_count = g_vbl_count + 60` unless mode bit 2 asks for an
+immediate stop), which is DRIVE TIMING rather than a register face - the first
+thing in this rung that a stub cannot answer by reading a value back.  That,
+and the card's own slot 6 and slot 7 in the bench, is rung 3d.
+
+**The host's half.**  `AppleMemory` gains a `Machine` and a
+`classify_gs(bank, addr, rw)` - the four bank classes, the pair-bank side, the
+language card in whichever pair, `$C1xx-$CFxx` against SLOTROMSEL, SHADOW's
+inhibits and the `$C035` bit 6 window swap - transcribed from the same KEGS
+fixups the firmware's oracle came from, and the 16 MB image IS the physical
+space on a IIgs, one to one.  `tests/gs_memory_test.cpp` sweeps it against a
+SECOND model written as a flat decision tree with no shared helpers, the same
+rule as rung 2: twelve banks, 256 pages, read and write, over every SHADOW
+state and the language card's.  `machine = iie | iigs` and `gs_rom` join the
+config.  Host tests 37/37 on the Pi.
 
 ## Verification
 
