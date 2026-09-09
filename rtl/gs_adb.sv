@@ -49,6 +49,9 @@
 //////////////////////////////////////////////////////////////////////////////////
 module gs_adb #(
     parameter [7:0] T_ADB_KEY = 8'h2F,
+    // The Pi's mouse, the same message rtl/mouse_card.sv takes for the IIe's
+    // AppleMouse: signed deltas in the payload, the buttons in the header.
+    parameter [7:0] T_MOUSE_MOVE = 8'h25,
     // The ADB micro's keymap, 128 entries of {ctrl, shift, plain}, each
     // {none, special, byte}: tools/gen_adb_keymap.py from KEGS's own table.
     parameter KEYMAP = "adb_keymap.hex"
@@ -94,6 +97,9 @@ module gs_adb #(
 
     input  wire        msg_valid,
     input  wire [7:0]  msg_type,
+    // The header's spare field: MOUSE_MOVE puts the button LEVELS in its low
+    // two bits, bit 0 being button 0 (docs/PROTOCOL.md).
+    input  wire [15:0] msg_free,
     input  wire [7:0]  msg_len,
     input  wire [31:0] pay_data,
     input  wire        pay_valid,
@@ -219,8 +225,24 @@ module gs_adb #(
     logic [3:0] kbd_dev_addr;
     logic [15:0] kbd_reg3;
 
-    // The mouse, not yet fed.
+    // ---- the mouse (adb_update_mouse, mouse_read_c024) ---------------------
+    // KEGS keeps ABSOLUTE positions because its mouse comes from a window;
+    // ours arrives as the Pi's evdev DELTAS already, so what is kept here is
+    // the motion NOT YET HANDED OVER.  The two are the same model seen from
+    // opposite ends - KEGS's `delta = target - a2_x` is this accumulator by
+    // another name, and what software observes, a stream of clamped deltas
+    // with the button on the Y read, is identical.
+    //
+    // $C024 ALTERNATES X AND Y, one coordinate per read, and `mouse_coord`
+    // says which is next; it is also $C027 bit 1, so a program that has lost
+    // its place can find it.  Each read hands over at most +-$3F of the
+    // motion owed and keeps the rest, which is the clamp a real ADB mouse's
+    // 7-bit signed field forces.
     logic mouse_valid, mouse_coord;
+    logic signed [15:0] pend_x, pend_y;   // motion owed to the machine
+    logic mouse_btn;                      // the button as the host last said
+    logic mouse_btn_rep;                  // ...and as the machine last read
+    logic [3:0] mouse_dev_addr;           // the mouse's own ADB address
 
     // The micro's own 256 bytes, read combinationally at the clock a Read Mem
     // command completes.
@@ -257,12 +279,32 @@ module gs_adb #(
     logic [7:0] c025_val;
     assign c025_rd = c025_val | (live_mods & 8'hC0);
 
+    // ---- $C024, without its side effects (mouse_read_c024) -----------------
+    // The gate first: ADB mode bit 1 turns the mouse off, and a mouse whose
+    // own address no longer matches the one the micro is polling is not being
+    // auto-polled either.  Either way the register reads ZERO and the mouse
+    // interrupt goes - KEGS returns 0 before it looks at anything else.
+    wire mouse_off = adb_mode[1] || (mouse_dev_addr != mouse_ctl_addr);
+    // The motion this read hands over, clamped to the 7-bit signed field.
+    function automatic signed [15:0] clamp63(input signed [15:0] v);
+        clamp63 = (v >  16'sd63) ?  16'sd63
+                : (v < -16'sd63) ? -16'sd63 : v;
+    endfunction
+    wire signed [15:0] mv_take = mouse_coord ? clamp63(pend_y) : clamp63(pend_x);
+    // KEGS zeroes the coordinate this read is not about and then ORs the two,
+    // so the byte is just the one that survived.  Bit 7 is the BUTTON, and
+    // only on the Y read: on the X read it is always set (`ret |= 0x80`,
+    // "mouse button not down on x coord rd").
+    wire [7:0] c024_rd = mouse_off ? 8'h00
+                       : {mouse_coord ? ~mouse_btn : 1'b1, mv_take[6:0]};
+
     wire [7:0] c000_rd = kbd_buf[0];
     wire [7:0] c010_rd = {hard_key_down, kbd_buf[0][6:0]};
 
     always_comb begin
         case (op_lo)
             8'h00:   rd_byte = c000_rd;
+            8'h24:   rd_byte = c024_rd;
             8'h10:   rd_byte = c010_rd;
             8'h25:   rd_byte = c025_rd;
             8'h26:   rd_byte = c026_rd;
@@ -300,15 +342,25 @@ module gs_adb #(
     // read on the word's own clock and the whole event registered, so the
     // apply below is a mux of registers and not a ROM lookup.
     logic [7:0] rx_type_k, rx_left_k;
+    logic [1:0] rx_btn;                 // the header's buttons, held for the word
     wire rx_word_k  = pay_valid && (rx_left_k != 8'd0);
     wire hdr_key    = msg_valid && (msg_type == T_ADB_KEY);
     wire word_key   = rx_word_k && (rx_type_k == T_ADB_KEY);
+    wire hdr_mouse  = msg_valid && (msg_type == T_MOUSE_MOVE);
+    wire word_mouse = rx_word_k && (rx_type_k == T_MOUSE_MOVE);
     // One address, two sources: the message's keycode, or the held key when
     // the repeat re-fires it.
     wire [6:0]  km_addr = word_key ? pay_data[6:0]
                         : loc_valid ? loc_code
                                     : a2code_down;
     wire [29:0] km_in   = keymap[km_addr];
+
+    // A MOUSE_MOVE, staged the way an ADB_KEY is and for the same reason: one
+    // sequential block owns the state, so the receive side parks the message
+    // here and the block below applies it on a clock of its own.
+    logic        mv_v;
+    logic signed [15:0] mv_dx, mv_dy;
+    logic        mv_btn;
 
     logic        ev_v;
     logic [6:0]  ev_code;
@@ -376,9 +428,26 @@ module gs_adb #(
             if (msg_valid) begin
                 rx_type_k <= msg_type;
                 rx_left_k <= msg_len;
-                if (hdr_key && msg_len != 8'd1) rx_type_k <= 8'd0;
+                rx_btn    <= msg_free[1:0];
+                if (hdr_key   && msg_len != 8'd1) rx_type_k <= 8'd0;
+                if (hdr_mouse && msg_len != 8'd1) rx_type_k <= 8'd0;
             end else if (rx_word_k) begin
                 rx_left_k <= rx_left_k - 8'd1;
+            end
+            // The mouse's word: two signed deltas, and the button level the
+            // header carried.  A move that arrives before the last one has
+            // been read ACCUMULATES rather than replacing - the machine is
+            // owed all of the motion, and the clamp above is what meters it
+            // out.  So the staging register holds a sum, not a sample.
+            if (word_mouse) begin
+                mv_v   <= 1'b1;
+                mv_dx  <= mv_v ? (mv_dx + $signed(pay_data[15:0]))
+                                : $signed(pay_data[15:0]);
+                mv_dy  <= mv_v ? (mv_dy + $signed(pay_data[31:16]))
+                                : $signed(pay_data[31:16]);
+                mv_btn <= rx_btn[0];
+            end else if (mv_v && !act) begin
+                mv_v <= 1'b0;
             end
             if (word_key) begin
                 ev_v    <= 1'b1;
@@ -409,6 +478,7 @@ module gs_adb #(
         end
     end
     wire ev_go = ev_v && !act;
+    wire mv_go = mv_v && !act && !ev_v;   // the keys go first; both are rare
 
     // adb_access_c010: the strobe goes, the head leaves, and $C025's
     // "a key is available" bit goes with it.  A task because a read of $C010
@@ -453,6 +523,10 @@ module gs_adb #(
             kbd_dev_addr <= 4'd2;
             kbd_reg3 <= 16'h0602;
             mouse_valid <= 1'b0; mouse_coord <= 1'b0;
+            pend_x <= 16'sd0; pend_y <= 16'sd0;
+            mouse_btn <= 1'b0; mouse_btn_rep <= 1'b0;
+            mouse_dev_addr <= 4'd3;
+            mv_v <= 1'b0; mv_dx <= 16'sd0; mv_dy <= 16'sd0; mv_btn <= 1'b0;
             cnt_cmds <= 8'd0; cnt_unknown <= 8'd0;
             // The keyboard.  A RESET clears the buffers and the modifiers;
             // c025 bit 5 is "no hard key is down", which is true of a machine
@@ -497,8 +571,42 @@ module gs_adb #(
             c025_val <= (ev_mods & 8'hC7) | (c025_val & 8'h08) |
                         (ev_rpt ? 8'h08 : 8'h00) |
                         ((!ev_up && ev_hard) ? 8'h00 : 8'h20);
+        end else if (mv_go) begin
+            // ---- adb_update_mouse ---------------------------------------
+            // The motion joins what is already owed; the button is a level.
+            // Either is enough to make the data VALID, which is $C027 bit 7
+            // and, with the enable, the mouse interrupt.
+            pend_x      <= pend_x + mv_dx;
+            pend_y      <= pend_y + mv_dy;
+            mouse_btn   <= mv_btn;
+            mouse_valid <= 1'b1;
         end else if (frame_tick) begin
             if (rpt_left != 16'd0) rpt_left <= rpt_left - 16'd1;
+        end else if (act && op_rw && (op_lo == 8'h24)) begin
+            // ---- mouse_read_c024 ----------------------------------------
+            // The motion handed over leaves the accumulator, the coordinate
+            // flips, and the button the machine has now seen is recorded on
+            // the Y read - KEGS keeps g_mouse_a2_button for the same reason,
+            // so that a button that has not changed does not keep the data
+            // valid for ever.
+            if (mouse_off) begin
+                mouse_valid <= 1'b0;
+            end else begin
+                if (mouse_coord) begin
+                    pend_y        <= pend_y - mv_take;
+                    mouse_btn_rep <= mouse_btn;
+                    // Caught up when nothing is owed either way and the
+                    // button the machine holds is the one the host last sent.
+                    mouse_valid   <= ((pend_y - mv_take) != 16'sd0) ||
+                                     (pend_x != 16'sd0);
+                end else begin
+                    pend_x        <= pend_x - mv_take;
+                    mouse_valid   <= ((pend_x - mv_take) != 16'sd0) ||
+                                     (pend_y != 16'sd0) ||
+                                     (mouse_btn != mouse_btn_rep);
+                end
+                mouse_coord <= !mouse_coord;
+            end
         end else if (act && !op_rw && (op_lo == 8'h10)) begin
             // ---- adb_access_c010, the write half ------------------------
             kbd_shift();

@@ -72,7 +72,7 @@ module gs_kbd_a2_tb #(parameter KEYMAP = "adb_keymap.hex",
         // not from a host message, and the message ports are held quiet.
         .loc_valid (ev_valid), .loc_code (ev_code), .loc_up (ev_up),
         .loc_mods (ev_mods), .live_mods (live_mods),
-        .msg_valid (1'b0), .msg_type (8'd0), .msg_len (8'd0),
+        .msg_valid (1'b0), .msg_type (8'd0), .msg_free (16'd0), .msg_len (8'd0),
         .pay_data (32'd0), .pay_valid (1'b0),
         .c025_rd (c025), .irq_data (), .irq_mouse (),
         .cnt_cmds (), .cnt_unknown ()

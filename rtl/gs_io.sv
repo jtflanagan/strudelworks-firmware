@@ -101,6 +101,9 @@ module gs_io #(
 
     input  wire        msg_valid,
     input  wire [7:0]  msg_type,
+    // MOUSE_MOVE's buttons ride in the header's spare field; the ADB micro
+    // needs them, so the field comes down with the rest.
+    input  wire [15:0] msg_free,
     input  wire [7:0]  msg_len,
     input  wire [31:0] pay_data,
     input  wire        pay_valid,
@@ -179,7 +182,8 @@ module gs_io #(
         .frame_tick (frame_tick),
         .loc_valid (loc_valid), .loc_code (loc_code),
         .loc_up (loc_up), .loc_mods (loc_mods), .live_mods (live_mods),
-        .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
+        .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
+        .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
         .c025_rd (adb_c025),
         .irq_data (adb_irq_data), .irq_mouse (adb_irq_mouse),

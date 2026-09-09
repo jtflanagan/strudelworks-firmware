@@ -252,7 +252,22 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        cpu_rw_eff   = cpu_rw | cyc_internal;
     wire [23:0] cpu_a24_eff  = cyc_internal ? 24'h000000 : cpu_a24;
     wire [15:0] cpu_addr_eff = cpu_a24_eff[15:0];
-    wire [7:0]  cpu_bank_eff = cpu_a24_eff[23:16];
+
+    // The four registers apple_mmu owns and gs_io shows.  Declared here rather
+    // than beside the chipset below because the vector-pull redirect needs
+    // SHADOW, and a wire has to exist before it is read.
+    wire [7:0]  gs_shadow_w, gs_cyareg_w, gs_sltrom_w, gs_state_w;
+
+    // ---- A VECTOR PULL COMES FROM THE ROM ----------------------------------
+    // The same redirect rtl/master_top.sv makes, at the same point and for
+    // the same reason: the 65816 forces PBR to zero for a vector fetch, but a
+    // IIgs's FPI watches VP' and takes the vector from BANK $FF unless
+    // SHADOW[6] says $00/$FFxx is plain RAM.  KEGS's moremem_fix_vector_pull.
+    // This bench is what found it - with the language card in RAM-read mode,
+    // which GS/OS sets early, $00/$FFFE read $00 $00 and the first IRQ sent
+    // the machine to $00/0000 for the rest of the run.
+    wire [7:0]  cpu_bank_eff = (cpu_vpb && !gs_shadow_w[6]) ? 8'hFF
+                                                            : cpu_a24_eff[23:16];
 
     // ---- the dispatcher ----------------------------------------------------------
     reg  [1:0]  mode = 2'd0;
@@ -276,7 +291,6 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // joins the dispatcher's internalized-op question, and its byte joins the
     // internalized read's answer.  apple_mmu's own swi is OFF on this build
     // (swi_on tied low), so the two never both claim.
-    wire [7:0]  gs_shadow_w, gs_cyareg_w, gs_sltrom_w, gs_state_w;
     wire        gsio_claim, gsio_u_claim;
     wire [7:0]  gsio_byte;
     wire        gsio_irq;
@@ -498,7 +512,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // same seconds or the two disagree about a byte the ROM checksums.
         .seed_time (SEED_TIME), .border (),
         // The battery RAM the host ships, sent before RES' is released.
-        .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
+        .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (16'd0),
+        .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid), .bram_ok (bram_landed),
         // The IIe's own keyboard (rtl/gs_kbd_a2.sv) is a TOP-LEVEL wiring:
         // it feeds on the driver's parked dummy cycles, and this bench has no

@@ -29,6 +29,7 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
     reg        frame_tick = 1'b0;
     reg        msg_valid = 1'b0, pay_valid = 1'b0;
     reg [7:0]  msg_type = 8'd0, msg_len = 8'd0;
+    reg [15:0] msg_free = 16'd0;
     reg [31:0] pay_data = 32'd0;
     reg        loc_valid = 1'b0, loc_up = 1'b0;
     reg [6:0]  loc_code = 7'd0;
@@ -45,7 +46,8 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
         // a model IOU, which is where the reverse keymap is proved.
         .loc_valid (loc_valid), .loc_code (loc_code), .loc_up (loc_up),
         .loc_mods (loc_mods), .live_mods (live_mods),
-        .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
+        .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
+        .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
         .c025_rd (c025),
         .irq_data (irq_data), .irq_mouse (irq_mouse),
@@ -114,6 +116,23 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
         end
     endtask
 
+    // ---- the host's side: one MOUSE_MOVE ------------------------------------
+    // The buttons ride in the header's spare field, the deltas in the word.
+    task automatic mouse(input signed [15:0] dx, input signed [15:0] dy,
+                         input btn);
+        begin
+            @(negedge clk);
+            msg_valid = 1'b1; msg_type = 8'h25; msg_len = 8'd1;
+            msg_free = {14'd0, 1'b0, btn};
+            @(negedge clk);
+            msg_valid = 1'b0; pay_valid = 1'b1;
+            pay_data = {dy, dx};
+            @(negedge clk);
+            pay_valid = 1'b0;
+            repeat (4) @(negedge clk);
+        end
+    endtask
+
     task automatic frames(input integer n);
         integer k;
         begin
@@ -141,6 +160,19 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
                 if (t == 8'h80) k = 12;
                 else begin rd(8'h26, t); rd(8'h26, t); end
             end
+        end
+    endtask
+
+    // $C027 is status only - reading it moves nothing - but rd_byte is
+    // COMBINATIONAL ON THE REGISTERED OP, so presenting the address and
+    // sampling in the same breath returns the byte for the op BEFORE it.  A
+    // function cannot wait; this has to be a task with a clock in it.
+    task automatic rd27(output [7:0] v);
+        begin
+            @(negedge clk);
+            op_lo = 8'h27; op_rw = 1'b1;
+            @(negedge clk);
+            v = rd_byte;
         end
     endtask
 
@@ -273,6 +305,65 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
         chk(c025 & 8'hC0, 8'hC0, "$C025 shows the real Apple keys");
         live_mods = 8'h00; @(negedge clk);
         chk(c025 & 8'hC0, 8'h00, "...and stops showing them at once");
+
+        // ---- THE MOUSE ($C024) ----------------------------------------------
+        // FIRST PUT THE CONFIG BACK.  The auto-repeat section above issues a
+        // set-config whose first byte is $23, and adb_set_config reads the
+        // mouse's controller address out of its high nibble - so the micro is
+        // now polling a mouse at address 2 while the mouse is still at 3, and
+        // a mouse the micro is not polling reads ZERO.  That is KEGS's rule
+        // and this module's, and finding it here is the rule working: send
+        // $32, the reset pairing (mouse 3, keyboard 2), and the mouse is back.
+        wr(8'h26, 8'h06); wr(8'h26, 8'h32); wr(8'h26, 8'h00); wr(8'h26, 8'h23);
+
+        // One coordinate a read, X first, and the byte is {button, delta}:
+        // bit 7 is the button ONLY on the Y read - KEGS sets it unconditionally
+        // on the X read ("mouse button not down on x coord rd").
+        mouse(16'sd10, 16'sd20, 1'b0);
+        rd27(v2); chk(v2 & 8'h80, 8'h80, "$C027 says the mouse has data");
+        rd(8'h24, v); chk(v, 8'h8A, "the X read: bit 7 set, delta 10");
+        rd27(v2); chk(v2 & 8'h02, 8'h02, "...and $C027 bit 1 now says Y is next");
+        rd(8'h24, v); chk(v, 8'h94, "the Y read: button up (bit 7), delta 20");
+        rd27(v2); chk(v2 & 8'h80, 8'h00, "caught up: the data is no longer valid");
+
+        // A negative delta is the same seven bits, two's complement.
+        mouse(-16'sd3, -16'sd1, 1'b0);
+        rd(8'h24, v); chk(v, 8'hFD, "a negative X delta is -3 in seven bits");
+        rd(8'h24, v); chk(v, 8'hFF, "...and -1 in Y, button still up");
+
+        // THE CLAMP, and what it means: a big move is handed over $3F at a
+        // time and the REST IS KEPT, so nothing is lost - it just takes more
+        // reads.  100 = 63 then 37.
+        mouse(16'sd100, 16'sd0, 1'b0);
+        rd(8'h24, v); chk(v, 8'hBF, "a big move is clamped to $3F");
+        rd(8'h24, v);                                  // the Y half
+        rd27(v2); chk(v2 & 8'h80, 8'h80, "...and the rest is still owed");
+        rd(8'h24, v); chk(v, 8'hA5, "the next X read hands over the other 37");
+        rd(8'h24, v);
+        rd27(v2); chk(v2 & 8'h80, 8'h00, "...and now it is caught up");
+
+        // The button, on the Y read, and it keeps the data valid until the
+        // machine has actually seen it.
+        mouse(16'sd0, 16'sd0, 1'b1);
+        rd27(v2); chk(v2 & 8'h80, 8'h80, "a button press alone is data");
+        rd(8'h24, v); chk(v, 8'h80, "the X read shows no button and no motion");
+        rd(8'h24, v); chk(v, 8'h00, "the Y read: bit 7 CLEAR means button down");
+        rd27(v2); chk(v2 & 8'h80, 8'h00, "...and the press has been delivered");
+
+        // Motion that arrives before the last was read ACCUMULATES: the
+        // machine is owed all of it.
+        mouse(16'sd5, 16'sd0, 1'b1);
+        mouse(16'sd7, 16'sd0, 1'b1);
+        rd(8'h24, v); chk(v, 8'h8C, "two moves before a read are added, not replaced");
+        rd(8'h24, v);
+
+        // ADB mode bit 1 turns the mouse off: the register reads zero.
+        // Command $04 is set-modes, one argument.
+        wr(8'h26, 8'h04); wr(8'h26, 8'h02);
+        mouse(16'sd9, 16'sd9, 1'b0);
+        rd(8'h24, v); chk(v, 8'h00, "with the mouse off $C024 reads zero");
+        rd27(v2); chk(v2 & 8'h80, 8'h00, "...and it has no data to offer");
+        wr(8'h26, 8'h05); wr(8'h26, 8'h02);             // clear-modes, back on
 
         $display("%0d checks, %0d errors", checks, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL");

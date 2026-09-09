@@ -546,7 +546,10 @@ module master_top #(
     // The core's bank.  A 65C02 has none: the IIe's unified stream is bank
     // zero, which is what a 24-bit map is asked when a IIe asks it
     // (docs/GS.md rung 3).
-    wire [7:0]  cpu_bank;
+    // ...and `cpu_bank_raw` is the core's own, before the IIgs's vector-pull
+    // redirect below turns it into `cpu_bank`.
+    wire [7:0]  cpu_bank, cpu_bank_raw;
+    wire        core_vpb;
     wire        cpu_rw;
     wire [7:0]  cpu_dout, cpu_din, cpu_p_flags;
     wire        cpu_cyc_en, cpu_sync;
@@ -567,8 +570,9 @@ module master_top #(
 
     generate if (!GS) begin : g_65c02
 
-    assign cpu_bank     = 8'd0;
+    assign cpu_bank_raw = 8'd0;
     assign cyc_internal = 1'b0;
+    assign core_vpb     = 1'b0;
 
     cpu65c02 u_cpu (
         .clk    (apple_clk),
@@ -622,7 +626,7 @@ module master_top #(
         .sync   (cpu_sync),
         .vda    (core_vda),
         .vpa    (core_vpa),
-        .vpb    (),
+        .vpb    (core_vpb),
         .emu    (),
         .halted ()
     );
@@ -641,7 +645,7 @@ module master_top #(
     assign cyc_internal = !core_vda && !core_vpa;
     assign cpu_rw       = core_rw | cyc_internal;
     assign cpu_addr     = cyc_internal ? 16'h0000 : core_a24[15:0];
-    assign cpu_bank     = cyc_internal ?  8'h00   : core_a24[23:16];
+    assign cpu_bank_raw = cyc_internal ?  8'h00   : core_a24[23:16];
     // The census's "this cycle is an instruction fetch" is the 65816's VPA.
     assign cpu_cyc_is_i = core_vpa;
 
@@ -768,6 +772,33 @@ module master_top #(
     wire [7:0]  gs_shadow_w, gs_cyareg_w, gs_sltrom_w, gs_state_w;
     wire [3:0]  gs_border;
     wire        gs_bram_ok;
+
+    // ---- A VECTOR PULL COMES FROM THE ROM (docs/GS.md rung 4b part 8) -------
+    // The 65816 forces PBR to zero for every vector fetch - rtl/cpu65816.sv
+    // says so where it does it, and that is the PART's behaviour, correctly.
+    // A IIgs is not a bare 65816: its FPI watches the VP' pin and takes the
+    // vector from BANK $FF, the ROM, so that the machine's handlers survive
+    // whatever the language card is currently showing at $00/$FFxx.  KEGS is
+    // explicit about it - every vector in its instable.h is written as a full
+    // 24-bit $FF/FFxx address and moremem_fix_vector_pull() masks it back
+    // down to bank $00 ONLY when SHADOW[6] is set, the bit that makes
+    // $C000-$FFFF in banks $00/$01 plain RAM with no I/O and no language card
+    // (rtl/apple_mmu.sv, gs_flat).  So the default is the ROM and the RAM is
+    // the exception, which is the opposite way round from the bare part.
+    //
+    // WITHOUT THIS THE MACHINE DIES ON ITS FIRST INTERRUPT once anything puts
+    // the language card in RAM-read mode.  GS/OS does, early: the boot bench
+    // has it at "bank1, RAM read, write enabled" by the time the SmartPort is
+    // loading, so $00/$FFFE read $00 $00, the IRQ vectored to $00/0000, and
+    // the machine spent the rest of the run executing zero page - ORA / SBC /
+    // ADC / BRK round and round, the BRK returning through the same dead
+    // vector.  It looked like a halt from the outside.
+    //
+    // Redirected HERE, at the one place the bank is formed, rather than
+    // inside the map: the cache, the event stream and the host's mirror all
+    // read the bank from this wire, and a redirect they could not see would
+    // put the host's model of memory at odds with the card's.
+    assign cpu_bank = (GS && core_vpb && !gs_shadow_w[6]) ? 8'hFF : cpu_bank_raw;
     // What the clock believes before the host's first GS_TIME lands: seconds
     // since 1904-01-01 for 2026-01-01 00:00:00.  The host sends the real
     // seconds before RES' is released, as it sends the battery RAM, so this
@@ -1564,6 +1595,7 @@ module master_top #(
         // The battery RAM the host ships before RES' is released.
         .msg_valid  (app_msg_valid),
         .msg_type   (app_msg_type),
+        .msg_free   (app_msg_free),
         .msg_len    (app_msg_len),
         .pay_data   (app_pay_data),
         .pay_valid  (app_pay_valid),

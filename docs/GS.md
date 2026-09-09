@@ -1,7 +1,13 @@
 # Apple IIgs on the card: the run sheet
 
-Status: **RUNG 4b, PART 7 - THE APPLE'S OWN KEYBOARD TYPES INTO THE IIgs,
-2026-09-09**, branch `gs_emulation`, WNS **+0.082** / WHS +0.020, 0 of 52,476
+Status: **RUNG 4b, PARTS 7-9, 2026-09-09**: the Apple's own keyboard types
+into the IIgs, A VECTOR PULL COMES FROM THE ROM (which is what was killing
+GS/OS), and the ADB mouse is fed.  WNS **+0.140** / WHS +0.057, 0 of 52,524
+failing endpoints, `sim/suite.sh gs` **9/9** (KEGS floor 67,398, unmoved),
+host 40/40.  GS/OS 6.0.1 now boots past its splash and runs the ROM's
+interrupt handlers; it stops at **"Unclaimed Sound Interrupt"**, the Ensoniq
+being rung 7 and not built.  The keyboard, in detail: **THE APPLE'S OWN
+KEYBOARD TYPES INTO THE IIgs, 2026-09-09**, branch `gs_emulation`, WNS **+0.082** / WHS +0.020, 0 of 52,476
 failing endpoints, `sim/suite.sh gs` **9/9** (KEGS divergence floor 67,398,
 unmoved).  The IIe keyboard the card lives behind reaches the ADB micro now:
 `rtl/gs_kbd_a2.sv` walks the driver's parked dummies over `$C000`, `$C010`
@@ -1831,6 +1837,114 @@ The rule the session already carries - name the config, and check WHICH image
 booted - covers this exactly; so does reading the banner that is handed back.
 A restart WITHOUT a fresh bitstream then hit the known no-register failure on
 top of it, which is its own entry under "What is NOT working".
+
+## Rung 4b, part 8: a vector pull comes from the ROM (2026-09-09)
+
+**GS/OS 6.0.1 boots to its splash and the machine dies on its first
+interrupt.**  The lead written up above - that `gs_io.sv` wires
+`.irq_scan (1'b0)`, so the VGC's scan-line interrupt can never fire - was
+WRONG, and reproducing the failure in `sim/boot_gs_tb.sv` from the same
+`system6.hdv` said so in one screen.  The bench is `--hdv=` plus
+`--watch=A:B`, and the watch is unambiguous:
+
+    cyc 907532: 0001f6 rw=0 dout=$c7   push PCH
+    cyc 907532: 0001f5 rw=0 dout=$8c   push PCL
+    cyc 907532: 0001f4 rw=0 dout=$a1   push P
+    cyc 907532: 00fffe rw=1 din=$00    vector low  = $00
+    cyc 907532: 00ffff rw=1 din=$00    vector high = $00
+    cyc 907532: 000000 sync=1          -> $0000
+
+An IRQ arrives while slot 7's firmware is busy-polling its EXECUTE port,
+three bytes go on the stack, the emulation-mode vector is fetched from BANK
+$00 and both bytes read `$00`.  The machine spends the rest of the run in
+zero page - `ORA` / `SBC` / `ADC` / `BRK` at `$0000`-`$0006`, exactly 100,000
+times in the last 400,000 instructions, the `BRK` returning through the same
+dead vector.  **From the outside that looked like a HALT**, which is what the
+hardware's frozen counters had suggested; it is not, it is a crash.
+
+**A IIgs IS NOT A BARE 65816.**  The part forces PBR to zero for every vector
+fetch and `rtl/cpu65816.sv` does exactly that, correctly.  The MACHINE does
+not: its FPI watches the VP' pin and takes the vector from BANK $FF, the ROM,
+so the handlers survive whatever the language card happens to be showing at
+`$00/$FFxx`.  KEGS is explicit - every vector in `instable.h` and
+`sim65816.c` is written as a full 24-bit `$FF/FFxx` address, and
+`moremem_fix_vector_pull()` masks it back down to bank $00 ONLY when
+`SHADOW[6]` is set, the bit that makes `$C000-$FFFF` in banks $00/$01 plain
+RAM with no I/O and no language card.  **The default is the ROM and the RAM
+is the exception**, which is the opposite way round from the bare part.
+
+GS/OS trips it because it puts the language card in RAM-read mode early - the
+bench reports "bank1, RAM read, write enabled" while the SmartPort is still
+loading - and from that moment `$00/$FFFE` is uninitialised RAM.  The IIe
+build never saw it: its vectors are the ROM's because the language card is
+usually showing ROM, and nothing on that machine redirects.
+
+`vpb` already existed on the core, correct, and `master_top.sv` was throwing
+it away (`.vpb ()`).  The redirect is made at THE ONE PLACE THE BANK IS
+FORMED, beside the `cyc_internal` parking and for the same reason: the map,
+the page cache, the event stream and the host's mirror all read the bank from
+that wire, and a redirect they could not see would put the host's model of
+memory at odds with the card's.  `sim/boot_gs_tb.sv` makes the same redirect
+at the same point, with the comment saying so.
+
+**AFTER**: the same run reaches 3,000,000 instructions across **470 distinct
+PCs** in the ROM's handlers with bus traffic climbing steadily, where before
+it had four PCs and frozen counters.  `sim/suite.sh gs` is 9/9 and **the KEGS
+divergence floor is UNMOVED at 67,398** - which is right, and worth saying
+why: early in the ROM's boot the language card is still showing ROM, so bank
+$00 and bank $FF read the same bytes there, and KEGS applies the same
+redirect anyway.
+
+## Rung 4b, part 9: the ADB mouse (2026-09-09)
+
+Milestone 1 wants the Finder with a mouse, and `gs_adb.sv` had `mouse_valid`
+and `mouse_coord` as stubs with the comment "the mouse, not yet fed".
+`$C024` already routed into the micro (`gs_io`'s read mux falls through to
+`adb_rd`), so what was missing was the model.
+
+Transcribed from KEGS's `mouse_read_c024`, MINUS its host-side shortcuts: the
+`em_active` block that reaches into GS/OS's own cursor variables at
+`$E1/0190` and pokes them is an emulator's shortcut, not something the
+hardware does, and the hide/warp-pointer handling is its window's.  What is
+left is the chip.
+
+**THE MODEL IS INVERTED, DELIBERATELY.**  KEGS keeps ABSOLUTE positions
+(`g_mouse_a2_x`, and `delta = target - a2_x`) because its mouse comes from a
+window with coordinates.  Ours arrives as the Pi's evdev DELTAS already, so
+what is kept here is THE MOTION NOT YET HANDED OVER - the same quantity
+KEGS's subtraction computes, from the other end.  What software observes, a
+stream of deltas clamped to +-$3F with the button on the Y read, is
+identical.
+
+The details that matter: `$C024` alternates X and Y and `mouse_coord` is also
+`$C027` bit 1, so a program can find its place; each read hands over at most
+$3F and KEEPS THE REST, so a fast movement is metered out rather than lost;
+bit 7 is the button and only on the Y read (KEGS sets it unconditionally on
+the X read - "mouse button not down on x coord rd"); and the register reads
+ZERO with ADB mode bit 1 set or when the mouse's own address no longer
+matches the one the micro polls.
+
+`MOUSE_MOVE` ($25) needed no change - it already carries signed deltas and
+the button levels, the same message `rtl/mouse_card.sv` takes for the IIe's
+AppleMouse - so only `msg_free` had to come down through `gs_io`.
+
+**ON A IIgs THERE IS NO MOUSE CARD**, so the host separates the card from the
+feed: `mouse_on_` is the slot-5 AppleMouse and `adb_mouse_on_` is the
+MOUSE_MOVE feed, and only the feed is armed at `machine = iigs`.  No slot, no
+ROM, no slot-clash check.  `mouse = off` still turns it off.
+
+`sim/gs_adb_tb.sv` is **46 checks**: the clamp (100 goes over as $3F then 37,
+nothing lost), negative deltas in seven bits, the button only on Y,
+accumulation when two moves arrive before a read, and the off-gate.  It also
+caught something that was the RULE WORKING rather than a bug: the
+auto-repeat section's set-config leaves `mouse_ctl_addr` at 2 while the mouse
+is at 3, and the module correctly reported the mouse as absent.
+
+**OPEN, found on the way, not fixed**: `gs_adb`'s main sequential block puts
+`frame_tick` ahead of the `act` cases in one if/else chain, so a register
+access landing on the same clock as a frame tick is dropped.  It is
+pre-existing (it affects `$C010` and `$C026` the same way) and rare - one
+clock in ~17,000 - but it is real.
 
 ## What is NOT working, as of the end of rung 4b
 
