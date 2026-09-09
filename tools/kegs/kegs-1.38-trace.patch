@@ -1,0 +1,92 @@
+--- a/src/engine_c.c
++++ b/src/engine_c.c
+@@ -42,6 +42,9 @@
+ extern Kimage g_debugwin_kimage;
+ 
+ extern word32 g_log_pc_enable;
++/* strudelworks trace hook: stream Pc_log records to a file, stop after N */
++extern FILE *g_trace_fp;
++extern dword64 g_trace_count, g_trace_max;
+ extern Pc_log *g_log_pc_ptr;
+ extern Pc_log *g_log_pc_start_ptr;
+ extern Pc_log *g_log_pc_end_ptr;
+@@ -904,6 +907,14 @@
+ 			((neg7 & 0x80) << 16) | ((!zero) << 17);	\
+ 		tmp_pc_ptr->xreg_yreg = (xreg << 16) + yreg;		\
+ 		tmp_pc_ptr->stack_direct = (stack << 16) + direct;	\
++		if(g_trace_fp) {					\
++			fwrite(tmp_pc_ptr, sizeof(Pc_log), 1, g_trace_fp); \
++			if(++g_trace_count >= g_trace_max) {		\
++				fclose(g_trace_fp);			\
++				fprintf(stderr, "trace: %lld instructions, done\n", (long long)g_trace_count); \
++				exit(0);				\
++			}						\
++		}							\
+ 		tmp_pc_ptr++;						\
+ 		if(tmp_pc_ptr >= g_log_pc_end_ptr) {			\
+ 			tmp_pc_ptr = g_log_pc_start_ptr;		\
+--- a/src/sim65816.c
++++ b/src/sim65816.c
+@@ -70,6 +70,11 @@
+ 
+ int	g_a2_fatal_err = 0;
+ dword64	g_dcycles_end = 0;
++/* strudelworks trace hook */
++FILE	*g_trace_fp = 0;
++dword64	g_trace_count = 0;
++dword64	g_trace_max = 20000000ULL;
++extern word32 g_clk_pin_time;
+ int	g_halt_sim = 0;
+ int	g_rom_version = -1;
+ int	g_user_halt_bad = 0;
+@@ -628,6 +633,28 @@
+ 					i++;
+ 				}
+ 			}
++		} else if(!strcmp("-trace", argv[i])) {
++			if((i + 1) < argc) {
++				g_trace_fp = fopen(argv[i+1], "wb");
++				if(g_trace_fp == 0) {
++					printf("-trace: cannot open %s\n", argv[i+1]);
++					exit(3);
++				}
++				printf("Tracing every instruction to %s\n", argv[i+1]);
++				debug_logpc_on("on");
++			}
++			i++;
++		} else if(!strcmp("-tracemax", argv[i])) {
++			if((i + 1) < argc) {
++				g_trace_max = strtoull(argv[i+1], 0, 0);
++			}
++			i++;
++		} else if(!strcmp("-pintime", argv[i])) {
++			if((i + 1) < argc) {
++				g_clk_pin_time = (word32)strtoul(argv[i+1], 0, 0);
++				printf("Clock pinned to %u (seconds since 1904)\n", g_clk_pin_time);
++			}
++			i++;
+ 		} else if(!strcmp("-logpc", argv[i])) {
+ 			printf("Force logpc enable\n");
+ 			debug_logpc_on("on");
+--- a/src/clock.c
++++ b/src/clock.c
+@@ -177,12 +177,19 @@
+ 	}
+ }
+ 
++word32	g_clk_pin_time = 0;	/* strudelworks: nonzero = fixed clock for deterministic traces */
++
+ void
+ update_cur_time()
+ {
+ 	struct tm *tm_ptr;
+ 	time_t	cur_time, secs, secs2;
+ 
++	if(g_clk_pin_time) {
++		g_clk_cur_time = g_clk_pin_time;
++		g_clk_next_vbl_update = g_vbl_count + 5;
++		return;
++	}
+ 	cur_time = time(0);
+ 
+ 	/* Figure out the timezone (effectively) by diffing two times. */
