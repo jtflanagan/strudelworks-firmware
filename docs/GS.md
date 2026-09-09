@@ -1601,6 +1601,62 @@ water tiles moving between them.  It is the same screen that had been
 alternating between correct and garbage all afternoon.  The machine was never
 wrong; only the picture was.
 
+## Rung 4b, part 6: the SHR stride, and $C029 (2026-09-09)
+
+**THE GARBLED SHR WAS AN 80-PIXEL SHEAR PER ROW.**  The user named it from the
+screen - "the lines are basically getting interlaced" - and the arithmetic
+agrees exactly.
+
+`AppleApp::Config::vidhd_possible()` was `vidhd_slot != 0 || boot_menu`, and
+that is what decides whether the SHR TEXTURE AND VIEWPORT are created at
+start-up (`apple_app.cpp:64`).  With `vidhd = 0` and `boot_menu = off` it was
+false, so `shr_tex_` (640x200) was never made and `vp_shr_` never placed -
+while the PUBLISH side had been changed this rung to `(vidhd_on_ ||
+cfg_.iigs)` and was sending 640x200 frames anyway.  `tex_for()` requires
+`shr_tex_.texture() != 0`, got zero, and fell back to the 560x192 Apple
+texture.  `TextureLayer::upload`'s size check then PASSED - 384,000 >= 322,560
+- and uploaded the SHR buffer with a 560-PIXEL STRIDE OVER 640-PIXEL ROWS.
+Eighty pixels of shear a row, accumulating down the screen, with the colours
+perfectly correct because the RGB triples themselves were untouched.
+
+A IIgs HAS A VGC ON THE MOTHERBOARD: SHR is always possible there, with no
+card in any slot.  The predicate says so now.
+
+**HOW IT WAS FOUND, because the method is the point.**  The buffer was dumped
+from a frozen machine and RENDERED OFFLINE by the same arithmetic
+`shr_render` uses - `$2000 + 160*y` in, `y*640*3` out - and came out as a
+perfect Prince of Persia title screen.  That single test proved the data
+right, the algorithm right, and therefore the fault downstream of both, in one
+step and with no hardware.  Everything before it had been chasing the data.
+
+**AND A CORRECTION TO THIS SHEET'S OWN METHOD.**  Before that, the same
+screenshot was asked for repeatedly on the grounds that a "matched instant"
+was needed - when the screen NEVER showed a clean frame, so any screenshot was
+matched and the evidence was already in hand.  The user said so.  A hypothesis
+that cannot distinguish two outcomes is not worth a measurement.
+
+**$C029, three faults, from KEGS.**  Found while chasing the above and real
+independently of it:
+
+- the card's write masked `& $A0` and **discarded bit 6** (linearise), so a
+  program that turned linear addressing on and read it back was told it had
+  not.  KEGS splits the register - `g_c029_val_some = val & 0x41`, the video
+  state takes `val & 0xa0` - and the read recombines them, so the byte read
+  back is `val & $E1` (moremem.c:1085,1616).  The card stores that now.
+- the card's reset was `$01`.  KEGS's is `g_c029_val_some = 0x41`
+  (moremem.c:53): **linearise is SET at power-on**.
+- the host required bits 7 AND 6 to render SHR at all - AppleWin's
+  `VidHDCard::IsSHR`, which is the rule for a VidHD IN A IIe.  On a IIgs SHR
+  is BIT 7 ALONE (`BIT_ALL_STAT_SUPER_HIRES = 7`, defcomm.h), and bit 6 is
+  read back and never consulted for the picture - `g_c029_val_some` appears
+  nowhere else in KEGS.  Two machines, two references: the pair for a VidHD,
+  bit 7 for a IIgs.
+
+None of the three was the garbling, and saying so matters: Total Replay writes
+`$C1` and had `shr = 1` throughout.
+
+Build: TIMING MET wns +0.036 whs +0.051, 0 of 52,296 endpoints.
+
 ## What is NOT working, as of the end of rung 4b
 
 Said plainly, because the first write-up of this rung claimed more than it

@@ -241,7 +241,11 @@ module gs_io #(
     // from.
     logic       c021_mono;          // $C021 bit 7: monochrome
     logic [7:0] c022_color;         // $C022: text colour in 7:4, background in 3:0
-    logic [7:0] c029_newvideo;      // $C029: bit 7 SHR, bit 6 linearise, bit 5 bandwidth
+    // $C029: bit 7 SHR, bit 6 linearise, bit 5 bandwidth, bit 0 reads back.
+    // SHR IS BIT 7 ALONE (KEGS defcomm.h: BIT_ALL_STAT_SUPER_HIRES = 7);
+    // bit 6 is stored so a program can read it and changes no picture, which
+    // is why KEGS consults g_c029_val_some nowhere but the readback.
+    logic [7:0] c029_newvideo;
     logic [7:0] c02b_langsel;       // $C02B: language and NTSC/PAL
     logic [7:0] c031_diskreg;       // $C031: bit 7 APPLE35SEL, bit 6 drive select
     logic [7:0] scc_ptr;            // the SCC's write-register pointer, per channel-pair
@@ -306,7 +310,10 @@ module gs_io #(
         if (rst || !res_sync) begin
             c021_mono <= 1'b0;
             c022_color <= 8'hF0;        // white on black, the ROM's own default
-            c029_newvideo <= 8'h01;     // bit 0 reads back set (KEGS halts if clear)
+            // KEGS's own power-on: g_c029_val_some = 0x41 (moremem.c:53), so
+            // LINEARISE IS SET AT RESET and bit 0 with it.  This was $01 -
+            // linearise clear - which is not what a IIgs comes up as.
+            c029_newvideo <= 8'h41;
             c02b_langsel <= 8'h00;
             c031_diskreg <= 8'h00;
             scc_ptr <= 8'd0;
@@ -318,7 +325,15 @@ module gs_io #(
                 case (u_addr[7:0])
                     8'h21: c021_mono <= u_wdata[7];
                     8'h22: c022_color <= u_wdata;
-                    8'h29: c029_newvideo <= (u_wdata & 8'hA0) | 8'h01;
+                    // $C029 NEWVIDEO, as KEGS keeps it (moremem.c:1085,1616).
+                    // KEGS splits the register: bits 6 and 0 are stored
+                    // (`g_c029_val_some = val & 0x41`) and bits 7 and 5 go to
+                    // the video state (`new_tmp = val & 0xa0`), and the READ
+                    // recombines them - so the byte a program reads back is
+                    // `val & 0xE1`.  This masked with $A0 and forced bit 0,
+                    // which DISCARDED BIT 6: a program that turned linear
+                    // addressing on and read it back was told it had not.
+                    8'h29: c029_newvideo <= u_wdata & 8'hE1;
                     8'h2B: c02b_langsel <= u_wdata;
                     8'h31: c031_diskreg <= u_wdata & 8'hC0;
                     // The SCC's write-register pointer protocol: a write to
