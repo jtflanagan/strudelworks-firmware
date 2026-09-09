@@ -68,8 +68,15 @@ module gs_iwm (
 
     output logic [7:0] rd_byte,
 
-    // $C031 DISKREG: bit 7 selects the 3.5" drives over the 5.25", and bit 6
-    // is a control line the 3.5" status mux reads (IWM_BIT_C031_CTRL).
+    // $C031 DISKREG, AND THE TWO BITS ARE NOT THE WAY ROUND THEY LOOK.
+    // iwm.h is explicit: IWM_BIT_C031_APPLE35SEL is 6 and IWM_BIT_C031_CTRL
+    // is 7 - so BIT 6 selects the 3.5" drives over the 5.25", and BIT 7 is
+    // the control line the 3.5" status multiplexer reads as one of its four
+    // select bits.  They were wired the other way round until 2026-09-09,
+    // which left apple35_sel low whenever the ROM had actually asked for the
+    // 3.5" path: the status register then answered from the 5.25" arm, a
+    // CONSTANT write-protect of 1, where the reference walks the mux and
+    // returns a different bit for each phase the ROM steps to.  docs/GS.md.
     input  wire        apple35_sel,
     input  wire        c031_ctrl,
 

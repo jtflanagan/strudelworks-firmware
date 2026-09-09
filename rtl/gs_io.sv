@@ -300,7 +300,7 @@ module gs_io #(
     gs_iwm u_iwm (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
-        .rd_byte (iwm_rd), .apple35_sel (c031_diskreg[7]), .c031_ctrl (c031_diskreg[6]),
+        .rd_byte (iwm_rd), .apple35_sel (c031_diskreg[6]), .c031_ctrl (c031_diskreg[7]),
         .cnt_mode_wr (iwm_cnt_mode_wr)
     );
 

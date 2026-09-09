@@ -2139,9 +2139,42 @@ Also open:
   been scribbling everywhere.  The routine compares `$24/$25` against `$047B`
   and `$21/$22` and retries, which has the shape of a list or handle walk
   that never reaches its terminator.
-  Next: disassemble ROM 3 around $FF/C973 to learn what the routine is
-  walking, and find which of those RAM locations holds a value our machine
-  produced differently.
+  **THE DIVERGENCE IS FOUND, AT INSTRUCTION 618,514**, by set-difference
+  against a KEGS trace of THE SAME IMAGE (`s7d1 =` in the config; 20M
+  instructions).  Every `(bank, PC)` KEGS visits is a set; the first of ours
+  that is not in it is a `SEC`/`RTS` error return at `$FF/4821`, reached by a
+  `BMI` at `$FF/480A` that KEGS does not take.  The N flag comes from
+
+        $FF/497E: BIT $C0ED     ; IWM Q6 high
+        $FF/4981: LDA $C0EE     ; Q7 low -> the IWM STATUS register
+
+  and the two machines answer it differently, at the same moment in the boot
+  (KEGS instruction 618,526, ours 618,511):
+
+        KEGS  $2F / $AF, alternating   bit 7 varies, BIT 5 SET (motor on)
+        ours  $8F, always              bit 7 stuck 1, bit 5 clear
+
+  KEGS's sense bit ALTERNATES as the ROM steps the phase lines - it is
+  walking the 3.5" status multiplexer - where ours is a constant.
+- **FIXED on the way (2026-09-09): $C031's two bits were the wrong way
+  round.**  `iwm.h` is explicit - `IWM_BIT_C031_APPLE35SEL` is **6** and
+  `IWM_BIT_C031_CTRL` is **7** - and `gs_io` had `apple35_sel` on bit 7 and
+  `c031_ctrl` on bit 6.  So whenever the ROM asked for the 3.5" path (it
+  writes `$C031 = $40`), `apple35_sel` read low and the status register
+  answered from the 5.25" arm, a constant write-protect of 1.  `gs_iwm`'s own
+  comment asserted the wrong bit while citing the right constant by name.
+  The suite is unmoved by the fix (10/10, floor 67,398) and it does not by
+  itself change the boot - because of the next item.
+- **STILL OPEN, and the next link**: with the swap fixed, `$FF/4981` still
+  reads `$8F`, because our IWM's MOTOR LATCH is 0 where KEGS's is 1.
+  KEGS gates the whole multiplexer on `if(state & IWM_STATE_MOTOR_ON)` and
+  returns a flat 1 with the motor off - which is exactly the arm we take.  So
+  the mux never walks.  This runs into the standing decision recorded in
+  `gs_iwm.sv`: bit 5 of the status byte reports NO MOTOR on purpose, so that
+  the ROM's motor-wait loops at $FF/4717 and $FF/5B71 fall through.  Note
+  KEGS keeps TWO motor bits - `IWM_STATE_MOTOR_ON` gates the mux,
+  `IWM_STATE_MOTOR_ON35` is what case $08 reports - and we have one.  That
+  distinction is probably the whole of it.
 
   Past the splash and past the sound driver now, it traps into the monitor
   with BRK and COP in banks $83, $18, $80 and $CF - banks with no RAM behind
