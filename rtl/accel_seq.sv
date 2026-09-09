@@ -418,8 +418,19 @@ module accel_seq #(
     // ...exactly the ops that can move a switch: a $C00x write, a $C05x or
     // $C08x access.  Not the keyboard or status page, not the speaker ($C03x,
     // a toggle and nothing of the map's), not a slot's.
+    // ...and on the IIgs, THREE MORE REGISTERS MOVE THE MAP, so an
+    // internalized write to any of them holds exactly as a switch does:
+    // $C02D SLOTROMSEL (which $Cnxx pages are the internal ROM's), $C035
+    // SHADOW (where a write lands a second time, and in bit 6 whether the
+    // fast pair has I/O at all), and $C068 STATEREG (seven switches at
+    // once).  $C036 CYAREG is NOT among them - the map does not read it.
+    // Reads of all four move nothing.
+    wire gs_map_wr = GS && !u_rw && ((u_addr[7:0] == 8'h2D) ||
+                                     (u_addr[7:0] == 8'h35) ||
+                                     (u_addr[7:0] == 8'h68));
     wire swi_change = swi_commit && !quiet_q && !slot_q && (u_addr[15:8] == 8'hC0) &&
-                      ((!u_rw && u_addr[7:4] == 4'h0) || (u_addr[7:4] == 4'h5) || (u_addr[7:4] == 4'h8));
+                      ((!u_rw && u_addr[7:4] == 4'h0) || (u_addr[7:4] == 4'h5) ||
+                       (u_addr[7:4] == 4'h8) || gs_map_wr);
     always_ff @(posedge clk) swi_sq <= rst ? 4'd0 : {swi_sq[2:0], swi_change};
     wire swi_settling = swi_change || (|swi_sq);
 

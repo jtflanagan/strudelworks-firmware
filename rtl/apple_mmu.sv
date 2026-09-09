@@ -217,7 +217,14 @@ module apple_mmu #(
     parameter logic [7:0] GS_ROM_BASE = 8'hFC,
     // Where a read of an unpopulated bank lands.  One page, write-protected,
     // so the ROM's memory sizing finds no memory there twice running.
-    parameter logic [7:0] GS_VOID_BANK = 8'hFB
+    parameter logic [7:0] GS_VOID_BANK = 8'hFB,
+    // CYAREG's POWER-ON value (KEGS moremem.c:61 and sim65816.c:714): bit 7
+    // is the speed bit, set, and bit 6 is the POWER-ON STATUS BIT, which a
+    // ROM 3 sets at startup and reads back to tell a cold start from a warm
+    // one.  It survives RES' - KEGS sets it before do_reset() and do_reset()
+    // does not touch it - which is why this register is reset by the card's
+    // `rst` alone below and not by res_sync.
+    parameter logic [7:0] GS_CYAREG_POR = 8'hC0
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -294,6 +301,18 @@ module apple_mmu #(
     output wire [2:0]  vid_sw,
     // The RamWorks bank register, for MEM_CTRL's readback.
     output logic [7:0] rw_bank,
+    // The IIgs's own registers, for rtl/gs_io.sv to read back.  The map holds
+    // them because the map is what they steer; the chipset's face answers
+    // them because $C0xx is its window (docs/GS.md rung 3b).  All zero at
+    // GS = 0 except CYAREG, which is not built there either.
+    output wire  [7:0] gs_shadow_o,
+    output wire  [7:0] gs_cyareg_o,
+    output wire  [7:0] gs_sltrom_o,
+    // STATEREG composed back out of the seven switches a write to it moved
+    // (KEGS set_statereg, moremem.c:606): ALTZP, PAGE2, RAMRD, RAMWRT, RDROM,
+    // LCBANK2, ROMBANK, INTCXROM.  ROMBANK is always 0: this machine has one
+    // ROM image.
+    output wire  [7:0] gs_state_o,
 
     // The driver's question, combinational: would a write to q_addr, presented
     // now, reach auxiliary memory in a RamWorks bank other than 0?  See the
@@ -489,11 +508,18 @@ module apple_mmu #(
             // (KEGS do_reset: $C035 = 0).  CYAREG's power-on bit is the
             // host's to set; the map does not read it.
             gs_shadow   <= 7'd0;
-            gs_cyareg   <= 8'd0;
             gs_sltrom   <= 8'd0;
+            // CYAREG IS RESET BY THE CARD'S RESET AND NOT BY RES'.  Its bit 6
+            // is the power-on status a ROM 3 reads to tell a cold start from
+            // a warm one, so a warm one must leave it alone: KEGS sets it
+            // before do_reset() and do_reset() does not touch it
+            // (sim65816.c:714).  One block still drives this register - the
+            // two resets are told apart here, not split into two writers.
+            if (rst) gs_cyareg <= GS ? GS_CYAREG_POR : 8'd0;
         end else if (op_commit) begin
             if (gs_shadow_w) gs_shadow <= op_wdata[6:0];
-            if (gs_cyareg_w) gs_cyareg <= op_wdata;
+            // CYAREG keeps bit 5 clear on every write (KEGS moremem.c:1713).
+            if (gs_cyareg_w) gs_cyareg <= op_wdata & ~8'h20;
             // $C02D and the SLOTC3ROM strobe are ONE register in the
             // reference (KEGS routes $C00A/B into g_c02d_int_crom bit 3), so
             // a write to either keeps both in step.  That is also why the
@@ -1116,6 +1142,18 @@ module apple_mmu #(
         endcase
     end
     assign swi_stat_byte = {swi_stat_bit, swi_kbd_low};
+
+    // ---- the IIgs's registers, read back (docs/GS.md rung 3b) ---------------
+    // SHADOW is seven bits in the register and eight on the bus; bit 7 reads
+    // zero, as it does in KEGS (g_c035_shadow_reg is only ever written with
+    // the low seven).
+    assign gs_shadow_o = {1'b0, gs_shadow};
+    assign gs_cyareg_o = gs_cyareg;
+    assign gs_sltrom_o = gs_sltrom;
+    assign gs_state_o  = {altzp, page2, ramrd, ramwrt,
+                          !lc_ramrd,        // RDROM: the complement, as on the write
+                          lc_bank2, 1'b0,   // ROMBANK: one image, always 0
+                          intcxrom};
 
     // ---- the instruction front's query ------------------------------------------
     // A read's classification and steering for a line address: the same

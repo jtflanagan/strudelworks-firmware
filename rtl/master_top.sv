@@ -1206,6 +1206,7 @@ module master_top #(
         .sw_state   (mem_sw),
         .vid_sw     (vid_sw),
         .rw_bank    (mem_rw_bank),
+        .gs_shadow_o (), .gs_cyareg_o (), .gs_sltrom_o (), .gs_state_o (),
         // The driver's next address, in the physical space: the bank is the
         // core's, which is zero on this build and the 65816's on the GS
         // (docs/GS.md rung 3).  An override's cycle belongs to no bank.

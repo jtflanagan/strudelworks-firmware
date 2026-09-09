@@ -163,8 +163,19 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [31:0] fast_ops, bus_ops, cycles, wait_clocks, accel_maps, turbo_ops;
     wire [7:0]  retries;
     wire        mem_image_ready, mem_invalidating;
-    wire        q_swi, q_swi_quiet, q_slot, swi_commit, sl_win, seq_slot_q;
+    wire        q_swi_mmu, q_swi_quiet, q_slot, swi_commit, sl_win, seq_slot_q;
     wire [7:0]  mmu_swi_stat;
+    // The chipset's face (rtl/gs_io.sv, docs/GS.md rung 3b): what it claims
+    // joins the dispatcher's internalized-op question, and its byte joins the
+    // internalized read's answer.  apple_mmu's own swi is OFF on this build
+    // (swi_on tied low), so the two never both claim.
+    wire [7:0]  gs_shadow_w, gs_cyareg_w, gs_sltrom_w, gs_state_w;
+    wire        gsio_claim, gsio_u_claim;
+    wire [7:0]  gsio_byte;
+    wire        gsio_irq;
+    wire        q_swi = q_swi_mmu || gsio_claim;
+    // The byte mux follows the REGISTERED op, exactly as master_top's does.
+    wire [7:0]  swi_byte = gsio_u_claim ? gsio_byte : mmu_swi_stat;
     wire        map_changed, map_settling;
 
     // The fronts are OFF on the GS build (docs/GS.md rung 6 turns them on):
@@ -173,7 +184,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     accel_seq #(.GS (1'b1)) u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (1'b0),
-        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (mmu_swi_stat),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte),
         .swi_commit (swi_commit), .fast_tick (), .fev_quiet (),
         .q_slot (q_slot), .slot_q_o (seq_slot_q), .sl_win (sl_win),
         .stall (1'b0),
@@ -263,6 +274,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .pw_data (rl_pw_data), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
+        .gs_shadow_o (gs_shadow_w), .gs_cyareg_o (gs_cyareg_w),
+        .gs_sltrom_o (gs_sltrom_w), .gs_state_o (gs_state_w),
         .q_addr ({cpu_bank, nxt_addr}), .q_divert (q_divert), .q_rw (cpu_rw), .q_cls (q_cls),
         // Nothing is internalized on the GS build yet: $C0xx is BUS class and
         // rides a real cycle until rtl/gs_io.sv answers it (rung 3b).
@@ -271,7 +284,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .swi_pb_ok (1'b0), .swi_pdl_ok (1'b0),
         .swi_hd_slot (3'd0), .swi_fd_slot (3'd0), .swi_mb_slot (3'd0),
         .swi_mouse_slot (3'd0), .swi_u2_slot (3'd0), .swi_prn_slot (3'd0),
-        .q_nsc (), .q_slot (q_slot), .q_swi (q_swi), .q_swi_quiet (q_swi_quiet),
+        .q_nsc (), .q_slot (q_slot), .q_swi (q_swi_mmu), .q_swi_quiet (q_swi_quiet),
         .swi_stat_byte (mmu_swi_stat),
         .p_addr (24'd0), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .d_addr (24'd0), .d_rw (1'b1), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
@@ -280,6 +293,20 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
         .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w)
+    );
+
+    // ---- the IIgs chipset on $C0xx ------------------------------------------------
+    // One instance, two claims: `claim` off the LIVE address for the
+    // dispatcher's decision, and `u_claim` off the REGISTERED op for the byte
+    // mux (rtl/gs_io.sv, "the two faces of an op").
+    gs_io u_gsio (
+        .clk (clk), .rst (rst), .res_sync (res_sync),
+        .q_addr ({cpu_bank, nxt_addr}), .q_rw (cpu_rw), .claim (gsio_claim),
+        .u_bank (u_bank), .u_addr (u_addr), .u_rw (u_rw), .u_wdata (u_wdata),
+        .u_commit (swi_commit),
+        .gs_shadow (gs_shadow_w), .gs_cyareg (gs_cyareg_w),
+        .gs_sltrom (gs_sltrom_w), .gs_state (gs_state_w),
+        .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
 
     // ROM 3 is 512 chunks of 512 bytes landing at physical bank $FC page $00.
@@ -433,6 +460,43 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         have_prev <= 1'b1;
     end
 
+    // ---- the I/O census: what the ROM asks the chipset for -------------------------
+    // Every $C0xx the ROM touches, counted by address and direction, with the
+    // instruction number of the FIRST touch.  This is rung 3b's work list in
+    // the ROM's own order (docs/GS.md): a register with an early first touch
+    // and a large count is one the machine is waiting on.
+    integer io_rd [0:255];
+    integer io_wr [0:255];
+    integer io_first [0:255];
+    integer ic;
+    initial for (ic = 0; ic < 256; ic = ic + 1) begin
+        io_rd[ic] = 0; io_wr[ic] = 0; io_first[ic] = -1;
+    end
+    // A IIgs sees I/O at $C0xx in a pair bank only, which is the rule the map
+    // applies; the census counts what the map would call I/O.
+    wire io_touch = boot_go && u_present && (u_addr[15:8] == 8'hC0) &&
+                    ((u_bank == 8'h00) || (u_bank == 8'h01) ||
+                     (u_bank == 8'hE0) || (u_bank == 8'hE1));
+    always @(posedge clk) if (io_touch) begin
+        if (u_rw) io_rd[u_addr[7:0]] = io_rd[u_addr[7:0]] + 1;
+        else      io_wr[u_addr[7:0]] = io_wr[u_addr[7:0]] + 1;
+        if (io_first[u_addr[7:0]] < 0) io_first[u_addr[7:0]] = trace_instrs;
+    end
+    task dump_io_census;
+        integer k, touched;
+        begin
+            touched = 0;
+            $display("    ---- the $C0xx census: addr, reads, writes, first touch ----");
+            for (k = 0; k < 256; k = k + 1)
+                if (io_rd[k] != 0 || io_wr[k] != 0) begin
+                    touched = touched + 1;
+                    $display("      $C0%02X  r %-9d w %-9d first @ %0d", k,
+                             io_rd[k], io_wr[k], io_first[k]);
+                end
+            $display("    %0d distinct $C0xx addresses touched", touched);
+        end
+    endtask
+
     // ---- the engine's overruns, named ---------------------------------------------
     // late_fills is "an op missed while the fill engine was busy, and was not
     // served" - which for a write means the byte is gone.  boot_tb asserts it
@@ -518,6 +582,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         $display("    cache: hits %0d misses %0d fills %0d flushes %0d declines %0d late %0d drops %0d",
                  hits, misses, mem_fills, mem_flushes, mem_declines, late_fills, fifo_drops);
         $display("    last PC $%02X/%04X", last_sync[23:16], last_sync[15:0]);
+        dump_io_census();
 
         // The machine itself, not the ROM's opinion of it.
         if (trace_instrs == 0) fail("the core executed nothing");

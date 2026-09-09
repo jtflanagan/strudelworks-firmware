@@ -82,6 +82,7 @@ module mmu_xlate_gs_tb;
         .pw_data (8'd0), .pw_ready (1'b1), .pw_take (pw_take),
         .intc8rom (intc8rom), .pf_off (pf_off), .cl_ppn (cl_ppn), .pf_ppn (pf_ppn),
         .sw_state (sw_state), .vid_sw (vid_sw), .rw_bank (rw_bank),
+        .gs_shadow_o (), .gs_cyareg_o (), .gs_sltrom_o (), .gs_state_o (),
         .q_addr (q_addr), .q_divert (q_divert), .q_rw (q_rw), .q_cls (q_cls),
         .swi_on (1'b0), .swi_kbd_ok (1'b0), .swi_fb_ok (1'b0), .swi_vbl_ok (1'b0),
         .swi_vbl_bar (1'b0), .swi_kbd_low (7'd0), .swi_pb_ok (1'b0), .swi_pdl_ok (1'b0),

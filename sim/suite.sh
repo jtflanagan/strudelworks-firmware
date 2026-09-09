@@ -60,11 +60,17 @@ declare -A B=(
   [reg_map]="sim/run_reg_map_tb.sh|^PASS$"
   [mmu_xlate]="sim/run_mmu_xlate_tb.sh +quick|^PASS$"
   [mmu_xlate_gs]="sim/run_mmu_xlate_gs_tb.sh +quick|^PASS$"
-  # The GS ROM booting against the KEGS trace, with the floor rung 3a reached
-  # pinned (docs/GS.md rung 3): the run FAILS if the two part company sooner.
+  # The GS ROM booting against the KEGS trace, with the floor the last rung
+  # reached pinned (docs/GS.md rung 3): the run FAILS if the two part company
+  # sooner.  41,877 at the end of 3a; 66,749 once gs_io answered the ADB micro
+  # and the map's own registers.  Raise it whenever a rung moves it - AND THE
+  # RUN LENGTH WITH IT: the floor is in events and --instrs is in
+  # instructions, so a run that stops short fails as "below floor" for want of
+  # length rather than for want of agreement.  66,749 events is card
+  # instruction 201,635.
   # It needs sim/boot_work/rom3.kegs.trc - tools/kegs/trace_rom.sh makes it -
   # and without one the bench still runs and only the diff is skipped.
-  [boot_gs]="sim/run_boot_gs_tb.sh --instrs=200000 --tag=suite --floor=41877|^PASS$"
+  [boot_gs]="sim/run_boot_gs_tb.sh --instrs=250000 --tag=suite --floor=66749|^PASS$"
   [ports]="python3 tools/check_ports.py|^PASS: 0 unknown"
   [report]="sim/run_report_tb.sh|^REPORT OK"
   [ssi263]="sim/run_ssi263_tb.sh|^PASS$"
