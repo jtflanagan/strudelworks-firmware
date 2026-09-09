@@ -1,16 +1,20 @@
 # Apple IIgs on the card: the run sheet
 
-Status: **RUNGS 0, 1, 1b, 2 AND 3a DONE, 2026-09-09** (1b proven on hardware;
-the rest in simulation, which is what those rungs are).  The IIgs memory map is
-built and swept against a model taken from KEGS: 3584 maps, 67,092,493 checks,
-0 mismatches.  **The soft 65816 now boots the real ROM 3 on the card's memory
-path and agrees with KEGS for 41,877 collapsed instruction events** before the
-first register the card does not yet answer - the ADB micro's KMSTATUS at
-`$C027` - sends it into a timeout loop.  **NEXT is rung 3b**: `gs_io.sv`, the
-IIgs chipset's register faces, which moves that number.  Nothing of the GS has
-run on hardware yet.  Branch `gs_emulation` in both repos, taken from master at
-fw `62b21ab` / host `98d46d2` (the `memory_refactor` merge).  No bitstream yet;
-the IIe design is untouched and stays bit-identical at `GS=0`.
+Status: **RUNGS 0, 1, 1b, 2 AND 3a DONE; 3b's TRACE GATE MET, 2026-09-09** (1b
+proven on hardware; the rest in simulation, which is what those rungs are).
+The IIgs memory map is built and swept against a model taken from KEGS: 3584
+maps, 67,092,493 checks, 0 mismatches.  **The soft 65816 boots the real ROM 3
+on the card's memory path and agrees with KEGS for 67,398 collapsed
+instruction events - 202,308 instructions, zero divergence - all the way to
+the STARTUP-DEVICE SLOT SCAN**, which is where rung 3's gate put the end of the
+comparison: past it KEGS boots its own emulated cards and this machine boots
+the ones it has.  **NEXT is the rest of the chipset** (VGC registers,
+`gs_intc`, the IWM and SCC stubs), built against KEGS's behaviour directly
+rather than against the index, and the card's own slot 6 and slot 7 in the
+bench.  Nothing of the GS has run on hardware yet.  Branch `gs_emulation` in
+both repos, taken from master at fw `62b21ab` / host `98d46d2` (the
+`memory_refactor` merge).  No bitstream yet; the IIe design is untouched and
+stays bit-identical at `GS=0`.
 
 The plan itself (inventory, decisions, memory-path design, rung ladder) was
 written with the user on 2026-09-08 and is reproduced here so the sheet stands
@@ -242,7 +246,7 @@ parity check on every rung that touches shared RTL.
 | 2 | GS map on the MMU, bench-only: bank classes, 13 regions, `sh`, the shadow dup register, STATEREG/SHADOW/SLOTROMSEL, `$C071-$C07F`, the VOID page, the MEM_ROM page message. `mmu_xlate_gs_tb`: a KEGS-derived oracle (`setup_pageinfo`/fixups ported) swept over switch states x SHADOW x bank classes x 256 pages, read and write. `mem_integ_tb` gains a cross-bank write, a dup landing, a read-after-shadowed-write ordering check | 0 mismatches; IIe sweep unchanged (16384 maps, 0); battery at GS=0 unchanged | **DONE 2026-09-09** - part 1 the scaffolding, part 2 the map itself with its own oracle. Part 1 (2026-09-08): a `GS` parameter; the region set 10 -> 13, splitting text page 2, hires page 2 and the rest of the SHR range out of plain RAM; the entry's new `sh` bit at the TOP so xlate and both fronts decode unchanged; the $C035/$C036/$C068/$C02D registers, inert at GS=0; the four bank classes (PAIR, RAM, VOID, ROM) in `xlate()`. Gate met: IIe sweep 16384 maps / 33,347,584 checks / 0 mismatches, battery 34/34. Part 2 (2026-09-09): the query ports widened to 24 bits, `sh` exported on the classified op and the write query, `$C071-$C07F` reading ROM, the I/O-and-language-card inhibit, and **`sim/mmu_xlate_gs_tb.sv`** - a model written from KEGS's own fixups, not from the RTL, sweeping 12 banks x 256 pages x read/write over all 128 SHADOW states and the language card's: **3584 maps, 67,092,480 checks, 0 mismatches**, with the IIe sweep still 16384/33,347,584/0 and the battery 34/34. The oracle found three bugs in the RTL it was written against - the two windows of the I/O inhibit implemented the wrong way round, a Mega II test written on bank bit 1 (which is 0 for $E0 as it is for $00, so the guard never fired), and the region table's fold inherited by bank classes that have no language card. Part 3 (2026-09-09) closes it: `$C02D` read by the map (a slot page is the INTERNAL ROM's unless its bit is SET, or INTCXROM overrides - so a IIgs comes up with every slot page internal where a IIe comes up with them the slots'; bit 3 IS SLOTC3ROM, one register with the $C00A/B strobe, which is why the IIe's $C3 rule falls out of the IIgs's); the SHADOW DUPLICATE, emitted one clock behind its op down the same path a posted write takes, one deep with a drop counter a bench asserts is zero; and `rtl/rom_loader.sv` parameterised on `N_CHUNKS`/`ROM_PPN0` so one message loads any run of physical pages, with the host's chunk count following the ROM's size. Final: GS sweep **3584 maps, 67,092,493 checks, 0 mismatches** including twelve duplicate-landing cases; IIe sweep 16384/33,347,584/0; battery 35/35; host 36/36 on the Pi. |
 | 3a | The machine exists and fetches: the bank byte on the unified op stream and into the classifier's 24 bits, the 65816 on the dispatcher at `GS=1` (no fronts), `sim/boot_gs_tb.sv` booting ROM 3 through the seam, `tools/trace_diff816.py` | the ROM runs; the divergence index measured and pinned; the IIe unmoved | **DONE 2026-09-09** - see below |
 | 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro, the map registers and the clock done, 41,877 -> 67,398 events |
-| 3c | Interrupts live, and the host side: wire v6 GS classify, ROM load, `machine = iigs`, ADB_KEY, `mock_card`, to the startup-device scan | zero divergence to the scan; the host mirror equals the bench image | |
+| 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face), the card's own slot 6 and slot 7 in `boot_gs_tb`, and the host side: wire v6 GS classify, ROM load, `machine = iigs`, ADB_KEY, `mock_card` | the ROM reaches its startup-device poll; the host mirror equals the bench image | trace gate MET at 3b (see below) |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
 | 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | |
@@ -421,11 +425,38 @@ bank $FC.  It had been in a fallback scan of the whole I/O page; with the
 clock answering it is on the normal boot path.  That is the census earning its
 place - the divergence index alone would have undersold the step.
 
-**Where it stops now**: a table-comparison loop at $FF/FA06 (`LDA (dp),Y` /
-`CMP abs,Y` / `DEY DEY BPL`) reading zeros where KEGS reads $03 and $0A.  The
-VGC is the next unanswered thing the ROM touches ($C021 and $C022 first appear
-at instruction 201,665, just before this), so **the VGC registers are next**,
-then `gs_intc` and the IWM and SCC stubs.
+**AND THE TRACE HAS REACHED THE SLOT SCAN, WHICH IS WHERE THE REFERENCE
+STOPS BEING ONE.**  The loop the run now stops in is at $FF/F9F8-$FA1B: a
+pointer walks $C700 down to $C400 and compares `($00),Y` against the signature
+table at $FF/FB01 - bytes 1, 3 and 5 against $20, $00, $03.  It is the
+STARTUP-DEVICE SLOT SCAN, which is exactly where rung 3's gate said the
+comparison ends.
+
+The card reads $C705 = $00 and moves on to $C6; KEGS reads $03 and matches at
+$C7.  That is not a bug in the map, and no chipset work will close it.  KEGS
+CONSTRUCTS BOTH PAGES (config.c:1163-1190) in a 4 KB "cards" area of its own:
+
+- `g_rom_cards_ptr[0x700 + i] = g_rom_c700[i]` - slot 7 is **KEGS's own
+  built-in SmartPort firmware**, a static array in the emulator.  It is not in
+  the Apple ROM at all: bank $FF's $C700 is 256 zero bytes.
+- `g_rom_cards_ptr[0x600 + i] = g_rom_fc_ff_ptr[0x3c600 + i] ^
+  g_rom_c600_rom01_diffs[i]`, plus four more XOR patches for ROM 3 - KEGS
+  rebuilds the real Disk II PROM out of the GS ROM and a diffs table so it
+  need not redistribute Apple's.
+
+So past the scan the two machines are configured differently BY DESIGN: KEGS
+boots its own emulated devices, and this card boots the slot-7 SmartPort HDC
+and slot-6 Disk II it already has (docs/HARDDISK.md, docs/FLOPPY.md), whose
+ROMs the host sends.  `sim/boot_gs_tb.sv` carries neither yet - it is the
+memory path and the chipset, not a machine with cards - which is why $C700
+reads zero there.
+
+**THE TRACE HALF OF RUNG 3's GATE IS THEREFORE MET**: 67,398 collapsed events,
+202,308 instructions, zero divergence, ending at the startup-device scan.  The
+index cannot usefully move further, so the remaining chipset - the VGC
+registers, `gs_intc`, the IWM and SCC stubs - is built against KEGS's
+behaviour directly rather than against the index, and the next thing the BENCH
+needs is the card's own slots in it.
 
 ## Verification
 
