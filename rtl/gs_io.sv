@@ -64,6 +64,12 @@ module gs_io (
     input  wire [7:0]  gs_sltrom,      // $C02D
     input  wire [7:0]  gs_state,       // $C068, composed from the switches
 
+    // Seconds since 1904-01-01, for the clock chip.  The host's, or the
+    // bench's pinned value (rtl/gs_clock.sv).
+    input  wire [31:0] seed_time,
+    // The border colour the VGC paints, $C034[3:0].
+    output wire [3:0]  border,
+
     // The byte a read of the registered op would take, and whether this
     // module is the one that owns that op at all - the select for the caller's
     // internalized-read mux, which follows the REGISTERED op just as the byte
@@ -89,6 +95,7 @@ module gs_io (
     function automatic mine(input [7:0] lo);
         mine = (lo == 8'h25) || (lo == 8'h26) || (lo == 8'h27)    // the ADB micro
             || (lo == 8'h2D)                                       // SLOTROMSEL
+            || (lo == 8'h33) || (lo == 8'h34)                      // the clock and battery RAM
             || (lo == 8'h35) || (lo == 8'h36) || (lo == 8'h37)     // SHADOW, CYAREG, and $C037
             || (lo == 8'h68);                                      // STATEREG
     endfunction
@@ -130,6 +137,8 @@ module gs_io (
     always_comb begin
         case (u_addr[7:0])
             8'h2D:   rd_byte = gs_sltrom;
+            8'h33,
+            8'h34:   rd_byte = clk_rd;
             8'h35:   rd_byte = gs_shadow;
             8'h36:   rd_byte = gs_cyareg;
             8'h37:   rd_byte = 8'h00;
@@ -137,6 +146,15 @@ module gs_io (
             default: rd_byte = adb_rd;
         endcase
     end
+    wire [7:0] clk_rd;
+    wire [7:0] clk_cnt_strobes, clk_cnt_bad;
+    gs_clock u_clock (
+        .clk (clk), .rst (rst), .res_sync (res_sync),
+        .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
+        .rd_byte (clk_rd), .seed_time (seed_time), .border (border),
+        .cnt_strobes (clk_cnt_strobes), .cnt_bad (clk_cnt_bad)
+    );
+
     assign irq = adb_irq_data || adb_irq_mouse;
 
     // q_rw is not consulted yet: every address claimed here answers both a

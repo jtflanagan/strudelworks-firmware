@@ -56,7 +56,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // nothing drives them.  KEGS's unclaimed I/O reads return
                     // the floating bus; until gs_io answers, a constant is
                     // both honest and repeatable.
-                    parameter [7:0] FLOAT_BYTE = 8'h00);
+                    parameter [7:0] FLOAT_BYTE = 8'h00,
+                    // Seconds since 1904-01-01; see the gs_io wiring below.
+                    parameter [31:0] SEED_TIME = 32'd3871713600);
 
     localparam integer T_PRESENT = 2, T_EMIT = 2, T_DIN = 44, T_CYCEN = 45;
     localparam integer PHI0_LOW = 98 - PHI0_HIGH, CYCLE = 98;
@@ -306,6 +308,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .u_commit (swi_commit),
         .gs_shadow (gs_shadow_w), .gs_cyareg (gs_cyareg_w),
         .gs_sltrom (gs_sltrom_w), .gs_state (gs_state_w),
+        // PINNED TO KEGS's OWN CLOCK.  tools/kegs/trace_rom.sh runs the
+        // reference with -pintime 3871713600 (2026-09-08 12:00:00 since
+        // 1904) so its trace is the same every run; the card must believe the
+        // same seconds or the two disagree about a byte the ROM checksums.
+        .seed_time (SEED_TIME), .border (),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
 

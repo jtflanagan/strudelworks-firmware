@@ -241,7 +241,7 @@ parity check on every rung that touches shared RTL.
 | 1b | Wire format v6, 64-bit event records, on the IIe build first (PROTOCOL.md "The event record"). Card: `apple_bus_read.sv`, `synth_bus_events.sv`, `event_merge.sv` (class 1 fast / 2 dummy), `bus_event_filter.sv` (SKIP = a record), `bus_event_capture.sv` (64-bit FIFO, 127 records a frame, two words each, `captured` in records); the ring and the link move words and needed nothing. Host: `proto::Record`, `BusEvent` + bank/cls/cpu, the parser assembles records and faults on an odd payload, the ring, the trace writer (file version 2, 8-byte records; version-1 files refused), the sparse filter, the sources, the mock card, every `apply()`, the three trace tools; the firmware's two `.swbt` readers likewise. | IIe battery unchanged; host tests pass; HW: `mem_test.sh`, `fb_test.sh`, `accel_test.sh` green, mirror mismatches unchanged, full capture at 1 MHz sustained | **DONE 2026-09-08.** Sims: battery 34/34 (accel_vl 98/0), filter and capture benches reworked, trace self-test passing; host 36/36 on the Pi (`tools/pi_tests.sh`, new: ships and runs the cross-built suite). Build: timing met, 0 failing endpoints, and 28,941 LUTs against 32,179 BEFORE the change - the merge-queue rewrite saved more than the wider record cost. HW: boots to Applesoft and computes correctly at 1x and at 48x; 149,781,258 fast-op records delivered with the mirror's mismatch count frozen and zero merge overflows, drops, torn messages or unknown types. |
 | 2 | GS map on the MMU, bench-only: bank classes, 13 regions, `sh`, the shadow dup register, STATEREG/SHADOW/SLOTROMSEL, `$C071-$C07F`, the VOID page, the MEM_ROM page message. `mmu_xlate_gs_tb`: a KEGS-derived oracle (`setup_pageinfo`/fixups ported) swept over switch states x SHADOW x bank classes x 256 pages, read and write. `mem_integ_tb` gains a cross-bank write, a dup landing, a read-after-shadowed-write ordering check | 0 mismatches; IIe sweep unchanged (16384 maps, 0); battery at GS=0 unchanged | **DONE 2026-09-09** - part 1 the scaffolding, part 2 the map itself with its own oracle. Part 1 (2026-09-08): a `GS` parameter; the region set 10 -> 13, splitting text page 2, hires page 2 and the rest of the SHR range out of plain RAM; the entry's new `sh` bit at the TOP so xlate and both fronts decode unchanged; the $C035/$C036/$C068/$C02D registers, inert at GS=0; the four bank classes (PAIR, RAM, VOID, ROM) in `xlate()`. Gate met: IIe sweep 16384 maps / 33,347,584 checks / 0 mismatches, battery 34/34. Part 2 (2026-09-09): the query ports widened to 24 bits, `sh` exported on the classified op and the write query, `$C071-$C07F` reading ROM, the I/O-and-language-card inhibit, and **`sim/mmu_xlate_gs_tb.sv`** - a model written from KEGS's own fixups, not from the RTL, sweeping 12 banks x 256 pages x read/write over all 128 SHADOW states and the language card's: **3584 maps, 67,092,480 checks, 0 mismatches**, with the IIe sweep still 16384/33,347,584/0 and the battery 34/34. The oracle found three bugs in the RTL it was written against - the two windows of the I/O inhibit implemented the wrong way round, a Mega II test written on bank bit 1 (which is 0 for $E0 as it is for $00, so the guard never fired), and the region table's fold inherited by bank classes that have no language card. Part 3 (2026-09-09) closes it: `$C02D` read by the map (a slot page is the INTERNAL ROM's unless its bit is SET, or INTCXROM overrides - so a IIgs comes up with every slot page internal where a IIe comes up with them the slots'; bit 3 IS SLOTC3ROM, one register with the $C00A/B strobe, which is why the IIe's $C3 rule falls out of the IIgs's); the SHADOW DUPLICATE, emitted one clock behind its op down the same path a posted write takes, one deep with a drop counter a bench asserts is zero; and `rtl/rom_loader.sv` parameterised on `N_CHUNKS`/`ROM_PPN0` so one message loads any run of physical pages, with the host's chunk count following the ROM's size. Final: GS sweep **3584 maps, 67,092,493 checks, 0 mismatches** including twelve duplicate-landing cases; IIe sweep 16384/33,347,584/0; battery 35/35; host 36/36 on the Pi. |
 | 3a | The machine exists and fetches: the bank byte on the unified op stream and into the classifier's 24 bits, the 65816 on the dispatcher at `GS=1` (no fronts), `sim/boot_gs_tb.sv` booting ROM 3 through the seam, `tools/trace_diff816.py` | the ROM runs; the divergence index measured and pinned; the IIe unmoved | **DONE 2026-09-09** - see below |
-| 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro and the map registers done, 41,877 -> 66,749 events |
+| 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro, the map registers and the clock done, 41,877 -> 67,398 events |
 | 3c | Interrupts live, and the host side: wire v6 GS classify, ROM load, `machine = iigs`, ADB_KEY, `mock_card`, to the startup-device scan | zero divergence to the scan; the host mirror equals the bench image | |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
@@ -391,12 +391,41 @@ an internalized op that moves a switch, and on the IIgs $C02D, $C035 and $C068
 move the map too - $C036 does not, the map never reads it.  Divergence 41,885
 -> **66,749 events**, indices identical again (201,635 both).
 
-**Where it stops now**, and the census called it: the checksum loop at
-$FF/BA5F sums $E1/$02C0 downward and compares it against $E1/$03BC.  The card
-sums $0000 because the region is empty; KEGS sums $2D36.  That data comes from
-the clock chip and battery RAM at $C033/$C034 - read 22,529 times and written
-4,104, first touched at instruction 191, and still answered by nobody.  **NEXT
-IS `gs_clock`**, then the VGC, then `gs_intc` and the two stubs.
+**The clock chip and battery RAM (`rtl/gs_clock.sv`)**, from KEGS's clock.c.
+A serial-ish protocol over two registers: $C033 is a data latch the CPU reads
+and writes freely, and $C034 is control - bits 3:0 the BORDER COLOUR, which
+has nothing to do with the clock, bit 6 the direction of the next transfer,
+and WRITING BIT 7 IS THE STROBE that makes the chip act on what is in $C033.
+Bit 7 is not stored, so a read of $C034 never shows it.  Five states, KEGS's
+`g_clk_mode`: from IDLE a strobed write carries a command naming the seconds
+register, the chip's internal registers, the low battery-RAM addresses, or the
+two-byte address form that reaches all 256; the state after does the transfer
+and returns to IDLE.  Every byte of battery RAM therefore costs two or three
+strobes, which is why the ROM touches $C034 twenty-two thousand times in a
+boot.
+
+THE CLOCK IS PINNED, and has to be: `tools/kegs/trace_rom.sh` runs the
+reference with `-pintime 3871713600` so its trace is the same every run, and
+the card must believe the same seconds or the two disagree about a byte the
+ROM checksums.  It does not tick yet for the same reason - a running clock
+would make the comparison depend on when the bench started.  Rung 3c gives it
+the host's seconds and a virtual-time tick.  The battery RAM is 256 bytes,
+zero at configuration, which is what KEGS boots with when its config names no
+`bram` lines, so both machines find an invalid checksum and initialise it the
+same way.
+
+**The number moved 66,749 -> 67,398, and the census moved more.**  Six hundred
+events is a small step, but the shape of the run changed: the distinct $C0xx
+addresses the ROM touches fell from 256 to 57, and the ROM began executing in
+bank $FC.  It had been in a fallback scan of the whole I/O page; with the
+clock answering it is on the normal boot path.  That is the census earning its
+place - the divergence index alone would have undersold the step.
+
+**Where it stops now**: a table-comparison loop at $FF/FA06 (`LDA (dp),Y` /
+`CMP abs,Y` / `DEY DEY BPL`) reading zeros where KEGS reads $03 and $0A.  The
+VGC is the next unanswered thing the ROM touches ($C021 and $C022 first appear
+at instruction 201,665, just before this), so **the VGC registers are next**,
+then `gs_intc` and the IWM and SCC stubs.
 
 ## Verification
 
