@@ -2095,6 +2095,54 @@ blocks`), so the failure is the machine's and not the disk's.
 Also open:
 
 - **GS/OS 6.0.1 DIES IN THE ROM's MONITOR (2026-09-09), the rung-7 crash.**
+  **CHASED TO A DEADLOCK ON THE VBL INTERRUPT, not yet to its cause.**  What
+  the bench's new `dump_intc` says at the hang:
+
+        the interrupt controller: irq 1, taken 61; $C041=09 $C023=09 $C046=08;
+        pending vbl 1 .25s 0 1s 0 scan 0; adb 0 doc 0
+
+  The VBL interrupt is RAISED AND NEVER CLEARED - `p_vbl` stuck at 1, the
+  line into the core stuck high.  `taken` counts RISING edges, so 61 in 7M
+  instructions means the handler ran and cleared it sixty-one times and then
+  stopped: the line went up a sixty-second time and stayed.  `$C047`'s clear
+  path is correct (a read or a write drops `p_vbl` and its INTFLAG bit), so
+  nothing is touching $C047 any more.
+  Meanwhile the machine spins in a REAL ROM ROUTINE at $FF/C973-C99B, entered
+  by an ordinary `JSR` from $FF/764F, which retries by calling ITSELF at
+  $C99B (`20 78 C9`) and never returns - so every pass pushes two more bytes
+  and the stack walks down out of page one, through page zero and into the
+  I/O page.  The `$C02D <= $c9` the log reports is NOT the ROM setting
+  SLOTROMSEL: it is a stack push landing on it, the high byte of the return
+  address $C99D.  That is what puts BRK/COP traps in impossible banks on the
+  screen.
+  **The loop polls RAM ONLY** - $24/$25, $21/$22, $2C/$2D, $8C/$8D, $AC/$AD,
+  $047B, $021170, no I/O at all - and runs with `P=37`, bit 2 SET, so
+  INTERRUPTS ARE MASKED while it waits for a flag only a handler could set.
+  Whatever stops the handler running is the bug; the deadlock and the stack
+  runaway are both downstream of it.
+  **AND THE INTERRUPT DEADLOCK IS DOWNSTREAM, NOT THE CAUSE** - the next
+  instrument said so and reversed the reading:
+
+        ...the line last went UP at instruction 6619795 and last came DOWN at
+        6597309; $C047 acknowledged 60 times, last at 6597309
+
+  The handler was still running and acknowledging normally at 6,597,309,
+  which is 400,000 instructions INTO the runaway.  So interrupts kept being
+  serviced while the stack marched, and only stopped once the marching stack
+  had destroyed the state the handler needs.  The recursion is the cause; the
+  stuck VBL is its consequence.
+
+  **THE LOOP IS ENTERED AT INSTRUCTION 5,415,646**, by an ordinary
+  `JSR $C978` from `$FF/CDF4`, reached moments after an `RTI` at `$FF/BF7D` -
+  on the way out of an interrupt handler.  It enters with `S=$0141` and
+  `Y=$8100`; by the end `Y` is `$C99D`, the return address the runaway has
+  been scribbling everywhere.  The routine compares `$24/$25` against `$047B`
+  and `$21/$22` and retries, which has the shape of a list or handle walk
+  that never reaches its terminator.
+  Next: disassemble ROM 3 around $FF/C973 to learn what the routine is
+  walking, and find which of those RAM locations holds a value our machine
+  produced differently.
+
   Past the splash and past the sound driver now, it traps into the monitor
   with BRK and COP in banks $83, $18, $80 and $CF - banks with no RAM behind
   them, where `apple_mmu`'s void page reads `02 40`, which disassembles as

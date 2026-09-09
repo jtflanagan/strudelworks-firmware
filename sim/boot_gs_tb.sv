@@ -972,6 +972,30 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // busy the interrupt queue is.  A pair handing back and forth over dead
     // wave tables, or a queue that never empties, shows here.
     integer dj;
+    // Rising edges of the chipset's interrupt line: how many times the machine
+    // was actually asked.
+    integer irqs_taken = 0;
+    reg     irq_q = 1'b0;
+    integer last_rise = 0;          // the instruction the line last went up at
+    integer last_fall = 0;          // ...and last came down at
+    integer c047_n = 0, last_c047 = 0;   // the acknowledge, and when it last happened
+    always @(posedge clk) begin
+        if (gsio_irq && !irq_q) begin
+            irqs_taken = irqs_taken + 1;
+            last_rise  = trace_instrs;
+        end
+        if (!gsio_irq && irq_q) last_fall = trace_instrs;
+        irq_q <= gsio_irq;
+        // $C047 is the acknowledge: a read or a write drops the Mega II's
+        // two timer interrupts.  It is an internalized op, so it is watched
+        // on the retire the chipset sees.
+        if (swi_commit && (u_addr[7:0] == 8'h47) &&
+            ((u_bank == 8'h00) || (u_bank == 8'h01) ||
+             (u_bank == 8'hE0) || (u_bank == 8'hE1))) begin
+            c047_n = c047_n + 1;
+            last_c047 = trace_instrs;
+        end
+    end
     task dump_doc;
         begin
             $display("    the Ensoniq: osc_en %0d, ends %0d, irqs %0d, queue %0d, irq %0d, ctl $C03C=%02x",
@@ -986,6 +1010,22 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                              u_gsio.u_doc.ctl[dj][3], u_gsio.u_doc.ctl[dj][7:4],
                              u_gsio.u_doc.freq[dj], u_gsio.u_doc.vol[dj],
                              u_gsio.u_doc.wptr[dj], u_gsio.u_doc.wsize[dj]);
+        end
+    endtask
+    // The interrupt controller's state (rtl/gs_intc.sv).  A machine spinning
+    // on a RAM flag that a handler is supposed to set wants this: which
+    // sources are pending, which are ENABLED, and whether the line into the
+    // core has ever gone up.
+    task dump_intc;
+        begin
+            $display("    the interrupt controller: irq %0d, taken %0d; $C041=%02x $C023=%02x $C046=%02x; pending vbl %0d .25s %0d 1s %0d scan %0d; adb %0d doc %0d",
+                     u_gsio.u_intc.irq, irqs_taken,
+                     u_gsio.u_intc.c041, u_gsio.u_intc.c023, u_gsio.u_intc.c046,
+                     u_gsio.u_intc.p_vbl, u_gsio.u_intc.p_25sec,
+                     u_gsio.u_intc.p_1sec, u_gsio.u_intc.p_scan,
+                     u_gsio.u_intc.irq_adb, u_gsio.u_intc.irq_doc);
+            $display("    ...the line last went UP at instruction %0d and last came DOWN at %0d; $C047 acknowledged %0d times, last at %0d",
+                     last_rise, last_fall, c047_n, last_c047);
         end
     endtask
     task dump_clash;
@@ -1809,6 +1849,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         dump_clash();
         dump_iwm();
         dump_doc();
+        dump_intc();
         // A shipped image the ROM ACCEPTS is one it does not rewrite: it
         // checksums the battery RAM at startup and writes its own defaults
         // over an image it does not believe (docs/GS.md, "The battery RAM the
