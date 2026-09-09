@@ -73,7 +73,7 @@ module card_link #(
     // event, the mark that says it is a frame origin (rtl/vbl_lock.sv):
     // the capture cuts its message there and sends the VBL_MARK notice
     // between.  A watching top ties the mark to 0.
-    input  wire [31:0] real_data,
+    input  wire [63:0] real_data,
     input  wire        real_valid,
     input  wire        real_mark,
     input  wire [15:0] real_mark_free,
@@ -818,7 +818,7 @@ module card_link #(
     // Two, selected per capture.  The synthetic one is not scaffolding to be
     // removed: it is the only source whose content the host can verify, so it
     // stays as the way to tell a suspect capture from a suspect capturer.
-    wire [31:0] synth_data;
+    wire [63:0] synth_data;
     wire        synth_valid;
 
     synth_bus_events u_synth (
@@ -834,7 +834,7 @@ module card_link #(
     assign capture_on   = capture_enable;
     assign capture_real = source_real;
 
-    wire [31:0] ev_data  = source_real ? real_data  : synth_data;
+    wire [63:0] ev_data  = source_real ? real_data  : synth_data;
     wire        ev_valid = source_real ? real_valid : synth_valid;
     // The synthetic source has no scanner, so no frame to mark.
     wire        ev_mark  = source_real && real_mark;
@@ -843,7 +843,7 @@ module card_link #(
     // core's fast ops into one stream in program order, spaced for the
     // filter (rtl/event_merge.sv).  Fast ops and the dummy flag belong to the
     // real bus only.
-    wire [31:0] mg_data;
+    wire [63:0] mg_data;
     wire        mg_valid, mg_mark, mg_dummy, mg_carrier;
     wire [15:0] mg_mark_free, mg_drop;
 
@@ -886,7 +886,7 @@ module card_link #(
     // count and the fast words' rule in both.  Sparse applies to the real
     // bus only - the synthetic stream is the link's self-test, and the host
     // checks its every word.
-    wire [31:0] fev_data;
+    wire [63:0] fev_data;
     wire        fev_valid, fev_mark;
     wire [15:0] fev_mark_free;
 

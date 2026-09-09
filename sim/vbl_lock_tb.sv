@@ -130,7 +130,7 @@ module vbl_lock_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire        phi0_sync, res_sync, tick;
     wire [7:0]  data_sync;
     wire        vbl_level;          // the DUT's level, into bit 19 of the event
-    wire [31:0] ev_data;
+    wire [63:0] ev_data;
     wire        ev_valid;
 
     apple_bus_read u_read (

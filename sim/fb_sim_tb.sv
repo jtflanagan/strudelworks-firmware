@@ -126,7 +126,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire        phi0_sync, res_sync, tick;
     wire [7:0]  data_sync;
     wire        vbl_level;
-    wire [31:0] ev_data;
+    wire [63:0] ev_data;
     wire        ev_valid;
     wire        sub_en;
     wire [7:0]  sub_data;
@@ -422,7 +422,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         if (data_sync !== (bus_dead ? 8'h00 : exp_byte)) bus_bad = bus_bad + 1;
     end
     always @(posedge clk) if (ev_valid && chk_en && ev_data[16] && floats(ev_data[15:0])) begin
-        if (ev_data[27:20] !== (want_sub ? exp_byte : (bus_dead ? 8'h00 : exp_byte))) ev_bad = ev_bad + 1;
+        if (ev_data[63:56] !== (want_sub ? exp_byte : (bus_dead ? 8'h00 : exp_byte))) ev_bad = ev_bad + 1;
     end
     integer sub_on_ovr = 0, sub_col80 = 0;
     always @(posedge clk) begin

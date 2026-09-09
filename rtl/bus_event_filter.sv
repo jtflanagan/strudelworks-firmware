@@ -30,10 +30,12 @@
 // runs its sample clock on cycles: before each kept event a SKIP word goes
 // out saying how many cycles passed since the word before it -
 //
-//   {4'hD, count[27:0]}      count >= 1
+//   {4'hD, count[27:0]}      count >= 1     (word 0; word 1 is zero)
 //
-// - a tag the event word never carries (it is 0xF), so the host tells the
-// two apart by the nibble it already checks.  A count that reaches CAP goes
+// - a tag the event record never carries (it is 0xF), so the host tells the
+// two apart by the nibble it already checks.  Every entry here is the
+// 64-bit record of docs/PROTOCOL.md; the capture puts its two words on the
+// wire.  A count that reaches CAP goes
 // out on its own, event or not: a program sitting in a loop that neither
 // writes nor touches I/O still moves the host's clocks a millisecond at a
 // time, and the count never nears its 28 bits.  A pending count when the
@@ -88,7 +90,7 @@ module bus_event_filter #(
     input  wire        enable,        // the capture is on (BUS_ENABLE free[0])
     input  wire        sparse,        // send the few, count the rest
 
-    input  wire [31:0] in_data,
+    input  wire [63:0] in_data,
     input  wire        in_valid,
     input  wire        in_mark,
     input  wire [15:0] in_mark_free,
@@ -103,7 +105,7 @@ module bus_event_filter #(
     input  wire [15:0] in_drop,
     input  wire        in_carrier,
 
-    output logic [31:0] out_data,
+    output logic [63:0] out_data,
     output logic        out_valid,
     output logic        out_mark,
     output logic [15:0] out_mark_free
@@ -126,7 +128,7 @@ module bus_event_filter #(
 
     // The kept event waiting behind its SKIP.
     logic        hold_valid = 1'b0;
-    logic [31:0] hold_data  = '0;
+    logic [63:0] hold_data  = '0;
     logic        hold_mark  = 1'b0;
     logic [15:0] hold_free  = '0;
 
@@ -170,7 +172,7 @@ module bus_event_filter #(
                 first    <= 1'b0;
             end
             if (pend != 29'd0) begin
-                out_data   <= {T_SKIP, pend[27:0]};
+                out_data   <= {32'd0, T_SKIP, pend[27:0]};
                 out_valid  <= 1'b1;
                 hold_data  <= in_data;
                 hold_mark  <= in_mark;
@@ -193,7 +195,7 @@ module bus_event_filter #(
                 first    <= 1'b0;
             end
             if (pend >= 29'(CAP)) begin
-                out_data  <= {T_SKIP, 28'(CAP)};
+                out_data  <= {32'd0, T_SKIP, 28'(CAP)};
                 out_valid <= 1'b1;
                 cnt       <= 28'(pend - 29'(CAP));
             end else begin

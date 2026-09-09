@@ -19,10 +19,14 @@
 // with known-good content is the only way to tell a suspect capture from a
 // suspect capturer.
 //
-//   [15:0]  addr        seq[15:0]
-//   [19:16] ctl         {m2b0, m2sel, res, rw} - here a fixed pattern
-//   [27:20] data        seq[23:16]
-//   [31:28] tag         0xF, as the v5 format
+//   word 0 [15:0]  addr        seq[15:0]
+//          [19:16] ctl         {vbl, sync, res, rw} - here a fixed pattern
+//          [27:20] bank        0
+//          [31:28] tag         0xF
+//   word 1 [63:56] data        seq[23:16]; the rest 0
+//
+// The 64-bit record of docs/PROTOCOL.md; the sequence spans the address and
+// the data byte as it always did.
 //////////////////////////////////////////////////////////////////////////////////
 
 module synth_bus_events #(
@@ -34,7 +38,7 @@ module synth_bus_events #(
     input  wire        rst,
     input  wire        enable,
 
-    output logic [31:0] ev_data,
+    output logic [63:0] ev_data,
     output logic        ev_valid
 );
 
@@ -57,7 +61,7 @@ module synth_bus_events #(
                 // rw toggles with the sequence so the control nibble is not
                 // constant; the rest is fixed, which is what a decoder would see
                 // on a machine doing something repetitive.
-                ev_data  <= {4'hf, seq[23:16], 3'b010, seq[0], seq[15:0]};
+                ev_data  <= {seq[23:16], 24'd0, 4'hf, 8'd0, 3'b010, seq[0], seq[15:0]};
             end else begin
                 tick <= tick + 1'b1;
             end

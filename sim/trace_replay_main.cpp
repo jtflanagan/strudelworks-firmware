@@ -74,7 +74,7 @@
 namespace trace {
 
 constexpr uint32_t kMagic = 0x54425753u;   // "SWBT"
-constexpr uint16_t kVersion = 1;
+constexpr uint16_t kVersion = 2;   // 64-bit records (host trace_writer.hpp)
 constexpr uint32_t kFlagRealBus = 1u << 0;
 constexpr uint32_t kFlagArmedOnReset = 1u << 1;
 // Set only by this tool's --emit. Not part of the host's format: the host never
@@ -135,21 +135,23 @@ struct Event {
 // dimension of checking: instruction boundaries in the trace were previously
 // inferred from the CORE's sync, which is the thing under test.
 
-inline bool is_event(uint32_t w) { return (w >> 28) == kEventTag; }
-inline bool is_gap(uint32_t w)   { return (w >> 28) == kGapTag; }
-inline uint32_t gap_count(uint32_t w) { return w & 0x0FFFFFFFu; }
+inline bool is_event(uint64_t w) { return ((w >> 28) & 0xFu) == kEventTag; }
+inline bool is_gap(uint64_t w) { return ((w >> 28) & 0xFu) == kGapTag; }
+inline uint32_t gap_count(uint64_t w) { return static_cast<uint32_t>(w) & 0x0FFFFFFFu; }
 // A sparse capture's SKIP (docs/SPARSE.md): N cycles the card did not send.
 // To a lockstep replay that is a gap by another name - the next word is not
 // the next cycle - and it is treated as one everywhere below.
 constexpr uint32_t kSkipTag = 0xDu;
-inline bool is_skip(uint32_t w)  { return (w >> 28) == kSkipTag; }
-inline uint32_t skip_count(uint32_t w) { return w & 0x0FFFFFFFu; }
-inline bool is_break(uint32_t w) { return is_gap(w) || is_skip(w); }
+inline bool is_skip(uint64_t w) { return ((w >> 28) & 0xFu) == kSkipTag; }
+inline uint32_t skip_count(uint64_t w) { return static_cast<uint32_t>(w) & 0x0FFFFFFFu; }
+inline bool is_break(uint64_t w) { return is_gap(w) || is_skip(w); }
 
-inline Event decode(uint32_t w) {
+// The record: word 0 (tag, bank, flags, addr) in the low half, the data
+// byte in bits 63:56 (host protocol.hpp, "Apple bus event record").
+inline Event decode(uint64_t w) {
     Event e;
     e.addr = static_cast<uint16_t>(w & 0xFFFF);
-    e.data = static_cast<uint8_t>((w >> 20) & 0xFF);
+    e.data = static_cast<uint8_t>((w >> 56) & 0xFF);
     e.rw   = ((w >> 16) & 1) != 0;
     e.res  = ((w >> 17) & 1) != 0;
     e.sync = ((w >> 18) & 1) != 0;
@@ -193,7 +195,7 @@ struct Options {
     bool quiet = false;
 };
 
-std::vector<uint32_t> g_words;
+std::vector<uint64_t> g_words;
 trace::Header g_header{};
 
 bool load(const std::string& path, std::string* err) {
@@ -212,17 +214,17 @@ bool load(const std::string& path, std::string* err) {
         std::fclose(f);
         return false;
     }
-    if (g_header.version != trace::kVersion || g_header.word_bytes != 4) {
+    if (g_header.version != trace::kVersion || g_header.word_bytes != 8) {
         char b[128];
-        std::snprintf(b, sizeof b, "%s: version %u/%u-byte words, this tool reads %u/4",
+        std::snprintf(b, sizeof b, "%s: version %u/%u-byte words, this tool reads %u/8",
                       path.c_str(), g_header.version, g_header.word_bytes,
                       trace::kVersion);
         *err = b;
         std::fclose(f);
         return false;
     }
-    uint32_t w;
-    while (std::fread(&w, 4, 1, f) == 1) g_words.push_back(w);
+    uint64_t w;
+    while (std::fread(&w, 8, 1, f) == 1) g_words.push_back(w);
     std::fclose(f);
     return true;
 }
@@ -369,9 +371,10 @@ const Prog kSelfTest[] = {
     {0x0360, {0xE8, 0xD0, 0xFD, 0x4C, 0x00, 0x03}},
 };
 
-uint32_t encode_event(uint16_t addr, uint8_t data, bool rw, bool res) {
-    return (trace::kEventTag << 28) | (static_cast<uint32_t>(data) << 20) |
-           (static_cast<uint32_t>(res) << 17) | (static_cast<uint32_t>(rw) << 16) | addr;
+uint64_t encode_event(uint16_t addr, uint8_t data, bool rw, bool res) {
+    // The 64-bit record: the data byte in 63:56, word 0 below.
+    return (static_cast<uint64_t>(data) << 56) | (static_cast<uint64_t>(trace::kEventTag) << 28) |
+           (static_cast<uint64_t>(res) << 17) | (static_cast<uint64_t>(rw) << 16) | addr;
 }
 
 int emit(const std::string& path, uint64_t cycles, uint8_t s_before) {
@@ -431,7 +434,7 @@ int emit(const std::string& path, uint64_t cycles, uint8_t s_before) {
     // dummy reads at PC, three stack reads descending from $0100+S, then the
     // vector - which is the sequence the replay's searches look for, so this is
     // also what tests those searches.
-    std::vector<uint32_t> out;
+    std::vector<uint64_t> out;
     for (int i = 0; i < 8; ++i) out.push_back(encode_event(0xFFFF, 0xFF, true, false));
     out.push_back(encode_event(vec, 0x00, true, true));
     out.push_back(encode_event(vec + 1, 0x00, true, true));
@@ -456,13 +459,13 @@ int emit(const std::string& path, uint64_t cycles, uint8_t s_before) {
     trace::Header h{};
     h.magic = trace::kMagic;
     h.version = trace::kVersion;
-    h.word_bytes = 4;
+    h.word_bytes = 8;
     h.flags = trace::kFlagRealBus | trace::kFlagArmedOnReset | trace::kFlagSelfTest;
     h.epoch_ms = 0;
     std::fwrite(&h, sizeof h, 1, f);
-    std::fwrite(out.data(), 4, out.size(), f);
+    std::fwrite(out.data(), 8, out.size(), f);
     std::fclose(f);
-    std::printf("emitted %zu words to %s  (reset S $%02X -> $%02X, vector $%04X)\n",
+    std::printf("emitted %zu records to %s  (reset S $%02X -> $%02X, vector $%04X)\n",
                 out.size(), path.c_str(), s_before, s_after, vec);
     return 0;
 }

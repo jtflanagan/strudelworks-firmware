@@ -9,7 +9,7 @@
 //
 //   every event that entered the FIFO comes out, in order, exactly once
 //   the framing is well formed - a header whose len matches the blocks after it
-//   a full frame is 255 events, so header + payload is exactly one 1 KB buffer
+//   a full frame is FRAME_EVENTS records of two words, len counting the words
 //   a partial frame is flushed by the timer rather than stranded
 //   a clean stop FLUSHES what is queued, then stops - a reset is what discards
 //   nothing leaks from one capture into the next
@@ -36,7 +36,7 @@ module bus_snoop_tb;
 
     reg         enable     = 1'b0;
     reg         status_req = 1'b0;
-    reg  [31:0] ev_data    = 32'd0;
+    reg  [63:0] ev_data    = 64'd0;
     reg         ev_valid   = 1'b0;
     reg         ev_mark    = 1'b0;
     reg  [15:0] ev_mark_free = 16'd0;
@@ -84,6 +84,8 @@ module bus_snoop_tb;
     reg        frame_first = 1'b0;     // the next payload word is a frame's first
     reg [31:0] after_mark_ev = 32'd0;
     integer    mark_misplaced = 0;
+    reg        hi = 1'b0;              // the payload word in hand is a record's second
+    reg [31:0] lo_word = 32'd0;
 
     always @(posedge clk) if (!rst && tx_valid && tx_take) begin
         if (blocks_left == 0) begin
@@ -95,8 +97,9 @@ module bus_snoop_tb;
                     blocks_left    = tx_data[7:0];
                     in_status      = 1'b0;
                     frame_first    = 1'b1;
-                    if (tx_data[7:0] == 0) begin
-                        $display("FAIL: BUS_EVENTS frame with len 0");
+                    hi             = 1'b0;
+                    if (tx_data[7:0] == 0 || tx_data[0]) begin
+                        $display("FAIL: BUS_EVENTS frame with len %0d (zero, or an odd word count)", tx_data[7:0]);
                         errors = errors + 1;
                     end
                 end
@@ -129,9 +132,10 @@ module bus_snoop_tb;
             blocks_left = blocks_left - 1;
             if (in_status) begin
                 last_status_count = tx_data;
-            end else begin
-                // Payload event: must follow its predecessor exactly.
-                n_events = n_events + 1;
+            end else if (!hi) begin
+                // A record's first word: must follow its predecessor exactly.
+                hi = 1'b1;
+                lo_word = tx_data;
                 if (after_mark) begin
                     // The first event after a notice: recorded, and it has
                     // to be a frame's first word.
@@ -149,6 +153,14 @@ module bus_snoop_tb;
                 end
                 expect_ev   = tx_data + 32'd1;
                 have_expect = 1'b1;
+            end else begin
+                // The record's second word, sent as the first's complement.
+                hi = 1'b0;
+                n_events = n_events + 1;
+                if (tx_data !== (lo_word ^ 32'hA5A5A5A5)) begin
+                    if (errors < 6) $display("FAIL: record second word %08x does not match its first %08x", tx_data, lo_word);
+                    errors = errors + 1;
+                end
             end
         end
     end
@@ -161,7 +173,7 @@ module bus_snoop_tb;
         begin
             for (k = 0; k < n; k = k + 1) begin
                 @(negedge clk);
-                ev_data  = src; src = src + 1;
+                ev_data  = {src ^ 32'hA5A5A5A5, src}; src = src + 1;
                 ev_valid = 1'b1;
                 @(negedge clk);
                 ev_valid = 1'b0;
@@ -179,7 +191,7 @@ module bus_snoop_tb;
         integer k;
         begin
             @(negedge clk);
-            ev_data  = src; src = src + 1;
+            ev_data  = {src ^ 32'hA5A5A5A5, src}; src = src + 1;
             ev_valid = 1'b1; ev_mark = 1'b1; ev_mark_free = free;
             @(negedge clk);
             ev_valid = 1'b0; ev_mark = 1'b0;
@@ -222,7 +234,7 @@ module bus_snoop_tb;
         send_events(FRAME_EVENTS);
         settle;
         check(n_frames, 1, "one full frame");
-        check(last_frame_len, FRAME_EVENTS, "full frame payload length");
+        check(last_frame_len, FRAME_EVENTS * 2, "full frame payload length (words)");
         check(n_events - mark_ev, FRAME_EVENTS, "events in the full frame");
 
         // --- a partial frame is flushed by the timer, not stranded -----------
@@ -230,7 +242,7 @@ module bus_snoop_tb;
         send_events(3);
         settle;
         check(n_frames - mark_fr, 1, "partial frame emitted");
-        check(last_frame_len, 3, "partial frame payload length");
+        check(last_frame_len, 6, "partial frame payload length (words)");
         check(n_events - mark_ev, 3, "events in the partial frame");
 
         // --- a burst spanning several frames loses nothing --------------------

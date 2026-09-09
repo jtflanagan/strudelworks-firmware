@@ -139,7 +139,7 @@ module master_top #(
 
     wire        apple_clk, apple_rst;
     wire        capture_on, capture_real;
-    wire [31:0] real_data;
+    wire [63:0] real_data;
     wire        real_valid, phi0_live, bus_tick;
     wire        apple_res_sync, apple_irq_sync, apple_phi0_sync;
     wire [7:0]  apple_data_sync;

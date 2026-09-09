@@ -74,7 +74,7 @@ module snoop_top #(
 
     wire        apple_clk, apple_rst;
     wire        capture_on, capture_real;
-    wire [31:0] real_data;
+    wire [63:0] real_data;
     wire        real_valid, phi0_live, apple_res_sync;
 
     card_link #(

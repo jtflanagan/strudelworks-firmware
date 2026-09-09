@@ -29,10 +29,10 @@ module bus_event_filter_tb;
 
     reg         enable = 1'b0, sparse = 1'b0, virt = 1'b0, in_carrier = 1'b0;
     reg  [15:0] in_drop = 16'd0;
-    reg  [31:0] in_data = 32'd0;
+    reg  [63:0] in_data = 64'd0;
     reg         in_valid = 1'b0, in_mark = 1'b0, in_dummy = 1'b0;
     reg  [15:0] in_mark_free = 16'd0;
-    wire [31:0] out_data;
+    wire [63:0] out_data;
     wire        out_valid, out_mark;
     wire [15:0] out_mark_free;
 
@@ -44,7 +44,7 @@ module bus_event_filter_tb;
     );
 
     // ---- the record of what came out --------------------------------------------
-    reg  [31:0] got      [0:4095];
+    reg  [63:0] got      [0:4095];
     reg         got_mark [0:4095];
     reg  [15:0] got_free [0:4095];
     integer     got_n = 0;
@@ -69,13 +69,15 @@ module bus_event_filter_tb;
     end
 
     // ---- the stream ---------------------------------------------------------------
-    reg  [31:0] sent   [0:4095];
+    reg  [63:0] sent   [0:4095];
     integer     sent_n = 0;
     integer     cycles = 0;
     reg         cur_vbl = 1'b0, cur_res = 1'b1;
 
-    function [31:0] ev(input [15:0] addr, input rw, input [7:0] data, input vbl, input res);
-        ev = {4'hF, data, vbl, 1'b0, res, rw, addr};
+    // The 64-bit record (docs/PROTOCOL.md): word 1 {data, class, cpu, spare}
+    // above word 0 {tag, bank, flags, addr}.
+    function [63:0] ev(input [15:0] addr, input rw, input [7:0] data, input vbl, input res);
+        ev = {data, 4'd0, 4'd0, 16'd0, 4'hF, 8'd0, vbl, 1'b0, res, rw, addr};
     endfunction
 
     // One bus cycle: the event, one clock wide, then three quiet clocks -
@@ -112,8 +114,8 @@ module bus_event_filter_tb;
         end
     endtask
     // A fast op's word: tag 0xC, the current levels.  Not a cycle.
-    function [31:0] fw(input [15:0] addr, input rw, input [7:0] data);
-        fw = {4'hC, data, cur_vbl, 1'b0, cur_res, rw, addr};
+    function [63:0] fw(input [15:0] addr, input rw, input [7:0] data);
+        fw = {data, 4'd1, 4'd0, 16'd0, 4'hC, 8'd0, cur_vbl, 1'b0, cur_res, rw, addr};
     endfunction
     task fast(input [15:0] addr, input rw, input [7:0] data);
         begin
@@ -155,7 +157,7 @@ module bus_event_filter_tb;
     task carrier_d(input [15:0] ndrop);
         begin
             @(negedge clk);
-            in_data = 32'd0; in_drop = ndrop; in_carrier = 1'b1; in_valid = 1'b1;
+            in_data = 64'd0; in_drop = ndrop; in_carrier = 1'b1; in_valid = 1'b1;
             @(negedge clk);
             in_valid = 1'b0; in_carrier = 1'b0; in_drop = 16'd0;
             repeat (2) @(negedge clk);
@@ -243,16 +245,16 @@ module bus_event_filter_tb;
         else begin
             bad = 0;
             if (got[0] !== sent[0]) bad = bad + 1;
-            if (got[1] !== {4'hD, 28'd2}) bad = bad + 1;
+            if (got[1] !== {32'd0, 4'hD, 28'd2}) bad = bad + 1;
             if (got[2] !== sent[3]) bad = bad + 1;
             if (got[3] !== sent[4] || got[4] !== sent[5]) bad = bad + 1;
-            if (got[5] !== {4'hD, 28'd2} || got[6] !== sent[8]) bad = bad + 1;
-            if (got[7] !== {4'hD, 28'd1} || got[8] !== sent[10]) bad = bad + 1;
-            if (got[9] !== {4'hD, 28'd1} || got[10] !== sent[12]) bad = bad + 1;
+            if (got[5] !== {32'd0, 4'hD, 28'd2} || got[6] !== sent[8]) bad = bad + 1;
+            if (got[7] !== {32'd0, 4'hD, 28'd1} || got[8] !== sent[10]) bad = bad + 1;
+            if (got[9] !== {32'd0, 4'hD, 28'd1} || got[10] !== sent[12]) bad = bad + 1;
             if (got_mark[10] !== 1'b1 || got_free[10] !== 16'hA501) bad = bad + 1;
             if (got_mark[9] !== 1'b0) bad = bad + 1;
-            if (got[11] !== {4'hD, 28'd1} || got[12] !== sent[14]) bad = bad + 1;
-            if (got[13] !== {4'hD, 28'd1} || got[14] !== sent[16]) bad = bad + 1;
+            if (got[11] !== {32'd0, 4'hD, 28'd1} || got[12] !== sent[14]) bad = bad + 1;
+            if (got[13] !== {32'd0, 4'hD, 28'd1} || got[14] !== sent[16]) bad = bad + 1;
             for (i = 0; i < got_n; i = i + 1) if (got_mark[i] && i != 10) bad = bad + 1;
             if (bad != 0) fail("case 2: the words out are not the expected ones");
             else $display("  ok: first, writes, $Cxxx, both blanking edges and both RES' edges kept, each behind its SKIP; the mark on the origin");
@@ -270,7 +272,7 @@ module bus_event_filter_tb;
         settle;
         if (got_n != 4) fail("case 3: expected SKIP CAP, SKIP CAP, SKIP 5, event");
         else begin
-            if (got[0] !== {4'hD, 28'(CAP)} || got[1] !== {4'hD, 28'(CAP)} || got[2] !== {4'hD, 28'd5} || got[3] !== sent[sent_n - 1])
+            if (got[0] !== {32'd0, 4'hD, 28'(CAP)} || got[1] !== {32'd0, 4'hD, 28'(CAP)} || got[2] !== {32'd0, 4'hD, 28'd5} || got[3] !== sent[sent_n - 1])
                 fail("case 3: wrong words");
             else $display("  ok: SKIP %0d, SKIP %0d, SKIP 5, then the write", CAP, CAP);
         end
@@ -289,7 +291,7 @@ module bus_event_filter_tb;
         rd(16'h0301);
         wr(16'h0400);
         settle;
-        if (got_n != 3 || got[0] !== sent[0] || got[1] !== {4'hD, 28'd1} || got[2] !== sent[2])
+        if (got_n != 3 || got[0] !== sent[0] || got[1] !== {32'd0, 4'hD, 28'd1} || got[2] !== sent[2])
             fail("case 4: expected the first read, SKIP 1, the write");
         else $display("  ok: the first event after enable is kept and the dropped count did not carry over");
 
@@ -335,10 +337,10 @@ module bus_event_filter_tb;
         else begin
             bad = 0;
             if (got[0] !== sent[0]) bad = bad + 1;                        // first dummy, kept
-            if (got[1] !== {4'hD, 28'd2}) bad = bad + 1;
+            if (got[1] !== {32'd0, 4'hD, 28'd2}) bad = bad + 1;
             if (got[2] !== sent[3] || got[3] !== sent[4]) bad = bad + 1;  // the fast words
-            if (got[4] !== {4'hD, 28'd1} || got[5] !== sent[6]) bad = bad + 1;   // the blanking edge, on a dummy
-            if (got[6] !== {4'hD, 28'd1} || got[7] !== sent[8]) bad = bad + 1;   // the ordinary cycle
+            if (got[4] !== {32'd0, 4'hD, 28'd1} || got[5] !== sent[6]) bad = bad + 1;   // the blanking edge, on a dummy
+            if (got[6] !== {32'd0, 4'hD, 28'd1} || got[7] !== sent[8]) bad = bad + 1;   // the ordinary cycle
             if (got[8] !== sent[9]) bad = bad + 1;                        // the fast word with the new level
             if (got[9] !== sent[10]) bad = bad + 1;                       // the dummy on which the level changed: kept, no SKIP
             if (got[10] !== sent[11] || got[11] !== sent[12]) bad = bad + 1;  // RES' edges on dummies
@@ -368,8 +370,8 @@ module bus_event_filter_tb;
             bad = 0;
             if (got[0] !== sent[0]) bad = bad + 1;
             if (got[1] !== sent[1]) bad = bad + 1;
-            if (got[2] !== {4'hD, 28'd3} || got[3] !== sent[5]) bad = bad + 1;
-            if (got[4] !== {4'hD, 28'd1} || got[5] !== sent[7]) bad = bad + 1;
+            if (got[2] !== {32'd0, 4'hD, 28'd3} || got[3] !== sent[5]) bad = bad + 1;
+            if (got[4] !== {32'd0, 4'hD, 28'd1} || got[5] !== sent[7]) bad = bad + 1;
             if (bad != 0) fail("case 8: the words out are not the expected ones");
             else $display("  ok: a fast write is kept and not a cycle, the edge stays with its cycle");
         end
@@ -395,15 +397,15 @@ module bus_event_filter_tb;
         else begin
             bad = 0;
             if (got[0] !== sent[0]) bad = bad + 1;
-            if (got[1] !== {4'hD, 28'd3} || got[2] !== sent[3]) bad = bad + 1;
-            if (got[3] !== {4'hD, 28'd2} || got[4] !== sent[4]) bad = bad + 1;
-            if (got[5] !== {4'hD, 28'd1} || got[6] !== sent[5]) bad = bad + 1;
+            if (got[1] !== {32'd0, 4'hD, 28'd3} || got[2] !== sent[3]) bad = bad + 1;
+            if (got[3] !== {32'd0, 4'hD, 28'd2} || got[4] !== sent[4]) bad = bad + 1;
+            if (got[5] !== {32'd0, 4'hD, 28'd1} || got[6] !== sent[5]) bad = bad + 1;
             if (got[7] !== sent[6] || got_mark[7] !== 1'b1 || got_free[7] !== 16'hA503) bad = bad + 1;
-            if (got[8] !== {4'hD, 28'd8} || got[9] !== sent[9]) bad = bad + 1;
+            if (got[8] !== {32'd0, 4'hD, 28'd8} || got[9] !== sent[9]) bad = bad + 1;
             for (i = 0; i < got_n; i = i + 1) if (got_mark[i] && i != 7) bad = bad + 1;
             if (bad != 0) begin
                 fail("case 10: the words out are not the expected ones");
-                for (i = 0; i < got_n; i = i + 1) $display("    got[%0d] = %08x mark %0d", i, got[i], got_mark[i]);
+                for (i = 0; i < got_n; i = i + 1) $display("    got[%0d] = %016x mark %0d", i, got[i], got_mark[i]);
             end else $display("  ok: the door's counts and a carrier into the SKIPs, dummies dropped uncounted, the switch read, the edge and the mark on fast words");
         end
         if (consecutive_bad != 0) fail("case 10: a word other than an event followed a SKIP on the next clock");
@@ -425,9 +427,9 @@ module bus_event_filter_tb;
     // A second filter and a capture, with a decoder that records every word
     // that leaves the arbiter port in order.
     reg         c_enable = 1'b0;
-    reg  [31:0] c_in_data = 32'd0;
+    reg  [63:0] c_in_data = 64'd0;
     reg         c_in_valid = 1'b0, c_in_mark = 1'b0;
-    wire [31:0] f_data;
+    wire [63:0] f_data;
     wire        f_valid, f_mark;
     wire [15:0] f_free;
     wire [31:0] tx_data;
@@ -454,7 +456,7 @@ module bus_event_filter_tb;
     task c_cycle(input [15:0] addr, input rw, input vbl, input mark);
         begin
             @(negedge clk);
-            c_in_data  = {4'hF, 8'h33, vbl, 1'b0, 1'b1, rw, addr};
+            c_in_data  = {8'h33, 24'd0, 4'hF, 8'd0, vbl, 1'b0, 1'b1, rw, addr};
             c_in_valid = 1'b1;
             c_in_mark  = mark;
             @(negedge clk);
@@ -474,23 +476,26 @@ module bus_event_filter_tb;
             c_cycle(16'h0468, 1'b1, 1'b0, 1'b1);     // the origin, marked: kept, SKIP 3
             c_cycle(16'h0400, 1'b0, 1'b0, 1'b0);     // a write
             repeat (400) @(negedge clk);              // the flush timer
-            // Expected wire: [BUS_EVENTS len 3] E0 S5 E192 S3  ... no: the cut.
             // The marked event's index is 4 (E0, S5, E192, S3, MARKED, W):
-            // the first message carries words 0..3, then VBL_MARK, then a
-            // message with the marked event and the write.
+            // the first message carries records 0..3, then VBL_MARK, then a
+            // message with the marked event and the write.  Two words per
+            // record on the wire, word 0 first; the SKIP's word 1 is zero.
             at_origin = -1;
-            for (k = 0; k < wire_n; k = k + 1) if (wire_seq[k] == {4'hF, 8'h33, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0468}) at_origin = k;
-            if (at_origin < 3) fail("case 6: the marked event did not appear");
+            for (k = 0; k < wire_n; k = k + 1) if (wire_seq[k] == {4'hF, 8'd0, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0468}) at_origin = k;
+            if (at_origin < 6) fail("case 6: the marked event did not appear");
             else begin
-                if (wire_seq[at_origin - 1][15:0] !== 16'h1202) fail("case 6: the marked event does not open a BUS_EVENTS message of 2");
+                if (wire_seq[at_origin + 1] !== {8'h33, 24'd0}) fail("case 6: the marked event's second word is wrong");
+                if (wire_seq[at_origin - 1][15:0] !== 16'h1204) fail("case 6: the marked event does not open a BUS_EVENTS message of 2 records (4 words)");
                 if (wire_seq[at_origin - 2] !== {16'h0700, 8'h1D, 8'h00}) fail("case 6: no VBL_MARK notice before it");
-                if (wire_seq[at_origin - 3] !== {4'hD, 28'd3}) fail("case 6: the SKIP 3 is not the last word before the notice");
-                if (wire_seq[at_origin - 4] !== {4'hF, 8'h33, 1'b1, 1'b0, 1'b1, 1'b1, 16'h0300}) fail("case 6: the blanking event is not before the SKIP");
-                if (errors == 0) $display("  ok: on the wire: ... E(192,0), SKIP 3 | VBL_MARK | [BUS_EVENTS] E(0,0), W");
+                if (wire_seq[at_origin - 3] !== 32'd0) fail("case 6: the SKIP's second word is not zero");
+                if (wire_seq[at_origin - 4] !== {32'd0, 4'hD, 28'd3}) fail("case 6: the SKIP 3 is not the last record before the notice");
+                if (wire_seq[at_origin - 5] !== {8'h33, 24'd0}) fail("case 6: the blanking event's second word is wrong");
+                if (wire_seq[at_origin - 6] !== {4'hF, 8'd0, 1'b1, 1'b0, 1'b1, 1'b1, 16'h0300}) fail("case 6: the blanking event is not before the SKIP");
+                if (errors == 0) $display("  ok: on the wire: ... E(192,0), SKIP 3 | VBL_MARK | [BUS_EVENTS] E(0,0), W - two words a record");
             end
             words_pushed = 6;
-            if (captured !== words_pushed) begin $display("FAIL: case 6: captured=%0d, expected %0d words", captured, words_pushed); errors = errors + 1; end
-            else $display("  ok: captured counts words: %0d", captured);
+            if (captured !== words_pushed) begin $display("FAIL: case 6: captured=%0d, expected %0d records", captured, words_pushed); errors = errors + 1; end
+            else $display("  ok: captured counts records: %0d", captured);
             c_enable = 1'b0;
         end
     endtask
@@ -498,12 +503,12 @@ module bus_event_filter_tb;
     // ---- case 9: the merge into the filter ----------------------------------------
     reg         m_enable = 1'b0;
     reg         m_bus_valid = 1'b0, m_bus_dummy = 1'b0, m_bus_mark = 1'b0;
-    reg  [31:0] m_bus_data = 32'd0;
+    reg  [63:0] m_bus_data = 64'd0;
     reg         m_fast_valid = 1'b0, m_fast_rw = 1'b1, m_vbl = 1'b0;
     reg         m_sparse = 1'b0, m_virt = 1'b0, m_quiet = 1'b0, m_fmark = 1'b0;
     reg  [15:0] m_fast_addr = 16'd0;
     reg  [7:0]  m_fast_data = 8'd0;
-    wire [31:0] m_data, m3_data;
+    wire [63:0] m_data, m3_data;
     wire        m_valid, m_mark, m_dummy, m3_valid, m3_mark, m_carrier;
     wire [15:0] m_drop;
     wire [15:0] m_free, m3_free;
@@ -525,7 +530,7 @@ module bus_event_filter_tb;
         .in_dummy (m_dummy), .virt (1'b0), .in_drop (m_drop), .in_carrier (m_carrier),
         .out_data (m3_data), .out_valid (m3_valid), .out_mark (m3_mark), .out_mark_free (m3_free)
     );
-    reg  [31:0] m_got [0:255];
+    reg  [63:0] m_got [0:255];
     reg         m_got_mark [0:255];
     integer     m_got_n = 0, m_last_clk = -10, m_gap_bad = 0, m_in_clk = -10, m_in_gap_bad = 0, m_clk = 0;
     always @(posedge clk) begin
@@ -542,7 +547,7 @@ module bus_event_filter_tb;
     end
     integer j;
     // The door (case 9b): the merge's own output recorded.
-    reg  [31:0] d_data [0:31]; reg [15:0] d_drop [0:31]; reg d_carrier [0:31]; reg d_mark [0:31];
+    reg  [63:0] d_data [0:31]; reg [15:0] d_drop [0:31]; reg d_carrier [0:31]; reg d_mark [0:31];
     integer     d_n = 0;
     always @(posedge clk) if (m_valid) begin
         d_data[d_n] = m_data; d_drop[d_n] = m_drop; d_carrier[d_n] = m_carrier; d_mark[d_n] = m_mark; d_n = d_n + 1;
@@ -578,7 +583,7 @@ module bus_event_filter_tb;
                 if (d_data[3][15:0] !== 16'h1003 || d_drop[3] !== 16'd0 || !d_mark[3]) bad = bad + 1;
                 if (bad != 0) begin
                     fail("case 9b: the door's entries are not the expected ones");
-                    for (j = 0; j < d_n; j = j + 1) $display("    entry %0d: %08x drop %0d carrier %0d mark %0d", j, d_data[j], d_drop[j], d_carrier[j], d_mark[j]);
+                    for (j = 0; j < d_n; j = j + 1) $display("    entry %0d: %016x drop %0d carrier %0d mark %0d", j, d_data[j], d_drop[j], d_carrier[j], d_mark[j]);
                 end else $display("  ok: the door drops the reads and a quiet switch read with their counts in order, keeps the write, the edge, the switch read and the mark");
             end
             if (m_overflows != 0) fail("case 9b: the merge overflowed");
@@ -589,7 +594,7 @@ module bus_event_filter_tb;
         begin
             m_enable = 1'b1; repeat (2) @(negedge clk);
             // An ordinary cycle's event and a fast op on the SAME clock.
-            m_bus_valid = 1'b1; m_bus_data = {4'hF, 8'h33, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0300};
+            m_bus_valid = 1'b1; m_bus_data = {8'h33, 24'd0, 4'hF, 8'd0, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0300};
             m_fast_valid = 1'b1; m_fast_addr = 16'h1000; m_fast_rw = 1'b0; m_fast_data = 8'h44;
             @(negedge clk);
             m_bus_valid = 1'b0;
@@ -602,25 +607,25 @@ module bus_event_filter_tb;
             m_fast_valid = 1'b0;
             repeat (30) @(negedge clk);
             // Then a dummy cycle, a fast op, a marked cycle.
-            m_bus_valid = 1'b1; m_bus_dummy = 1'b1; m_bus_data = {4'hF, 8'h00, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0000};
+            m_bus_valid = 1'b1; m_bus_dummy = 1'b1; m_bus_data = {8'h00, 24'd0, 4'hF, 8'd0, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0000};
             @(negedge clk); m_bus_valid = 1'b0; m_bus_dummy = 1'b0;
             repeat (3) @(negedge clk);
             m_fast_valid = 1'b1; m_fast_addr = 16'h2000; m_fast_rw = 1'b1; m_fast_data = 8'h55; m_vbl = 1'b1;
             @(negedge clk); m_fast_valid = 1'b0;
             repeat (3) @(negedge clk);
-            m_bus_valid = 1'b1; m_bus_mark = 1'b1; m_bus_data = {4'hF, 8'h33, 1'b1, 1'b0, 1'b1, 1'b1, 16'h0468};
+            m_bus_valid = 1'b1; m_bus_mark = 1'b1; m_bus_data = {8'h33, 24'd0, 4'hF, 8'd0, 1'b1, 1'b0, 1'b1, 1'b1, 16'h0468};
             @(negedge clk); m_bus_valid = 1'b0; m_bus_mark = 1'b0;
             repeat (40) @(negedge clk);
             // Expected out of the filter: E300 F1000..F1004 S1(the dummy) F2000 E468(marked) = 9 words
             if (m_got_n != 9) fail($sformatf("case 9: expected 9 words, got %0d", m_got_n));
             else begin
                 bad = 0;
-                if (m_got[0] !== {4'hF, 8'h33, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0300}) bad = bad + 1;
+                if (m_got[0] !== {8'h33, 24'd0, 4'hF, 8'd0, 1'b0, 1'b0, 1'b1, 1'b1, 16'h0300}) bad = bad + 1;
                 for (j = 0; j < 5; j = j + 1)
-                    if (m_got[1 + j] !== {4'hC, 8'h44 + j[7:0], 1'b0, 1'b0, 1'b1, 1'b0, 16'h1000 + j[15:0]}) bad = bad + 1;
-                if (m_got[6] !== {4'hD, 28'd1}) bad = bad + 1;
-                if (m_got[7] !== {4'hC, 8'h55, 1'b1, 1'b0, 1'b1, 1'b1, 16'h2000}) bad = bad + 1;
-                if (m_got[8] !== {4'hF, 8'h33, 1'b1, 1'b0, 1'b1, 1'b1, 16'h0468} || !m_got_mark[8]) bad = bad + 1;
+                    if (m_got[1 + j] !== {8'h44 + j[7:0], 4'd1, 4'd0, 16'd0, 4'hC, 8'd0, 1'b0, 1'b0, 1'b1, 1'b0, 16'h1000 + j[15:0]}) bad = bad + 1;
+                if (m_got[6] !== {32'd0, 4'hD, 28'd1}) bad = bad + 1;
+                if (m_got[7] !== {8'h55, 4'd1, 4'd0, 16'd0, 4'hC, 8'd0, 1'b1, 1'b0, 1'b1, 1'b1, 16'h2000}) bad = bad + 1;
+                if (m_got[8] !== {8'h33, 24'd0, 4'hF, 8'd0, 1'b1, 1'b0, 1'b1, 1'b1, 16'h0468} || !m_got_mark[8]) bad = bad + 1;
                 for (j = 0; j < 8; j = j + 1) if (m_got_mark[j]) bad = bad + 1;
                 if (bad != 0) fail("case 9: the words out are not the expected ones, in order");
                 else $display("  ok: the bus's word first on a collision, the fast ops in order behind it, the dummy a SKIP, the mark on its cycle");

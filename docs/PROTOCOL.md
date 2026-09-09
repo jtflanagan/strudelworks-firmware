@@ -52,8 +52,8 @@ host reads; the receiver carries parser state across all of them.
 | `0x01`–`0x0F` | — | Reserved for link-layer types: ones the FT601 layer may generate or consume on its own, parseable without application state. |
 | `0x10` | SEQ | Card→host. The verified counter stream from `ft601_top`, the link regression vehicle. |
 | `0x11` | BUS_ENABLE | Host→card. `free[0]` capture enable, `free[1]` source select (0 synthetic, 1 real bus), `free[2]` sparse (send only `$Cxxx` accesses, writes, the blanking and RES′ edges, with SKIP words counting the rest - see SPARSE.md; real bus only), `free[7:4]` heartbeat period select. All latched at enable. `enable = 0` is the clean stop. |
-| `0x12` | BUS_EVENTS | Card→host. Payload is N words: Apple bus events (`rtl/apple_bus_read.sv`: `{0xF, data[7:0], vbl, sync, res, rw, addr[15:0]}`; bit 19 is the video scanner's vertical blanking level once locked - see VBL.md, "The bit"); in sparse mode SKIP words `{0xD, count[27:0]}`: that many cycles passed unsent before the next word (SPARSE.md); and while the core is accelerated (ACCELERATION.md) fast-op words `{0xC, …}` in the event's layout - an op the core took from the card that rode no bus cycle, an op and not a cycle - with SKIPs standing for the dummy cycles in full mode too. |
-| `0x13` | BUS_STATUS | Card→host. Overflow flag, enable state, captured count - of WORDS into the capture FIFO (events and SKIPs alike). |
+| `0x12` | BUS_EVENTS | Card→host. Payload is N words, two per RECORD (see "The event record" below): bus cycles (`rtl/apple_bus_read.sv`, tag `0xF`), in sparse mode SKIP records `{0xD, count[27:0]}` in word 0 - that many cycles passed unsent before the next record (SPARSE.md) - and while the core is accelerated (ACCELERATION.md) fast-op records (tag `0xC`, class 1): an op the core took from the card that rode no bus cycle, an op and not a cycle, with SKIPs standing for the dummy cycles in full mode too. `len` is always even; a message never splits a record. |
+| `0x13` | BUS_STATUS | Card→host. Overflow flag, enable state, captured count - of RECORDS into the capture FIFO (events and SKIPs alike). |
 | `0x14` | REG_READ | Host→card. Payload `[addr]`. Answered with REG_VALUE. |
 | `0x15` | REG_WRITE | Host→card. Payload `[addr][data]`. Also answered with REG_VALUE. |
 | `0x16` | REG_VALUE | Card→host. Payload `[addr][data]`, answering either of the above. |
@@ -80,7 +80,36 @@ host reads; the receiver carries parser state across all of them.
 | `0x2A` | U2_RX | Host→card. Bytes to append at a socket's RX write pointer, the W5100's header in front. `free` = `{bytes[11:0], 0, 0, sock[1:0]}`; payload the bytes packed four a word. The card moves `Sn_RX_WR` and adds to `Sn_RX_RSR` at the last word. |
 | `0x2B` | U2_STAT | Host→card. `free` = `{sr[7:0], 0, sock[1:0]}`: the socket's `Sn_SR`, at once; payload none, or two words `[DIPR][{MSSR, DPORT}]` (the socket's register words 3 and 4) for an accepted LISTEN's peer. |
 | `0x2C` | AUDIO_FRAMES | Card→host, **unsolicited once asked** (AUDIO_CTRL on). The sound on the card (AUDIO.md): n samples at the play rate, three words each - `{ay0, spk}`, `{ay2, ay1}`, `{seq, ay3}` - the speaker's and each AY chip's box average over one sample window (0..32767) and a running sample count. `free` = `{drops[7:0], n[7:0]}`, n = 32; `len` = 3n. A gap in `seq` is that many samples the card's FIFO dropped. |
-| `0x2D`–`0xFF` | — | Application, unassigned. |
+| `0x2E`–`0xFF` | — | Application, unassigned. |
+
+### The event record (wire format v6, 2026-09-08)
+
+One event is a **64-bit record**, two 32-bit words on the wire, word 0 first;
+the host holds it as one `uint64_t` with word 0 in the low half
+(`src/protocol.hpp`, "Apple bus event record").  Word 0 keeps every bit
+position the 32-bit v5 word had, except the data byte, whose place the
+65816's bank byte takes:
+
+```
+word 0   [31:28] tag      0xF bus cycle, 0xC fast op, 0xD SKIP
+         [27:20] bank     the 65816's bank byte (0 on the IIe)
+         [19:16] flags    {vbl, sync, res, rw}
+         [15:0]  addr
+word 1   [31:24] data
+         [23:20] class    0 bus cycle, 1 fast op, 2 a dummy cycle the filter kept
+                          (an edge), 3 shadow duplicate, 4 DMA
+         [19:16] cpu      {E, M, X, irq-taken} of the cycle (0 on the IIe)
+         [15:0]  spare    zero until something earns it
+```
+
+A SKIP's word 1 is zero.  The 24-bit address regime of the IIgs is what
+forced the size (the bank has to ride every record), and the record is
+uniform for the IIe build too, so every consumer - the capture, the host's
+ring, the trace file (version 2, 8-byte records) - has one stride.  A frame is
+at most 127 records (254 words + header); `captured` counts records.  The
+producers: `rtl/apple_bus_read.sv` (class 0), `rtl/event_merge.sv` (class 1
+for a fast op, class 2 stamped on a dummy), `rtl/bus_event_filter.sv`
+(SKIPs); `rtl/bus_event_capture.sv` puts the two words on the wire.
 
 The host heartbeat is an **IDLE frame**, not a type of its own — it is the same
 four bytes in the other direction, and the card's watchdog is reset by any

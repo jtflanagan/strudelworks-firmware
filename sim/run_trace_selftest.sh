@@ -59,11 +59,11 @@ import struct, sys
 src, dst, victim = sys.argv[1], sys.argv[2], int(sys.argv[3])
 raw = open(src, 'rb').read()
 head, body = raw[:32], bytearray(raw[32:])
-off = victim * 4
+off = victim * 8                                 # 64-bit records; the address is in word 0
 w = struct.unpack_from('<I', body, off)[0]
 struct.pack_into('<I', body, off, w ^ 0x0040)   # one bit of the address
 open(dst, 'wb').write(head + bytes(body))
-print(f"  corrupted word {victim}: {w:08x} -> {w ^ 0x0040:08x}")
+print(f"  corrupted record {victim}: word 0 {w:08x} -> {w ^ 0x0040:08x}")
 PY
 if "$bin" --trace="$bad" --quiet > "$work/selftest_corrupt.log" 2>&1; then
     cat "$work/selftest_corrupt.log"

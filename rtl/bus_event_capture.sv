@@ -44,10 +44,15 @@
 // the other side.
 //////////////////////////////////////////////////////////////////////////////////
 
+// EACH EVENT IS A 64-BIT RECORD, two words on the wire (docs/PROTOCOL.md
+// "The event record"); the FIFO holds records, a frame counts records and
+// its header's len counts words, and `captured` counts records.  A frame
+// never splits a record: the VBL_MARK cut lands between two records.
 module bus_event_capture #(
-    parameter integer DEPTH        = 2048,
-    // 255 payload blocks + 1 header = 256 blocks = exactly one FT601 buffer.
-    parameter integer FRAME_EVENTS = 255,
+    parameter integer DEPTH        = 1024,
+    // 127 records = 254 payload words + 1 header = 255 words, just under one
+    // FT601 buffer; len is 8 bits of WORDS, so 127 is the most a frame holds.
+    parameter integer FRAME_EVENTS = 127,
     // Flush a partial frame after this long with no new event, so a quiet bus
     // does not strand events.  ~1 ms at 100 MHz.
     parameter integer FLUSH_TICKS  = 100_000
@@ -61,7 +66,7 @@ module bus_event_capture #(
 
     // event source.  ev_mark with ev_valid: this event is a frame origin;
     // ev_mark_free rides in the notice's header.
-    input  wire [31:0] ev_data,
+    input  wire [63:0] ev_data,
     input  wire        ev_valid,
     input  wire        ev_mark,
     input  wire [15:0] ev_mark_free,
@@ -106,12 +111,12 @@ module bus_event_capture #(
     wire  fifo_active = enable || draining || enable_fall;
     wire  fifo_rst    = rst || !fifo_active;
 
-    wire [31:0]    fq_dout;
+    wire [63:0]    fq_dout;
     wire           fq_full, fq_empty;
     wire [CW-1:0]  fq_count;
     logic          fq_rd_en;
 
-    sync_fifo #(.WIDTH (32), .DEPTH (DEPTH)) fq (
+    sync_fifo #(.WIDTH (64), .DEPTH (DEPTH)) fq (
         .clk (clk), .rst (fifo_rst),
         .din (ev_data), .wr_en (ev_valid && enable && !overflow), .full (fq_full),
         .dout (fq_dout), .rd_en (fq_rd_en), .empty (fq_empty),
@@ -127,7 +132,8 @@ module bus_event_capture #(
                      S_MARK    = 3'd5;
 
     logic [2:0] state = S_IDLE;
-    logic [7:0] left  = 8'd0;
+    logic [7:0] left  = 8'd0;          // records still owed by the frame
+    logic       hi    = 1'b0;          // the record's second word is next
     logic       status_pending = 1'b0;
 
     // Counters reset when a capture STARTS, not when it stops.  Clearing them on
@@ -242,13 +248,16 @@ module bus_event_capture #(
 
         case (state)
             S_HDR: begin
-                tx_data  = {16'h0000, T_BUS_EVENTS, left};
+                // len in words: two per record.
+                tx_data  = {16'h0000, T_BUS_EVENTS, left[6:0], 1'b0};
                 tx_valid = 1'b1;
             end
             S_PAY: begin
-                tx_data  = fq_dout;
+                // Word 0 then word 1 of the record at the head; the record is
+                // popped with its second word.
+                tx_data  = hi ? fq_dout[63:32] : fq_dout[31:0];
                 tx_valid = !fq_empty;
-                fq_rd_en = tx_take && !fq_empty;
+                fq_rd_en = tx_take && !fq_empty && hi;
             end
             S_ST_HDR: begin
                 tx_data  = {14'd0, enable, overflow, T_BUS_STATUS, 8'd1};
@@ -274,6 +283,7 @@ module bus_event_capture #(
         if (rst) begin
             state <= S_IDLE;
             left  <= 8'd0;
+            hi    <= 1'b0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -291,11 +301,14 @@ module bus_event_capture #(
                     end
                 end
 
-                S_HDR: if (tx_take) state <= S_PAY;
+                S_HDR: if (tx_take) begin state <= S_PAY; hi <= 1'b0; end
 
                 S_PAY: if (tx_take && !fq_empty) begin
-                    if (left == 8'd1) state <= S_IDLE;
-                    else              left  <= left - 8'd1;
+                    hi <= !hi;
+                    if (hi) begin
+                        if (left == 8'd1) state <= S_IDLE;
+                        else              left  <= left - 8'd1;
+                    end
                 end
 
                 S_ST_HDR: if (tx_take) state <= S_ST_PAY;

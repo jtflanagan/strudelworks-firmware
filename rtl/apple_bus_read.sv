@@ -38,11 +38,19 @@
 // DMA needs the setup and hold the rest of the machine expects, which is a
 // different figure and is not derivable from these.
 //
-// One event is produced per phi0 cycle, at the data sample, in the v5 wire
-// format so existing analysis tooling reads these dumps:
+// One event is produced per phi0 cycle, at the data sample, as a 64-bit
+// RECORD (docs/PROTOCOL.md "The event record"), two words on the wire, word
+// 0 first:
 //
-//   [15:0]  addr        [19:16] {vbl, m2sel, res, rw}
-//   [27:20] data        [31:28] 0xF tag
+//   word 0  [15:0]  addr        [19:16] {vbl, sync, res, rw}
+//           [27:20] bank        [31:28] 0xF tag
+//   word 1  [47:32] spare       [51:48] cpu {E, M, X, irq}
+//           [55:52] class       [63:56] data
+//
+// The bank and the cpu bits are the 65816's; this reader, on an 8-bit bus,
+// records zero for both, and class 0 (a bus cycle).  Word 0 keeps every bit
+// position the 32-bit v5 word had except the data byte, whose place the
+// bank takes.
 //
 // BIT 19 IS THE VBL LEVEL, NOT m2b0.  The v5 format put the IIgs's M2B0 pin
 // there; on the machines this card serves the pin is never high (measured
@@ -132,7 +140,7 @@ module apple_bus_read #(
     input  wire         vbl_level,
 
     // one event per phi0 cycle
-    output logic [31:0] ev_data,
+    output logic [63:0] ev_data,
     output logic        ev_valid,
     // ...and the same pulse UNGATED: one per phi0 cycle at the data sample
     // whether or not anyone is capturing.  rtl/vbl_lock.sv counts the
@@ -225,7 +233,7 @@ module apple_bus_read #(
             data_pipe   <= '0;
             addr_q      <= 16'd0;
             ctl_q       <= 3'd0;
-            ev_data     <= 32'd0;
+            ev_data     <= 64'd0;
             ev_valid    <= 1'b0;
             data_tick   <= 1'b0;
             live_cnt    <= '0;
@@ -245,9 +253,10 @@ module apple_bus_read #(
             end
 
             if (data_snap && enable) begin
-                ev_data  <= {4'hf, rw_override_en   ? wdata_override :
-                                   data_override_en ? data_override  : data_clean,
-                             vbl_level, ctl_q, addr_q};
+                ev_data  <= {rw_override_en   ? wdata_override :
+                             data_override_en ? data_override  : data_clean,
+                             4'd0, 4'd0, 16'd0,
+                             4'hf, 8'd0, vbl_level, ctl_q, addr_q};
                 ev_valid <= 1'b1;
             end
 

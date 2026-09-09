@@ -41,6 +41,8 @@ travels in the stream as a word of its own:
 
 ```
 SKIP   {4'hD, count[27:0]}     count >= 1: this many cycles passed unsent
+                               (word 0 of a 64-bit record; word 1 is zero -
+                               PROTOCOL.md "The event record")
 ```
 
 The event word's tag is `0xF`, so the host tells the two apart by the nibble
@@ -62,8 +64,8 @@ EVENT(0,0)`. The host's ring sees the skip word, the marker, the event, in
 that order, and its beam - placed by the marker, or by the bit's edge in the
 same event - agrees with itself.
 
-**`captured` counts words.** BUS_STATUS reports how many words went into the
-FIFO: kept events and SKIPs. That is what the host's parser, session and
+**`captured` counts records.** BUS_STATUS reports how many records went into
+the FIFO: kept events and SKIPs. That is what the host's parser, session and
 pipeline count too, so the completeness check (`captured` against what
 arrived) holds unchanged. The number of *cycles* is the kept events plus
 the sum of the SKIPs, which the host keeps for itself.

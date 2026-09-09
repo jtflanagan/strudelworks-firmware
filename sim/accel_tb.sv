@@ -414,7 +414,7 @@ module accel_tb #(parameter integer SWINT = 1,
     // overflows: counted below through the merge's own verdict.  room_rand
     // withholds the write room at random on top, for the wait path.
     wire        mg_room, mg_room_w, mg_out_valid;
-    wire [31:0] mg_out_data;
+    wire [63:0] mg_out_data;
     wire [7:0]  mg_overflows;
     wire        mg_fast_valid = fev_valid || (tev_valid && mg_room) ||
                                 (dev_valid && (!dev_rw || mg_room));
@@ -425,7 +425,7 @@ module accel_tb #(parameter integer SWINT = 1,
     wire        ev_room_w_tb = mg_room_w && (!room_rand || room_lfsr[3]);
     event_merge #(.DEPTH (8)) u_merge (
         .clk (clk), .rst (rst), .enable (1'b1),
-        .bus_valid (bus_tick), .bus_data (32'd0), .bus_mark (1'b0), .bus_mark_free (16'd0), .bus_dummy (1'b0),
+        .bus_valid (bus_tick), .bus_data (64'd0), .bus_mark (1'b0), .bus_mark_free (16'd0), .bus_dummy (1'b0),
         .fast_valid (mg_fast_valid), .fast_addr (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
         .fast_rw (mg_fast_rw), .fast_data (8'd0), .fast_sync (1'b0), .fast_mark (1'b0), .fast_mark_free (16'd0),
         .fast_quiet (1'b0), .vbl_level (1'b0), .res_level (1'b0), .sparse (1'b0), .virt (1'b0),

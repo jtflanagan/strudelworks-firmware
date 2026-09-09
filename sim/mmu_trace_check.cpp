@@ -44,7 +44,7 @@
 
 namespace trace {
 constexpr uint32_t kMagic = 0x54425753u;   // "SWBT"
-constexpr uint16_t kVersion = 1;
+constexpr uint16_t kVersion = 2;   // 64-bit records (host trace_writer.hpp)
 struct Header {
     uint32_t magic; uint16_t version; uint16_t word_bytes; uint32_t flags;
     uint32_t reserved0; uint64_t epoch_ms; uint64_t reserved1;
@@ -54,20 +54,22 @@ constexpr uint32_t kEventTag = 0xFu;
 constexpr uint32_t kGapTag = 0xEu;
 constexpr uint32_t kSkipTag = 0xDu;   // sparse capture: N cycles passed unsent (docs/SPARSE.md)
 struct Event { uint16_t addr; uint8_t data; bool rw; bool res; bool sync; };
-inline bool is_event(uint32_t w) { return (w >> 28) == kEventTag; }
+inline bool is_event(uint64_t w) { return ((w >> 28) & 0xFu) == kEventTag; }
 // An accelerated core's fast op (docs/ACCELERATION.md, tag 0xC): an op the
 // bus never carried, in the event's layout.  To the shadow it is an op like
 // any other - in mode 2 the fast writes ARE the RAM the shadow follows - and
 // to the cycle count it is nothing.
 constexpr uint32_t kFastTag = 0xCu;
-inline bool is_fast(uint32_t w) { return (w >> 28) == kFastTag; }
-inline bool is_gap(uint32_t w)   { return (w >> 28) == kGapTag; }
-inline bool is_skip(uint32_t w)  { return (w >> 28) == kSkipTag; }
-inline uint32_t skip_count(uint32_t w) { return w & 0x0FFFFFFFu; }
-inline Event decode(uint32_t w) {
+inline bool is_fast(uint64_t w) { return ((w >> 28) & 0xFu) == kFastTag; }
+inline bool is_gap(uint64_t w) { return ((w >> 28) & 0xFu) == kGapTag; }
+inline bool is_skip(uint64_t w) { return ((w >> 28) & 0xFu) == kSkipTag; }
+inline uint32_t skip_count(uint64_t w) { return static_cast<uint32_t>(w) & 0x0FFFFFFFu; }
+// The record: word 0 (tag, bank, flags, addr) in the low half, the data
+// byte in bits 63:56 (host protocol.hpp, "Apple bus event record").
+inline Event decode(uint64_t w) {
     Event e;
     e.addr = static_cast<uint16_t>(w & 0xFFFF);
-    e.data = static_cast<uint8_t>((w >> 20) & 0xFF);
+    e.data = static_cast<uint8_t>((w >> 56) & 0xFF);
     e.rw   = ((w >> 16) & 1) != 0;
     e.res  = ((w >> 17) & 1) != 0;
     e.sync = ((w >> 18) & 1) != 0;
@@ -127,21 +129,21 @@ std::string sw_string(unsigned s) {
     return out.empty() ? "(none)" : out;
 }
 
-bool load_words(const std::string& path, std::vector<uint32_t>* words, std::string* err) {
+bool load_words(const std::string& path, std::vector<uint64_t>* words, std::string* err) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) { *err = "cannot open " + path; return false; }
     trace::Header h{};
     if (std::fread(&h, sizeof h, 1, f) != 1) { *err = "too short"; std::fclose(f); return false; }
     if (h.magic != trace::kMagic) { *err = "not a bus trace"; std::fclose(f); return false; }
-    if (h.version != trace::kVersion || h.word_bytes != 4) {
+    if (h.version != trace::kVersion || h.word_bytes != 8) {
         *err = "unsupported trace version"; std::fclose(f); return false;
     }
     std::fseek(f, 0, SEEK_END);
     long end = std::ftell(f);
     std::fseek(f, static_cast<long>(sizeof h), SEEK_SET);
-    size_t n = static_cast<size_t>(end - static_cast<long>(sizeof h)) / 4;
+    size_t n = static_cast<size_t>(end - static_cast<long>(sizeof h)) / 8;
     words->resize(n);
-    if (n && std::fread(words->data(), 4, n, f) != n) { *err = "short read"; std::fclose(f); return false; }
+    if (n && std::fread(words->data(), 8, n, f) != n) { *err = "short read"; std::fclose(f); return false; }
     std::fclose(f);
     return true;
 }
@@ -178,7 +180,7 @@ int main(int argc, char** argv) {
     }
     if (opt.path.empty()) { usage(); return 2; }
 
-    std::vector<uint32_t> words;
+    std::vector<uint64_t> words;
     std::string err;
     if (!load_words(opt.path, &words, &err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 2; }
     std::vector<uint8_t> rom;
@@ -221,7 +223,7 @@ int main(int argc, char** argv) {
     unsigned shown = 0;
 
     for (size_t wi = 0; wi < words.size(); ++wi) {
-        uint32_t w = words[wi];
+        uint64_t w = words[wi];
         if (trace::is_gap(w)) {
             ++gaps;
             std::fill(written.begin(), written.end(), 0);

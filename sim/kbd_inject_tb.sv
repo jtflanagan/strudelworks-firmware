@@ -102,7 +102,7 @@ module kbd_inject_tb;
     wire        apple_rw_pin   = addr_rw_oe ? rw_drive   : 1'b1;
 
     // ---- the reader, exactly as master_top has it ---------------------------
-    wire [31:0] ev_data;
+    wire [63:0] ev_data;
     wire        ev_valid, res_sync, phi0_s;
     wire [7:0]  data_s;
     wire        sub_en;
@@ -311,7 +311,7 @@ module kbd_inject_tb;
         end
         if (ev_valid) begin
             cap_addr[ncap] = ev_data[15:0];
-            cap_data[ncap] = ev_data[27:20];
+            cap_data[ncap] = ev_data[63:56];
             ncap = ncap + 1;
         end
     end
