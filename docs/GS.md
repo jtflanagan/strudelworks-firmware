@@ -248,7 +248,7 @@ parity check on every rung that touches shared RTL.
 | 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro, the map registers and the clock done, 41,877 -> 67,398 events |
 | 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face) and the host side: the GS map in the mirror, `machine = iigs`, `gs_rom` | the ROM runs past the chipset with no spin; the host's map agrees with the card's | **DONE 2026-09-09** - see below |
 | 3d | `hd_card` in `boot_gs_tb` with the bench playing host, so the scan has something to find | the ROM finds slot 7, runs its firmware and reads blocks | **DONE 2026-09-09** - and the boot block runs; see below |
-| 3e | Why the third block read asks for $0203 instead of $0003 (the high byte of the block number); then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | **THE IMAGE BOOTS 2026-09-09.** The $0203 was an internal cycle (VDA and VPA both low) being taken as an access - as a WRITE (`INC $46` put the old byte in $47) and as a STROBE ($C083 after $C082 undid the language card). The eviction pressure that uncovered turned up a real page-cache bug: the shadow duplicate reached `cl_valid` with no entrant in `e_any`, so no P0 ran for it and it evicted pages under another page's tag - `cnt_ppn_clash` had been counting it since the day it was written. Then the IWM's handshake had to stop saying "a write is in progress" for ever. ProDOS 2.4.3 now boots off the slot-7 SmartPort to its BYE selector. The battery RAM now ships too (GS_BRAM `0x2E`), and the ROM believes it: `$C02D` comes out naming the host's slots. STILL TO DO: ADB_KEY, `mock_card` speaking a GS stream, the mirror replayed |
+| 3e | Why the third block read asks for $0203 instead of $0003 (the high byte of the block number); then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | **THE IMAGE BOOTS 2026-09-09.** The $0203 was an internal cycle (VDA and VPA both low) being taken as an access - as a WRITE (`INC $46` put the old byte in $47) and as a STROBE ($C083 after $C082 undid the language card). The eviction pressure that uncovered turned up a real page-cache bug: the shadow duplicate reached `cl_valid` with no entrant in `e_any`, so no P0 ran for it and it evicted pages under another page's tag - `cnt_ppn_clash` had been counting it since the day it was written. Then the IWM's handshake had to stop saying "a write is in progress" for ever. ProDOS 2.4.3 now boots off the slot-7 SmartPort to its BYE selector. The battery RAM now ships too (GS_BRAM `0x2E`), and the ROM believes it: `$C02D` comes out naming the host's slots. ADB_KEY works end to end on the card - Return at ProDOS's selector launches a file. STILL TO DO: the host's evdev-to-ADB feed, `mock_card` speaking a GS stream, the mirror replayed |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
 | 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | |
@@ -877,6 +877,56 @@ card.  55 blocks read, 54 checked intact where the machine looks for them, the
 ROM still the image in all 256 KB, and no op reaching the cache without its
 own directory read.  `sim/boot_gs_tb.sv` reads the text page out of the card's
 memory the way the host's `screen` does, so the machine says this itself.
+
+## Rung 3e: the keys arrive (2026-09-09)
+
+**ADB_KEY (`0x2F`)**, host→card, one word an event:
+`{mods[7:0], is_up, keycode[6:0]}`.  **THE CARD HOLDS THE KEYMAP**, as a real
+ADB micro does - a real one turns a keycode and the modifier state into the
+byte `$C000` reads, and the ROM never sees the keycode for that - so what
+travels is a keycode and not a character.
+
+`tools/gen_adb_keymap.py` generates `rtl/adb_keymap.hex` from KEGS's own
+`g_a2_key_to_ascii[][4]`, 128 entries of `{ctrl, shift, plain}` each
+`{none, special, byte}`.  Generated rather than transcribed, and it earned
+that twice over: **three rows carry `'{'`, `'}'` and `','` as character
+literals**, which breaks any naive split of the table, and KEGS's `& 0xef00`
+special-key mask **leaves bit 12 out on purpose** (the `$10xx` entries - Home,
+Page Up, the keypad's edges - are ordinary ASCII to it) while `hard_key` is
+decided from **the plain column alone** and then whichever column the
+modifiers choose is read.  Both are written down beside the flag.
+
+`gs_adb` gains what the micro has always had beside its command port: the
+ASCII buffer `$C000` reads head-first with bit 7 the strobe, the raw event
+queue a Talk register 0 drains two bytes at a time (a RESET travels alone),
+`$C010` as an ACCESS - a write to it clears the strobe too - and `$C025`,
+which is the host's modifier byte with the micro's own "a key is available"
+and "no hard key is down" bits.  `gs_io` claims `$C000` and `$C010` now.  An
+event WAITS for a clock with no `act`: the apply and the command machine both
+touch the raw queue, and this module keeps one writer for its state.
+
+NOT YET: KEGS's auto-repeat and its "read five times with keys pending, toss
+one" nudge, both of which want the frame count; the decision table asks for
+auto-repeat from set-config and it is a rung of its own.
+
+**IT WORKS, END TO END.**  Booted to ProDOS's BYE selector, pressed Return
+(ADB keycode `$24`) and let it up:
+
+    ok: keycode $24 reached the keyboard: $C000 reads $8d, $C025 $00
+      |ProDOS 2.4.3 is a minor update.         |
+      |Changes from ProDOS 2.4.2:              |
+      |- Thunderclock driver updated for       |
+
+`$8D` is `$0D` with the strobe.  The machine took it, launched `VIEW.README`
+and put the release notes on the screen.  `--key=CODE:AT[:MODS]` presses one
+at an instruction number.
+
+The landing check had to get MORE honest to say that.  While the boot is a
+read-then-jump a block is still the host's when the next command goes out;
+once an operating system is running it reads a block into a buffer, WORKS ON
+IT, and only then asks for the next thing.  So a block the machine has written
+to is skipped and counted rather than failed - and the DMA's own writes, which
+carry `u_ovr`, are not the machine's.  95 blocks read, 91 intact, 3 touched.
 
 ## Rung 3e: the battery RAM ships (2026-09-09)
 

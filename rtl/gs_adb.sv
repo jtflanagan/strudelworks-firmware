@@ -47,7 +47,12 @@
 // register 0 answers with a zero-byte response packet, which is exactly what
 // KEGS does with an empty buffer.
 //////////////////////////////////////////////////////////////////////////////////
-module gs_adb (
+module gs_adb #(
+    parameter [7:0] T_ADB_KEY = 8'h2F,
+    // The ADB micro's keymap, 128 entries of {ctrl, shift, plain}, each
+    // {none, special, byte}: tools/gen_adb_keymap.py from KEGS's own table.
+    parameter KEYMAP = "adb_keymap.hex"
+) (
     input  wire        clk,
     input  wire        rst,
     input  wire        res_sync,       // synchronised RES', ACTIVE LOW
@@ -62,8 +67,22 @@ module gs_adb (
     // The byte a read of op_lo would take, combinational.
     output logic [7:0] rd_byte,
 
-    // The modifier-key register $C025, fed from outside (rung 3c).
-    input  wire [7:0]  c025_val,
+    // THE KEYS, from the host (docs/GS.md, ADB_KEY).  One word an event:
+    // the ADB keycode, whether it went up, and the modifier byte the host
+    // resolved - shift, control, caps, option and command, in $C025's own
+    // bit order.  The micro holds the keymap, as a real one does, so what
+    // arrives is a keycode and not an ASCII byte.
+    input  wire        msg_valid,
+    input  wire [7:0]  msg_type,
+    input  wire [7:0]  msg_len,
+    input  wire [31:0] pay_data,
+    input  wire        pay_valid,
+
+    // The keyboard registers this module now owns beside the micro's own:
+    // $C000's latched byte, and $C025's modifiers.  $C010 is an ACCESS, not
+    // a read - a write to it clears the strobe too - so it arrives as a
+    // pulse rather than through rd_byte.
+    output logic [7:0] c025_val,
 
     // Interrupt requests into gs_intc, each gated by its own $C027 enable.
     output wire        irq_data,
@@ -100,6 +119,26 @@ module gs_adb (
     logic [7:0] dq [0:7];
     logic [3:0] dq_n;
 
+    // ---- the keyboard (adb_key_event, adb_read_c000, adb_access_c010) -------
+    // Two queues, because the machine has two ways to ask.  kbd_buf is the
+    // ASCII one $C000 reads, head first, bit 7 the strobe; reg0 is the RAW
+    // ADB events a Talk register 0 drains, {is_up, keycode}.  A key that has
+    // no ASCII - a function key, a modifier - goes only into reg0, which is
+    // KEGS's `hard_key` split.
+    localparam integer KBD_N = 8, REG0_N = 8;
+    logic [7:0] kbd_buf [0:KBD_N-1];
+    logic [3:0] kbd_n;
+    logic [7:0] reg0 [0:REG0_N-1];
+    logic [3:0] reg0_n;
+    logic       hard_key_down;
+    logic [6:0] a2code_down;
+
+    // The keymap: 128 entries of {ctrl, shift, plain}, each {none, special,
+    // byte}.  Distributed, and read combinationally - one event at a time and
+    // nothing else wants the port.
+    (* rom_style = "distributed" *) logic [29:0] keymap [0:127];
+    initial $readmemh(KEYMAP, keymap);
+
     logic [7:0] int_byte;
     logic [7:0] c027_val;
     logic [7:0] adb_mode;
@@ -131,8 +170,24 @@ module gs_adb (
                        : (st == S_IN_CMD) ? 8'h00
                                           : dq[0];
 
+    // ---- $C000 and $C010, the keyboard the machine has always had -----------
+    // adb_read_c000 returns the head of the buffer as it stands; bit 7 is the
+    // strobe, set when a key is waiting.  adb_access_c010 answers with the
+    // strobe CLEARED and bit 7 replaced by "a hard key is still down", and
+    // clears the strobe as a side effect - which is why $C010 is an access
+    // and not a read: a WRITE to it clears the strobe too.
+    //
+    // NOT HERE YET: KEGS's auto-repeat (g_adb_repeat_vbl and the $C025 bit 3
+    // it sets) and its "read five times with keys pending, toss one" nudge,
+    // both of which need the frame count.  docs/GS.md's decision table asks
+    // for auto-repeat from set-config; it is a rung of its own.
+    wire [7:0] c000_rd = kbd_buf[0];
+    wire [7:0] c010_rd = {hard_key_down, kbd_buf[0][6:0]};
+
     always_comb begin
         case (op_lo)
+            8'h00:   rd_byte = c000_rd;
+            8'h10:   rd_byte = c010_rd;
             8'h25:   rd_byte = c025_val;
             8'h26:   rd_byte = c026_rd;
             8'h27:   rd_byte = c027_rd;
@@ -164,6 +219,54 @@ module gs_adb (
         arg = (cmd_so_far == k) ? op_wdata : cmd_data[k[2:0]];
     endfunction
 
+    // ---- an ADB_KEY, decoded (adb_key_event) --------------------------------
+    // The message word is {mods[7:0], is_up, keycode[6:0]}.  The keymap is
+    // read on the word's own clock and the whole event registered, so the
+    // apply below is a mux of registers and not a ROM lookup.
+    logic [7:0] rx_type_k, rx_left_k;
+    wire rx_word_k  = pay_valid && (rx_left_k != 8'd0);
+    wire hdr_key    = msg_valid && (msg_type == T_ADB_KEY);
+    wire word_key   = rx_word_k && (rx_type_k == T_ADB_KEY);
+    wire [29:0] km_in = keymap[pay_data[6:0]];
+
+    logic        ev_v;
+    logic [6:0]  ev_code;
+    logic        ev_up;
+    logic [7:0]  ev_mods;
+    logic [29:0] ev_km;
+
+    // Which column the modifiers choose, KEGS's order: caps lock lifts a-z,
+    // shift lifts anything, and control overrides both when the key has one.
+    // $C025's bits are 0 shift, 1 control, 2 caps (adb.c's SHIFT_DOWN etc).
+    wire ev_shift = ev_mods[0], ev_ctrl = ev_mods[1], ev_caps = ev_mods[2];
+    wire [9:0] km_plain = ev_km[9:0];
+    wire [9:0] km_shift = ev_km[19:10];
+    wire [9:0] km_ctrl  = ev_km[29:20];
+    wire       lower_az = !km_plain[9] && !km_plain[8] &&
+                          (km_plain[7:0] >= 8'h61) && (km_plain[7:0] <= 8'h7A);
+    wire [9:0] km_sel   = (ev_ctrl && !km_ctrl[9])       ? km_ctrl
+                        : (ev_shift || (ev_caps && lower_az)) ? km_shift
+                                                          : km_plain;
+    // KEGS decides "this key has an ASCII" from the PLAIN column alone and
+    // then reads whichever column the modifiers chose - see
+    // tools/gen_adb_keymap.py.
+    wire ev_hard = !km_plain[9] && !km_plain[8];
+
+    // adb_kbd_talk_reg0's choice, spelled out: val0 is the head, val1 the
+    // one behind it, and a RESET ($7F with either up bit) never shares a
+    // packet.  t0_num is how many the answer consumes.
+    wire [7:0] t0_v0  = reg0[0];
+    wire [7:0] t0_v1  = reg0[1];
+    wire       t0_r0  = (t0_v0[6:0] == 7'h7F);
+    wire       t0_r1  = (t0_v1[6:0] == 7'h7F);
+    wire [7:0] t0_hi  = t0_v0;
+    wire [7:0] t0_lo  = t0_r0            ? t0_v0            // reset: doubled
+                      : (reg0_n > 4'd1)  ? (t0_r1 ? 8'hFF : t0_v1)
+                                         : 8'hFF;
+    wire [1:0] t0_num = t0_r0           ? 2'd1
+                      : (reg0_n > 4'd1) ? (t0_r1 ? 2'd1 : 2'd2)
+                                        : 2'd1;
+
     // Named so they can be bit-selected: a function call cannot be.
     wire [7:0] a0 = arg(4'd0), a1 = arg(4'd1), a2 = arg(4'd2), a3 = arg(4'd3);
 
@@ -176,6 +279,52 @@ module gs_adb (
                       : (ram_addr >= 16'h0100)     ? 8'h00
                       : (ram_addr[7:0] == 8'h0C)   ? (c025_val & 8'hC7)
                       : adb_ram[ram_addr[7:0]];
+
+    // The message's own header/word counter, and the event register.  An
+    // event WAITS for a clock with no `act`: the apply below and the command
+    // machine both touch reg0 - one pushes, a Talk pops - and the module
+    // keeps one writer for its state, so they take turns rather than
+    // arbitrate.  Ops are tens of clocks apart even accelerated, so the wait
+    // is one clock at most.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            rx_type_k <= 8'd0; rx_left_k <= 8'd0;
+            ev_v <= 1'b0;
+        end else begin
+            if (msg_valid) begin
+                rx_type_k <= msg_type;
+                rx_left_k <= msg_len;
+                if (hdr_key && msg_len != 8'd1) rx_type_k <= 8'd0;
+            end else if (rx_word_k) begin
+                rx_left_k <= rx_left_k - 8'd1;
+            end
+            if (word_key) begin
+                ev_v    <= 1'b1;
+                ev_code <= pay_data[6:0];
+                ev_up   <= pay_data[7];
+                ev_mods <= pay_data[15:8];
+                ev_km   <= km_in;
+            end else if (ev_v && !act) begin
+                ev_v <= 1'b0;
+            end
+        end
+    end
+    wire ev_go = ev_v && !act;
+
+    // adb_access_c010: the strobe goes, the head leaves, and $C025's
+    // "a key is available" bit goes with it.  A task because a read of $C010
+    // and a write to it do the same thing - it is an ACCESS.
+    integer j;
+    task automatic kbd_shift;
+        begin
+            kbd_buf[0] <= {1'b0, kbd_buf[0][6:0]};
+            if (kbd_n != 4'd0) begin
+                for (j = 1; j < KBD_N; j = j + 1) kbd_buf[j-1] <= kbd_buf[j];
+                kbd_n <= kbd_n - 4'd1;
+            end
+            c025_val <= c025_val & ~8'h08;
+        end
+    endtask
 
     integer i;
     wire [7:0] c    = op_wdata;         // the command byte being written
@@ -198,6 +347,44 @@ module gs_adb (
             kbd_reg3 <= 16'h0602;
             mouse_valid <= 1'b0; mouse_coord <= 1'b0;
             cnt_cmds <= 8'd0; cnt_unknown <= 8'd0;
+            // The keyboard.  A RESET clears the buffers and the modifiers;
+            // c025 bit 5 is "no hard key is down", which is true of a machine
+            // that has just been reset.
+            kbd_n <= 4'd0; reg0_n <= 4'd0;
+            hard_key_down <= 1'b0; a2code_down <= 7'd0;
+            c025_val <= 8'h20;
+            for (i = 0; i < KBD_N; i = i + 1) kbd_buf[i] <= 8'd0;
+            for (i = 0; i < REG0_N; i = i + 1) reg0[i] <= 8'd0;
+        end else if (ev_go) begin
+            // ---- adb_key_event ------------------------------------------
+            // The raw event always goes to register 0, up or down; the ASCII
+            // only on a press of a key that has one.
+            if (reg0_n < REG0_N[3:0]) begin
+                reg0[reg0_n[2:0]] <= {ev_up, ev_code};
+                reg0_n <= reg0_n + 4'd1;
+            end
+            if (!ev_up && ev_hard) begin
+                if (kbd_n < KBD_N[3:0]) begin
+                    // KEGS's `key = (ascii & 0x7f) + 0x80`: bit 7 is the
+                    // strobe the machine polls, not part of the character.
+                    kbd_buf[kbd_n[2:0]] <= {1'b1, km_sel[6:0]};
+                    kbd_n <= kbd_n + 4'd1;
+                end
+                hard_key_down <= 1'b1;
+                a2code_down   <= ev_code;
+            end else if (ev_up && ev_hard && (ev_code == a2code_down)) begin
+                hard_key_down <= 1'b0;
+            end
+            // The modifiers are the host's, and bit 5 is this module's:
+            // set when no hard key is down, which is what the ROM's own
+            // "update the modifier latch" reads.
+            c025_val <= (ev_mods & 8'hC7) | (c025_val & 8'h08) |
+                        ((!ev_up && ev_hard) ? 8'h00 : 8'h20);
+        end else if (act && !op_rw && (op_lo == 8'h10)) begin
+            // ---- adb_access_c010, the write half ------------------------
+            kbd_shift();
+        end else if (act && op_rw && (op_lo == 8'h10)) begin
+            kbd_shift();
         end else if (act && op_rw && (op_lo == 8'h26)) begin
             // ---- a read of $C026 drains (adb_read_c026) ---------------------
             case (st)
@@ -287,11 +474,32 @@ module gs_adb (
                         8'h0F: begin dq[0] <= 8'h0A; dq[1] <= 8'h00; dq_n <= 4'd2; st <= S_SENDING; end
                         default: begin
                             if (c[7:4] == 4'hC) begin
-                                // Talk device, register 0: the key buffer.
-                                // Empty, so adb_response_packet(0, ...) -
-                                // no queued bytes, interrupt byte $80.
-                                if (wdev == kbd_dev_addr) int_byte <= int_byte | 8'h80;
-                                else cnt_unknown <= cnt_unknown + 8'd1;
+                                // Talk device, register 0: the raw key
+                                // events (adb_kbd_talk_reg0).  Empty answers
+                                // adb_response_packet(0, ...) - no queued
+                                // bytes, interrupt byte $80 - which is what
+                                // this did before there were any keys.
+                                //
+                                // With keys it is always a TWO-byte packet,
+                                // even when only one event goes: the second
+                                // byte is $FF, "nothing here".  A RESET
+                                // ($7F either way) travels alone - KEGS will
+                                // not put one second, and doubles it when it
+                                // is first.
+                                if (wdev != kbd_dev_addr) begin
+                                    cnt_unknown <= cnt_unknown + 8'd1;
+                                end else if (reg0_n == 4'd0) begin
+                                    int_byte <= int_byte | 8'h80;
+                                end else begin
+                                    dq[0]    <= t0_lo;
+                                    dq[1]    <= t0_hi;
+                                    dq_n     <= 4'd2;
+                                    int_byte <= int_byte | 8'h81;
+                                    for (i = 0; i < REG0_N - 1; i = i + 1)
+                                        if (i + int'(t0_num) < REG0_N)
+                                            reg0[i] <= reg0[i + int'(t0_num)];
+                                    reg0_n <= reg0_n - {2'd0, t0_num};
+                                end
                             end else if (c[7:4] == 4'hF) begin
                                 // Talk device, register 3.  Two bytes, and
                                 // the response packet stays IDLE.

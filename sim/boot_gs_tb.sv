@@ -99,6 +99,13 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // an invalid checksum on both machines and initialises it
                     // the same way.  Ship one and the two part company at
                     // once - correctly, and not at the floor.
+                    parameter ADB_KEYMAP = "adb_keymap.hex",
+                    // A key, pressed at an instruction number (docs/GS.md,
+                    // ADB_KEY): the ADB keycode, the modifier byte in
+                    // $C025's own order, and when.  0 = type nothing.
+                    parameter integer KEY_AT   = 0,
+                    parameter integer KEY_CODE = 0,
+                    parameter integer KEY_MODS = 0,
                     parameter BRAMF = "gsbram.hex",
                     parameter integer HAS_BRAM = 0);
 
@@ -463,7 +470,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // One instance, two claims: `claim` off the LIVE address for the
     // dispatcher's decision, and `u_claim` off the REGISTERED op for the byte
     // mux (rtl/gs_io.sv, "the two faces of an op").
-    gs_io u_gsio (
+    gs_io #(.adb_keymap (ADB_KEYMAP)) u_gsio (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .q_addr ({cpu_bank_eff, nxt_addr}), .q_rw (cpu_rw_eff), .claim (gsio_claim),
         .u_bank (u_bank), .u_addr (u_addr), .u_rw (u_rw), .u_wdata (u_wdata),
@@ -479,6 +486,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // The battery RAM the host ships, sent before RES' is released.
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid), .bram_ok (bram_landed),
+
         .frame_tick (frame_tick),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
@@ -785,6 +793,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // the machine will look for a block DMA'd into the LC is not its virtual
     // address.  Captured here because the switches may move before the check.
     reg        pend_b2 = 1'b0, pend_azp = 1'b0;
+    // ...and whether the MACHINE wrote into the block before the check got
+    // to it.  While the boot is a read-then-jump the block is still the
+    // host's when the next command goes out; once an operating system is
+    // running it reads a block into a buffer, WORKS ON IT, and only then
+    // asks for the next thing.  A block the machine has written is not
+    // evidence about the DMA either way, so it is skipped and counted.
+    reg        pend_dirty = 1'b0;
+    integer    blocks_touched = 0;
     integer    pend_blk = 0, blocks_verified = 0;
 
     task automatic hm_io_read0;
@@ -1178,6 +1194,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                                 host_reads = host_reads + 1;
                                 pend_addr = memblock; pend_blk = diskblock;
                                 pend_b2 = sw_state[8]; pend_azp = sw_state[3];
+                                pend_dirty = 1'b0;
                                 pend_valid = 1'b1;
                             end
                             hm_uerr[r] = err;
@@ -1379,6 +1396,37 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         end
     endtask
 
+    // One ADB_KEY: a single word, {mods[7:0], is_up, keycode[6:0]}.
+    task send_key(input [6:0] code, input up, input [7:0] mods);
+        begin
+            @(negedge clk);
+            msg_valid <= 1'b1; msg_type <= 8'h2F; msg_len <= 8'd1;
+            @(negedge clk);
+            msg_valid <= 1'b0; pay_valid <= 1'b1;
+            pay_data <= {16'd0, mods, up, code};
+            @(negedge clk);
+            pay_valid <= 1'b0;
+            @(negedge clk);
+        end
+    endtask
+
+    // The typist: waits for the machine to get where it is going, presses the
+    // key and lets it up.  Held apart from the run's own process because it
+    // has to happen WHILE the machine runs, not before or after it.
+    integer keys_sent = 0;
+    initial if (KEY_AT != 0) begin : typist
+        wait (trace_instrs >= KEY_AT);
+        send_key(7'(KEY_CODE), 1'b0, 8'(KEY_MODS));
+        keys_sent = keys_sent + 1;
+        if (u_gsio.u_adb.kbd_buf[0][7] !== 1'b1)
+            fail("the key went down and $C000's strobe did not set");
+        else
+            ok($sformatf("keycode $%02X reached the keyboard: $C000 reads $%02X, $C025 $%02X",
+                         KEY_CODE, u_gsio.u_adb.kbd_buf[0], u_gsio.u_adb.c025_val));
+        repeat (20000) @(negedge clk);
+        send_key(7'(KEY_CODE), 1'b1, 8'(KEY_MODS));
+    end
+
     // The battery RAM the host ships, as one GS_BRAM: 64 words, four bytes a
     // word, low byte first, taken all or nothing (rtl/gs_clock.sv).
     reg [7:0] bram_img [0:255];
@@ -1485,9 +1533,17 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 blocks_verified = blocks_verified + 1;
         end
     endtask
+    // The machine writing into the block it was just given.
+    always @(posedge clk)
+        if (boot_go && pend_valid && u_present && !u_rw && !u_ovr &&
+            u_bank == 8'h00 &&
+            u_addr >= pend_addr && u_addr <= (pend_addr + 16'd511))
+            pend_dirty <= 1'b1;
+
     always @(posedge clk) if (chk_go) begin
         chk_go = 1'b0;
-        verify_landed(pend_addr, pend_blk);
+        if (pend_dirty) blocks_touched = blocks_touched + 1;
+        else            verify_landed(pend_addr, pend_blk);
         pend_valid = 1'b0;
     end
 
@@ -1603,8 +1659,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             if (blocks_verified == 0 && hd_blocks_read > 1)
                 fail("no block was ever checked where the machine would look for it");
             else
-                ok($sformatf("%0d blocks landed intact where the machine looks for them",
-                             blocks_verified));
+                ok($sformatf("%0d blocks landed intact where the machine looks for them (%0d the machine had already written to)",
+                             blocks_verified, blocks_touched));
         end
         $display("    parked %0d internal cycles: %0d would have written, %0d would have hit $C0xx",
                  internal_cycles, internal_writes, internal_io);

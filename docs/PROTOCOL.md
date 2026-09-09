@@ -81,7 +81,8 @@ host reads; the receiver carries parser state across all of them.
 | `0x2B` | U2_STAT | Host→card. `free` = `{sr[7:0], 0, sock[1:0]}`: the socket's `Sn_SR`, at once; payload none, or two words `[DIPR][{MSSR, DPORT}]` (the socket's register words 3 and 4) for an accepted LISTEN's peer. |
 | `0x2C` | AUDIO_FRAMES | Card→host, **unsolicited once asked** (AUDIO_CTRL on). The sound on the card (AUDIO.md): n samples at the play rate, three words each - `{ay0, spk}`, `{ay2, ay1}`, `{seq, ay3}` - the speaker's and each AY chip's box average over one sample window (0..32767) and a running sample count. `free` = `{drops[7:0], n[7:0]}`, n = 32; `len` = 3n. A gap in `seq` is that many samples the card's FIFO dropped. |
 | `0x2E` | GS_BRAM | Host→card. Payload 64 words: the IIgs's 256-byte battery RAM, four bytes a word, low byte first. Taken ALL OR NOTHING by `rtl/gs_clock.sv` - a partial image is worse than none, because the ROM checksums it, finds it wrong, and writes its own defaults over the slot settings it was shipping. The host sends one at start when `machine = iigs`, naming every slot it has put an emulated card in. See GS.md. |
-| `0x2F`–`0xFF` | — | Application, unassigned. |
+| `0x2F` | ADB_KEY | Host→card. Payload one word `{16'd0, mods[7:0], is_up, keycode[6:0]}`: one ADB key event, with the modifier byte in `$C025`'s own bit order (1 shift, 2 control, 4 caps lock, `$40` option, `$80` command). THE CARD HOLDS THE KEYMAP, as a real ADB micro does, so what travels is a keycode and not a character: `rtl/gs_adb.sv` turns it into `$C000`'s ASCII with `rtl/adb_keymap.hex` (`tools/gen_adb_keymap.py`, from KEGS's own table) and queues the raw event for a Talk register 0. See GS.md. |
+| `0x30`–`0xFF` | — | Application, unassigned. |
 
 ### The event record (wire format v6, 2026-09-08)
 

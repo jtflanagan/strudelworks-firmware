@@ -37,6 +37,7 @@ declare -A B=(
   [lint]="sim/lint.sh|^(lint clean|all OK)|LINTEXIT"
   [microcode]="python3 sim/gen_microcode.py --check|microcode up to date"
   [microcode816]="python3 sim/gen_microcode816.py --check|microcode up to date"
+  [adb_keymap]="python3 tools/gen_adb_keymap.py --check|ADB keymap up to date"
   [cpu816_cycles]="python3 sim/gen_cycle_table816.py|every observed cycle count is reachable"
   [cpu816_trace]="sim/run_cpu816_trace.sh --limit 400 --flags|^PASS$"
   [boot_hold]="sim/run_boot_hold_tb.sh|^PASS$"
@@ -90,7 +91,7 @@ declare -A B=(
 )
 QUICK="lint microcode boot_hold bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
-GS="microcode816 cpu816_cycles cpu816_trace mmu_xlate_gs boot_gs"
+GS="microcode816 adb_keymap cpu816_cycles cpu816_trace mmu_xlate_gs boot_gs"
 BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"
 [ "$iverilog" = 1 ] && BATTERY="$BATTERY accel_iv"
 

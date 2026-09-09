@@ -25,6 +25,9 @@
 #     --lctrace        name every $C08x touch with the state it left
 #     --watch=A:B      print every CPU cycle between instructions A and B
 #     --engtrace       name every page-cache fill and victim in the ROM's pages
+#     --key=CODE:AT[:MODS]  press an ADB keycode at instruction AT, with the
+#                      modifier byte MODS in $C025's order (1 shift, 2 ctrl,
+#                      4 caps, $40 option, $80 command)
 #     --bram=SLOTS     ship a battery RAM naming these slots "Your Card"
 #                      (tools/gs_bram.py), e.g. --bram=6,7 or --bram=none.
 #                      OFF by default: KEGS boots with an all-zero battery RAM,
@@ -36,7 +39,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/boot_work"
 mkdir -p "$work"
 
-instrs=20000 clks=400000000 mode=2 target=0 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram=
+instrs=20000 clks=400000000 mode=2 target=0 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport.bin"
 hdv=""
@@ -58,6 +61,7 @@ for a in "$@"; do
         --lctrace) lctrace=1 ;;
         --engtrace) engtrace=1 ;;
         --bram=*) bram="${a#*=}" ;;
+        --key=*) IFS=: read -r keycode keyat keymods <<< "${a#*=}"; keymods="${keymods:-0}" ;;
         --watch=*) wfrom="${a#*=}"; wto="${wfrom#*:}"; wfrom="${wfrom%%:*}" ;;
         --iverilog) vl=0 ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
@@ -144,6 +148,8 @@ if [ "$vl" = 1 ]; then
         -GLC_TRACE="$lctrace" \
         -GWATCH_FROM="$wfrom" -GWATCH_TO="$wto" \
         -GENG_TRACE="$engtrace" \
+        -GKEY_AT="$keyat" -GKEY_CODE="$keycode" -GKEY_MODS="$keymods" \
+        -GADB_KEYMAP="\"$root/rtl/adb_keymap.hex\"" \
         -GBRAMF="\"$work/gsbram_$tag.hex\"" -GHAS_BRAM="$has_bram" \
         -Mdir "$obj" "${srcs[@]}" \
         -o boot_gs_tb > "$work/verilator_gs_$tag.log" 2>&1 || {

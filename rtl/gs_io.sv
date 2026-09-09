@@ -39,7 +39,11 @@
 // hardware this machine has; $C058-$C05F, the annunciators; and any $Cnxx
 // belonging to a physical card in a slot.  Those must never be claimed here.
 //////////////////////////////////////////////////////////////////////////////////
-module gs_io (
+module gs_io #(
+    // The ADB micro's keymap (tools/gen_adb_keymap.py), passed down so a
+    // bench can name its own copy.
+    parameter adb_keymap = "adb_keymap.hex"
+) (
     input  wire        clk,
     input  wire        rst,
     input  wire        res_sync,       // synchronised RES', ACTIVE LOW
@@ -113,7 +117,8 @@ module gs_io (
     // One function, asked of the live address for the claim and of the
     // registered one for the effect, so the two can never drift apart.
     function automatic mine(input [7:0] lo);
-        mine = (lo == 8'h21) || (lo == 8'h22) || (lo == 8'h23)    // the VGC
+        mine = (lo == 8'h00) || (lo == 8'h10)                     // the keyboard
+            || (lo == 8'h21) || (lo == 8'h22) || (lo == 8'h23)    // the VGC
             || (lo == 8'h24) || (lo == 8'h25) || (lo == 8'h26) || (lo == 8'h27)  // ADB
             || (lo == 8'h29) || (lo == 8'h2A) || (lo == 8'h2B) || (lo == 8'h2C)  // the VGC
             || (lo[7:4] == 4'h1 && lo != 8'h10)                    // $C011-$C01F, the status page
@@ -138,16 +143,20 @@ module gs_io (
     // op, so the decode is repeated here rather than trusted.
     wire act = u_commit && u_mine;
 
+    wire [7:0] adb_c025;
     wire [7:0] adb_rd;
     wire       adb_irq_data, adb_irq_mouse;
     wire [7:0] adb_cnt_cmds, adb_cnt_unknown;
 
-    gs_adb u_adb (
+    gs_adb #(.KEYMAP (adb_keymap)) u_adb (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
         .rd_byte (adb_rd),
-        // The modifier keys, from nobody yet (rung 3c).
-        .c025_val (8'h00),
+        // The keys, from the host (docs/GS.md, ADB_KEY); the micro holds the
+        // keymap and $C025's modifiers, as a real one does.
+        .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
+        .pay_data (pay_data), .pay_valid (pay_valid),
+        .c025_val (adb_c025),
         .irq_data (adb_irq_data), .irq_mouse (adb_irq_mouse),
         .cnt_cmds (adb_cnt_cmds), .cnt_unknown (adb_cnt_unknown)
     );
