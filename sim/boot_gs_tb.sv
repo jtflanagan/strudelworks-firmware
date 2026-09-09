@@ -100,6 +100,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     reg frame_tick = 1'b0;
     always @(posedge clk)
         frame_tick <= fall && (bus_cycles % 17030 == 17029);
+    // ...and the blanking interval itself, the last 4550 cycles of the frame,
+    // for $C019.  On the card this is rtl/vbeam.sv's own.
+    wire vbl_active = (bus_cycles % 17030) >= 12480;
 
     // ---- the backplane, the reader and the driver --------------------------------
     reg  res_n = 1'b1;
@@ -317,6 +320,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .u_commit (swi_commit),
         .gs_shadow (gs_shadow_w), .gs_cyareg (gs_cyareg_w),
         .gs_sltrom (gs_sltrom_w), .gs_state (gs_state_w),
+        .stat_byte (mmu_swi_stat), .vbl (vbl_active),
         // PINNED TO KEGS's OWN CLOCK.  tools/kegs/trace_rom.sh runs the
         // reference with -pintime 3871713600 (2026-09-08 12:00:00 since
         // 1904) so its trace is the same every run; the card must believe the
@@ -499,6 +503,44 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         else      io_wr[u_addr[7:0]] = io_wr[u_addr[7:0]] + 1;
         if (io_first[u_addr[7:0]] < 0) io_first[u_addr[7:0]] = trace_instrs;
     end
+    // The SLOT pages beside the $C0xx registers: $C0n0-$C0nF device select
+    // and $Cn00-$CnFF ROM, per slot.  The machine boots from the emulated
+    // SmartPort in SLOT 7 (the user's, 2026-09-09), so what matters most is
+    // whether the ROM's scan ever reaches slot 7's pages at all.
+    integer slot_dev [0:7];
+    integer slot_rom [0:7];
+    integer slot_first [0:7];
+    integer sc;
+    initial for (sc = 0; sc < 8; sc = sc + 1) begin
+        slot_dev[sc] = 0; slot_rom[sc] = 0; slot_first[sc] = -1;
+    end
+    wire slot_pair = (u_bank == 8'h00) || (u_bank == 8'h01) ||
+                     (u_bank == 8'hE0) || (u_bank == 8'hE1);
+    wire dev_touch = boot_go && u_present && slot_pair &&
+                     (u_addr[15:8] == 8'hC0) && (u_addr[7:4] >= 4'h8);
+    wire rom_touch = boot_go && u_present && slot_pair &&
+                     (u_addr[15:12] == 4'hC) && (u_addr[11:8] >= 4'h1) &&
+                     (u_addr[11:8] <= 4'h7);
+    always @(posedge clk) begin
+        if (dev_touch) begin
+            slot_dev[u_addr[6:4]] = slot_dev[u_addr[6:4]] + 1;
+            if (slot_first[u_addr[6:4]] < 0) slot_first[u_addr[6:4]] = trace_instrs;
+        end
+        if (rom_touch) begin
+            slot_rom[u_addr[10:8]] = slot_rom[u_addr[10:8]] + 1;
+            if (slot_first[u_addr[10:8]] < 0) slot_first[u_addr[10:8]] = trace_instrs;
+        end
+    end
+    task dump_slot_census;
+        integer k;
+        begin
+            $display("    ---- the slot census: device select, ROM page, first touch ----");
+            for (k = 1; k < 8; k = k + 1)
+                $display("      slot %0d  $C0%0dx %-9d  $C%0dxx %-9d  first @ %0d",
+                         k, k + 8, slot_dev[k], k, slot_rom[k], slot_first[k]);
+        end
+    endtask
+
     task dump_io_census;
         integer k, touched;
         begin
@@ -600,6 +642,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                  hits, misses, mem_fills, mem_flushes, mem_declines, late_fills, fifo_drops);
         $display("    last PC $%02X/%04X", last_sync[23:16], last_sync[15:0]);
         dump_io_census();
+        dump_slot_census();
 
         // The machine itself, not the ROM's opinion of it.
         if (trace_instrs == 0) fail("the core executed nothing");

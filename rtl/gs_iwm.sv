@@ -8,12 +8,17 @@
 // read_iwm and write_iwm for the data path, iwm_read_status35 for the 3.5"
 // status, iwm_read_enable2_handshake for the SmartPort handshake.
 //
-// WHY A STUB AND NOT A DRIVE.  docs/GS.md's decision: no 3.5" drive and no
-// SmartPort device, so the ROM's scan ENDS - which is what KEGS does with no
-// disks attached.  The card's own slot-6 Disk II and slot-7 SmartPort HDC are
-// the machine's real drives and they answer in their own $Cnxx pages.  What
-// this must do is be a believable IWM with nothing in it, because the ROM
-// talks to the chip before it ever asks about a disk.
+// WHAT IT IS FOR, EXACTLY (the user's, 2026-09-09): the machine boots from the
+// EMULATED SMARTPORT DRIVE IN SLOT 7, never from the IWM.  So this module's
+// whole job is to make the ROM's startup scan give up on the IWM quickly and
+// move on.  It is not a drive and is not on the way to being one; fidelity
+// beyond "there is nothing here, stop asking" is not wanted and would be work
+// spent in the wrong place.  The card's own slot-6 Disk II and slot-7
+// SmartPort HDC are the machine's real drives, in their own $Cnxx pages.
+//
+// It still has to be a BELIEVABLE empty IWM, because the ROM talks to the chip
+// before it ever asks about a disk, and a chip that answers nonsense hangs it
+// (see below).  Believable and empty, and no more than that.
 //
 // AND IT IS NOT OPTIONAL.  Without it the ROM hangs, at $FF/4720:
 //
@@ -118,7 +123,7 @@ module gs_iwm (
                 4'h4: status35 = 1'b1;       // 1 = not stepping
                 4'h5: status35 = 1'b1;       // ROM 3's unknown function
                 4'h6: status35 = 1'b0;       // disk locked: !write_prot, and it is
-                4'h8: status35 = 1'b1;       // motor: 1 = off
+                4'h8: status35 = 1'b1;       // motor: 1 = off, and it always is
                 4'h9: status35 = 1'b1;       // 1 = two sides
                 4'hA: status35 = 1'b0;       // at track 0: 0 = there
                 4'hB: status35 = 1'b1;       // ready: 1 = not ready
@@ -137,7 +142,22 @@ module gs_iwm (
     // KEGS: val = ((write_prot & 1) << 7) | (state & 0x3f), and state's bit 5
     // is motor_on with the mode in [4:0].  Bit 6 is outside that mask and
     // reads zero.
-    wire [7:0] status_byte = {wr_prot, 1'b0, motor_on, mode};
+    //
+    // BIT 5 READS ZERO HERE, AND THAT IS THE WHOLE POINT OF THE MODULE.  KEGS
+    // reports the IWM's own motor LATCH, because KEGS has drives for it to
+    // spin; a real machine's latch is followed by a real motor, and the ROM
+    // waits for that motor to stop:
+    //
+    //     FF/4717  LDA $C0EE / AND #$20 / BNE $4717     ; and again at
+    //     FF/5B71  LDA $C08E,X / AND #$20 / BNE $5B71   ; ...$FF/5B71
+    //
+    // Reporting the latch makes both of those spin for ever, because nothing
+    // here ever stops spinning.  THERE IS NO DRIVE, SO THERE IS NO MOTOR: the
+    // status says so, both loops fall straight through, and the scan moves on
+    // to slot 7.  The latch itself is kept - `motor_on` still gates the data
+    // register below, as the chip's own does - it simply is not what the
+    // drive's status line reports.
+    wire [7:0] status_byte = {wr_prot, 2'b00, mode};
     wire [7:0] handshake   = (hs_count == 2'd3) ? 8'h80 : 8'hC0;
 
     // ---- the data register, with no disk under the head --------------------

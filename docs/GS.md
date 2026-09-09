@@ -247,7 +247,7 @@ parity check on every rung that touches shared RTL.
 | 3a | The machine exists and fetches: the bank byte on the unified op stream and into the classifier's 24 bits, the 65816 on the dispatcher at `GS=1` (no fronts), `sim/boot_gs_tb.sv` booting ROM 3 through the seam, `tools/trace_diff816.py` | the ROM runs; the divergence index measured and pinned; the IIe unmoved | **DONE 2026-09-09** - see below |
 | 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro, the map registers and the clock done, 41,877 -> 67,398 events |
 | 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face) and the host side: the GS map in the mirror, `machine = iigs`, `gs_rom` | the ROM runs past the chipset with no spin; the host's map agrees with the card's | **DONE 2026-09-09** - see below |
-| 3d | The IWM's motor TIMING (the one-second motor-off and the 3.5" motor latch - where 3c stops), the card's own slot 6 and slot 7 in `boot_gs_tb`, ADB_KEY, `mock_card` speaking a GS stream, and the mirror replayed against the bench image | the ROM reaches its startup-device poll and boots from the HDC | |
+| 3d | **Boot from the slot-7 SmartPort**: the battery RAM preset so `$C02D` marks slot 7 "Your Card" (else its page stays internal ROM and the scan never looks), `hd_card` in `boot_gs_tb` with the bench playing host, ADB_KEY, `mock_card` speaking a GS stream, and the mirror replayed against the bench image | the ROM's scan finds slot 7 and boots the image | |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
 | 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | |
@@ -519,23 +519,45 @@ and the banks were fragments of neighbouring fields.  The machine had never
 left the ROM.  Read a record-structured file at a record boundary, and take a
 size from `os.path.getsize` rather than from `seek(0, 2)` on a live writer.
 
-**WHERE IT STOPS, AND WHAT THAT COSTS.**  With the IWM answering, the machine
-runs 1.65 MILLION instructions of real work - `boot_gs_tb`'s tail went from
-three distinct PCs to 1,657, across banks $FF and $FC - and then reaches
-another wait, at $FF/5B71:
+**THE IWM ONLY HAS TO BE SKIPPED** (the user's, 2026-09-09): the machine boots
+from the EMULATED SMARTPORT IN SLOT 7, never from the IWM, so the stub's whole
+job is to make the ROM's scan give up and move on.  That settled a question
+the first cut got wrong by trying to be faithful.  The ROM waits twice - at
+$FF/4717 and $FF/5B71 - for the STATUS BYTE's motor bit to CLEAR, and KEGS
+reports the IWM's own motor LATCH there because KEGS has drives for it to
+spin.  Reporting the latch spins for ever.  THERE IS NO DRIVE, SO THERE IS NO
+MOTOR: bit 5 reads zero, both loops fall through, and the scan moves on.  The
+latch is kept - it still gates the data register, as the chip's own does - it
+simply is not what the drive's status line reports.  No motor-off timer and no
+3.5" motor latch are needed, and building them would have been work in the
+wrong place.
 
-    FF/5B6E  LDA $C08D,X    ; Q6 = 1
-    FF/5B71  LDA $C08E,X    ; read the status: $A0
-    FF/5B74  AND #$20       ; the MOTOR bit
-    FF/5B76  BNE $5B71      ; loop while the motor is still on
+**AND $C019 HAD TO COME WITH IT.**  Past the IWM the ROM waits on VBL at
+$FF/A5F1, and $C019 is the IIgs's WAY ROUND: bit 7 is set WHILE IN VBL, where
+the IIe's is set while NOT (KEGS moremem.c:1044 inverts it for the IIe alone).
+`gs_io` answers $C011-$C01F from `apple_mmu`'s status-page byte, with $C019
+composed from the beam.
 
-The ROM turned the motor on and is waiting for it to report itself off.  On a
-real machine that comes from the IWM's ONE-SECOND MOTOR-OFF TIMER and the
-3.5" drive's own motor latch (KEGS: `$C0E8` sets a pending flag and
-`motor_off_vbl_count = g_vbl_count + 60` unless mode bit 2 asks for an
-immediate stop), which is DRIVE TIMING rather than a register face - the first
-thing in this rung that a stub cannot answer by reading a value back.  That,
-and the card's own slot 6 and slot 7 in the bench, is rung 3d.
+**WHERE IT GETS TO NOW**, and the bench's new SLOT CENSUS says it plainly:
+
+      slot 5  $C5xx    141          first @ 202348
+      slot 6  $C0Ex 65734  $C6xx 977620   first @ 202320
+      slot 7  $C0Fx 24564  $C7xx     10   first @ 43769
+
+The IWM is skipped and the ROM is in the BOOT SCAN, running the internal
+Disk II firmware at $C6xx nearly a million times looking for a 5.25" disk,
+finding none, and ending at $FF/A5F1 - the ROM's "no bootable device, wait a
+frame and try again" loop.  That is the right end state for a machine with no
+boot device, and it is what KEGS does with no disks.
+
+**$C7xx WAS TOUCHED TEN TIMES**, and that is the one thing between here and
+the milestone: the ROM never scans slot 7's ROM page because SLOTROMSEL leaves
+it INTERNAL, and bank $FF's $C700 is 256 zero bytes (rung 3b's finding - the
+IIgs ROM has no slot-7 firmware; KEGS substitutes its own).  For the card's
+SmartPort HDC to be found, SLOT 7 MUST BE MARKED "YOUR CARD" in $C02D, which
+on a IIgs comes from the battery RAM's slot configuration - so the BRAM has to
+be preset rather than left all zero (docs/GS.md already plans "Preset slots
+6/7 = Your Card").  That, and putting `hd_card` in the bench, is rung 3d.
 
 **The host's half.**  `AppleMemory` gains a `Machine` and a
 `classify_gs(bank, addr, rw)` - the four bank classes, the pair-bank side, the

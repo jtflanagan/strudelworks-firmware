@@ -63,6 +63,12 @@ module gs_io (
     input  wire [7:0]  gs_cyareg,      // $C036
     input  wire [7:0]  gs_sltrom,      // $C02D
     input  wire [7:0]  gs_state,       // $C068, composed from the switches
+    // apple_mmu's status-page byte for the REGISTERED op: the switch this
+    // $C01x address reports, in bit 7, over the keyboard latch's low bits.
+    input  wire [7:0]  stat_byte,
+    // The video scanner is in vertical blanking.  On the card this is
+    // rtl/vbeam.sv's; in the bench it is the frame counter's.
+    input  wire        vbl,
 
     // Seconds since 1904-01-01, for the clock chip.  The host's, or the
     // bench's pinned value (rtl/gs_clock.sv).
@@ -100,6 +106,7 @@ module gs_io (
         mine = (lo == 8'h21) || (lo == 8'h22) || (lo == 8'h23)    // the VGC
             || (lo == 8'h24) || (lo == 8'h25) || (lo == 8'h26) || (lo == 8'h27)  // ADB
             || (lo == 8'h29) || (lo == 8'h2A) || (lo == 8'h2B) || (lo == 8'h2C)  // the VGC
+            || (lo[7:4] == 4'h1 && lo != 8'h10)                    // $C011-$C01F, the status page
             || (lo == 8'h2D)                                       // SLOTROMSEL
             || (lo == 8'h31) || (lo == 8'h32)                      // DISKREG, SCANINT
             || (lo == 8'h33) || (lo == 8'h34)                      // the clock and battery RAM
@@ -147,6 +154,15 @@ module gs_io (
     // where the BYTE comes from and nothing about where the write goes.
     always_comb begin
         case (u_addr[7:0])
+            // $C019 IS THE IIgs's WAY ROUND: bit 7 is set WHILE IN VBL, where
+            // the IIe's is set while NOT (KEGS moremem.c:1044, which inverts
+            // it for the IIe alone).  Getting this backwards is not subtle -
+            // the ROM waits at $FF/A5F1 for the bit to rise and then fall,
+            // and a constant of either polarity hangs it.
+            8'h19:   rd_byte = {vbl, stat_byte[6:0]};
+            8'h11, 8'h12, 8'h13, 8'h14, 8'h15, 8'h16, 8'h17, 8'h18,
+            8'h1A, 8'h1B, 8'h1C, 8'h1D, 8'h1E, 8'h1F:
+                     rd_byte = stat_byte;
             8'h21:   rd_byte = {c021_mono, 7'd0};
             8'h22:   rd_byte = c022_color;
             8'h23,
