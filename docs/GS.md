@@ -1,13 +1,18 @@
 # Apple IIgs on the card: the run sheet
 
-Status: **RUNG 4a IS BUILT AND THERE IS A IIgs BITSTREAM, 2026-09-09.**  The
-Apple IIgs now exists in `rtl/master_top.sv` - the file that actually becomes
-a bitstream - behind one `parameter bit GS`, and `build/build.sh --gs` makes
-`build/results/master_top_gs.bit` from it.  The netlist is what the design
-says it should be: `cpu65816`, `gs_io`, `gs_adb`, `gs_clock`, `gs_intc` and
-`gs_iwm` present, `cpu65c02`, `iline`, `dline` and `iscan` at ZERO instances.
-Nothing of it has run on hardware yet.  See "Rung 4a" below for what it cost,
-what the gate said, and the four things the gate itself uncovered.
+Status: **RUNG 4b, PART 7 - THE APPLE'S OWN KEYBOARD TYPES INTO THE IIgs,
+2026-09-09**, branch `gs_emulation`, WNS **+0.082** / WHS +0.020, 0 of 52,476
+failing endpoints, `sim/suite.sh gs` **9/9** (KEGS divergence floor 67,398,
+unmoved).  The IIe keyboard the card lives behind reaches the ADB micro now:
+`rtl/gs_kbd_a2.sv` walks the driver's parked dummies over `$C000`, `$C010`
+and the two Apple keys, and runs the IOU's ASCII BACKWARDS through the
+micro's keymap into the keycode that made it (`tools/gen_adb_revmap.py`, an
+inversion that is total and round-trip exact for all 128 values).  PROVEN ON
+HARDWARE - both keyboards, the Apple's and the Pi's, into one buffer.
+**And GS/OS 6.0.1 draws its splash from the slot-7 SmartPort and then the
+core halts**; see "What is NOT working" for the evidence and the lead.
+Rung 4a before it built the bitstream itself (`parameter bit GS`,
+`build/build.sh --gs`); rung 4b brought first light and the fixes it bought.
 
 Rung 3 before it: **CLOSED, 2026-09-09** - rungs 0, 1, 1b, 2 and 3a-3e all
 done (1b proven on hardware; the rest in simulation, which is what those rungs
@@ -149,7 +154,7 @@ IIe through a real bus cycle. "M" = milestone (1 GS/OS Finder, 2 sound,
 |---|---|---|---|
 | ADB micro at $C026/$C027: abort, flush, set/clear modes, set config, SYNC (8 bytes on ROM 3), r/w ADB RAM, read modes/config, version (6 for ROM 3), char sets, layouts, reset, send keycode, $12/$13, Listen/Talk reg 0/3 | CARD | 1 | `gs_adb.sv`: FSM + 256 B ADB RAM in LUTRAM. ADB RAM $1400/$1401 read $72/$F7 (self-test checksum). |
 | KMSTATUS $C027 bits | CARD | 1 | |
-| Keyboard: $C000 ASCII + strobe, $C010 clear + any-key-down, $C025 modifiers, 8-deep buffer, auto-repeat from set-config | CARD | 1 | Sources: Pi evdev keyboard via a new ADB_KEY message (keycode, modifier byte, up/down); real IIe keyboard from the dummy-cycle $C000 latch as ASCII; real game-port buttons as Open/Closed Apple. |
+| Keyboard: $C000 ASCII + strobe, $C010 clear + any-key-down, $C025 modifiers, 8-deep buffer, auto-repeat from set-config | CARD | 1 | BUILT. Two sources into one buffer: the Pi's evdev keyboard via the ADB_KEY message (keycode, modifier byte, up/down), and the real IIe keyboard from the dummy-cycle $C000 latch, its ASCII run backwards into a keycode by `gs_kbd_a2.sv` + `adb_revmap.hex`. Real game-port buttons as Command/Option, merged into $C025 at the read. See rung 4b part 7. |
 | Mouse $C024: alternating X/Y deltas +-63, button in bit 7 on the Y read; mouse interrupt | CARD | 1 | Pi evdev mouse via the existing MOUSE_MOVE feed. |
 | Ctrl-Apple-Reset, Ctrl-Apple-Option-Reset self-test, Ctrl-Apple-Esc Desk Manager (interrupt byte bit 5) | CARD | 1 | The ROM samples $C061/$C062 after reset. |
 
@@ -188,7 +193,7 @@ IIe through a real bus cycle. "M" = milestone (1 GS/OS Finder, 2 sound,
 
 | access | policy |
 |---|---|
-| $C000/$C010 | served by the ADB model; the dummy cycles keep sampling the real keyboard as an input |
+| $C000/$C010 | served by the ADB model; the dummy cycles keep sampling the real keyboard as an input, and the $C010 in the walk is what CLEARS THE IOU's STROBE - the machine's own $C010 never reaches it (`gs_kbd_a2.sv`) |
 | $C030 | on card |
 | $C061-$C067, $C070 game port | REAL |
 | $C058-$C05F annunciators | REAL write-through + on-card AN3 for dhires |
@@ -1657,6 +1662,176 @@ None of the three was the garbling, and saying so matters: Total Replay writes
 
 Build: TIMING MET wns +0.036 whs +0.051, 0 of 52,296 endpoints.
 
+## Rung 4b, part 7: the Apple's own keyboard (2026-09-09)
+
+The machine this card lives in has a keyboard, and until this step it reached
+nothing.  Everything the IIe build uses to read it stands down at `GS = 1`,
+each for a good reason, and the three together left the real keyboard
+electrically present and logically absent:
+
+* `sw_int` is `!GS && ...`, so `park_kbd` was low and the driver's dummy
+  cycles parked at `$0000`.  The card never looked at the IOU's latch.
+* `kbd_sub_gs`/`pb_sub_gs` stand `kbd_inject` and `pb_inject` down, because
+  `gs_io` claims `$C000` and `$C010` for the ADB micro before a bus cycle is
+  ever presented - a substitution on top of that would be a second authority
+  for the same byte.
+* `gs_adb`'s only key source was `word_key`, the host's `ADB_KEY` message.
+
+The decision table (`Inputs`, and the keyboard row of the chipset table) has
+asked for this since the plan was written.  It is `rtl/gs_kbd_a2.sv` now.
+
+### The byte is the wrong shape, and the map inverts
+
+The IIe's encoder has already applied shift, control and caps lock and thrown
+the keycode away: what is in the latch is an ASCII byte with the strobe in
+bit 7.  An ADB micro is given the opposite - a keycode and a modifier byte -
+and makes the ASCII itself.  So the byte is run BACKWARDS through the micro's
+own keymap and forwards again.
+
+**THE INVERSE EXISTS AND IS EXACT**, which was not obvious before it was
+computed.  `tools/gen_adb_revmap.py` inverts KEGS's `g_a2_key_to_ascii` under
+two rules - only main-block keycodes (below `$41`; the keypad starts there and
+KEGS's duplicate rows are above `$60`), then plain before shift before control
+- and the result is TOTAL: all 128 ASCII values have exactly one answer, with
+no tie left inside the winning column, and every one of them reproduces its
+own byte when fed back through the forward selection.  56 are plain, 47 need a
+synthesized shift, 25 a synthesized control.  The generator asserts totality,
+uniqueness and the round trip rather than assuming any of them, because a
+change in KEGS's table could break all three - the same argument as
+`gen_adb_keymap.py`, and see [[oracle-from-the-reference]].
+
+The tie-break is what makes the answers right rather than merely consistent:
+`$0D` is the RETURN KEY and not control-M, `$08` the LEFT ARROW and not
+control-H, `$09` Tab, `$1B` Esc, `$7F` Delete.  A key that produces a byte on
+its own is a truer account of what the user pressed than a modifier
+combination that happens to land on the same value.
+
+### The walk, and the strobe nobody was clearing
+
+`gs_kbd_a2` owns `park_addr` at `GS = 1` and walks four slots: `$C000` (the
+latch), `$C010` (the clear), `$C061` and `$C062` (the Apple keys).  A dummy is
+nobody's op, so the whole thing costs the machine no cycle - the standing
+rule.
+
+**THE TWO BUILDS PARK ON `$C000` FOR OPPOSITE REASONS.**  On the IIe it is a
+SHORTCUT: the program's `$C00x` read would have reached the IOU anyway and the
+sample lets the card answer without the cycle.  On the IIgs it is the ONLY
+PATH, and that difference has a consequence the IIe build never has to think
+about.  There, the program's own `$C010` rides the bus on purpose
+(`apple_mmu.sv`, "`$C010` is the real strobe's and rides the bus"), so the
+program clears the IOU itself.  Here `gs_io` answers `$C010` on the card and
+the IOU never sees one: without the `$C010` in the walk the first key would
+latch and stay, and **the same key pressed twice would be invisible**, because
+only bit 7 says "again" and nothing would ever clear it.
+
+That same read pays for itself twice: on a IIe, `$C010` returns ANY KEY DOWN
+in bit 7, so the release of a key can be SEEN rather than guessed, and
+`gs_adb`'s `hard_key_down`, `$C025` bit 5 and the any-key-down a game polls
+all follow the user's finger.  A four-frame timeout stands behind it, because
+a new strobe landing on the `$C010` slot is seen by its low seven bits alone
+and a key stuck down for ever is the one failure that wedges a machine.
+
+**AUTO-REPEAT IS THE IIe's, NOT THE MICRO's.**  A held key re-strobes in the
+IIe's own encoder, so repeats arrive as ordinary presses and `gs_adb` must not
+add its own on top - it does not, because its repeat arms from an event's
+modifiers and a fresh press re-arms the delay each time.  The Control Panel's
+repeat setting therefore does not reach the real keyboard, which is the honest
+behaviour: the rate belongs to the hardware the keys are on.
+
+### The Apple keys are the only modifiers that are really held
+
+Open- and Closed-Apple are on the IIe's game port, and on a IIgs `$C061` and
+`$C062` ARE Command and Option (KEGS `moremem.c`: `adb_is_cmd_key_down() ||
+g_paddle_buttons & 1`).  A direct read of either already reached the
+motherboard on this build - `gs_io` does not claim `$C06x` - so a program
+looking there saw the real keys before this step.  What had no source was
+`$C025`, which is what GS/OS's Event Manager reads.
+
+**THEY ARE MERGED AT THE READ, NOT WRITTEN INTO `c025_val`** - a distinction
+the bench found the hard way.  `gs_adb` latches an event's modifier byte into
+`c025_val`, and these two are LEVELS: put them in the event and the latched
+copy outlives the finger, so the key that let go of both left them set for
+ever.  So `gs_kbd_a2`'s event carries only the shift and control the reverse
+map inferred, and `c025_rd` (the port is renamed, because what leaves the
+module is what `$C025` reads) joins `live_mods` in at the read, always
+current.
+
+### What is lost, and it is all in the shape of the event
+
+Not in the character - the round trip is exact.
+
+* Caps lock cannot be told from shift; the encoder applies both and sends one
+  byte, so an upper-case letter is reported as shift.
+* A modifier pressed ALONE is invisible: shift, control and caps make no
+  strobe, so `$C025`'s shift and control bits appear only for the instant of a
+  key that used them.  Command and Option are the exception.
+* No function keys, no keypad, no Help, no Home/End - the keyboard has none.
+  Ctrl-Command-Esc (the Control Panel) and Ctrl-Option-Reset (the self-test)
+  are all reachable.
+
+### The lever, and what the benches say
+
+`ACCEL_CTRL[28]` - `swint` on the host - is reused rather than spent on a new
+bit: on both machines it means "stop reading the real keyboard on the
+dummies", and on a IIgs the Pi's USB keyboard goes on working with it off.
+The boot hold excludes the walk for the reason it excludes the IIe's.
+
+* `sim/gs_kbd_a2_tb.sv` (31 checks) is the pair driven together from a MODEL
+  IOU, because separately neither module says anything useful - the claim
+  worth checking is that the byte comes back, and it is only visible across
+  the two.  The headline case sweeps **all 128 ASCII values** through the IOU
+  and out of `$C000`.  That is the generator's claim made of the silicon: a
+  table that inverts and an implementation that does not is exactly the gap a
+  generator's self-check cannot see.
+* It found three real faults in the first run, all in the code and none in
+  the table: the Command/Option latching above; a held key that was dropped
+  SILENTLY when the walk stopped (the lever, the hold), leaving `gs_adb`'s
+  `hard_key_down` stuck high with no up event to clear it - the release now
+  fires whether the walk is running or not; and a stale raw-event queue,
+  which was the bench's own fault.
+* `sim/gs_adb_tb.sv` gained the two sources sharing one buffer, which is what
+  the decision table asked for, and the level/latch distinction above.
+* `sim/suite.sh gs` is **9/9**, with `adb_revmap` and `gs_kbd_a2` added and
+  the KEGS divergence floor UNMOVED at 67,398 - the new source is inert when
+  nothing drives it.
+
+The host needs no change: the path is entirely on the card.  Only `swint`'s
+help text and its config comment say what the bit means on a IIgs.
+
+### ON HARDWARE (2026-09-09)
+
+`build.sh --gs` **TIMING MET: WNS +0.082, WHS +0.020, 0 of 52,476 failing
+endpoints**; 21,107 LUTs (+154 over rung 4b for the reverse ROM and the walk),
+BRAM unchanged at 94 of 135.  The route needed the post-route physical
+optimisation to land it - routing ended at -0.024 with ONE failing endpoint in
+`clk_ctrl_raw`, which physopt cleared to +0.082 - the same shape as rung 4a,
+where the first placement pass missed and the incremental one recovered.
+
+Loaded, and Total Replay v6.1 boots to its title screen with 519 games, so
+**the walk did not disturb the machine**: the dummies now put `$C000`,
+`$C010`, `$C061` and `$C062` on the backplane where they used to put `$0000`,
+and nothing minded.  **THE USER CONFIRMS BOTH KEYBOARDS WORK** - the Apple's
+own and the Pi's, into the one buffer.
+
+**A PROCEDURE ERROR WORTH RECORDING, because it cost a false alarm.**  The
+first load looked like a total regression: a screen of NULs whatever was
+chosen to boot, no Pi keyboard, and a beep at the wrong pitch.  None of it was
+the gateware.  `swhost` had been started with a BARE `start`, which reads the
+user's `swhost.conf` - `machine = iie` - so the host sent the IIe's ROM and the
+banner said so in as many words, and I read past it:
+
+    cpu : MACHINE MISMATCH: the bitstream is an Apple IIgs (build.sh --gs)
+          and this host is configured for an Apple IIe (machine = iie)
+
+...along with `ROM not loaded on the card`.  The 65816 had no ROM 3, which is
+the whole of it: the NUL screen, the hang, the beep, and the Pi keyboard doing
+nothing (the host was sending IIe ASCII into `kbd_inject`, which stands down
+at `GS = 1`).  `gs=0` in the status line says the same thing in one field.
+The rule the session already carries - name the config, and check WHICH image
+booted - covers this exactly; so does reading the banner that is handed back.
+A restart WITHOUT a fresh bitstream then hit the known no-register failure on
+top of it, which is its own entry under "What is NOT working".
+
 ## What is NOT working, as of the end of rung 4b
 
 Said plainly, because the first write-up of this rung claimed more than it
@@ -1670,6 +1845,27 @@ blocks`), so the failure is the machine's and not the disk's.
 
 Also open:
 
+- **GS/OS 6.0.1 REACHES ITS SPLASH AND THE CORE HALTS (2026-09-09).**  Tried
+  for the first time this session, from `disks/system6.hdv` on the slot-7
+  SmartPort with `gs_os.conf`: the machine draws **"Welcome to the IIgs /
+  System 6.0.1"** in SHR, correctly, and then stops with the progress bar
+  empty.  IT IS NOT SLOW AND IT IS NOT LOOPING.  Two `accel` samples thirty
+  seconds apart are byte-identical in EVERY core-side field - `2327065` fast
+  ops, `23212` bus ops, `2892238` wait clocks, `I 1900155`, `RAM 146266`,
+  `KBD 6314` - while `cycles` runs on from 18.5M to 55.3M.  The core retired
+  nothing at all, and `wait` frozen with it says it is not stalled on a
+  memory fill either: it is not asking.  That is the signature of `WAI`,
+  which `rtl/cpu65816.sv` implements by parking the microcode on itself
+  (`cpu65816.sv:673`) until an interrupt arrives - or of `STP`.
+  **THE LEAD, not yet a diagnosis**: `rtl/gs_io.sv:310` wires
+  `.irq_scan (1'b0)`, so the VGC's scan-line interrupt CANNOT FIRE, and
+  `gs_intc`'s own header names its trigger as the thing not built.  VBL, the
+  quarter-second and the one-second ARE implemented and the ADB's interrupt
+  IS wired (`irq_adb`), so the scan line is the one an interrupt-driven boot
+  could be waiting on for ever.  Proving it wants a trace saying which PC the
+  core parked at, which is a rung of its own.  (Stale comment found on the
+  way: `gs_adb.sv`'s header still lists "the wiring of irq_data/irq_mouse
+  into gs_intc" as missing.  It is not - `gs_io.sv:310` does it.)
 - A PHYSICAL Ctrl-Reset does not engage the boot hold, though a programmatic
   one does - both confirmed on the machine, no explanation yet.
 - After a swhost restart WITHOUT a fresh bitstream, the card answers no
@@ -1688,10 +1884,13 @@ Also open:
 
 ## Verification
 
-- `sim/suite.sh gs` is **7/7**: the microcode check, the ADB keymap's
-  `--check`, `gs_adb` (the micro driven directly, 23 checks), the cycle
-  table, a `cpu816_trace` sample, the GS map sweep, and `boot_gs` against the
-  KEGS trace with the floor at 67,398 events.  The IIe suites keep their
+- `sim/suite.sh gs` is **9/9**: the microcode check, the ADB keymap's
+  `--check` and the REVERSE keymap's (which asserts its own totality,
+  uniqueness and round trip), `gs_adb` (the micro driven directly, 28
+  checks), `gs_kbd_a2` (the IIe's keyboard through the micro from a model
+  IOU, 31 checks, all 128 ASCII values), the cycle table, a `cpu816_trace`
+  sample, the GS map sweep, and `boot_gs` against the KEGS trace with the
+  floor at 67,398 events.  The IIe suites keep their
   counts - the battery is 35/35 on every rung. `tools/check_ports.py` and
   `sim/lint.sh` every rung.
 - Host: **40/40 on the Pi**. `gs_memory_test` (the map against a second

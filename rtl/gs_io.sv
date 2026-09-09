@@ -90,6 +90,15 @@ module gs_io #(
     // Host -> card messages as ft601_msg_rx decodes them, for the battery
     // RAM the host ships down to gs_clock (docs/GS.md, "The battery RAM the
     // host ships").  Nothing else in here wants them yet.
+    // THE IIe's OWN KEYBOARD (rtl/gs_kbd_a2.sv), passed through to the ADB
+    // micro beside the host's ADB_KEY: the events the reverse keymap made,
+    // and the real Apple keys as a level for $C025.
+    input  wire        loc_valid,
+    input  wire [6:0]  loc_code,
+    input  wire        loc_up,
+    input  wire [7:0]  loc_mods,
+    input  wire [7:0]  live_mods,
+
     input  wire        msg_valid,
     input  wire [7:0]  msg_type,
     input  wire [7:0]  msg_len,
@@ -164,12 +173,15 @@ module gs_io #(
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
         .rd_byte (adb_rd),
-        // The keys, from the host (docs/GS.md, ADB_KEY); the micro holds the
-        // keymap and $C025's modifiers, as a real one does.
+        // The keys, from the host (docs/GS.md, ADB_KEY) and from the IIe's
+        // own keyboard; the micro holds the keymap and $C025's modifiers, as
+        // a real one does.
         .frame_tick (frame_tick),
+        .loc_valid (loc_valid), .loc_code (loc_code),
+        .loc_up (loc_up), .loc_mods (loc_mods), .live_mods (live_mods),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
-        .c025_val (adb_c025),
+        .c025_rd (adb_c025),
         .irq_data (adb_irq_data), .irq_mouse (adb_irq_mouse),
         .cnt_cmds (adb_cnt_cmds), .cnt_unknown (adb_cnt_unknown)
     );

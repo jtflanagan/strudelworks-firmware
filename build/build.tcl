@@ -229,6 +229,7 @@ if {$snoop || $master} {
                 [file join $root rtl cpu65816.sv] \
                 [file join $root rtl gs_io.sv] \
                 [file join $root rtl gs_adb.sv] \
+                [file join $root rtl gs_kbd_a2.sv] \
                 [file join $root rtl gs_clock.sv] \
                 [file join $root rtl gs_intc.sv] \
                 [file join $root rtl gs_iwm.sv] \
@@ -241,6 +242,7 @@ if {$snoop || $master} {
                 [file join $root rtl cpu65816_ucode0.hex] \
                 [file join $root rtl cpu65816_useq0.hex] \
                 [file join $root rtl adb_keymap.hex] \
+                [file join $root rtl adb_revmap.hex] \
             ]
         }
     } else {

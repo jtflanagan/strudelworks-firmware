@@ -1,5 +1,11 @@
 # Keyboard injection: the keyboard the soft core reads, with the host on it
 
+> **This document is the IIe build's.**  At `GS = 1` none of it is in play:
+> `kbd_inject` stands down, `gs_io` answers `$C000` and `$C010` for the ADB
+> micro, and the Apple's own keyboard reaches the machine by a different road
+> entirely - the dummy walk in `rtl/gs_kbd_a2.sv`, which runs the IOU's ASCII
+> BACKWARDS into an ADB keycode.  See `docs/GS.md`, rung 4b part 7.
+
 Status: **✅ on hardware, 2026-08-28.** Rebuilt that day with formal
 semantics - the first cut (2026-08-26) was a latch bolted beside the real
 keyboard with the host polling a strobe bit - and then run on a IIe from a

@@ -30,6 +30,9 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
     reg        msg_valid = 1'b0, pay_valid = 1'b0;
     reg [7:0]  msg_type = 8'd0, msg_len = 8'd0;
     reg [31:0] pay_data = 32'd0;
+    reg        loc_valid = 1'b0, loc_up = 1'b0;
+    reg [6:0]  loc_code = 7'd0;
+    reg [7:0]  loc_mods = 8'd0, live_mods = 8'd0;
     wire [7:0] rd_byte, c025, cnt_cmds, cnt_unknown;
     wire       irq_data, irq_mouse;
 
@@ -37,9 +40,14 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (op_lo), .op_rw (op_rw), .op_wdata (op_wdata), .act (act),
         .rd_byte (rd_byte), .frame_tick (frame_tick),
+        // The IIe's own keyboard, driven here as a second source into the one
+        // buffer; sim/gs_kbd_a2_tb.sv drives it through rtl/gs_kbd_a2.sv from
+        // a model IOU, which is where the reverse keymap is proved.
+        .loc_valid (loc_valid), .loc_code (loc_code), .loc_up (loc_up),
+        .loc_mods (loc_mods), .live_mods (live_mods),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
-        .c025_val (c025),
+        .c025_rd (c025),
         .irq_data (irq_data), .irq_mouse (irq_mouse),
         .cnt_cmds (cnt_cmds), .cnt_unknown (cnt_unknown)
     );
@@ -92,6 +100,17 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
             @(negedge clk);
             pay_valid = 1'b0;
             repeat (4) @(negedge clk);      // the apply waits for a clock with no act
+        end
+    endtask
+
+    // ---- the card's side: one event from the IIe's keyboard -----------------
+    task automatic loc_key(input [6:0] code, input up, input [7:0] mods);
+        begin
+            @(negedge clk);
+            loc_valid = 1'b1; loc_code = code; loc_up = up; loc_mods = mods;
+            @(negedge clk);
+            loc_valid = 1'b0;
+            repeat (4) @(negedge clk);
         end
     endtask
 
@@ -227,6 +246,33 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
         repeat (8) @(negedge clk);
         rd(8'h00, v); chk(v[7], 1'b0, "a delay of zero never repeats");
         key(7'h07, 1'b1, 8'h00);
+
+        drain();
+        // ---- THE TWO KEYBOARDS SHARE ONE BUFFER -----------------------------
+        // The host's ADB_KEY and the IIe's own keyboard (rtl/gs_kbd_a2.sv)
+        // are two sources into the same micro, which is what docs/GS.md asked
+        // for: whichever the user reaches for, the machine reads $C000.
+        loc_key(7'h01, 1'b0, 8'h00);                   // 's', from the card
+        key(7'h07, 1'b0, 8'h00);                       // 'x', from the host
+        rd(8'h00, v); chk(v, 8'hF3, "the card's key is first in the buffer");
+        rd(8'h10, v);
+        rd(8'h00, v); chk(v, 8'hF8, "...and the host's is behind it");
+        rd(8'h10, v);
+        loc_key(7'h01, 1'b1, 8'h00); key(7'h07, 1'b1, 8'h00);
+
+        // The IIe's keyboard has no caps-lock of its own to report, so an
+        // upper case letter arrives as shift and the forward map lifts it.
+        loc_key(7'h00, 1'b0, 8'h01);
+        rd(8'h00, v); chk(v, 8'hC1, "a card key with shift types a capital");
+        rd(8'h10, v); loc_key(7'h00, 1'b1, 8'h00);
+
+        // ---- the real Apple keys are merged at the read ---------------------
+        // They are LEVELS on the IIe's game port, not events, so they never
+        // enter c025_val: a latched copy would outlive the finger.
+        live_mods = 8'hC0; @(negedge clk);
+        chk(c025 & 8'hC0, 8'hC0, "$C025 shows the real Apple keys");
+        live_mods = 8'h00; @(negedge clk);
+        chk(c025 & 8'hC0, 8'h00, "...and stops showing them at once");
 
         $display("%0d checks, %0d errors", checks, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL");

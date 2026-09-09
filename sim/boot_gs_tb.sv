@@ -500,6 +500,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // The battery RAM the host ships, sent before RES' is released.
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid), .bram_ok (bram_landed),
+        // The IIe's own keyboard (rtl/gs_kbd_a2.sv) is a TOP-LEVEL wiring:
+        // it feeds on the driver's parked dummy cycles, and this bench has no
+        // driver and no backplane.  sim/gs_kbd_a2_tb.sv drives it from a
+        // model IOU instead.  Quiet here, so the reference trace is unmoved.
+        .loc_valid (1'b0), .loc_code (7'd0), .loc_up (1'b0),
+        .loc_mods (8'd0), .live_mods (8'd0),
 
         .frame_tick (frame_tick),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)

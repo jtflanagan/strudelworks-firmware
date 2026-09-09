@@ -739,6 +739,21 @@ module master_top #(
     // CXXX.md "The game port"): the loop that visits the buttons and the
     // paddles between the keyboard's samples, its own chicken bit on top.
     wire sw_game = sw_int && !accel_game_dis;
+    // ...and, AT GS = 1, THE SAME DUMMIES CARRY THE IIe's OWN KEYBOARD
+    // (rtl/gs_kbd_a2.sv, docs/GS.md).  The two builds park on $C000 for
+    // opposite reasons.  On the IIe it is a SHORTCUT: the program's $C00x
+    // read would have reached the IOU anyway, and the sample lets the card
+    // answer it without the cycle.  On the IIgs it is the ONLY PATH: gs_io
+    // claims $C000 and $C010 for the ADB micro, so the machine never asks the
+    // IOU anything, and without this walk the keyboard the user is typing on
+    // is not connected to the machine at all.  The chicken bit is the same
+    // one - ACCEL_CTRL[28], `swint` on the host - which on this build means
+    // "no real keyboard, dummies at $0000"; and the hold is excluded for the
+    // same reason it is above.
+    wire        gs_kbd_en = GS && !accel_swint_dis && !boot_held;
+    wire [15:0] gs_park_addr;
+    wire        park_kbd_sel  = GS ? gs_kbd_en : sw_int;
+    wire [15:0] park_addr_sel = GS ? gs_park_addr : game_park_addr;
     // ...and the rest of the internalized ops (docs/CXXX.md, "The switch
     // reads in the closed regime", "The switch writes"): apple_mmu asks
     // q_swi of the live address; for a read the serve byte comes from
@@ -834,8 +849,8 @@ module master_top #(
         .phi0_sync     (apple_phi0_sync),
         .data_sync     (apple_data_sync),
         .master_active (cpu_source_active),
-        .park_kbd      (sw_int),
-        .park_addr     (game_park_addr),
+        .park_kbd      (park_kbd_sel),
+        .park_addr     (park_addr_sel),
         .bus_owns      (bus_owns),
         .core_valid    (core_valid),
         .cpu_addr      (cpu_addr),
@@ -1483,6 +1498,41 @@ module master_top #(
     // and both claims are constant zero.
     generate if (GS) begin : g_gsio
 
+    // ---- the Apple IIe's own keyboard, as an ADB device --------------------
+    // The machine this card lives in has a keyboard, and until this module it
+    // reached nothing: kbd_inject stands down at GS = 1 (kbd_sub_gs, above)
+    // because gs_io claims $C000 and $C010, and the ADB micro's only source
+    // was the host's message.  The driver's parked dummies walk the IOU's
+    // latch, its strobe-clear and the two Apple keys, and what comes back is
+    // run BACKWARDS through the micro's keymap into the keycode and modifiers
+    // that would have made it.  See rtl/gs_kbd_a2.sv and docs/GS.md.
+    wire       gskbd_ev_valid, gskbd_ev_up;
+    wire [6:0] gskbd_ev_code;
+    wire [7:0] gskbd_ev_mods, gskbd_live_mods;
+
+    gs_kbd_a2 u_gskbd (
+        .clk        (apple_clk),
+        .rst        (apple_rst),
+        .res_sync   (apple_res_sync),
+        .enable     (gs_kbd_en && cpu_source_active),
+        .op_addr    (op_addr),
+        .op_rw      (op_rw),
+        .op_commit  (op_commit),
+        .op_dummy   (op_dummy),
+        .data_sync  (apple_data_sync),
+        // The held-key timeout counts frames, the machine's own, as the ADB
+        // micro's auto-repeat does.
+        .frame_tick (beam_mark_bus || beam_mark_fast),
+        .park_addr  (gs_park_addr),
+        .ev_valid   (gskbd_ev_valid),
+        .ev_code    (gskbd_ev_code),
+        .ev_up      (gskbd_ev_up),
+        .ev_mods    (gskbd_ev_mods),
+        .live_mods  (gskbd_live_mods),
+        .cnt_keys   (),
+        .cnt_timeouts ()
+    );
+
     gs_io u_gsio (
         .clk        (apple_clk),
         .rst        (apple_rst),
@@ -1518,6 +1568,13 @@ module master_top #(
         .pay_data   (app_pay_data),
         .pay_valid  (app_pay_valid),
         .bram_ok    (gs_bram_ok),
+        // The IIe keyboard's events and the real Apple keys, through to the
+        // ADB micro beside the host's ADB_KEY.
+        .loc_valid  (gskbd_ev_valid),
+        .loc_code   (gskbd_ev_code),
+        .loc_up     (gskbd_ev_up),
+        .loc_mods   (gskbd_ev_mods),
+        .live_mods  (gskbd_live_mods),
         // The frame origin, from the beam every consumer takes: the quarter-
         // second and one-second interrupts count frames off it.
         .frame_tick (beam_mark_bus || beam_mark_fast),
@@ -1534,6 +1591,7 @@ module master_top #(
     assign gsio_irq     = 1'b0;
     assign gs_border    = 4'd0;
     assign gs_bram_ok   = 1'b0;
+    assign gs_park_addr = 16'hC000;
 
     end endgenerate
 

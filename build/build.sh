@@ -164,8 +164,70 @@ vivado_win="$(wslpath -w "$VIVADO")"
 # working directory and prints a warning while silently falling back to the
 # Windows directory.  Everything below is an absolute Windows path anyway, so
 # giving it nothing to complain about is cleaner than ignoring the warning.
+
+# WHICH BITSTREAM THIS RUN OWES, by the same rule build/build.tcl names it
+# with (its $topname / $bitname) - the check below is against the artefact
+# itself, so the two have to agree.  --gs implies --master there, which is why
+# it is not folded in with the others.
+case "${1:-}" in
+  --gs)     bitname=master_top_gs ;;
+  --master) bitname=master_top ;;
+  --snoop)  bitname=snoop_top ;;
+  --ft601)  bitname=ft601_top ;;
+  --diag)   bitname=diag_top ;;
+  *)        bitname=au_top ;;
+esac
+bit="$root/build/results/$bitname.bit"
+# The mark a fresh bitstream has to beat.  Not the file's ABSENCE: a failed run
+# leaves the previous one sitting there, and that is the whole trap - it is
+# there, it is the right size, and it is the design from before the change.
+before=0
+[ -e "$bit" ] && before=$(stat -c %Y "$bit")
+started=$(date +%s)
+
+# THIS WAS AN `exec`, AND A BUILD THAT PRODUCED NOTHING REPORTED SUCCESS.
+# Vivado's exit status does not survive the trip out through vivado.bat and
+# cmd.exe's interop marshalling: a synthesis ERROR - a module missing from the
+# fileset, say - printed its message, exited Vivado, and handed this script a
+# 0.  Nothing that crosses that boundary can be trusted to carry a status, so
+# the status is not what is trusted here: THE ARTEFACT IS.
+#
+# NOT THE SAME THING AS A TIMING MISS, and this must not be read as one.  A
+# miss is a warning to build.tcl on purpose: it still writes a .bit, which is
+# often exactly what you want to look at, and the rule stays what CLAUDE.md
+# says - read WNS with build/wns.sh, never the exit status, and a miss is
+# never green.  What is caught below is the other case: no new bitstream at
+# all.
 cd /
-exec cmd.exe /c "$vivado_win" -mode batch -nojournal -notrace \
+cmd.exe /c "$vivado_win" -mode batch -nojournal -notrace \
     -log "$log_win" -journal "$jou_win" \
     -source "$script_win" -tclargs -outdir "$workdir_win" -board "$BOARD" \
     -stamp-date "$STAMP_DATE" -stamp-time "$STAMP_TIME" "$@"
+status=$?
+cd "$root"
+
+after=0
+[ -e "$bit" ] && after=$(stat -c %Y "$bit")
+if [ "$after" -ge "$started" ] && [ "$after" != "$before" ]; then
+    [ "$status" -eq 0 ] || echo "note: vivado exited $status but wrote $bitname.bit" >&2
+    exit 0
+fi
+
+# No new bitstream.  Say which of the two cases it is - the stale file still
+# sitting in build/results is the one worth naming out loud - and quote
+# Vivado's own errors, because the log is 400 KB and the three lines that
+# matter are somewhere in the middle of it.
+echo >&2
+if [ "$after" != 0 ]; then
+    echo "BUILD FAILED: $bitname.bit was NOT rebuilt." >&2
+    echo "  The file in build/results is the PREVIOUS run's," >&2
+    echo "  dated $(date -d "@$after" '+%Y-%m-%d %H:%M:%S').  It is not this design." >&2
+else
+    echo "BUILD FAILED: no $bitname.bit was produced." >&2
+fi
+echo "  vivado exit status: $status;  full log: build/vivado.log" >&2
+if [ -s "$root/build/vivado.log" ]; then
+    echo >&2
+    grep -aE '^ERROR:' "$root/build/vivado.log" | head -10 | sed 's/^/  /' >&2
+fi
+exit 1

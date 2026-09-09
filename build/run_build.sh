@@ -40,6 +40,7 @@ python3 sim/gen_microcode.py --check || { echo "pre-flight FAILED: microcode ROM
 if [ "$gs" = 1 ]; then
     python3 sim/gen_microcode816.py --check || { echo "pre-flight FAILED: 65816 microcode ROM stale (python3 sim/gen_microcode816.py)"; exit 1; }
     python3 tools/gen_adb_keymap.py --check || { echo "pre-flight FAILED: ADB keymap stale (python3 tools/gen_adb_keymap.py)"; exit 1; }
+    python3 tools/gen_adb_revmap.py --check || { echo "pre-flight FAILED: ADB reverse keymap stale (python3 tools/gen_adb_revmap.py)"; exit 1; }
 fi
 sim/lint.sh > "$root/build/lint_$tag.log" 2>&1 || { echo "pre-flight FAILED: lint (build/lint_$tag.log):"; grep -B1 -A6 FAIL "$root/build/lint_$tag.log" | head -40; exit 1; }
 echo "lint: OK ($(grep -c ' OK$' "$root/build/lint_$tag.log") modules)"

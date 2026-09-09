@@ -9,6 +9,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/adb_work"
 mkdir -p "$work"
 python3 "$root/tools/gen_adb_keymap.py" --check
+python3 "$root/tools/gen_adb_revmap.py" --check
 verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module gs_adb_tb \
     -I"$root/rtl" \
     -GKEYMAP="\"$root/rtl/adb_keymap.hex\"" \

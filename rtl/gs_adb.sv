@@ -77,6 +77,21 @@ module gs_adb #(
     // and rate are in g_vbl_count units, out of the set-config byte.
     input  wire        frame_tick,
 
+    // THE APPLE IIe's OWN KEYBOARD, beside the host's (rtl/gs_kbd_a2.sv).
+    // The same event shape as ADB_KEY, made on the card by running the IOU's
+    // ASCII backwards through this module's keymap; both sources land in the
+    // one buffer, which is what docs/GS.md asked for.  A press cannot arrive
+    // on the same clock from both - one is a message word, the other a bus
+    // dummy's commit - and the message is given precedence anyway.
+    input  wire        loc_valid,
+    input  wire [6:0]  loc_code,
+    input  wire        loc_up,
+    input  wire [7:0]  loc_mods,
+    // Command and Option as the real Apple keys stand, a level: the only
+    // modifiers on that keyboard that are genuinely held rather than
+    // inferred from the character.  ORed into $C025 at the read.
+    input  wire [7:0]  live_mods,
+
     input  wire        msg_valid,
     input  wire [7:0]  msg_type,
     input  wire [7:0]  msg_len,
@@ -87,7 +102,10 @@ module gs_adb #(
     // $C000's latched byte, and $C025's modifiers.  $C010 is an ACCESS, not
     // a read - a write to it clears the strobe too - so it arrives as a
     // pulse rather than through rd_byte.
-    output logic [7:0] c025_val,
+    // $C025 AS THE MACHINE READS IT, which is the micro's own modifier latch
+    // with the real Apple keys merged in - not the latch alone.  Nothing but
+    // a bench consumes it, and a bench wants the answer the machine gets.
+    output wire  [7:0] c025_rd,
 
     // Interrupt requests into gs_intc, each gated by its own $C027 enable.
     output wire        irq_data,
@@ -232,6 +250,13 @@ module gs_adb #(
     // it sets) and its "read five times with keys pending, toss one" nudge,
     // both of which need the frame count.  docs/GS.md's decision table asks
     // for auto-repeat from set-config; it is a rung of its own.
+    // The merge: they are a LEVEL on the IIe's game port, not an event, so
+    // they are joined at the read rather than written into c025_val - which
+    // the ADB set/clear-modifier commands own, and where a latched copy would
+    // outlive the finger (rtl/gs_kbd_a2.sv says the same from its end).
+    logic [7:0] c025_val;
+    assign c025_rd = c025_val | (live_mods & 8'hC0);
+
     wire [7:0] c000_rd = kbd_buf[0];
     wire [7:0] c010_rd = {hard_key_down, kbd_buf[0][6:0]};
 
@@ -239,7 +264,7 @@ module gs_adb #(
         case (op_lo)
             8'h00:   rd_byte = c000_rd;
             8'h10:   rd_byte = c010_rd;
-            8'h25:   rd_byte = c025_val;
+            8'h25:   rd_byte = c025_rd;
             8'h26:   rd_byte = c026_rd;
             8'h27:   rd_byte = c027_rd;
             default: rd_byte = 8'h00;
@@ -280,7 +305,9 @@ module gs_adb #(
     wire word_key   = rx_word_k && (rx_type_k == T_ADB_KEY);
     // One address, two sources: the message's keycode, or the held key when
     // the repeat re-fires it.
-    wire [6:0]  km_addr = word_key ? pay_data[6:0] : a2code_down;
+    wire [6:0]  km_addr = word_key ? pay_data[6:0]
+                        : loc_valid ? loc_code
+                                    : a2code_down;
     wire [29:0] km_in   = keymap[km_addr];
 
     logic        ev_v;
@@ -332,7 +359,7 @@ module gs_adb #(
     wire [7:0] ram_rd = (ram_addr == 16'h1400)     ? 8'h72
                       : (ram_addr == 16'h1401)     ? 8'hF7
                       : (ram_addr >= 16'h0100)     ? 8'h00
-                      : (ram_addr[7:0] == 8'h0C)   ? (c025_val & 8'hC7)
+                      : (ram_addr[7:0] == 8'h0C)   ? (c025_rd & 8'hC7)
                       : adb_ram[ram_addr[7:0]];
 
     // The message's own header/word counter, and the event register.  An
@@ -359,6 +386,14 @@ module gs_adb #(
                 ev_up   <= pay_data[7];
                 ev_rpt  <= 1'b0;
                 ev_mods <= pay_data[15:8];
+                ev_km   <= km_in;
+            end else if (loc_valid) begin
+                // The IIe keyboard's, already in ADB shape.
+                ev_v    <= 1'b1;
+                ev_code <= loc_code;
+                ev_up   <= loc_up;
+                ev_rpt  <= 1'b0;
+                ev_mods <= loc_mods;
                 ev_km   <= km_in;
             end else if (rpt_fire) begin
                 // The held key again, with the modifiers as they stand.
