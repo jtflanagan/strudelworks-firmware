@@ -11,8 +11,13 @@
 // load the ROM's sixty-four pages sit in the cache dirty, hit like any other
 // page, and flush to the DDR3 only if something ever evicts them.
 //
-// THE WIRE FORMAT IS UNCHANGED - 32 chunks, each a word naming the chunk and
-// 128 words of data - because there is nothing wrong with it.  What changes is
+// THE WIRE FORMAT IS THE SAME SHAPE - N chunks, each a word naming the chunk
+// and 128 words of data - because there is nothing wrong with it.  What is
+// parameterised is WHERE the chunks land and HOW MANY there are, so that this
+// loads any run of physical pages and not only the IIe's ROM: the IIgs's is
+// 256 KB at bank $FC (docs/GS.md), the same message carrying eight times the
+// chunks to a different base.  The defaults are the IIe's, so nothing about
+// that machine moves.  What changes is
 // the rate.  A chunk arrives at up to a word a clock, and a byte leaves through
 // the posted-write seam every four clocks (apple_mmu takes one only when the
 // cache's pipeline is clear), so the load is sixteen times slower than the link
@@ -42,7 +47,12 @@
 // few milliseconds instead of half of one, at startup, once.
 //////////////////////////////////////////////////////////////////////////////////
 module rom_loader #(
-    parameter [7:0] T_MEM_ROM = 8'h22
+    parameter [7:0] T_MEM_ROM = 8'h22,
+    // Chunks of 512 bytes, and the physical page the first of them lands on.
+    // IIe: 32 chunks of the 16 KB ROM at bank $FF page $C0.
+    // IIgs ROM 3: 512 chunks of 256 KB at bank $FC page $00.
+    parameter int          N_CHUNKS = 32,
+    parameter logic [15:0] ROM_PPN0 = 16'hFFC0
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -69,14 +79,15 @@ module rom_loader #(
     output wire        rom_ok         // all 32 chunks have landed whole
 );
 
-    localparam integer CHUNK_WORDS = 128;      // 32 chunks x 128 words = 16 KB
+    localparam integer CHUNK_WORDS = 128;      // 128 words = 512 bytes a chunk
+    localparam integer CW = $clog2(N_CHUNKS);  // bits of chunk index
 
     // ---- the message ---------------------------------------------------------
     logic [7:0]  rx_type;
     logic [7:0]  rx_idx;
     logic [7:0]  rx_left;
-    logic [4:0]  chunk;
-    logic [31:0] seen;
+    logic [CW-1:0]        chunk;
+    logic [N_CHUNKS-1:0]  seen;
 
     wire rx_word  = pay_valid && (rx_left != 8'd0);
     wire word_rom = rx_word && (rx_type == T_MEM_ROM);
@@ -89,7 +100,7 @@ module rom_loader #(
     (* ram_style = "distributed" *) logic [31:0] stage [0:CHUNK_WORDS-1];
     logic [8:0] dr_k;              // the byte being drained, 0..511
     logic       draining;
-    logic [4:0] dr_chunk;
+    logic [CW-1:0] dr_chunk;
 
     // Clocks since the last op, saturating: 0..WIN is the safe window, and
     // the saturated value means the machine has stopped presenting at all.
@@ -108,12 +119,12 @@ module rom_loader #(
     end
 
     // ---- the drain ------------------------------------------------------------
-    // Byte i of the ROM is at CPU address $C000 + i, which is physical
-    // {$FF, $C0 + i[13:8]} offset i[7:0].
-    wire [13:0] dr_byte = {dr_chunk, dr_k};
+    // A chunk is two 256-byte pages, so the page this byte belongs to is the
+    // chunk number and the top bit of the byte index, counted from the base.
+    wire [CW:0] dr_page = {dr_chunk, dr_k[8]};
     assign pw_valid = draining && image_ready && in_window;
-    assign pw_ppn   = {8'hFF, 2'b11, dr_byte[13:8]};
-    assign pw_off   = dr_byte[7:0];
+    assign pw_ppn   = ROM_PPN0 + {{(15 - CW){1'b0}}, dr_page};
+    assign pw_off   = dr_k[7:0];
     assign pw_data  = dr_word[8 * dr_k[1:0] +: 8];
     assign busy     = draining;
 
@@ -122,11 +133,11 @@ module rom_loader #(
             rx_type  <= 8'd0;
             rx_idx   <= 8'd0;
             rx_left  <= 8'd0;
-            chunk    <= 5'd0;
-            seen     <= 32'd0;
+            chunk    <= '0;
+            seen     <= '0;
             draining <= 1'b0;
             dr_k     <= 9'd0;
-            dr_chunk <= 5'd0;
+            dr_chunk <= '0;
             overruns <= 8'd0;
         end else begin
             if (msg_valid) begin
@@ -138,7 +149,7 @@ module rom_loader #(
             end else if (rx_word) begin
                 rx_idx  <= rx_idx + 8'd1;
                 rx_left <= rx_left - 8'd1;
-                if (word_rom && rx_idx == 8'd0) chunk <= pay_data[4:0];
+                if (word_rom && rx_idx == 8'd0) chunk <= pay_data[CW-1:0];
             end
 
             // The message's last word starts the drain; the last byte of the

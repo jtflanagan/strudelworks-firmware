@@ -53,6 +53,7 @@ module mmu_xlate_gs_tb;
 
     wire [1:0]  cl_cls; wire cl_aux; wire [7:0] cl_bank; wire [15:0] cl_off;
     wire        cl_valid, cl_rw, cl_wr_image, cl_posted, cl_sh;
+    wire [7:0]  shd_drops;
     wire [7:0]  cl_wdata;
     wire [15:0] cl_ppn, pf_off, pf_ppn;
     wire [11:0] sw_state;
@@ -72,7 +73,8 @@ module mmu_xlate_gs_tb;
         .op_present (op_present), .op_commit (op_commit), .rom_ok (rom_ok),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
-        .cl_posted (cl_posted), .cl_sh (cl_sh), .cl_wdata (cl_wdata),
+        .cl_posted (cl_posted), .cl_sh (cl_sh), .shd_drops (shd_drops),
+        .cl_wdata (cl_wdata),
         .pw_valid (1'b0), .pw_ppn (16'd0), .pw_off (8'd0),
         .pw_data (8'd0), .pw_ready (1'b1), .pw_take (pw_take),
         .intc8rom (intc8rom), .pf_off (pf_off), .cl_ppn (cl_ppn), .pf_ppn (pf_ppn),
@@ -105,6 +107,12 @@ module mmu_xlate_gs_tb;
     // SHADOW is the bench's own: it is driven by writes to $C035 and nothing
     // reads it back, so the model keeps the value it wrote.
     logic [6:0] shadow = 7'd0;
+    // $C02D, likewise the bench's own.  Bit n SET gives slot n's page to the
+    // slot; CLEAR gives it to the internal ROM (KEGS fixup_intcx), which is
+    // the opposite sense to what the name suggests and is why a IIgs comes up
+    // with every slot page internal.  Bit 3 is SLOTC3ROM, one register with
+    // the $C00A/B strobe.
+    logic [7:0] sltrom = 8'd0;
 
     // ---- the model -------------------------------------------------------------
     // Regions, named as the RTL names them so a disagreement is legible.
@@ -192,9 +200,10 @@ module mmu_xlate_gs_tb;
                 end
             end else if (r == R_CXL || r == R_C3 || r == R_C8) begin
                 logic internal;
-                internal = (r == R_CXL) ? (rom_ok && intcxrom) :
-                           (r == R_C3)  ? (rom_ok && (intcxrom || !slotc3rom))
-                                        : (rom_ok && (intcxrom || intc8rom));
+                // $C1-$C7 go by the slot's own bit; $C8-$CF by the expansion
+                // latch, which has no per-slot bit.
+                internal = (r == R_C8) ? (rom_ok && (intcxrom || intc8rom))
+                                       : (rom_ok && (intcxrom || !sltrom[a[10:8]]));
                 if (a == 16'hCFFF) internal = 1'b0;
                 if (!rw)           internal = 1'b0;   // a $Cxxx write is the bus's
                 if (internal) begin
@@ -241,6 +250,21 @@ module mmu_xlate_gs_tb;
     function automatic [15:0] mx_ppn(input [M_W-1:0] x); mx_ppn  = x[16:1];  endfunction
     function automatic       mx_fold(input [M_W-1:0] x); mx_fold = x[0];     endfunction
 
+    // ---- what came out of the classified path ---------------------------------
+    // Every landing in the image, in order: the op's, then the shadow's
+    // duplicate on the clock after it.
+    logic [15:0] land_ppn [0:15];
+    logic [7:0]  land_off [0:15], land_dat [0:15];
+    logic        land_pst [0:15];
+    integer      land_n = 0;
+    always @(posedge clk) if (!rst && cl_valid && cl_wr_image && land_n < 16) begin
+        land_ppn[land_n] = cl_ppn;
+        land_off[land_n] = cl_off[7:0];
+        land_dat[land_n] = cl_wdata;
+        land_pst[land_n] = cl_posted;
+        land_n = land_n + 1;
+    end
+
     // ---- driving --------------------------------------------------------------
     integer errs = 0; longint checks = 0;
 
@@ -257,6 +281,10 @@ module mmu_xlate_gs_tb;
 
     task automatic set_shadow(input [6:0] v);
         begin shadow = v; op(16'hC035, 1'b0, {1'b0, v}); end
+    endtask
+
+    task automatic set_sltrom(input [7:0] v);
+        begin sltrom = v; op(16'hC02D, 1'b0, v); end
     endtask
 
     task automatic set_lc(input [2:0] st);   // {wren, bank2, ramrd}
@@ -330,9 +358,11 @@ module mmu_xlate_gs_tb;
         banks[0]=8'h00; banks[1]=8'h01; banks[2]=8'h02; banks[3]=8'h10;
         banks[4]=8'h7F; banks[5]=8'h80; banks[6]=8'hC0; banks[7]=8'hE0;
         banks[8]=8'hE1; banks[9]=8'hFB; banks[10]=8'hFC; banks[11]=8'hFF;
+        sl_v[0]=8'h00; sl_v[1]=8'hFF; sl_v[2]=8'h52;
     end
 
     integer bi, pi_, si, li, sh_i, maps;
+    logic [7:0] sl_v [0:2];
     logic quick;
 
     initial begin
@@ -351,6 +381,11 @@ module mmu_xlate_gs_tb;
                 set_lc(li[2:0]);
                 for (si = 0; si < 128; si = si + (quick ? 61 : 19)) begin
                     set_sw(si[6:0]);
+                    // The slot register, a few values: all internal, all the
+                    // slots', and a mixture.  Written AFTER set_sw, which
+                    // strobes SLOTC3ROM - bit 3 of this same register - so
+                    // the bench's copy is the one the DUT ends up with.
+                    set_sltrom(sl_v[si % 3]);
                     maps = maps + 1;
                     for (bi = 0; bi < NBK; bi = bi + 1)
                         for (pi_ = 0; pi_ < 256; pi_ = pi_ + 1)
@@ -371,11 +406,95 @@ module mmu_xlate_gs_tb;
             end
         end
 
+        // ---- the shadow's second landing ------------------------------------
+        // The sweep above checks that the map SAYS a write is shadowed.  This
+        // checks that the duplicate is actually emitted, at the right page of
+        // the right Mega II bank, carrying the right byte - and that the two
+        // land in that order, the original first.
+        run_dup;
+
         $display("maps swept %0d, %0d checks, %0d mismatches", maps, checks, errs);
         if (errs == 0) $display("PASS");
         else           $display("FAIL");
         $finish;
     end
+
+    // A write at `a` with `d`, with the landings recorded.
+    task automatic dup_case(input [15:0] a, input [7:0] d, input [15:0] want0,
+                            input [15:0] want1, input string what);
+        begin
+            land_n = 0;
+            op(a, 1'b0, d);
+            repeat (3) @(negedge clk);
+            checks = checks + 1;
+            if (want1 == 16'hFFFF) begin
+                // not shadowed: exactly one landing
+                if (land_n != 1 || land_ppn[0] !== want0) begin
+                    errs = errs + 1;
+                    $display("  DUP %0s: expected one landing at %04x, got %0d (first %04x)",
+                             what, want0, land_n, land_ppn[0]);
+                end else $display("  ok: %0s - one landing at %04x, no duplicate", what, want0);
+            end else begin
+                if (land_n != 2) begin
+                    errs = errs + 1;
+                    $display("  DUP %0s: expected two landings, got %0d", what, land_n);
+                end else if (land_ppn[0] !== want0 || land_ppn[1] !== want1) begin
+                    errs = errs + 1;
+                    $display("  DUP %0s: landed %04x then %04x, wanted %04x then %04x",
+                             what, land_ppn[0], land_ppn[1], want0, want1);
+                end else if (land_dat[0] !== d || land_dat[1] !== d) begin
+                    errs = errs + 1;
+                    $display("  DUP %0s: bytes %02x/%02x, wanted %02x both",
+                             what, land_dat[0], land_dat[1], d);
+                end else if (land_off[0] !== a[7:0] || land_off[1] !== a[7:0]) begin
+                    errs = errs + 1;
+                    $display("  DUP %0s: offsets %02x/%02x, wanted %02x",
+                             what, land_off[0], land_off[1], a[7:0]);
+                end else if (land_pst[1] !== 1'b1) begin
+                    errs = errs + 1;
+                    $display("  DUP %0s: the duplicate is not marked posted", what);
+                end else
+                    $display("  ok: %0s - %04x then %04x, byte %02x, in that order",
+                             what, want0, want1, d);
+            end
+        end
+    endtask
+
+    task automatic run_dup;
+        begin
+            $display("the shadow's second landing:");
+            set_sw(7'd0);            // every switch off: writes land in main
+            set_shadow(7'd0);        // nothing inhibited: everything shadows
+            dup_case(16'h0455, 8'hA5, 16'h0004, 16'hE004, "text 1, main -> $E0");
+            dup_case(16'h2077, 8'h5A, 16'h0020, 16'hE020, "hires 1, main -> $E0");
+            dup_case(16'h6001, 8'h11, 16'h0060, 16'hFFFF, "SHR in main is not shadowed");
+            dup_case(16'h9001, 8'h12, 16'h0090, 16'hFFFF, "...nor the rest of it");
+            // RAMWRT sends the write to auxiliary memory, and the duplicate
+            // follows it there: $E1, not $E0.
+            set_sw(7'b0000100);      // ramwrt
+            dup_case(16'h0455, 8'hB6, 16'h0104, 16'hE104, "text 1, aux -> $E1");
+            dup_case(16'h6001, 8'h13, 16'h0160, 16'hE160, "SHR in aux IS shadowed");
+            // The inhibits, one at a time.
+            set_shadow(7'b0000001);  // text 1 inhibited
+            dup_case(16'h0455, 8'hC7, 16'h0104, 16'hFFFF, "text 1 inhibited");
+            set_shadow(7'b0001000);  // SHR inhibited
+            dup_case(16'h6001, 8'h14, 16'h0160, 16'hFFFF, "SHR inhibited");
+            // Hires in aux has two routes: its own bit and Super Hi-Res.
+            set_shadow(7'b0000010);  // hires 1 inhibited, SHR not
+            dup_case(16'h2077, 8'h15, 16'h0120, 16'hE120, "hires 1 inhibited but SHR is not");
+            set_shadow(7'b0001010);  // both inhibited
+            dup_case(16'h2077, 8'h16, 16'h0120, 16'hFFFF, "hires 1 and SHR both inhibited");
+            set_shadow(7'b0010000);  // the aux-hires veto alone
+            dup_case(16'h2077, 8'h17, 16'h0120, 16'hE120, "the aux veto alone leaves SHR's route");
+            set_shadow(7'b0011010);  // aux veto + hires1 + SHR
+            dup_case(16'h2077, 8'h18, 16'h0120, 16'hFFFF, "aux veto with both routes shut");
+            checks = checks + 1;
+            if (shd_drops !== 8'd0) begin
+                errs = errs + 1;
+                $display("  DUP: %0d duplicate(s) dropped - one deep was not enough", shd_drops);
+            end else $display("  ok: no duplicate was ever dropped");
+        end
+    endtask
 
     initial begin
         #900_000_000;

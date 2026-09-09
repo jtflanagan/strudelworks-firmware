@@ -256,6 +256,9 @@ module apple_mmu #(
     // same page in $E0 or $E1 by the side the write landed on - so only the
     // bit needs carrying.  Always 0 at GS = 0.
     output logic        cl_sh,
+    // Shadowed writes that arrived while one was still in hand.  Must be 0:
+    // see the note on the duplicate's depth.  A bench asserts on it.
+    output logic [7:0]  shd_drops,
     output logic [7:0]  cl_wdata,      // the write's byte
     // The posted FIFO's head, and the page cache's leave to take it.
     input  wire         pw_valid,
@@ -479,7 +482,16 @@ module apple_mmu #(
         end else if (op_commit) begin
             if (gs_shadow_w) gs_shadow <= op_wdata[6:0];
             if (gs_cyareg_w) gs_cyareg <= op_wdata;
-            if (gs_sltrom_w) gs_sltrom <= op_wdata;
+            // $C02D and the SLOTC3ROM strobe are ONE register in the
+            // reference (KEGS routes $C00A/B into g_c02d_int_crom bit 3), so
+            // a write to either keeps both in step.  That is also why the
+            // IIe's $C3 rule falls straight out of the IIgs's: "internal
+            // unless this slot's bit is set" with bit 3 IS "internal unless
+            // SLOTC3ROM".
+            if (gs_sltrom_w) begin
+                gs_sltrom <= op_wdata;
+                slotc3rom <= op_wdata[3];
+            end
             // STATEREG moves seven switches at once.  It is the same state
             // the individual strobes below reach, so it is written here and
             // nowhere else: two writers of one register is how they drift.
@@ -501,7 +513,10 @@ module apple_mmu #(
                     3'd2: ramwrt    <= op_addr[0];
                     3'd3: intcxrom  <= op_addr[0];
                     3'd4: altzp     <= op_addr[0];
-                    3'd5: slotc3rom <= op_addr[0];
+                    3'd5: begin
+                              slotc3rom    <= op_addr[0];
+                              gs_sltrom[3] <= op_addr[0];
+                          end
                     3'd6: col80     <= op_addr[0];
                     3'd7: altchar   <= op_addr[0];
                 endcase
@@ -841,6 +856,29 @@ module apple_mmu #(
                     // of the pair - so the side is the select itself, or the
                     // address naming the odd bank directly.
                     gs_side = va[16] || (e[3:2] == BS_AUX);
+                    // THE PER-SLOT ROM SELECTION ($C02D), which the region
+                    // table cannot carry: one entry covers $C1, $C2 and
+                    // $C4-$C7, and each of those slots has a bit of its own.
+                    // So it is applied here, as the pair side is, and for the
+                    // same reason - see the note on rt_rd_flat in docs/GS.md
+                    // about what the fronts will need when they serve a IIgs.
+                    //
+                    // A page is the INTERNAL ROM's unless the slot's bit is
+                    // SET, or INTCXROM overrides it (KEGS fixup_intcx:
+                    // `((g_c02d_int_crom & mask) == 0) || intcx`).  So a IIgs
+                    // comes up with every slot page internal, where a IIe
+                    // comes up with them the slots'.
+                    if ((r == R_CXL || r == R_C3) && rw) begin
+                        // The slot is the page's low nibble, and $C1-$C7 is
+                        // all this arm sees, so three bits index the register.
+                        if (rom_ok && (intcxrom || !gs_sltrom[va[10:8]])) begin
+                            cls = CLS_ROM; wr = 1'b0; bank = 8'hFF;
+                            pg  = va[15:8]; sh = 1'b0;
+                            fs  = (r == R_C3) ? intc8rom : 1'b1;
+                        end else begin
+                            cls = CLS_BUS; wr = 1'b0; fs = 1'b0; sh = 1'b0;
+                        end
+                    end
                     if (va[16] && cls == CLS_RAM) begin
                         bank = {va[23:17], 1'b1};
                         // An odd bank named directly always LANDS in auxiliary
@@ -1165,7 +1203,53 @@ module apple_mmu #(
 
     // A posted write takes the classified stage only when no op is being
     // presented: the op's is the older claim on the pipeline.
-    assign pw_take = pw_valid && pw_ready && !op_present && !rst;
+    // ---- the shadow duplicate (docs/GS.md) --------------------------------------
+    // A shadowed write lands TWICE: once where it was going, and once at the
+    // same page of the matching Mega II bank - $E0 or $E1 by the side it
+    // landed on.  The second landing is emitted here, one clock later, down
+    // the same path a posted write takes: cl_* already carries a write into
+    // the image that is nobody's op, and the page cache does not care which
+    // producer made it.
+    //
+    // ONE DEEP IS ENOUGH, and that is a property of the machine rather than a
+    // hope.  The op path presents a write at most once every bus cycle, and
+    // the duplicate goes out on the very next idle clock - which is the clock
+    // after the op, since op_present is a pulse.  Two shadowed writes can
+    // therefore never be in hand at once.  `shd_drop` counts the case that
+    // says otherwise, and a bench that ever sees it non-zero has found a
+    // machine this reasoning does not describe.
+    logic        shd_valid;
+    logic [15:0] shd_ppn;
+    logic [7:0]  shd_off, shd_data;
+    logic [7:0]  shd_drop;
+    assign shd_drops = shd_drop;
+
+    wire shd_new  = cl_valid && !cl_rw && cl_wr_image && cl_sh;
+    wire shd_take = shd_valid && !op_present && !rst;
+
+    // The duplicate is offered before the front's posted write: it belongs to
+    // an op that has already been classified, and holding it back behind a
+    // queue would let a later read of $E0 see the write that had not landed.
+    assign pw_take = pw_valid && pw_ready && !op_present && !shd_valid && !rst;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            shd_valid <= 1'b0;
+            shd_drop  <= 8'd0;
+        end else begin
+            if (shd_new) begin
+                if (shd_valid && !shd_take) shd_drop <= shd_drop + 8'd1;
+                shd_valid <= 1'b1;
+                // The same page in $E0 or $E1, by the side the write landed
+                // on: cl_ppn's bank bit 0 IS that side.
+                shd_ppn   <= {7'h70, cl_ppn[8], cl_ppn[7:0]};
+                shd_off   <= cl_off[7:0];
+                shd_data  <= cl_wdata;
+            end else if (shd_take) begin
+                shd_valid <= 1'b0;
+            end
+        end
+    end
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -1181,7 +1265,7 @@ module apple_mmu #(
             cl_ppn      <= 16'd0;
             cl_sh       <= 1'b0;
         end else begin
-            cl_valid <= op_present || pw_take;
+            cl_valid <= op_present || pw_take || shd_take;
             if (op_present) begin
                 cl_cls      <= n_cls;
                 cl_aux      <= n_aux;
@@ -1193,6 +1277,19 @@ module apple_mmu #(
                 cl_wdata    <= op_wdata;
                 cl_ppn      <= pf_ppn;
                 cl_sh       <= n_sh;
+            end else if (shd_take) begin
+                // The shadow's second landing.  A RAM write into the Mega II
+                // bank, posted like the front's, and never itself shadowed.
+                cl_cls      <= CLS_RAM;
+                cl_aux      <= 1'b0;
+                cl_bank     <= 8'd0;
+                cl_off      <= {shd_ppn[7:0], shd_off};
+                cl_rw       <= 1'b0;
+                cl_wr_image <= 1'b1;
+                cl_posted   <= 1'b1;
+                cl_wdata    <= shd_data;
+                cl_ppn      <= shd_ppn;
+                cl_sh       <= 1'b0;
             end else if (pw_take) begin
                 cl_cls      <= CLS_RAM;      // the front posts RAM class only
                 // The old triple, derived from the page the front stamped:
