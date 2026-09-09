@@ -58,7 +58,22 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // both honest and repeatable.
                     parameter [7:0] FLOAT_BYTE = 8'h00,
                     // Seconds since 1904-01-01; see the gs_io wiring below.
-                    parameter [31:0] SEED_TIME = 32'd3871713600);
+                    parameter [31:0] SEED_TIME = 32'd3871713600,
+                    // The slot-7 SmartPort HDC and the image it serves.  THE
+                    // MACHINE BOOTS FROM THIS (the user's, 2026-09-09): the
+                    // IWM is only skipped, and the GS ROM's own defaults
+                    // already mark slot 7 "Your Card" ($C02D = $80), so the
+                    // scan looks here.
+                    parameter HDROMF = "hdrom.hex",
+                    parameter HDVF   = "hdv.hex",
+                    parameter integer HDV_BLOCKS = 2880,
+                    // 0 when no image was given: the bench still runs the
+                    // whole machine and the ROM still scans, it simply finds
+                    // an empty slot, so "no block was read" is the expected
+                    // outcome rather than a failure.
+                    parameter integer HAS_HDV = 0,
+                    parameter integer HD_SLOT = 7,
+                    parameter integer HOST_DELAY = 2000);
 
     localparam integer T_PRESENT = 2, T_EMIT = 2, T_DIN = 44, T_CYCEN = 45;
     localparam integer PHI0_LOW = 98 - PHI0_HIGH, CYCLE = 98;
@@ -213,7 +228,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .op_present (op_present), .op_commit (op_commit), .op_dummy (op_dummy), .op_ovr (op_ovr),
         .op_divert (op_divert), .op_sync (drv_sync), .op_addr (op_addr), .op_rw (op_rw),
         .op_wdata (op_wdata), .cyc_done (drv_cyc_done), .drv_din (drv_din),
-        .op_inflight (op_inflight), .ovr_en (1'b0),
+        .op_inflight (op_inflight), .ovr_en (hd_ovr_en),
         .bus_owns (bus_owns), .core_valid (core_valid),
         .mem_sub_en (mem_sub_en), .mem_sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .mq_valid (1'b0),
@@ -236,15 +251,87 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .drv_sync (drv_sync), .cyc_en (drv_cyc_done), .cpu_din (drv_din),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
-        .slot_rd_claim (1'b0), .slot_rd_data (8'd0),
+        .slot_rd_claim (hd_rd_claim), .slot_rd_data (hd_rd_data),
         .din_sub_en (sub_en), .din_sub_data (sub_data),
-        .ovr_en (1'b0), .ovr_addr (16'd0), .ovr_rw (1'b1), .ovr_wdata (8'd0),
+        .ovr_en (hd_ovr_en), .ovr_addr (hd_ovr_addr), .ovr_rw (hd_ovr_rw),
+        .ovr_wdata (hd_ovr_wdata),
         .op_ovr (op_ovr), .op_dummy (op_dummy), .op_inflight (op_inflight),
         .nxt_addr (nxt_addr), .divert (serve && q_divert), .op_divert (op_divert),
         .addr_drive (addr_drive), .rw_drive (rw_drive), .data_drive (data_drive),
         .addr_rw_oe (addr_rw_oe), .data_oe (data_oe), .dma_assert (dma_assert),
         .driving (driving)
     );
+
+    // ---- the hard disk: the real card, in slot 7 ---------------------------------
+    // The GS build has no on-card slot fast path - apple_mmu's `swi_on` is
+    // low, so q_slot never fires - which means the peripherals see the
+    // DRIVER's op stream, exactly as they did before docs/CXXX.md's closed
+    // regime.  A $C0Fx or $C7xx access is BUS class and rides a real cycle,
+    // which is what "Your Card" means on this machine.
+    reg  [31:0] rx_mem [0:4095];
+    integer     rx_wr = 0, rx_rd = 0;
+    reg  [31:0] rx_head = 32'd0;
+    reg         rx_head_v = 1'b0;
+    wire [31:0] rx_dout  = rx_head;
+    wire        rx_empty = !rx_head_v;
+    wire        rx_rd_en;
+    always @(posedge clk) begin
+        if (rst) begin
+            rx_head_v <= 1'b0;
+        end else if ((rx_rd_en && rx_head_v) || !rx_head_v) begin
+            if (rx_rd < rx_wr) begin
+                rx_head <= rx_mem[rx_rd % 4096];
+                rx_head_v <= 1'b1;
+                rx_rd <= rx_rd + 1;
+            end else rx_head_v <= 1'b0;
+        end
+    end
+    task automatic push_word(input [31:0] w);
+        begin rx_mem[rx_wr % 4096] = w; rx_wr = rx_wr + 1; end
+    endtask
+    function automatic [31:0] hdr(input [7:0] t, input [7:0] len, input [15:0] free);
+        hdr = {free, t, len};
+    endfunction
+    localparam [7:0] T_HD_ROM = 8'h18, T_HD_DONE = 8'h19;
+
+    wire        hmsg_valid, hpay_valid, unknown_valid;
+    wire [7:0]  hmsg_type, hmsg_len, unknown_type_w;
+    wire [15:0] hmsg_free;
+    wire [31:0] hpay_data;
+    ft601_msg_rx u_rx (
+        .clk (clk), .rst (rst),
+        .fifo_dout (rx_dout), .fifo_empty (rx_empty), .fifo_rd_en (rx_rd_en),
+        .msg_valid (hmsg_valid), .msg_type (hmsg_type), .msg_free (hmsg_free),
+        .msg_len (hmsg_len), .pay_data (hpay_data), .pay_valid (hpay_valid),
+        .unknown_valid (unknown_valid), .unknown_type (unknown_type_w), .unknown_len ()
+    );
+    integer unknowns = 0;
+    always @(posedge clk) if (unknown_valid) begin
+        unknowns = unknowns + 1;
+        if (unknowns <= 5) $display("[%0t] msg_rx: unknown type %02x", $time, unknown_type_w);
+    end
+
+    wire        hd_rom_loaded, hd_busy, hd_rd_claim;
+    wire [7:0]  hd_rd_data, hd_execs;
+    wire [31:0] hd_tx_word;
+    wire        hd_tx_valid;
+    wire        hd_exec_q;
+    hd_card u_hd (
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .res_sync (res_sync),
+        .master_active (master_active), .slot_assign (3'(HD_SLOT)),
+        .op_addr (op_addr), .op_rw (op_rw), .op_present (op_present),
+        .op_commit (op_commit), .op_ovr (op_ovr), .din (drv_din),
+        .ovr_en (hd_ovr_en), .ovr_addr (hd_ovr_addr), .ovr_rw (hd_ovr_rw),
+        .ovr_wdata (hd_ovr_wdata),
+        .rd_claim (hd_rd_claim), .rd_data (hd_rd_data),
+        .msg_valid (hmsg_valid), .msg_type (hmsg_type), .msg_free (hmsg_free),
+        .msg_len (hmsg_len), .pay_data (hpay_data), .pay_valid (hpay_valid),
+        .tx_word (hd_tx_word), .tx_valid (hd_tx_valid), .tx_take (hd_tx_valid),
+        .rom_loaded (hd_rom_loaded), .busy (hd_busy), .execs (hd_execs), .exec_q (hd_exec_q)
+    );
+    wire        hd_ovr_en, hd_ovr_rw;
+    wire [15:0] hd_ovr_addr;
+    wire [7:0]  hd_ovr_wdata;
 
     // ---- the memory path, on the unified stream ----------------------------------
     wire        cl_valid, cl_rw, cl_wr_image, cl_aux, cl_posted, cl_sh, intc8rom;
@@ -481,6 +568,345 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         have_prev <= 1'b1;
     end
 
+    // ---- the host, mirrored off the driver's op stream ------------------------------
+    // strudelworks-host src/hd_card.cpp, register for register.
+    localparam [7:0] CMD_BLK_STATUS = 8'h00, CMD_BLK_READ = 8'h01, CMD_BLK_WRITE = 8'h02,
+                     CMD_BLK_FORMAT = 8'h03, CMD_SP_STATUS = 8'h80, CMD_SP_READ = 8'h81,
+                     CMD_SP_WRITE = 8'h82, CMD_SP_FORMAT = 8'h83, CMD_SP_BUSY = 8'hBF;
+    localparam [7:0] ERR_OK = 8'h00, ERR_BADCTL = 8'h21, ERR_IO = 8'h27,
+                     ERR_NOTCONN = 8'h28, ERR_NOWRITE = 8'h2B;
+    localparam integer UNIT_NONE = -1, UNIT_CTL = -2;
+    localparam integer NUM_DEVICES = 1;
+
+    reg [7:0] himg [0:HDV_BLOCKS*512-1];
+
+    reg [7:0]  hm_cmd, hm_unit_num, hm_fifo, hm_sc;
+    reg        hm_armed;
+    reg [15:0] hm_memblock [0:8];       // 8 = the controller's
+    reg [23:0] hm_diskblock [0:8];
+    reg [7:0]  hm_uerr [0:8];
+    task hm_clear;
+        integer k;
+        begin
+            hm_cmd = 0; hm_fifo = 0; hm_sc = 0; hm_armed = 0;
+            hm_unit_num = {1'b0, 3'(HD_SLOT), 4'd0};        // slot << 4
+            for (k = 0; k <= 8; k = k + 1) begin
+                hm_memblock[k] = 0; hm_diskblock[k] = 0; hm_uerr[k] = 0;
+            end
+        end
+    endtask
+
+    function automatic integer hm_resolve;
+        integer slot_from_unit, offset;
+        begin
+            if ((hm_cmd & 8'h80) == 0) begin
+                slot_from_unit = (hm_unit_num >> 4) & 7;
+                offset = (slot_from_unit == HD_SLOT) ? 0 : 2;
+                hm_resolve = offset + (hm_unit_num >> 7);
+            end else if (hm_unit_num > 8) hm_resolve = UNIT_NONE;
+            else if (hm_unit_num > NUM_DEVICES) hm_resolve = UNIT_NONE;
+            else if (hm_unit_num == 0) hm_resolve = UNIT_CTL;
+            else hm_resolve = hm_unit_num - 1;
+        end
+    endfunction
+    function automatic integer hm_ridx;      // unit_regs(): 8 = controller, -1 = none
+        integer u;
+        begin
+            u = hm_resolve();
+            if (u == UNIT_NONE) hm_ridx = -1;
+            else if (u == UNIT_CTL) hm_ridx = 8;
+            else hm_ridx = u;
+        end
+    endfunction
+
+    task automatic hm_io_write(input [7:0] idx_in, input [7:0] d_in);
+        integer r, depth;
+        reg [7:0] idx, d;
+        begin
+            idx = idx_in; d = d_in;
+            if (idx >= 8'h2 && idx <= 8'hA) hm_armed = 1;
+            r = -2;                                          // -2: not needed
+            if (idx != 8'h2 && idx != 8'h3 &&
+                !((idx == 8'h9 || idx == 8'hA) && hm_fifo < 2)) begin
+                r = hm_ridx();
+                if (r < 0) begin
+                    depth = (idx == 8'h9) ? 6 : 7;
+                    hm_fifo = (hm_fifo + 1) % depth;
+                end
+            end
+            if (r >= -2 && r != -1) begin
+            if (idx == 8'h9 || idx == 8'hA) begin
+                if (idx == 8'hA && hm_fifo == 0) d = d | 8'h80;
+                depth = (idx == 8'h9) ? 6 : 7;
+                idx = 8'h2 + hm_fifo;
+                hm_fifo = (hm_fifo + 1) % depth;
+            end
+            case (idx)
+                8'h2: hm_cmd = d;
+                8'h3: hm_unit_num = d;
+                8'h4: if (r >= 0) hm_memblock[r] = {hm_memblock[r][15:8], d};
+                8'h5: if (r >= 0) hm_memblock[r] = {d, hm_memblock[r][7:0]};
+                8'h6: begin
+                    if (hm_cmd != CMD_SP_STATUS) begin
+                        if (r >= 0) hm_diskblock[r] = {hm_diskblock[r][23:8], d};
+                    end else hm_sc = d;
+                end
+                8'h7: if (r >= 0) hm_diskblock[r] = {hm_diskblock[r][23:16], d, hm_diskblock[r][7:0]};
+                8'h8: if ((hm_cmd & 8'h80) != 0 && r >= 0)
+                          hm_diskblock[r] = {d, hm_diskblock[r][15:0]};
+                default: ;
+            endcase
+            if (r >= 0 && (hm_cmd & 8'h80) == 0) hm_diskblock[r] = hm_diskblock[r] & 24'h00FFFF;
+            end
+        end
+    endtask
+
+    // The command queue an EXECUTE snapshots into.  A write command's block
+    // is captured HERE, from the reference through the read map - the real
+    // host reads its program-order mirror at the EXECUTE's place in the
+    // stream (src/pipeline.cpp), and never asks the card.
+    localparam integer QN = 64;
+    reg [7:0]  q_cmd [0:QN-1];
+    reg [7:0]  q_unum [0:QN-1];
+    integer    q_unit [0:QN-1];
+    reg [7:0]  q_sc [0:QN-1];
+    reg [15:0] q_mem [0:QN-1];
+    reg [23:0] q_disk [0:QN-1];
+    integer    q_at [0:QN-1];
+    reg [7:0]  q_blk [0:QN-1][0:511];
+    integer    qw = 0, qr = 0;
+    integer    host_execs = 0, host_reads = 0, host_writes = 0, host_statuses = 0;
+
+    task automatic hm_io_read0;
+        integer u, r, k;
+        begin
+            if (hm_armed) begin                             // else: a poll
+                hm_armed = 0;
+                host_execs = host_execs + 1;
+                u = hm_resolve();
+                q_cmd[qw % QN] = hm_cmd; q_unum[qw % QN] = hm_unit_num;
+                q_unit[qw % QN] = u; q_sc[qw % QN] = hm_sc; q_at[qw % QN] = now;
+                if (u != UNIT_NONE) begin
+                    r = (u == UNIT_CTL) ? 8 : u;
+                    q_mem[qw % QN] = hm_memblock[r];
+                    q_disk[qw % QN] = hm_diskblock[r];
+                    // BLOCK WRITES ARE NOT MODELLED HERE.  boot_tb captures
+                    // the block from its reference memory, which this bench
+                    // does not keep - the ROM's boot only reads, so rather
+                    // than write zeros over the image and call it a pass,
+                    // this fails loudly and rung 3e can model it when GS/OS
+                    // needs it.
+                    if (hm_cmd == CMD_BLK_WRITE || hm_cmd == CMD_SP_WRITE)
+                        fail("a block WRITE was issued: this bench does not model one");
+                    hm_cmd = (hm_cmd & 8'h80) ? CMD_SP_BUSY : CMD_BLK_STATUS;
+                    hm_fifo = 0;
+                end
+                qw = qw + 1;
+            end
+        end
+    endtask
+
+    // The mirror taps the peripherals' view of the stream - the driver's
+    // ops, and the on-card slot ops served fast in the closed regime - as
+    // the real host taps the capture (bus words and fast words alike).
+    always @(posedge clk) begin
+        if (op_present && !op_ovr && !op_rw && op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
+            hm_io_write(op_addr[3:0], op_wdata);
+        if (op_commit && !op_ovr && op_rw && op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
+            if (op_addr[3:0] == 4'h0) hm_io_read0();
+    end
+    // RES' drops what the card drops.
+    reg res_prev = 1'b1;
+    always @(posedge clk) begin
+        if (!res_sync && res_prev) begin
+            hm_fifo = 0; hm_armed = 0; qr = qw;             // nothing outstanding
+        end
+        res_prev = res_sync;
+    end
+
+    function automatic bit dma_hits_io(input [15:0] a, input integer len);
+        integer k;
+        begin
+            dma_hits_io = 0;
+            for (k = 0; k < len; k = k + 256) begin
+                if (((a + k) & 16'hF000) == 16'hC000) dma_hits_io = 1;
+            end
+            if (((a + len - 1) & 16'hF000) == 16'hC000) dma_hits_io = 1;
+        end
+    endfunction
+    function automatic [7:0] status_byte(input [7:0] err);
+        status_byte = (err != 0) ? {(err[5:0]), 1'b1} : 8'h00;
+    endfunction
+
+    // Building and pushing an answer.  The bytes it carries land in the
+    // machine by the card's DMA - bus writes through the override path -
+    // so the reference follows them through the unified stream on its own.
+    reg [7:0] ans [0:1023];              // data bytes of the completion
+    integer   ans_n;
+    task automatic push_done(input [7:0] status, input [15:0] addr, input [15:0] size16);
+        integer k;
+        reg [31:0] w;
+        begin
+            if (ans_n == 0) push_word(hdr(T_HD_DONE, 8'd0, {8'd0, status}));
+            else begin
+                push_word(hdr(T_HD_DONE, 8'(2 + (ans_n + 3) / 4), {8'd0, status}));
+                push_word({16'(ans_n), addr});
+                push_word({16'd0, size16});
+                for (k = 0; k < ans_n; k = k + 4) begin
+                    w = 32'd0;
+                    w[7:0]   = ans[k];
+                    if (k + 1 < ans_n) w[15:8]  = ans[k+1];
+                    if (k + 2 < ans_n) w[23:16] = ans[k+2];
+                    if (k + 3 < ans_n) w[31:24] = ans[k+3];
+                    push_word(w);
+                end
+            end
+        end
+    endtask
+    task automatic id_string(input string s);
+        integer k, n;
+        begin
+            n = s.len() > 16 ? 16 : s.len();
+            ans[ans_n] = 8'(n); ans_n = ans_n + 1;
+            for (k = 0; k < n; k = k + 1) begin ans[ans_n] = s[k]; ans_n = ans_n + 1; end
+            for (k = n; k < 16; k = k + 1) begin ans[ans_n] = 8'h20; ans_n = ans_n + 1; end
+        end
+    endtask
+
+    integer hd_blocks_read = 0, hd_blocks_written = 0;
+
+    // Every command the card was given, and what came back, so a boot that
+    // stops can be read off rather than guessed at.
+    // The host's worker: answers each queued command HOST_DELAY clocks after
+    // its EXECUTE, in order - and never while the card is still moving a
+    // previous answer's bytes, as the real host spaces its HD_DONEs for
+    // exactly that reason (hd_service.cpp: an unspaced one would be dropped).
+    task automatic host_serve_one;
+        integer u, r, k, base;
+        reg [7:0] cmd, sc, err, unum;
+        reg [15:0] memblock, size16;
+        reg [23:0] diskblock;
+        begin
+            cmd = q_cmd[qr % QN]; unum = q_unum[qr % QN]; u = q_unit[qr % QN];
+            sc = q_sc[qr % QN]; memblock = q_mem[qr % QN]; diskblock = q_disk[qr % QN];
+            ans_n = 0;
+            size16 = 16'd0;
+            if (u >= 0 && u < NUM_DEVICES) size16 = 16'(HDV_BLOCKS);
+            if (u == UNIT_NONE) begin
+                push_done(status_byte(ERR_NOTCONN), 16'd0, 16'd0);
+            end else begin
+                r = (u == UNIT_CTL) ? 8 : u;
+                err = ERR_OK;
+                if (u >= NUM_DEVICES && u != UNIT_CTL &&
+                    cmd != CMD_BLK_STATUS && cmd != CMD_SP_STATUS) begin
+                    hm_uerr[r] = ERR_NOTCONN;
+                    push_done(status_byte(ERR_NOTCONN), 16'd0, 16'd0);
+                end else if ((cmd == CMD_SP_READ || cmd == CMD_SP_WRITE) && diskblock > 24'h7FFFFF) begin
+                    hm_uerr[r] = ERR_IO;
+                    push_done(status_byte(ERR_IO), 16'd0, size16);
+                end else begin
+                    hm_uerr[r] = ERR_OK;
+                    case (cmd)
+                        CMD_BLK_STATUS: begin
+                            host_statuses = host_statuses + 1;
+                            if (u == UNIT_CTL || u >= NUM_DEVICES) err = ERR_IO;
+                            push_done(status_byte(err), 16'd0, (u >= 0 && u < NUM_DEVICES) ? size16 : 16'd0);
+                            hm_uerr[r] = err;
+                        end
+                        CMD_SP_BUSY: push_done(status_byte(ERR_OK), 16'd0, size16);
+                        CMD_SP_STATUS: begin
+                            host_statuses = host_statuses + 1;
+                            if (u == UNIT_CTL) begin
+                                case (sc)
+                                    8'h00, 8'h03: begin
+                                        ans[ans_n] = 8'(NUM_DEVICES); ans_n = ans_n + 1;
+                                        for (k = 0; k < 7; k = k + 1) begin ans[ans_n] = 0; ans_n = ans_n + 1; end
+                                        if (sc == 8'h03) begin
+                                            id_string("STRUDELWORKS SP");
+                                            ans[ans_n] = 8'h00; ans_n = ans_n + 1;
+                                            ans[ans_n] = 8'h00; ans_n = ans_n + 1;
+                                            ans[ans_n] = 8'h01; ans_n = ans_n + 1;
+                                            ans[ans_n] = 8'h00; ans_n = ans_n + 1;
+                                        end
+                                    end
+                                    default: err = ERR_BADCTL;
+                                endcase
+                            end else begin
+                                case (sc)
+                                    8'h00, 8'h03: begin
+                                        ans[ans_n] = (u < NUM_DEVICES) ? 8'hF8 : 8'hE8; ans_n = ans_n + 1;
+                                        ans[ans_n] = (u < NUM_DEVICES) ? 8'(HDV_BLOCKS & 255) : 8'd0; ans_n = ans_n + 1;
+                                        ans[ans_n] = (u < NUM_DEVICES) ? 8'((HDV_BLOCKS >> 8) & 255) : 8'd0; ans_n = ans_n + 1;
+                                        ans[ans_n] = 8'd0; ans_n = ans_n + 1;
+                                        if (sc == 8'h03) begin
+                                            id_string($sformatf("STRUDELWORKS D#%0d", unum));
+                                            ans[ans_n] = 8'h02; ans_n = ans_n + 1;
+                                            ans[ans_n] = 8'h20; ans_n = ans_n + 1;
+                                            ans[ans_n] = 8'h01; ans_n = ans_n + 1;
+                                            ans[ans_n] = 8'h00; ans_n = ans_n + 1;
+                                        end
+                                    end
+                                    default: err = ERR_BADCTL;
+                                endcase
+                            end
+                            if (err == ERR_OK && dma_hits_io(memblock, ans_n)) err = ERR_BADCTL;
+                            if (err != ERR_OK) ans_n = 0;
+                            hm_uerr[r] = err;
+                            push_done(status_byte(err), memblock, size16);
+                        end
+                        CMD_BLK_READ, CMD_SP_READ: begin
+                            if (diskblock >= HDV_BLOCKS || dma_hits_io(memblock, 512)) begin
+                                err = ERR_IO; ans_n = 0;
+                            end else begin
+                                base = diskblock * 512;
+                                for (k = 0; k < 512; k = k + 1) begin ans[k] = himg[base + k]; end
+                                ans_n = 512;
+                                hd_blocks_read = hd_blocks_read + 1;
+                                $display("    disk: READ block %0d -> $%04X at instruction %0d",
+                                         diskblock, memblock, trace_instrs);
+                                host_reads = host_reads + 1;
+                            end
+                            hm_uerr[r] = err;
+                            push_done(status_byte(err), memblock, size16);
+                        end
+                        CMD_BLK_WRITE, CMD_SP_WRITE: begin
+                            if (diskblock >= HDV_BLOCKS || dma_hits_io(memblock, 512)) begin
+                                hm_uerr[r] = ERR_IO;
+                                push_done(status_byte(ERR_IO), 16'd0, size16);
+                            end else begin
+                                // The block was captured from the mirror at
+                                // the EXECUTE; it goes straight to the image.
+                                base = diskblock * 512;
+                                for (k = 0; k < 512; k = k + 1)
+                                    himg[base + k] = q_blk[qr % QN][k];
+                                hd_blocks_written = hd_blocks_written + 1;
+                                host_writes = host_writes + 1;
+                                push_done(status_byte(ERR_OK), 16'd0, size16);
+                            end
+                        end
+                        CMD_BLK_FORMAT, CMD_SP_FORMAT: begin
+                            for (k = 0; k < HDV_BLOCKS * 512; k = k + 1) himg[k] = 8'h00;
+                            push_done(status_byte(ERR_OK), 16'd0, size16);
+                        end
+                        default: begin
+                            hm_uerr[r] = ERR_IO;
+                            push_done(status_byte(ERR_IO), 16'd0, size16);
+                        end
+                    endcase
+                end
+            end
+            qr = qr + 1;
+        end
+    endtask
+
+    initial begin : host_pump
+        forever begin
+            @(posedge clk);
+            if (qr < qw && (now - q_at[qr % QN]) >= HOST_DELAY && u_hd.st == u_hd.S_IDLE)
+                host_serve_one();
+        end
+    end
+
     // ---- the I/O census: what the ROM asks the chipset for -------------------------
     // Every $C0xx the ROM touches, counted by address and direction, with the
     // instruction number of the FIRST touch.  This is rung 3b's work list in
@@ -619,6 +1045,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
 
     // ---- ROM loading -------------------------------------------------------------
     reg [7:0] rom_img [0:262143];
+    reg [7:0] hd_rom [0:255];
     task send_chunk(input integer c);
         integer k;
         begin
@@ -642,7 +1069,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     integer a, c;
     initial begin
         $readmemh(ROMF, rom_img);
+        $readmemh(HDROMF, hd_rom);
+        $readmemh(HDVF, himg);
         for (a = 0; a < IMG; a = a + 1) smem[a] = 8'h00;
+        hm_clear();
 
         $display("boot_gs_tb: GS=1 MODE %0d TARGET %04x ROM %0d chunks, max %0d instructions / %0d clocks",
                  MODE, TARGET, ROM_CHUNKS, MAX_INSTRS, MAX_CLKS);
@@ -655,6 +1085,19 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         else ok($sformatf("the IIgs ROM loaded: %0d chunks into bank $FC", ROM_CHUNKS));
         if (rom_overruns != 0)
             fail($sformatf("%0d ROM chunks were dropped: the load outran the seam", rom_overruns));
+
+        // The slot ROM the card answers $C700-$C7FF from, as the host sends
+        // it.  The GS ROM has no slot-7 firmware of its own - bank $FF's
+        // $C700 is 256 zero bytes - so this IS what the scan finds.
+        push_word(hdr(T_HD_ROM, 8'd64, 16'd0));
+        for (c = 0; c < 64; c = c + 1)
+            push_word({hd_rom[4*c+3], hd_rom[4*c+2], hd_rom[4*c+1], hd_rom[4*c]});
+        c = 0;
+        while (!hd_rom_loaded && c < 2000) begin @(posedge clk); c = c + 1; end
+        if (!hd_rom_loaded) begin
+            fail("the slot ROM did not load");
+            $display("    rx_wr %0d rx_rd %0d unknowns %0d", rx_wr, rx_rd, unknowns);
+        end else ok("the slot-7 SmartPort ROM loaded");
 
         serve <= 1'b1;
         mode <= 2'(MODE);
@@ -679,6 +1122,18 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         dump_io_census();
         dump_slot_census();
         dump_config();
+
+        $display("    the disk: %0d blocks read, %0d written, %0d statuses, %0d execs",
+                 hd_blocks_read, hd_blocks_written, host_statuses, host_execs);
+
+        // THE MILESTONE, when there is an image to find: the ROM's scan
+        // reached slot 7 and read from the card.  With no image the scan
+        // finds an empty slot and reads nothing, which is not a failure.
+        if (HAS_HDV == 0)
+            $display("    (no image given: the scan had nothing to find)");
+        else if (hd_blocks_read == 0)
+            fail("no block was ever read: the scan did not boot from slot 7");
+        else ok($sformatf("%0d blocks read from the slot-7 SmartPort", hd_blocks_read));
 
         // The machine itself, not the ROM's opinion of it.
         if (trace_instrs == 0) fail("the core executed nothing");

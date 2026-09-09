@@ -18,6 +18,8 @@
 #     --floor=N        fail unless the traces agree for N collapsed events
 #     --trace=FILE     trace output (default sim/boot_work/boot_gs_<tag>.trc)
 #     --tag=NAME       names the log and the trace
+#     --hdv=FILE       the SmartPort image to boot from (slot 7)
+#     --hdrom=FILE     its slot ROM (default ../strudelworks-host/assets/hdc_smartport.bin)
 #     --iverilog       use iverilog (Verilator is the default here)
 set -euo pipefail
 
@@ -27,6 +29,8 @@ mkdir -p "$work"
 
 instrs=20000 clks=400000000 mode=2 target=0 tag=gs vl=1 ref="" floor=""
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
+hdrom="$root/../strudelworks-host/assets/hdc_smartport.bin"
+hdv=""
 trace=""
 for a in "$@"; do
     case "$a" in
@@ -35,6 +39,8 @@ for a in "$@"; do
         --mode=*) mode="${a#*=}" ;;
         --target=*) target="${a#*=}" ;;
         --rom=*) rom="${a#*=}" ;;
+        --hdv=*) hdv="${a#*=}" ;;
+        --hdrom=*) hdrom="${a#*=}" ;;
         --ref=*) ref="${a#*=}" ;;
         --floor=*) floor="${a#*=}" ;;
         --trace=*) trace="${a#*=}" ;;
@@ -66,6 +72,24 @@ if len(b) == 262144:
 open(dst, 'w').write(''.join('%02x\n' % v for v in b))
 PY
 
+# The slot-7 image.  Without one the bench still runs - the ROM scans, finds
+# no card, and sits in its retry loop - so this is optional and the run says
+# which it did.
+blocks=1
+has_hdv=0
+if [ -n "$hdv" ]; then
+    has_hdv=1
+    [ -f "$hdv" ] || { echo "no image at $hdv" >&2; exit 2; }
+    hsize=$(stat -c%s "$hdv")
+    blocks=$(( (hsize + 511) / 512 ))
+    { xxd -p -c1 "$hdv"; head -c $((blocks * 512 - hsize)) /dev/zero | xxd -p -c1; } \
+        > "$work/hdv_$tag.hex"
+else
+    : > "$work/hdv_$tag.hex"
+fi
+[ -f "$hdrom" ] || { echo "no slot ROM at $hdrom" >&2; exit 2; }
+xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
+
 srcs=(
     "$root/sim/boot_gs_tb.sv"
     "$root/rtl/cpu65816.sv" "$root/rtl/accel_seq.sv"
@@ -73,6 +97,7 @@ srcs=(
     "$root/rtl/gs_io.sv" "$root/rtl/gs_adb.sv" "$root/rtl/gs_clock.sv" "$root/rtl/gs_intc.sv" "$root/rtl/gs_iwm.sv"
     "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv"
     "$root/rtl/way_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv"
+    "$root/rtl/hd_card.sv" "$root/rtl/ft601_msg_rx.sv"
 )
 echo "== boot_gs_tb: rom=$(basename "$rom") ($chunks chunks) mode=$mode target=$target instrs=$instrs"
 
@@ -90,6 +115,10 @@ if [ "$vl" = 1 ]; then
         -GTARGET="$target" \
         -GMAX_INSTRS="$instrs" \
         -GMAX_CLKS="$clks" \
+        -GHDROMF="\"$work/hdrom.hex\"" \
+        -GHDVF="\"$work/hdv_$tag.hex\"" \
+        -GHDV_BLOCKS="$blocks" \
+        -GHAS_HDV="$has_hdv" \
         -Mdir "$obj" "${srcs[@]}" \
         -o boot_gs_tb > "$work/verilator_gs_$tag.log" 2>&1 || {
             echo "verilator build failed:" >&2; tail -40 "$work/verilator_gs_$tag.log" >&2; exit 1; }
