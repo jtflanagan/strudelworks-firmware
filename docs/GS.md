@@ -245,10 +245,10 @@ parity check on every rung that touches shared RTL.
 | 1b | Wire format v6, 64-bit event records, on the IIe build first (PROTOCOL.md "The event record"). Card: `apple_bus_read.sv`, `synth_bus_events.sv`, `event_merge.sv` (class 1 fast / 2 dummy), `bus_event_filter.sv` (SKIP = a record), `bus_event_capture.sv` (64-bit FIFO, 127 records a frame, two words each, `captured` in records); the ring and the link move words and needed nothing. Host: `proto::Record`, `BusEvent` + bank/cls/cpu, the parser assembles records and faults on an odd payload, the ring, the trace writer (file version 2, 8-byte records; version-1 files refused), the sparse filter, the sources, the mock card, every `apply()`, the three trace tools; the firmware's two `.swbt` readers likewise. | IIe battery unchanged; host tests pass; HW: `mem_test.sh`, `fb_test.sh`, `accel_test.sh` green, mirror mismatches unchanged, full capture at 1 MHz sustained | **DONE 2026-09-08.** Sims: battery 34/34 (accel_vl 98/0), filter and capture benches reworked, trace self-test passing; host 36/36 on the Pi (`tools/pi_tests.sh`, new: ships and runs the cross-built suite). Build: timing met, 0 failing endpoints, and 28,941 LUTs against 32,179 BEFORE the change - the merge-queue rewrite saved more than the wider record cost. HW: boots to Applesoft and computes correctly at 1x and at 48x; 149,781,258 fast-op records delivered with the mirror's mismatch count frozen and zero merge overflows, drops, torn messages or unknown types. |
 | 2 | GS map on the MMU, bench-only: bank classes, 13 regions, `sh`, the shadow dup register, STATEREG/SHADOW/SLOTROMSEL, `$C071-$C07F`, the VOID page, the MEM_ROM page message. `mmu_xlate_gs_tb`: a KEGS-derived oracle (`setup_pageinfo`/fixups ported) swept over switch states x SHADOW x bank classes x 256 pages, read and write. `mem_integ_tb` gains a cross-bank write, a dup landing, a read-after-shadowed-write ordering check | 0 mismatches; IIe sweep unchanged (16384 maps, 0); battery at GS=0 unchanged | **DONE 2026-09-09** - part 1 the scaffolding, part 2 the map itself with its own oracle. Part 1 (2026-09-08): a `GS` parameter; the region set 10 -> 13, splitting text page 2, hires page 2 and the rest of the SHR range out of plain RAM; the entry's new `sh` bit at the TOP so xlate and both fronts decode unchanged; the $C035/$C036/$C068/$C02D registers, inert at GS=0; the four bank classes (PAIR, RAM, VOID, ROM) in `xlate()`. Gate met: IIe sweep 16384 maps / 33,347,584 checks / 0 mismatches, battery 34/34. Part 2 (2026-09-09): the query ports widened to 24 bits, `sh` exported on the classified op and the write query, `$C071-$C07F` reading ROM, the I/O-and-language-card inhibit, and **`sim/mmu_xlate_gs_tb.sv`** - a model written from KEGS's own fixups, not from the RTL, sweeping 12 banks x 256 pages x read/write over all 128 SHADOW states and the language card's: **3584 maps, 67,092,480 checks, 0 mismatches**, with the IIe sweep still 16384/33,347,584/0 and the battery 34/34. The oracle found three bugs in the RTL it was written against - the two windows of the I/O inhibit implemented the wrong way round, a Mega II test written on bank bit 1 (which is 0 for $E0 as it is for $00, so the guard never fired), and the region table's fold inherited by bank classes that have no language card. Part 3 (2026-09-09) closes it: `$C02D` read by the map (a slot page is the INTERNAL ROM's unless its bit is SET, or INTCXROM overrides - so a IIgs comes up with every slot page internal where a IIe comes up with them the slots'; bit 3 IS SLOTC3ROM, one register with the $C00A/B strobe, which is why the IIe's $C3 rule falls out of the IIgs's); the SHADOW DUPLICATE, emitted one clock behind its op down the same path a posted write takes, one deep with a drop counter a bench asserts is zero; and `rtl/rom_loader.sv` parameterised on `N_CHUNKS`/`ROM_PPN0` so one message loads any run of physical pages, with the host's chunk count following the ROM's size. Final: GS sweep **3584 maps, 67,092,493 checks, 0 mismatches** including twelve duplicate-landing cases; IIe sweep 16384/33,347,584/0; battery 35/35; host 36/36 on the Pi. |
 | 3a | The machine exists and fetches: the bank byte on the unified op stream and into the classifier's 24 bits, the 65816 on the dispatcher at `GS=1` (no fronts), `sim/boot_gs_tb.sv` booting ROM 3 through the seam, `tools/trace_diff816.py` | the ROM runs; the divergence index measured and pinned; the IIe unmoved | **DONE 2026-09-09** - see below |
-| 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro, the map registers and the clock done, 41,877 -> 67,398 events |
+| 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **DONE 2026-09-09**: the ADB micro, the map's registers and the clock took the index 41,877 -> 66,749 -> 67,398 events, which is the startup-device slot scan and as far as the reference can be one (see below); rung 3c built the rest of the chipset against KEGS's behaviour directly |
 | 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face) and the host side: the GS map in the mirror, `machine = iigs`, `gs_rom` | the ROM runs past the chipset with no spin; the host's map agrees with the card's | **DONE 2026-09-09** - see below |
 | 3d | `hd_card` in `boot_gs_tb` with the bench playing host, so the scan has something to find | the ROM finds slot 7, runs its firmware and reads blocks | **DONE 2026-09-09** - and the boot block runs; see below |
-| 3e | Why the third block read asks for $0203 instead of $0003 (the high byte of the block number); then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | **THE IMAGE BOOTS 2026-09-09.** The $0203 was an internal cycle (VDA and VPA both low) being taken as an access - as a WRITE (`INC $46` put the old byte in $47) and as a STROBE ($C083 after $C082 undid the language card). The eviction pressure that uncovered turned up a real page-cache bug: the shadow duplicate reached `cl_valid` with no entrant in `e_any`, so no P0 ran for it and it evicted pages under another page's tag - `cnt_ppn_clash` had been counting it since the day it was written. Then the IWM's handshake had to stop saying "a write is in progress" for ever. ProDOS 2.4.3 now boots off the slot-7 SmartPort to its BYE selector. The battery RAM now ships too (GS_BRAM `0x2E`), and the ROM believes it: `$C02D` comes out naming the host's slots. ADB_KEY works end to end - Return at ProDOS's selector launches a file - and the Pi's keyboard feeds it (host `pi_adbmap.hpp`). STILL TO DO: auto-repeat, `mock_card` speaking a GS stream, the mirror replayed |
+| 3e | Why the third block read asks for $0203 instead of $0003; then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | **DONE 2026-09-09.** The $0203 was an internal cycle (VDA and VPA both low) taken as an access - as a WRITE and as a STROBE - and the eviction pressure that uncovered turned up a real page-cache bug (the shadow duplicate had no P0). ProDOS 2.4.3 boots off the slot-7 SmartPort to its BYE selector and a Return launches a file. The battery RAM ships (GS_BRAM `$2E`) and the ROM believes it; ADB_KEY carries keycodes to a micro that holds the keymap, with auto-repeat; `mock_card` speaks a GS stream (`gs_source.hpp`); and the mirror replays a real boot - 1,817,727 ops, 481 pages, ZERO bytes different - which found three host bugs of its own |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
 | 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | |
@@ -936,6 +936,57 @@ once an operating system is running it reads a block into a buffer, WORKS ON
 IT, and only then asks for the next thing.  So a block the machine has written
 to is skipped and counted rather than failed - and the DMA's own writes, which
 carry `u_ovr`, are not the machine's.  95 blocks read, 91 intact, 3 touched.
+
+## Rung 3e: the mirror against the machine, and rung 3 closed (2026-09-09)
+
+The last two items, and the strongest oracle in the programme.
+
+**`mock_card` SPEAKS A GS STREAM** (host `src/gs_source.hpp`).  Every other
+source there is a IIe - bank 0, sixteen bits of address - so the host's GS
+paths never saw a record at all.  This one puts the four bank classes, the
+Mega II pair and the registers that move the map on the wire, and
+`gs_stream_test` drives `MockCard` from it, reads the words back through the
+REAL link parser, and applies them to the mirror as a IIgs: 15 checks that the
+bank byte survives framing and that the mirror writes the banks it is told to.
+
+**THE MIRROR REPLAYED AGAINST THE MACHINE** (`tools/gs_mirror_test.sh`).
+`boot_gs_tb --mirror=DIR` writes every op the core retires - plus the host's
+own DMA, which never goes near the core and which a replay has to be told -
+in the host's own 64-bit record shape, and the physical pages the machine
+wrote with a BIT-MASK of which bytes it wrote.  The host's `AppleMemory`
+replays the one and is held to the other, on the Pi.
+
+    1,817,727 ops replayed, 481 written pages compared, 0 pages and 0 bytes differ
+
+**ONLY THE MASKED BYTES ARE COMPARED, and that is not a weakening.**  A byte
+the stream never wrote has no agreed value: the mirror starts at zero and the
+card's cache starts at whatever its way was left holding.  Comparing those
+compares two arbitrary choices rather than two maps.  The bench's own page
+$0001 shows why - 17,865 writes landed on it and the LOWEST OFFSET EVER
+WRITTEN WAS $70, yet the cache holds a previous tenant's bytes below that,
+where DDR3 correctly holds zeros.  Nothing reads them and nothing wrote them,
+but the cache and the backing store disagree there, so an eviction and refill
+would change them under the machine.  Worth a rung of its own; it is not a
+map disagreement and the oracle should not pretend it is.
+
+**IT FOUND THREE HOST BUGS**, none of which any sweep could have:
+
+1. **`apply()` threw the bank away.**  It called the IIe's two-argument
+   `classify(addr, rw)`, so on a IIgs every bank's writes went to bank 0:
+   banks $02-$7F and $E0/$E1 empty, bank 0 full of other banks' bytes.
+2. **The shadow duplicate was computed and never performed.**  `classify_gs`
+   set `l.sh` and `apply()` only ever wrote once, so the Mega II banks never
+   received anything.
+3. **The IIgs registers were never tracked from a stream.**  `sw_.shadow`,
+   `sltrom` and STATEREG were only ever written by the map sweep's
+   `set_switches_for_test` - so a GS stream left SHADOW at zero, no route
+   inhibited, and text page 2's writes shadowed over a fill the machine had
+   put in $E0.
+
+That is what the sweeps cannot do.  `gs_memory_test` argues this mirror
+against a second model and `mmu_xlate_gs_tb` argues the card's against a
+KEGS-derived oracle; both are models arguing with models.  This one takes a
+boot that actually happened.
 
 ## Rung 3e: the battery RAM ships (2026-09-09)
 

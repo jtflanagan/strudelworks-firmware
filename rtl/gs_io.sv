@@ -154,6 +154,7 @@ module gs_io #(
         .rd_byte (adb_rd),
         // The keys, from the host (docs/GS.md, ADB_KEY); the micro holds the
         // keymap and $C025's modifiers, as a real one does.
+        .frame_tick (frame_tick),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
         .c025_val (adb_c025),

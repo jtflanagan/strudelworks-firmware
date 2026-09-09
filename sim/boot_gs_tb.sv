@@ -99,6 +99,17 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // an invalid checksum on both machines and initialises it
                     // the same way.  Ship one and the two part company at
                     // once - correctly, and not at the floor.
+                    // THE MIRROR'S SIDE (docs/GS.md rung 3e).  Every retired
+                    // op, in the host's own 64-bit record shape
+                    // (protocol.hpp), and the physical pages the machine
+                    // wrote - so the host's AppleMemory can replay the one
+                    // and be held to the other.  Empty = write neither.
+                    // Name a physical page and the bench says which op first
+                    // wrote it - the fastest way from "these bytes are not in
+                    // the stream" to "this is what put them there".
+                    parameter integer PAGE_WATCH = 0,
+                    parameter OPSF  = "",
+                    parameter PAGESF = "",
                     parameter ADB_KEYMAP = "adb_keymap.hex",
                     // A key, pressed at an instruction number (docs/GS.md,
                     // ADB_KEY): the ADB keycode, the modifier byte in
@@ -106,6 +117,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     parameter integer KEY_AT   = 0,
                     parameter integer KEY_CODE = 0,
                     parameter integer KEY_MODS = 0,
+                    // How long the key is held, in clocks.  Long enough and
+                    // the ADB micro's auto-repeat should fire.
+                    parameter integer KEY_HOLD = 20000,
                     parameter BRAMF = "gsbram.hex",
                     parameter integer HAS_BRAM = 0);
 
@@ -884,11 +898,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     always @(posedge clk) if (ENG_TRACE != 0) begin
         eng_prev <= u_cache.state;
         if (u_cache.state != eng_prev && eng_prev == u_cache.E_IDLE &&
-            (u_cache.e_ppn >= 16'hFC00 || u_cache.e_old >= 16'hFC00))
-            $display("    eng %0d: fill ppn $%04X, victim $%04X %0s, set %0d way %02X",
-                     now, u_cache.e_ppn, u_cache.e_old,
+            (u_cache.e_ppn >= 16'hFC00 || u_cache.e_old >= 16'hFC00 ||
+             (PAGE_WATCH != 0 && (u_cache.e_ppn == PAGE_WATCH[15:0] ||
+                                  u_cache.e_old == PAGE_WATCH[15:0]))))
+            $display("    eng %0d: fill ppn $%04X crit line %0d, victim $%04X %0s, set %0d way %02X, %0s",
+                     now, u_cache.e_ppn, u_cache.e_crit, u_cache.e_old,
                      u_cache.e_dirty ? "DIRTY" : "clean",
-                     u_cache.e_set, u_cache.e_way);
+                     u_cache.e_set, u_cache.e_way,
+                     u_cache.e_rw ? "read" : "write");
     end
 
     // The cache's own clash counter, which nothing has ever looked at: it
@@ -977,6 +994,120 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             $display("    parked an internal cycle: %06X rw=%0d (pc %02X/%04X)",
                      cpu_a24, cpu_rw, last_sync[23:16], last_sync[15:0]);
     end
+
+    // ---- the op stream, as the host's mirror takes it -------------------------------
+    // proto::encode_event's own layout (the host's protocol.hpp), so a
+    // replay needs no translation:
+    //   lo = {tag[3:0], bank[7:0], vbl, sync, res, rw, addr[15:0]}
+    //   hi = {data[7:0], cls[3:0], cpu[3:0], 16'd0}
+    // Every retired op goes down as an EVENT - the mirror applies fast and
+    // bus ops the same way, and a replay wants them all, in order.  `res` is
+    // HIGH for a machine that is not being held: reset_asserted() is its
+    // complement.  The override's own DMA is not the machine's op and is
+    // left out, as it is everywhere else in this bench.
+    // TAPPED AT THE CORE, not at the dispatcher: a read's BYTE is only known
+    // when the core takes it, and the mirror learns memory from reads as
+    // well as writes - it is a mirror, not a write log.  So this is every
+    // cycle the core actually accesses something, in order, with the byte it
+    // moved: cpu_din on a read, cpu_dout on a write.  Internal cycles are
+    // not accesses and are not here (docs/GS.md rung 3e).
+    integer opsf = 0, ops_written = 0;
+    initial if (OPSF != "") opsf = $fopen(OPSF, "wb");
+    wire [31:0] op_lo_w = {4'hF, cpu_bank, 1'b0, cpu_sync, 1'b1, cpu_rw, cpu_addr};
+    wire [31:0] op_hi_w = {cpu_rw ? cpu_din : cpu_dout, 4'd0, 4'd0, 16'd0};
+    // ...AND THE HOST'S OWN DMA.  A block the card DMAs in never goes near
+    // the core, so the core's cycles do not carry it - but it is a write to
+    // the machine's memory like any other, it goes through the map, and it
+    // SHADOWS like any other.  On real hardware the host does the DMA itself
+    // and its mirror knows; a replay has to be told.  Emitted from the same
+    // block so the order is the one the machine saw.
+    wire [31:0] dma_lo_w = {4'hF, u_bank, 1'b0, 1'b0, 1'b1, 1'b0, u_addr};
+    wire [31:0] dma_hi_w = {u_wdata, 4'd0, 4'd0, 16'd0};
+    always @(posedge clk) if (opsf != 0 && boot_go) begin
+        if (cpu_cyc_en && !cyc_internal) begin
+            $fwrite(opsf, "%u%u", op_lo_w, op_hi_w);
+            ops_written = ops_written + 1;
+        end
+        if (u_present && u_ovr && !u_rw) begin
+            $fwrite(opsf, "%u%u", dma_lo_w, dma_hi_w);
+            ops_written = ops_written + 1;
+        end
+    end
+
+    // The physical pages the machine wrote, so the replay has something to be
+    // held to.  Taken from the CLASSIFIED op - the map's own answer for where
+    // the byte landed - and not from the virtual address, which is the whole
+    // question the mirror is being asked.
+    reg     pg_dirty [0:65535];
+    integer pgi, pages_dirty = 0;
+    initial for (pgi = 0; pgi < 65536; pgi = pgi + 1) pg_dirty[pgi] = 1'b0;
+    // ...and WHICH BYTES of it, because a byte the stream never wrote has no
+    // agreed value: the mirror starts at zero and the card's cache starts at
+    // whatever its way was left holding.  Comparing those compares two
+    // arbitrary choices.  32 bytes of mask a page, one bit a byte.
+    reg [255:0] pg_mask [0:65535];
+    initial for (pgi = 0; pgi < 65536; pgi = pgi + 1) pg_mask[pgi] = 256'd0;
+    integer pw_shown = 0, pw_writes = 0;
+    reg [7:0] pw_lowest = 8'hFF;
+    always @(posedge clk)
+        if (PAGE_WATCH != 0 && boot_go && cl_valid && !cl_rw && cl_wr_image &&
+            cl_ppn_w == PAGE_WATCH[15:0]) begin
+            pw_writes = pw_writes + 1;
+            if (cl_off[7:0] < pw_lowest) pw_lowest = cl_off[7:0];
+        end
+    always @(posedge clk)
+        if (PAGE_WATCH != 0 && boot_go && cl_valid && !cl_rw && cl_wr_image &&
+            cl_ppn_w == PAGE_WATCH[15:0] && cl_off[7:0] < 8'h70 && pw_shown < 8) begin
+            pw_shown = pw_shown + 1;
+            $display("    page $%04X <= $%02X at offset $%02X, %0d clocks; the op is %02X/%04X %0s",
+                     cl_ppn_w, cl_wdata, cl_off[7:0], now, u_bank, u_addr,
+                     u_rw ? "read" : "write");
+        end
+    always @(posedge clk)
+        if (boot_go && cl_valid && !cl_rw && cl_wr_image && !pg_dirty[cl_ppn_w]) begin
+            pg_dirty[cl_ppn_w] = 1'b1;
+            pages_dirty = pages_dirty + 1;
+        end
+    always @(posedge clk)
+        if (boot_go && cl_valid && !cl_rw && cl_wr_image)
+            pg_mask[cl_ppn_w][cl_off[7:0]] = 1'b1;
+
+    // ...written out at the end as {ppn, 256 bytes}, little-endian ppn.
+    task dump_pages;
+        integer f, k, off;
+        begin
+            if (PAGESF == "") return;
+            f = $fopen(PAGESF, "wb");
+            for (k = 0; k < 65536; k = k + 1)
+                if (pg_dirty[k]) begin
+                    $fwrite(f, "%c%c", k[7:0], k[15:8]);
+                    for (off = 0; off < 32; off = off + 1)
+                        $fwrite(f, "%c", pg_mask[k][8*off +: 8]);
+                    for (off = 0; off < 256; off = off + 1)
+                        $fwrite(f, "%c", card_byte(16'(k), 8'(off)));
+                end
+            $fclose(f);
+            // ...and the op stream's own tail, which is buffered and would
+            // otherwise be short of the last few hundred ops - which is
+            // exactly the stack, written to the end.
+            if (opsf != 0) $fclose(opsf);
+            if (PAGE_WATCH != 0) begin
+                $write("    page $%04X in the card's memory:", PAGE_WATCH[15:0]);
+                for (off = 0; off < 16; off = off + 1)
+                    $write(" %02X", card_byte(PAGE_WATCH[15:0], 8'(off)));
+                $display("  (%0d writes, lowest offset $%02X, %0s)",
+                         pw_writes, pw_lowest,
+                         card_resident(PAGE_WATCH[15:0]) ? "RESIDENT in the cache"
+                                                         : "not resident: from DDR3");
+                $write("    ...and what DDR3 holds for it:");
+                for (off = 0; off < 16; off = off + 1)
+                    $write(" %02X", smem[{PAGE_WATCH[15:0], 8'(off)}]);
+                $display("");
+            end
+            $display("    the mirror's side: %0d ops and %0d written pages out",
+                     ops_written, pages_dirty);
+        end
+    endtask
 
     // ---- rung 3e: the language card ------------------------------------------------
     // Where ProDOS stops: it relocates, then calls `JSR $FE84` and reads $00
@@ -1414,6 +1545,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // key and lets it up.  Held apart from the run's own process because it
     // has to happen WHILE the machine runs, not before or after it.
     integer keys_sent = 0;
+    integer adb_repeats = 0;
+    always @(posedge clk) if (u_gsio.u_adb.rpt_fire) adb_repeats = adb_repeats + 1;
     initial if (KEY_AT != 0) begin : typist
         wait (trace_instrs >= KEY_AT);
         send_key(7'(KEY_CODE), 1'b0, 8'(KEY_MODS));
@@ -1423,8 +1556,17 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         else
             ok($sformatf("keycode $%02X reached the keyboard: $C000 reads $%02X, $C025 $%02X",
                          KEY_CODE, u_gsio.u_adb.kbd_buf[0], u_gsio.u_adb.c025_val));
-        repeat (20000) @(negedge clk);
+        repeat (KEY_HOLD) @(negedge clk);
         send_key(7'(KEY_CODE), 1'b1, 8'(KEY_MODS));
+        if (KEY_HOLD >= 4000000) begin
+            // Held for tens of frames with the machine polling $C000: the
+            // micro should have re-fired the key on its own.
+            if (adb_repeats == 0)
+                fail("the key was held for tens of frames and never repeated");
+            else
+                ok($sformatf("the ADB micro repeated the held key %0d times",
+                             adb_repeats));
+        end
     end
 
     // The battery RAM the host ships, as one GS_BRAM: 64 words, four bytes a
@@ -1639,6 +1781,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             else ok("the ROM kept the host's battery RAM: it checksummed and believed it");
         end
         dump_text();
+        dump_pages();
 
         $display("    the disk: %0d blocks read, %0d written, %0d statuses, %0d execs",
                  hd_blocks_read, hd_blocks_written, host_statuses, host_execs);

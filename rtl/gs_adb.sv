@@ -72,6 +72,11 @@ module gs_adb #(
     // resolved - shift, control, caps, option and command, in $C025's own
     // bit order.  The micro holds the keymap, as a real one does, so what
     // arrives is a keycode and not an ASCII byte.
+    // One pulse a video frame, the machine's own (rtl/vbeam.sv): the ADB
+    // micro's auto-repeat counts in frames because KEGS's does - its delay
+    // and rate are in g_vbl_count units, out of the set-config byte.
+    input  wire        frame_tick,
+
     input  wire        msg_valid,
     input  wire [7:0]  msg_type,
     input  wire [7:0]  msg_len,
@@ -132,6 +137,52 @@ module gs_adb #(
     logic [3:0] reg0_n;
     logic       hard_key_down;
     logic [6:0] a2code_down;
+
+    // ---- auto-repeat (adb_key_event, adb_read_c000, adb_set_config) --------
+    // KEGS holds a frame number to repeat at and compares the frame count
+    // with it; a counter that runs DOWN says the same thing without a
+    // free-running frame number to keep, and cannot wrap into a false
+    // compare.  key_down is KEGS's g_key_down: a hard key is held AND the
+    // delay is not zero, which is set-config's way of turning repeat off.
+    logic        key_down;
+    logic [15:0] rpt_left;
+    // The timing follows `repeat_info` itself rather than a second copy of
+    // it: set-config writes that register and these are what it means.
+    // adb_set_config's val2: the high nibble is the delay, four meaning
+    // never, otherwise (n+1) * 15 frames; the low nibble is the rate, which
+    // ROM 3 sends as 9 - n, through a table that is not linear.
+    wire [3:0] cfg_delay_n = repeat_info[7:4];
+    wire [3:0] cfg_rate_n  = 4'd9 - repeat_info[3:0];
+    wire [7:0] cfg_delay = (cfg_delay_n == 4'd4) ? 8'd0
+                         : (cfg_delay_n <  4'd4) ? ((8'd1 + {4'd0, cfg_delay_n}) * 8'd15)
+                                                 : 8'd45;
+    logic [7:0] cfg_rate;
+    always_comb begin
+        case (cfg_rate_n)
+            4'd0:    cfg_rate = 8'd1;
+            4'd1:    cfg_rate = 8'd2;
+            4'd2:    cfg_rate = 8'd3;
+            4'd3:    cfg_rate = 8'd3;
+            4'd4:    cfg_rate = 8'd4;
+            4'd5:    cfg_rate = 8'd5;
+            4'd6:    cfg_rate = 8'd7;
+            4'd7:    cfg_rate = 8'd15;
+            4'd8:    cfg_rate = 8'd30;
+            4'd9:    cfg_rate = 8'd60;
+            default: cfg_rate = 8'd3;
+        endcase
+    end
+
+    // THE REPEAT FIRES WHEN THE MACHINE LOOKS, not on the timer.  KEGS does
+    // it inside adb_read_c000 - a program that never reads the keyboard does
+    // not accumulate repeats in the buffer, and one that polls gets them at
+    // the rate - so this is a read of $C000 with the strobe already gone, a
+    // key still held, and the count run out.  It is taken as an EVENT, so
+    // the whole of adb_key_event applies to it, which is what KEGS's calling
+    // itself amounts to.
+    wire c000_rd_act = act && op_rw && (op_lo == 8'h00);
+    wire rpt_fire = c000_rd_act && key_down && !kbd_buf[0][7] &&
+                    (rpt_left == 16'd0) && !ev_v;
 
     // The keymap: 128 entries of {ctrl, shift, plain}, each {none, special,
     // byte}.  Distributed, and read combinationally - one event at a time and
@@ -227,11 +278,15 @@ module gs_adb #(
     wire rx_word_k  = pay_valid && (rx_left_k != 8'd0);
     wire hdr_key    = msg_valid && (msg_type == T_ADB_KEY);
     wire word_key   = rx_word_k && (rx_type_k == T_ADB_KEY);
-    wire [29:0] km_in = keymap[pay_data[6:0]];
+    // One address, two sources: the message's keycode, or the held key when
+    // the repeat re-fires it.
+    wire [6:0]  km_addr = word_key ? pay_data[6:0] : a2code_down;
+    wire [29:0] km_in   = keymap[km_addr];
 
     logic        ev_v;
     logic [6:0]  ev_code;
     logic        ev_up;
+    logic        ev_rpt;        // this event is a repeat, not a new press
     logic [7:0]  ev_mods;
     logic [29:0] ev_km;
 
@@ -302,7 +357,16 @@ module gs_adb #(
                 ev_v    <= 1'b1;
                 ev_code <= pay_data[6:0];
                 ev_up   <= pay_data[7];
+                ev_rpt  <= 1'b0;
                 ev_mods <= pay_data[15:8];
+                ev_km   <= km_in;
+            end else if (rpt_fire) begin
+                // The held key again, with the modifiers as they stand.
+                ev_v    <= 1'b1;
+                ev_code <= a2code_down;
+                ev_up   <= 1'b0;
+                ev_rpt  <= 1'b1;
+                ev_mods <= c025_val;
                 ev_km   <= km_in;
             end else if (ev_v && !act) begin
                 ev_v <= 1'b0;
@@ -319,7 +383,15 @@ module gs_adb #(
         begin
             kbd_buf[0] <= {1'b0, kbd_buf[0][6:0]};
             if (kbd_n != 4'd0) begin
-                for (j = 1; j < KBD_N; j = j + 1) kbd_buf[j-1] <= kbd_buf[j];
+                // ONLY THE ENTRIES BEHIND THE HEAD MOVE.  KEGS's loop is
+                // `for(i = 1; i < g_kbd_chars_buffered; i++)`, so with ONE
+                // character buffered it does not run at all and the head
+                // keeps the byte with its strobe cleared - which is what
+                // $C000 goes on reading until the next key.  Shifting
+                // unconditionally zeroes it instead, and the machine sees a
+                // character it never typed go away.
+                for (j = 1; j < KBD_N; j = j + 1)
+                    if (j < int'(kbd_n)) kbd_buf[j-1] <= kbd_buf[j];
                 kbd_n <= kbd_n - 4'd1;
             end
             c025_val <= c025_val & ~8'h08;
@@ -352,6 +424,7 @@ module gs_adb #(
             // that has just been reset.
             kbd_n <= 4'd0; reg0_n <= 4'd0;
             hard_key_down <= 1'b0; a2code_down <= 7'd0;
+            key_down <= 1'b0; rpt_left <= 16'd0;
             c025_val <= 8'h20;
             for (i = 0; i < KBD_N; i = i + 1) kbd_buf[i] <= 8'd0;
             for (i = 0; i < REG0_N; i = i + 1) reg0[i] <= 8'd0;
@@ -372,14 +445,25 @@ module gs_adb #(
                 end
                 hard_key_down <= 1'b1;
                 a2code_down   <= ev_code;
+                // A press arms the delay; a repeat arms the rate.  A delay of
+                // zero is set-config's way of saying "never repeat", and
+                // KEGS clears g_key_down for it rather than counting.
+                key_down <= (cfg_delay != 8'd0);
+                rpt_left <= ev_rpt ? {8'd0, cfg_rate} : {8'd0, cfg_delay};
             end else if (ev_up && ev_hard && (ev_code == a2code_down)) begin
                 hard_key_down <= 1'b0;
+                key_down      <= 1'b0;
             end
             // The modifiers are the host's, and bit 5 is this module's:
             // set when no hard key is down, which is what the ROM's own
             // "update the modifier latch" reads.
+            // ...and bit 3, "a key is available", which KEGS sets on a
+            // repeat and $C010 clears.
             c025_val <= (ev_mods & 8'hC7) | (c025_val & 8'h08) |
+                        (ev_rpt ? 8'h08 : 8'h00) |
                         ((!ev_up && ev_hard) ? 8'h00 : 8'h20);
+        end else if (frame_tick) begin
+            if (rpt_left != 16'd0) rpt_left <= rpt_left - 16'd1;
         end else if (act && !op_rw && (op_lo == 8'h10)) begin
             // ---- adb_access_c010, the write half ------------------------
             kbd_shift();
