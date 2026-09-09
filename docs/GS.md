@@ -1,6 +1,15 @@
 # Apple IIgs on the card: the run sheet
 
-Status: **RUNG 3 IS CLOSED, 2026-09-09** - rungs 0, 1, 1b, 2 and 3a-3e all
+Status: **RUNG 4a IS BUILT AND THERE IS A IIgs BITSTREAM, 2026-09-09.**  The
+Apple IIgs now exists in `rtl/master_top.sv` - the file that actually becomes
+a bitstream - behind one `parameter bit GS`, and `build/build.sh --gs` makes
+`build/results/master_top_gs.bit` from it.  The netlist is what the design
+says it should be: `cpu65816`, `gs_io`, `gs_adb`, `gs_clock`, `gs_intc` and
+`gs_iwm` present, `cpu65c02`, `iline`, `dline` and `iscan` at ZERO instances.
+Nothing of it has run on hardware yet.  See "Rung 4a" below for what it cost,
+what the gate said, and the four things the gate itself uncovered.
+
+Rung 3 before it: **CLOSED, 2026-09-09** - rungs 0, 1, 1b, 2 and 3a-3e all
 done (1b proven on hardware; the rest in simulation, which is what those rungs
 are).  **THE MACHINE BOOTS AN OPERATING SYSTEM.**  The soft 65816 runs ROM 3
 on the card's memory path with the whole chipset answering on the card, finds
@@ -1067,6 +1076,559 @@ The end-of-run landing check went with it.  Rung 3d could snapshot `$0800` at
 the end because the boot stalled there; a boot that gets going relocates over
 it, so each block is now checked at the moment the machine asks the card for
 the next thing - still the machine's newest, and 38 of the 39 get checked.
+
+## Rung 4a: the machine reaches the top level (2026-09-09)
+
+Everything above rung 4 was a bench.  `master_top` - the file that is actually
+built into a bitstream - had never had a 65816 in it, never instantiated
+`gs_io`, and never asked `apple_mmu` or `accel_seq` for anything but a IIe.
+Rung 4a puts the machine in the top level.
+
+**ONE TOP LEVEL, ONE PARAMETER.**  `master_top` takes `parameter bit GS`, and
+every GS term folds to a constant at `GS = 0`.  The 65C02 and the 65816 are
+the two arms of a generate; so are the two fronts and their absence.  The
+choice is made in one place and nothing downstream knows which machine it is
+serving.
+
+**WHAT THE REST OF THE BOARD SEES IS NOT THE CORE'S PINS.**  `cpu_addr`,
+`cpu_bank` and `cpu_rw` are now the EFFECTIVE op, and at `GS = 1` the
+65816's internal cycle - VDA and VPA both low - is parked at `$000000` as a
+read before anything downstream decodes it.  This is the wiring rung 3e's
+bench found the hard way, and the bench's own comment asks for it by name:
+handed on raw, that cycle is a write in the middle of a read-modify-write and
+a strobe in the middle of a `$C0xx` read, and it cost that bench both halves
+of a boot.
+
+**THE FRONTS ARE NOT BUILT AT `GS = 1`.**  `iline` and `dline` are the IIe's;
+rung 6 widens them for the 24-bit space.  At `GS = 1` the core takes the
+dispatcher's cycle enable and the dispatcher's byte directly, and the thirty-
+odd seams the two fronts drive are tied still in the generate's other arm -
+which is also what makes room on the die for the 65816 and the chipset.
+
+**THE IIe's `$Cxxx` APPARATUS STANDS DOWN.**  `sw_int` is `!GS && ...`, so
+`apple_mmu`'s own internalization and the on-card slot fast path are off and
+the peripherals see the driver's op stream, as they did before docs/CXXX.md's
+closed regime - which is what "Your Card" means on this machine, and what the
+bench proved.  `gs_io`'s claim joins `q_swi` and its byte the serve mux, in
+the shape sim/boot_gs_tb.sv uses.  The keyboard latch, the button injector and
+the floating-bus simulator stand down at the substitution mux: each answers
+for `$C0xx` addresses a IIgs decodes differently, and a substitution on top of
+an internalized op is a second authority for the same byte.  The No-Slot Clock
+too - a IIgs has a clock of its own and no reason to look for one hiding
+behind a slot ROM.
+
+**THE BEAM FREE-RUNS.**  `vbl_lock` finds the IIe's beam by writing a picture
+into the motherboard's text page and reading the floating bus back.  A IIgs's
+video is the card's and the host's and there is nothing on the backplane to
+lock to, so at `GS = 1` the lock takes no override cycle, `virt` is forced on,
+and `vbeam` is told it is locked and notifying from reset.
+
+**THE CLOCK IS THE HOST'S FEED.**  `gs_clock`'s `cur_time` was loaded from a
+parameter at card reset, which on hardware is before the host has connected.
+It now also takes a **GS_TIME** message - one word, seconds since 1904-01-01,
+type `$30` - and the host re-sends it every second, exactly as it feeds the
+No-Slot Clock, because the card has no oscillator of its own to count.
+Nothing ticks in RTL, deliberately: a clock that advanced here would make the
+bench's comparison against a recorded trace depend on when the run started,
+and the bench sends no GS_TIME at all - which is why the floor is unmoved.
+The conversion is LOCAL time to the Macintosh epoch (`gs_now_1904`), because
+the Control Panel shows what the chip counts; `gs_bram_test` holds it to the
+same 3,871,713,600 that `tools/kegs/trace_rom.sh` pins KEGS's clock to.  A
+32-bit count from 1904 runs out on 2040-02-06, which is the real part's limit.
+
+**`build.sh --gs`** is `--master` with the parameter set: its own Vivado work
+directory (sharing one with `--master` would let a IIe project's state stand
+in for a IIgs build's), its own source-list additions, and its own bitstream
+name - `build/results/master_top_gs.bit`, so a IIe bit and a IIgs bit can sit
+side by side and neither can be mistaken for the other.  `run_build.sh --gs`
+adds the 65816's microcode and the ADB keymap to the pre-flight and tags the
+log `gs_`.
+
+**AND THE TOP LEVEL IS LINTED NOW, at both machines.**  master_top was on
+sim/lint.sh's "not linted, deliberately" list because it instantiates Xilinx
+primitives, an XPM macro and UberDDR3's top, and Verilator can resolve none of
+them - which left a mistyped connection or an undriven wire in the top level
+to be found by Vivado, after a fifteen-minute elaboration.  `sim/stubs/prims.v`
+gives the linter the port names and nothing else, and `sim/lint.sh` now
+elaborates the whole design twice, once per value of `GS`, in about a second.
+The arm that is not being built is the one that rots, so both are checked on
+every lint.  The stubs are never in a synthesis source list; if one disagrees
+with the real primitive, Vivado still says so.
+
+**A IIgs CANNOT BE TYPED AT THE WAY A IIe CAN**, and the rung's own gate is
+what found it.  The control socket's `type` - which every `*_test.sh` and the
+MCP tools use - goes to `key_typist.hpp`, which handshakes with the card's
+keyboard latch key by key: a KBD_PRESS, an ack, a KBD_EVENT saying the machine
+resolved it.  A IIgs has no such latch.  Keys reach an ADB micro as raw
+KEYCODE events, its queue is eight deep, and it sends nothing back.  So the
+IIgs's path is a PACED QUEUE and not a handshake: `PiAdbmap::from_ascii` turns
+the character into the key that makes it plus the modifiers held while it is
+pressed, and one event goes out every 16 ms - about a frame, a fast human, and
+far slower than the ROM drains its queue.  A script that wants to know the
+machine READ the key waits on the mirror (`wait_for_text`), which is what it
+should have been doing anyway.
+
+`from_ascii` is written from the keyboard, not by inverting the evdev table:
+that one says which ADB code a physical key is, and this one has to say which
+key AND WHETHER SHIFT IS HELD, which the other cannot know.  So they are two
+tables and `adbmap_test` presses every unshifted character through BOTH and
+compares the code - 244 checks now, up from 184.  Return is the RETURN KEY and
+not Control-M, deliberately: the ROM looks at keycodes and the Control Panel
+navigates by them.
+
+**THE SPEED SWITCH IS THE MACHINE'S, NOT THE HOST'S.**  `$C036` bit 7 is the
+IIgs's high-speed bit and the ROM, the Control Panel and every disk routine
+drive it.  The governor now follows it: bit CLEAR gives exactly 1.0 ops per
+bus cycle, because a program that cleared it believes it is on a 1 MHz Apple
+II and has timed its loops for one; bit SET gives whatever the host asked for
+in ACCEL_CTRL.  Running a slow-mode program at the fast target is not
+"faster", it is wrong - the ROM's own self-test measures things.  The plan
+listed this as a milestone-1 row and it had not been built; the gate for this
+rung names it ("the self-test at the 2.8x governor"), which is what found it.
+
+**THE `GS = 0` PARITY GATE.**  Battery **35/35** (`accel_vl` 98 checks, 0
+errors), `gs` **7/7** with `boot_gs` still AT FLOOR at 67,398, host **40/40**
+on the Pi.  The build: **TIMING MET, wns +0.012, whs +0.015, 0 failing
+endpoints of 65,196**; 26,821 LUTs, 18,640 flops, 86 of 135 block RAM tiles.
+There is no magic slack figure here and +0.012 against the previous +0.027 is
+fifteen picoseconds, which is inside this board's build-to-build spread on
+identical source.
+
+**THERE IS NO VALID UTILISATION COMPARISON, and saying so is the point.**  The
+last LUT count this sheet records is rung 1b's 28,941, which predates rungs 2
+and 3 - and those grew the region table from ten entries to thirteen, added
+four registers and the shadow duplicate, all of them live at `GS = 0` as well.
+The last bitstream's own `utilization.rpt` was overwritten by this build, so
+the number it would have given is gone.  26,821 against 28,941 is therefore
+two rungs of drift and one parameter, not a measurement of either.  The
+structural check stands in its place and is the one that matters: the `GS = 0`
+netlist synthesises `cpu65c02`, `iline`, `dline` and `iscan` and no `gs_io` or
+`cpu65816`, with `GS` bound to `1'b0` at every level - which is what "the
+plain build is unchanged" actually asserts.
+
+**A FINDING FROM THAT BUILD, and it is not this rung's.**  The depth census
+reports 142 new deep-tail endpoints.  Thirty-three are the generate blocks'
+renames - `u_iline` is `g_fronts.u_iline` now and `u_cpu` is `g_65c02.u_cpu`,
+the same silicon under a new name - and those are expected and were predicted
+before the build ran.  **The other 109 are inside `card_link`**: 82 into
+`u_filter`, 8 into `u_merge`, 7 into `u_capture`, 8 into `u_ring`, 3 into
+`u_wb_arb`, 1 into `u_regfile`.  Nothing in this rung can reach them: every
+`GS` term added here is `GS && x`, `!GS && x` or `GS ? a : b` with `GS` a
+literal, which folds during ELABORATION, before synthesis sees it.  `build/depth_baseline.txt` was last written at
+fw `8bdc601`, which is BEFORE rung 1b rewrote the merge queue, the filter and
+the capture for the 64-bit record; rung 1b's build gate reported timing and
+utilisation and did not re-save the baseline.  So the reading is that the
+baseline went stale two rungs ago and this build is the first to say so.
+THAT IS AN ARGUMENT AND NOT A MEASUREMENT, so it is settled by building the
+unmodified branch head and diffing the two censuses rather than by re-saving
+the baseline over the question.
+
+**THE FIRST IIgs BITSTREAM (2026-09-09, `build/results/master_top_gs.bit`).**
+`build/run_build.sh first_light --gs`: **TIMING MET, wns +0.045, whs +0.060,
+0 failing endpoints of 52,100.**  20,953 LUTs (33% of the Pt), 13,054 flops,
+**94 of 135 block RAM tiles** and 2 DSPs.  Synthesis: 0 errors, 0 critical
+warnings.  The netlist is the design: `cpu65816`, `gs_io`, `gs_adb`,
+`gs_clock`, `gs_intc`, `gs_iwm` synthesised; `cpu65c02`, `iline`, `dline` and
+`iscan` at ZERO instances; all four memory-init files - the 65816's three
+microcode ROMs and the ADB keymap - read at elaboration.  Block RAM is the
+number to watch: 41 tiles free, and rung 7's DOC wants 16 of them.
+
+Route was not easy and the log says so: the first pass ended at WNS -0.111 and
+the incremental placement pass brought it back to +0.045.  A build that has to
+be rescued is one to watch rather than one to celebrate, so the first
+long-chain census is recorded here even though there is nothing yet to compare
+it against - **max depth 22, 1,559 paths at >= 10 levels, 134 at >= 14**.
+
+`build/wns.sh` learned two things from grading it.  It names
+`master_top_gs.bit` for a IIgs log instead of quoting the IIe bitstream's name
+and mtime - the same stale-results confusion `build/build.sh` takes such care
+over.  And it does NOT diff a IIgs census against `build/depth_baseline.txt`:
+that baseline is the IIe's, and a design with a different core, no fronts and a
+chipset the IIe never had would show its every difference as a regression.
+The census is printed and nothing is called new until the IIgs has a baseline
+of its own, which it gets when the design settles rather than now.
+
+## Rung 4b: first light, and what it found (2026-09-09)
+
+The bitstream loads, the link comes up with the GS stamp, the card reports
+itself a IIgs (CPU_SOURCE bit 17), the host ships ROM 3 as 1024 physical pages
+and says so, and **the 65816 comes out of reset and executes 2,530,109
+instructions off the card's memory path**.  Then it leaves it.  The machine
+does not reach a screen.
+
+ONE REAL DEFECT AND TWO MISREADINGS, and the misreadings are written down
+because both were said out loud before they were checked.  The pattern in both
+was the same: a counter at zero was taken for a mechanism failing, when the
+mechanism was fine and the zero meant something narrower.
+
+**1. THE RUNAWAY.**  Two samples of `accel status` a minute apart:
+instruction fetches frozen at 2,530,109, RAM at 90,972 and writes at 158,667 -
+all three UNCHANGED - while bus ops went from 67.9M to 124.6M and keyboard
+polls from 9.26M to 17.0M.  A core that executes no new on-card fetch but
+keeps taking bus cycles is fetching its loop OVER THE BACKPLANE, from a page
+the map calls BUS class, and `CX 61` says next to nothing in `$Cxxx` is being
+served from the internal ROM.  The bus-to-keyboard ratio is about 7:1, which
+is the shape of a three-or-four-byte poll loop.  So the ROM got somewhere it
+should not have and is running whatever the physical IIe returns.
+
+**2. THE TRACE RECORDED NOTHING, and the reason is NOT the sparse filter.**
+`tools/pi.sh trace --seconds 3 --reset` wrote **0 words**.  The first reading
+of that was that the filter discards a IIgs's stream, and it is WRONG - said
+here because it was said out loud before it was checked.  The filter's keep
+rule is `!sparse || on_edge || in_io || !in_rw` (`bus_event_filter.sv:138`):
+`in_io` is the address's top nibble being `C`, which is bank-blind and so
+still true on a IIgs, and every write is kept regardless.  And the counters
+agree that the stream flowed: `skips=965,182` SKIP words standing for
+`skipped=3,436,731` cycles, `mgaps=0`, `mlost=0`, and a `peek` of `$0400` came
+back with real bytes rather than the `--` an unseen byte shows - which the
+mirror can only have learned from the stream.
+
+So the stream reaches the host.  What did not work is the TRACE ARMING: the
+recorder arms and waits for the next RES', and the machine was already running
+when it was asked, so the RES' it was waiting for is the one that never came.
+That is a procedure question, not a gateware one, and the next attempt arms
+the trace BEFORE the machine is started rather than after.
+
+The blank `$E0` text screen therefore still stands as unexplained, and is not
+excused by a blind mirror.
+
+**3. THE CARD CALLS THE IIgs's MESSAGES UNKNOWN, and that is a lie rather
+than a loss.**  `card: unknown message type 0x30 (len 1) skipped ... is the
+bitstream older than this host?`, `unk=36`.  The first reading was that the
+message is dropped and the clock never fed - WRONG, and recorded as wrong for
+the same reason as the one above.  `ft601_msg_rx.sv` fires `msg_valid` and
+delivers the payload REGARDLESS of `hdr_known`; `unknown_valid` is only a
+notice.  So GS_TIME lands, and so have GS_BRAM and ADB_KEY all along - which
+is why rung 3e's battery RAM worked on the bench with the same module.
+
+What was actually wrong is the whitelist, and all THREE of the IIgs's types
+were missing from it - `$2E` and `$2F` since rung 3.  The notice they printed
+is exactly backwards ("the gateware does not consume" a type it does consume,
+"is the bitstream older than this host" when it is newer), and a stream of
+them buries the notices that mean something.  Fixed in rung 4b.
+
+**WHAT THE BENCH HAS THAT THE MACHINE DOES NOT: A BACKPLANE THAT SAYS $00.**
+`sim/boot_gs_tb.sv:186` is `data_pin = data_oe ? data_drive : FLOAT_BYTE`,
+and FLOAT_BYTE is `8'h00`.  Every `$C0xx` address `gs_io` does not claim, and
+every slot page, reads back ZERO on the bench and reads back WHATEVER THE REAL
+IIe DRIVES on hardware.  That is not a wiring mistake, it is the largest real
+difference between the machine that boots ProDOS in simulation and the machine
+that ran away on the board, and the candidates in order of how cheaply each
+can be tested:
+
+- **`$C061`-`$C063`, the Apple keys.**  The GS ROM reads them at startup to
+  decide whether Option or Command is held - which is the door to the self
+  test and the Control Panel.  `gs_io` does not claim them, so on hardware
+  they are the physical IIe's GAME PORT, and a game port with nothing plugged
+  into it FLOATS.  A floating input that reads as pressed sends the ROM down a
+  path the bench has never taken.  This is the decision the plan recorded
+  ("Open/Closed Apple from the real game-port buttons") meeting an input that
+  is only defined when something is plugged in.
+- **`$C050`-`$C05F`, the video switches.**  The map snoops the op stream so
+  the EFFECT happens either way, but the byte a READ returns is the IIe's
+  floating bus rather than the IIgs's.
+- **The slot pages.**  `$C02D` decides which are the internal ROM's and which
+  the backplane's; on the bench the backplane's are zeros, on hardware they
+  are whatever cards are in the machine.
+- **`$C030`.**  Unclaimed, so a real cycle to the motherboard's speaker.
+
+None of these is confirmed.  The instrument that confirms one is a bus trace
+compared against the bench's, and the next hardware session arms the recorder
+BEFORE starting the machine rather than after (see above).
+
+**AND A DESIGN QUESTION THE HARDWARE ASKED.**  The user reports HORRIBLE NOISE
+FROM THE SPEAKER while the machine runs away.  That is not a side issue, it is
+the design working as written: every `$C0xx` address `gs_io` does not claim
+rides a REAL CYCLE TO THE MOTHERBOARD, and `$C030` is the IIe's speaker.  A
+65816 looping at a megahertz through garbage that lands anywhere in `$C03x`
+toggles the physical speaker on every pass.  Whether or not the runaway is
+fixed, `$C030` reaching the motherboard at all is probably wrong - the IIgs's
+speaker is the card's and the host's (rung 7), and a runaway core driving the
+real one is a bad failure mode to have designed in.
+
+**WHAT THIS RUNG DOES NOT HAVE, and should be read as a risk.**  No bench
+instantiates `master_top` - not on the IIe either.  Every bench in sim/ builds
+the machine itself "as master_top wires it", so the top level's own wiring has
+never been simulated on either machine; on the IIe that gap has been closed by
+years of hardware, and on the IIgs it has not been closed at all.  The first
+GS bitstream is therefore the first time this wiring runs anywhere, and the
+capture path is the instrument for it: `apple_bus_read` is instantiated in the
+GS build exactly as in the IIe's, so a driven cycle can be CHECKED against
+`sim/boot_gs_tb.sv`'s trace rather than inferred.
+
+## Rung 4b, part 2: the fixes first light bought (2026-09-09)
+
+**THE MIRROR WAS NEVER TOLD WHICH MACHINE IT WAS, and that was the blank
+screen.**  `AppleMemory::set_machine()` exists, `classify_gs` exists, the
+SHADOW duplicate exists - and NOTHING IN THE HOST EVER CALLED set_machine, so
+`machine_` sat at its `IIe` default and every op was classified by the IIe's
+map.  Bank $00 filled correctly, `$E0` and `$E1` were never written at all,
+and the display - which reads `$E0` on a IIgs - drew a screen of `$00`s, which
+is a screen of `@`.  One line in `Pipeline::configure`, host only, no
+bitstream.  Confirmed on the machine: the text page went from `@` to spaces
+the moment it landed.
+
+This is the shape of the whole rung's mistakes: a piece that was BUILT and
+TESTED (`gs_memory_test` sweeps `classify_gs` against a second model and
+passes) but never WIRED.  The oracles all passed because they call
+`classify_gs` directly; only the live path went through the selector.
+
+**$C03x MUST NOT REACH THE BACKPLANE, and the user heard why.**  Two separate
+faults with one symptom - bursts of noise on a IIgs boot:
+
+- `rtl/speaker.sv` decoded `$C030-$C03F` as the speaker.  That is CORRECT for
+  a IIe, whose decode is partial in real hardware.  On a IIgs those are
+  separate registers and `$C03C-$C03F` is the SOUND GLU - and the capture
+  caught the ROM writing `$C03D` **65,465 times** clearing the DOC's 64 KB of
+  sound RAM at startup.  Sixty-five thousand speaker toggles.  Now
+  parameterised on `GS`: the IIgs decodes `$C030` alone.
+- `gs_io` did not claim `$C030`, so it rode a REAL CYCLE to the motherboard -
+  and the machine this card lives in decodes `$C030-$C03F` for its own
+  speaker, partially, as real hardware does.  Every other address in the range
+  was already claimed; claiming this one closes it, and nothing in `$C03x` is
+  ever presented to the bus again.  The card's speaker model still sees it,
+  because it watches the fast event and not the backplane.  The claim does not
+  move the reference: `$C030` reads back `$00`, which is what the bench's stub
+  backplane returned for it, and `boot_gs` is still AT FLOOR at 67,398.
+
+**THE CARD CALLED ITS OWN MESSAGES UNKNOWN.**  All three IIgs types were
+missing from `ft601_msg_rx`'s whitelist - `$2E` and `$2F` since rung 3.
+Nothing was lost (an unknown type is still decoded and delivered) but every
+one printed "the gateware does not consume" about a type it does consume, and
+a stream of them buries the notices that mean something.
+
+**THE `$C036` GOVERNOR**, which the plan listed as a milestone-1 row and which
+had never been built: the speed bit clear now gives exactly 1.0 ops per bus
+cycle.  A program that cleared it has timed its loops for a 1 MHz machine.
+
+**AND A LEAD ON THE BLANK SCREEN, from the user.**  The IIgs's video is
+chosen by registers a IIe does not have, and `shr_active()` is
+`gs_video() && (newvideo & $C0) == $C0` - with `gs_video()` now always true on
+a IIgs, `$C029` alone decides whether the host renders Super Hi-Res from `$E1`
+or a legacy mode from `$E0`.  **The one image that works is the one that
+forces VidHD/SHR**; the ones that are blank are legacy.  That is the signature
+of the host being stuck in SHR while the machine draws hi-res.
+
+The reset path itself is NOT the fault, which was checked before the lead was
+believed: both `AppleVideo::reset_switches` and `AppleMemory::reset_switches`
+assign `sw_ = Switches{}` on a detected RES', clearing `newvideo`, `shadow`
+and `sltrom`; the fast event carries the RES' level in bit 17
+(`event_merge.sv:111`) and the filter keeps every cycle where it changes, so a
+reset reaches the host even on a machine that is 99.6% fast ops.  What is not
+yet known is what `$C029` actually holds when the screen is blank.
+
+So the status line now says: `gs=`, `newvideo=`, `shr=`, `shadow=`, `sltrom=`.
+"The screen is blank" then splits into "the machine drew nothing" and "the
+host is rendering the wrong thing" without another boot to find out which.
+
+## Rung 4b, part 3: the page-2 lead (2026-09-09)
+
+Nox boots and plays - DHGR and HGR both correct - but a screen that has been
+drawn once and left alone shows GARBAGE, while anything the program redraws
+comes good.  The user's observation is the one that named it: **"the tiles
+which are static are the ones which remain garbage"**.  That is not a
+rendering fault.  A renderer that picked the wrong page or the wrong mode
+would be wrong about the whole frame, every frame; content that heals when
+rewritten means THE HOST'S MIRROR HOLDS BYTES THE MACHINE NEVER WROTE.
+
+Everything else was ruled out first, by measurement:
+
+- **The `$E0`/`$E1` SHADOW is faithful** - bank $00 and bank $E0 are
+  byte-identical over TEXT1 (1024/1024), HGR1 (8192/8192) and HGR2
+  (8192/8192), with matching non-zero counts.  **THIS TEST WAS NOT SUFFICIENT
+  AND IS RECORDED AS SUCH**: it proves the duplicate copies faithfully, not
+  that the source is right.  A write the host never received is missing from
+  BOTH banks and they still agree perfectly.
+- **The switch models agree**: `msw=hsw=e30` (card and mirror), and the
+  display's own word `vsw=8c` - hires, page2, page2_displayed - agrees with
+  them.  `vsw` was added for this and it earned its keep by killing the
+  hypothesis it was built to test: the display DOES follow the page flip.
+- **SHR is not involved**: `shr=0`, `newvideo=01` throughout.
+- **The program double-buffers**: the two hires pages hold different pictures
+  (4100 of 8192 bytes in common), which is why the static right-hand menu
+  panel is pixel-identical between a good frame and a garbage one and only the
+  animated map differs.
+
+**THE LEAD.**  `fbpeek` compares the CARD's side copy of the display pages
+against the host's mirror, and the split is sharp:
+
+    $2000 (HGR page 1):   0 of 256 differ
+    $4000 (HGR page 2): 102 of 256 differ
+
+with the mirror holding bytes where the card holds zeros ($4000: card `00`,
+mirror `40`).  Two pages the host treats identically, and only one is right.
+
+**CAVEAT, stated rather than buried**: the card's side copy is the IIe
+floating-bus simulator's (`rtl/fb_sim.sv`), so how faithfully it tracks page 2
+at `GS = 1` is itself unverified.  The 0-vs-102 split is a strong signal, not
+a proof, and the next step is to confirm it against something that is not
+fb_sim - the `gs_mirror_test` replay is the instrument that already found
+three host bugs of exactly this kind at rung 3e.
+
+**WHERE TO LOOK FIRST.**  The capture shows `$C004`/`$C005` - RAMWRT off/on -
+written **80,541 and 24,691 times** in seven seconds: the program toggles
+auxiliary memory around every write burst.  The aux halves of the two pages
+are lopsided in the mirror (`$E1` HGR1 4,207 non-zero, HGR2 2,718), and DHGR
+interleaves main and aux, so a page whose aux half is half-populated renders
+as exactly the smear seen.  A host whose RAMWRT state is momentarily out of
+step with the card's puts a write on the wrong side.  Ordering between the
+FAST path and the BUS path is the thing to check: at `GS = 1` the machine is
+98.7% fast ops while `$C004`/`$C005` ride the bus, so a switch change and the
+writes it governs travel by different routes.
+
+NOT the accelerator: the flashing persists with the governor holding the
+machine at 1x (`accel ratio=1`, measured 0.96x, "held by the governor" - which
+is also the first confirmation that the `$C036` governor works).
+## Rung 4b, part 4: two holes found by reading, not by testing (2026-09-09)
+
+The user stopped the live testing and named the invariant instead: **every
+write, every soft switch, and - in a full capture - every read, must go out
+over the capture, perfectly serialized.**  Both of the following came from
+reading the capture path against that sentence.  NEITHER HAS BEEN RUN: the
+machine was unplugged before the tests could execute, so what follows is
+"compiles and is argued", not "passes".
+
+**1. FULL CAPTURE WAS NOT FULL** (`rtl/event_merge.sv`).  The two halves of
+the same stream disagreed about what "full" means:
+
+    bus_event_filter:  keep      = !sparse || on_edge || in_io || !in_rw
+    event_merge (was): fast_keep = ... || (!fast_quiet && (!sparse || ...))
+
+On the bus side `!sparse` is a TOP-LEVEL term, so a full capture keeps every
+cycle.  On the fast side it sat INSIDE the `!fast_quiet` conjunction, so an op
+apple_mmu marked quiet was dropped even when the host had asked for
+everything.  The lesser problem is that a full capture which silently omits
+ops is not one.  The greater is what "quiet" means: `q_swi_quiet` is the
+CARD'S OPINION that the op changes no switch (`qi_c05x && qi_same5`, or a
+`$C00x` write with `qi_same0`), and that is only safe while the card's switch
+state and the host's ALREADY AGREE.  Once they have diverged, suppressing the
+op suppresses the very event that would have corrected the host - so a
+divergence STICKS instead of healing at the next touch.  `!sparse` is now a
+top-level term on both sides.
+
+**2. THE DISPLAY HAD NO STATEREG, and this is very likely the flashing**
+(`src/apple_video.cpp`).  `$C068` moves SEVEN switches with one write, three
+of which are AppleVideo's: PAGE2, RAMRD, RAMWRT.  `AppleMemory` has the case
+and follows it correctly.  **`AppleVideo` had no case for `$C068` at all** -
+and `AppleVideo` is the object the DISPLAY draws from: `page2_displayed()`
+picks the page, `ramrd`/`ramwrt` pick the bank a write belongs to.
+
+So a IIgs that moves the displayed page through STATEREG rather than
+`$C054`/`$C055` moved it in the memory mirror and NOT in the display, and the
+display went on drawing the other page until something touched `$C054`/`$C055`
+directly.  On screen: static content stale, redrawn content correct - which is
+exactly how the user described it ("the tiles which are static are the ones
+which remain garbage"), and why `msw`/`hsw` could agree perfectly while the
+picture was wrong.  `vsw` was added to see that difference and is what made
+the split visible.
+
+**THE USER'S POINT ABOUT INTERRUPTS is why it was so pervasive**: the IIgs
+firmware's interrupt handler saves and restores machine state THROUGH
+STATEREG, because it is one read and one write instead of a dozen strobes.
+`$C068` is therefore written many times a second on any machine taking
+interrupts, and every one of those writes was invisible to the display.  The
+display's PAGE2 was not merely stale after an explicit flip; it was being
+left behind continuously.
+
+It is a IIgs-only case and gated as one: `gs_video()` would be too generous,
+because a VidHD in a IIe takes the video registers but does not give the
+machine a state register.  `tests/video_test.cpp` gains
+`test_statereg_moves_the_displayed_page` - the display follows PAGE2 both
+ways, RAMRD/RAMWRT carry, a IIe ignores `$C068` even with a VidHD, and a READ
+of it moves nothing.
+
+**WHAT THE EARLIER TESTING COULD NOT HAVE FOUND, and why.**  The mirror replay
+passes on both a ProDOS boot (1,817,727 ops, 481 pages, 0 bytes) and a Nox
+boot (8,326,642 ops, 510 pages, 0 bytes, and 39 pages written in bank $01 so
+the auxiliary path IS exercised) - because the replay checks `AppleMemory`,
+which was right.  The bug was in `AppleVideo`, which no oracle covers.  That
+is the same shape as the `set_machine` bug earlier in this rung: a piece that
+is built and swept, and a live path that never reaches it.
+
+## Rung 4b, part 5: the bank never reached the host (2026-09-09)
+
+The user's question was the right one - "how are some events not getting
+forwarded, or getting forwarded with bad data?" - and the answer is the
+second.  `rtl/event_merge.sv`, building a fast op's record:
+
+    wire [63:0] fast_word = {fast_data, CLS_FAST, 4'd0, 16'd0,
+                             T_FAST, 8'd0, vbl_level, ..., fast_addr};
+                                     ^^^^^
+Word 0's `[27:20]` is **the 65816's bank byte** (docs/PROTOCOL.md, "The event
+record").  It was a hardwired `8'd0`, and `event_merge` had no bank input at
+all.  So **every fast op reached the host labelled bank $00** - and at
+`GS = 1` that is 98.7% of everything the machine does.
+
+The whole chain existed except its last link.  `accel_seq` computes the bank
+and drives `fev_bank`; `master_top` declares `fev_bank` and takes it from the
+dispatcher; and then it goes nowhere - `card_link` had no `fast_bank` port to
+pass it through.  master_top's own comment said so in as many words and was
+never revisited: *"NOTHING TAKES IT ON THIS BUILD, and that is right: the v6
+record has the field but card_link's fast port is sixteen bits and a IIe's
+bank is always zero, so the merge hardwires it."*  True at rung 1b, which
+built the record on the IIe; wrong from rung 3a, which put a 65816 behind it.
+
+**WHY NO ORACLE COULD SEE IT.**  `tools/gs_mirror_test.sh` replays the
+BENCH's op stream, and `sim/boot_gs_tb.sv --mirror` writes those records
+DIRECTLY in the host's shape - it never passes through `event_merge`.  So the
+replay's banks were right and the hardware's were zero, and the replay passed
+on both a ProDOS boot and a Nox boot (8,326,642 ops, 510 pages, 0 bytes) while
+the machine on the bench drew a corrupted screen.  The oracle bypassed the
+faulty code.  That is the third time this rung that a piece was built, swept
+and not WIRED (`set_machine`, `AppleVideo`'s STATEREG, this), and the pattern
+is worth naming: every one was found by looking at the live path, and none by
+a test.
+
+**HOW IT REACHES THE SCREEN.**  A write the machine makes in bank $E0, $E1 or
+$01 arrives as a write to bank $00 at the same offset.  The host puts the byte
+in bank $00 - where it does not belong - and then, if that offset is a display
+page, its own SHADOW derivation copies it into $E0 as well.  So a byte the
+machine wrote somewhere else appears in the picture, stays there because
+nothing rewrites it, and the machine itself is unaffected because the CARD
+used the real bank.  Machine fine, display corrupt, damage permanent until
+overwritten: which is what was reported.
+
+Fixed: `fast_bank` added to `event_merge` and `card_link`, connected in
+`master_top` from `fev_bank`, tied to zero in `snoop_top` and in the benches
+that drive the merge directly.  At `GS = 0` it is a constant zero and the IIe
+build is unmoved.
+
+**CONFIRMED ON HARDWARE 2026-09-09** (fw stamp 14:53:38, TIMING MET wns
++0.193 whs +0.031, 0 of 52,319 endpoints): with the bank on the record, **Nox
+Archaist's party menu draws CLEANLY** - the map, the ship, the party names,
+the health bars and the prompts, frame after frame, with only the animated
+water tiles moving between them.  It is the same screen that had been
+alternating between correct and garbage all afternoon.  The machine was never
+wrong; only the picture was.
+
+## What is NOT working, as of the end of rung 4b
+
+Said plainly, because the first write-up of this rung claimed more than it
+had - and then the bank fix (part 5) closed both of the things that were
+wrong.  **Nox Archaist boots, plays, and draws its menus cleanly.  Total
+Replay v6.1 boots to its title screen** - 519 games, the artwork correct,
+waiting for a key - where an hour earlier it "locked up quickly".  Neither
+needed a fix of its own; both were the same missing bank byte.  The `In Use/` fence and the host's own log
+confirm the image mounted is the one named (`unit 1: Total Replay v6.1, 65535
+blocks`), so the failure is the machine's and not the disk's.
+
+Also open:
+
+- A PHYSICAL Ctrl-Reset does not engage the boot hold, though a programmatic
+  one does - both confirmed on the machine, no explanation yet.
+- After a swhost restart WITHOUT a fresh bitstream, the card answers no
+  register at all - `ring`, `card`, `accel` and the memory readback all come
+  back "unknown", and the `ddr=0` the status line shows is a CONSEQUENCE of
+  that silence and not a calibration failure.  It cannot be one: `ddr3_rst_n`
+  is synchronised from the BOARD's reset pin, not from card_link's `rst`, so
+  a host `cmd_reset` never touches the DDR3 controller (card_link.sv:533).
+  This is the link failing to resync, and the workaround for now is a fresh
+  bitstream before every run.  Not known whether the IIe build is the same;
+  the first write-up of this called it a DDR3 fault, which it is not.
+- The `GS = 0` build is 1,109 flops and 2,362 LUTs SMALLER than the
+  unmodified branch head built the same day, with identical module lists (87
+  each) and `master_top.sv` the only differing source.  Parked at the user's
+  direction: if something is missing it will show in testing.
 
 ## Verification
 

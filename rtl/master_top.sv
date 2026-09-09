@@ -81,7 +81,14 @@ module master_top #(
     // if the block RAM is ever wanted elsewhere; both are proven by
     // sim/run_page_cache_tb.sh's sweep.
     parameter integer MEM_SETS = 128,
-    parameter integer MEM_WAYS = 8
+    parameter integer MEM_WAYS = 8,
+    // THE MACHINE (docs/GS.md rung 4).  0 = the Apple IIe this board has
+    // always been: a 65C02, the two fronts, the IIe's own $Cxxx apparatus.
+    // 1 = the Apple IIgs: a 65816 on the dispatcher, rtl/gs_io.sv answering
+    // the chipset's registers, the map and the ROM in the 24-bit space.
+    // build/build.sh --gs sets it; the plain build must stay bit-identical
+    // at GS = 0, which the IIe battery is the parity check on.
+    parameter bit GS = 1'b0
 ) (
     input  wire        clk_pin,
     input  wire        rst_n,
@@ -215,9 +222,21 @@ module master_top #(
     wire        mem_sub_en, fb_sub_en;
     wire [7:0]  mem_sub_data, fb_sub_data;
     wire        mem_sub_bus = mem_sub_en && bus_owns;
-    wire        sub_en   = kbd_sub_en | pb_sub_en | mem_sub_bus | fb_sub_en;
-    wire [7:0]  sub_data = kbd_sub_en ? kbd_sub_data :
-                           pb_sub_en  ? pb_sub_data  :
+    // THREE OF THE FOUR ARE THE IIe's (docs/GS.md rung 4).  The keyboard
+    // latch, the buttons and the floating-bus simulator all answer for
+    // $C0xx addresses a IIgs decodes differently - $C000 and $C010 are the
+    // ADB micro's, $C019 the VGC's - and rtl/gs_io.sv answers those as an
+    // INTERNALIZED op, before a bus cycle is ever presented.  A substitution
+    // on top of that would be a second authority for the same byte, so the
+    // three stand down at GS = 1 and only the memory image's answer remains.
+    // The modules stay built and their host-side levers still work; nothing
+    // reaches them, which the host holds up by not arming them.
+    wire        kbd_sub_gs = kbd_sub_en && !GS;
+    wire        pb_sub_gs  = pb_sub_en  && !GS;
+    wire        fb_sub_gs  = fb_sub_en  && !GS;
+    wire        sub_en   = kbd_sub_gs | pb_sub_gs | mem_sub_bus | fb_sub_gs;
+    wire [7:0]  sub_data = kbd_sub_gs ? kbd_sub_data :
+                           pb_sub_gs  ? pb_sub_data  :
                            mem_sub_bus ? mem_sub_data : fb_sub_data;
     // The memory image's seam through card_link (rtl/page_client.sv is there,
     // beside the DDR3; the MMU shadow, the ROM and the page cache are here,
@@ -341,7 +360,8 @@ module master_top #(
         .MEM_PAGES_LOG2 ($clog2(MEM_SETS * MEM_WAYS)),
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
-        .CAN_MASTER (1'b1)
+        .CAN_MASTER (1'b1),
+        .GS (GS)
     ) u_card (
         .clk_pin (clk_pin), .rst_n (rst_n), .led (led),
         .usb_rx (usb_rx), .usb_tx (usb_tx),
@@ -360,6 +380,11 @@ module master_top #(
         // priority here is form, not arbitration.
         .fast_valid (fev_valid || tev_valid || dev_valid),
         .fast_addr (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
+        // THE BANK, which had no wire to travel on until rung 4b (docs/GS.md).
+        // Only the dispatcher's own event carries one - the two fronts are the
+        // IIe's and are not built at GS = 1 - so theirs is bank zero, which is
+        // what a IIe means.
+        .fast_bank (fev_valid ? fev_bank : 8'd0),
         .fast_rw (fev_valid ? fev_rw : tev_valid ? 1'b1 : dev_rw),
         .fast_data (fev_valid ? fev_data : tev_valid ? tev_data : dev_data),
         .fast_sync (fev_valid ? fev_sync : tev_valid ? tev_sync : 1'b0),
@@ -426,7 +451,8 @@ module master_top #(
         .mem_flushes    (mem_flushes),
         .mem_declines   (mem_declines),
         .mem_rom_busy   (rom_busy),
-        .mem_rom_over   (rom_overruns), .mem_fifo_drops (mem_fifo_drops),
+        .mem_rom_over   (rom_overruns), .mem_shd_drops (mem_shd_drops),
+        .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
         .mem_served (mem_served), .mem_last (mem_last), .mem_diverted (mem_diverted),
         .mem_intc8rom (mem_intc8rom),
@@ -512,13 +538,21 @@ module master_top #(
     // Held in reset while the machine is, so it starts where the machine does.
     wire cpu_rst = apple_rst || !apple_res_sync;
 
+    // WHAT THE REST OF THE BOARD SEES.  Not the core's pins: the EFFECTIVE op
+    // it is presenting.  At GS = 0 the two are the same thing and every wire
+    // below is the 65C02's, unchanged.  At GS = 1 they are not - see the
+    // parking note in the 65816 arm - and everything downstream takes these.
     wire [15:0] cpu_addr;
-    // The 65C02 has no bank: the IIe's unified stream is bank zero, which is
-    // what a 24-bit map is asked when a IIe asks it (docs/GS.md rung 3).
-    wire [7:0]  cpu_bank = 8'd0;
+    // The core's bank.  A 65C02 has none: the IIe's unified stream is bank
+    // zero, which is what a 24-bit map is asked when a IIe asks it
+    // (docs/GS.md rung 3).
+    wire [7:0]  cpu_bank;
     wire        cpu_rw;
     wire [7:0]  cpu_dout, cpu_din, cpu_p_flags;
     wire        cpu_cyc_en, cpu_sync;
+    // The 65816's "this cycle touches nothing" (VDA and VPA both low), and
+    // zero on a 65C02, which has no such cycle.  The dispatcher skips it.
+    wire        cyc_internal;
 
     // The Mockingboard's IRQ takes the short route into the core, the same
     // route drv_sync takes out of it: a real card would pull the slot's IRQ'
@@ -527,6 +561,14 @@ module master_top #(
     // Physical cards still interrupt through the pin, via apple_irq_sync,
     // exactly as before.
     wire mb_irq;
+    // The IIgs chipset's one interrupt line (rtl/gs_intc.sv inside gs_io),
+    // zero on the IIe build.
+    wire gsio_irq;
+
+    generate if (!GS) begin : g_65c02
+
+    assign cpu_bank     = 8'd0;
+    assign cyc_internal = 1'b0;
 
     cpu65c02 u_cpu (
         .clk    (apple_clk),
@@ -553,6 +595,65 @@ module master_top #(
         .sync   (cpu_sync),
         .halted ()                  // STP is not on the base part; see the RTL
     );
+
+    end else begin : g_65816
+
+    // ---- the 65816 (docs/GS.md rung 4) --------------------------------------
+    // The core rides the dispatcher alone: no fronts on this build, so the
+    // split interface the 65C02 offers here has no consumer and the part is
+    // wired as sim/boot_gs_tb.sv wires it - one din, one address, and the
+    // valid-data / valid-program lines that say what a cycle IS.
+    wire [23:0] core_a24;
+    wire        core_rw, core_vda, core_vpa;
+
+    cpu65816 u_cpu (
+        .clk    (apple_clk),
+        .rst    (cpu_rst),
+        .cyc_en (cpu_cyc_en),
+        .addr   (core_a24),
+        .rw     (core_rw),
+        .dout   (cpu_dout),
+        .din    (cpu_din),
+        // The chipset's line, the backplane's pin, and the on-card cards'.
+        // A physical slot card still interrupts through apple_irq_sync,
+        // which is what a real GS gives it.
+        .irq_n  (apple_irq_sync && !gsio_irq && !mb_irq && !mouse_irq),
+        .nmi_n  (1'b1),
+        .sync   (cpu_sync),
+        .vda    (core_vda),
+        .vpa    (core_vpa),
+        .vpb    (),
+        .emu    (),
+        .halted ()
+    );
+
+    // AN INTERNAL CYCLE IS NOT AN ACCESS, and this is where the board says
+    // so - the same wiring, for the same reason, as the bench that found it
+    // (sim/boot_gs_tb.sv, docs/GS.md rung 3e).  VDA AND VPA BOTH LOW is the
+    // part's own encoding for a cycle that touches nothing, and the address
+    // left on the pins is whatever the last address step put there - very
+    // often the last operand's address plus one.  Handed downstream as it
+    // comes off the pins it is a real access, and it cost the bench both
+    // halves of a boot: as a WRITE, because the part drives R/W low through
+    // the internal cycle of a read-modify-write, and as a READ, because
+    // $C0xx reads are strobes.  So it is PARKED at $000000, which is RAM on
+    // every Apple II, and read, so it disturbs nothing wherever it lands.
+    assign cyc_internal = !core_vda && !core_vpa;
+    assign cpu_rw       = core_rw | cyc_internal;
+    assign cpu_addr     = cyc_internal ? 16'h0000 : core_a24[15:0];
+    assign cpu_bank     = cyc_internal ?  8'h00   : core_a24[23:16];
+    // The census's "this cycle is an instruction fetch" is the 65816's VPA.
+    assign cpu_cyc_is_i = core_vpa;
+
+    // The fronts are off on this build (docs/GS.md rung 6 turns them on), so
+    // what they would have consumed has no producer.
+    assign cpu_p_flags  = 8'd0;
+    assign cpu_pc_addr  = 16'd0;
+    assign cpu_d_pred   = 16'd0;
+    assign cpu_d_pred_v = 1'b0;
+    assign cpu_d_pred_rw = 1'b1;
+
+    end endgenerate
 
     // ---- driving ------------------------------------------------------------
     wire [15:0] addr_drive;
@@ -591,7 +692,13 @@ module master_top #(
     wire        mmu_q_divert, op_divert;
     wire [15:0] nxt_addr;
 
-    wire        ovr_en    = boot_ovr_en | hd_ovr_en | vbl_ovr_en;
+    // THE VBL LOCK TAKES NO CYCLE ON THE IIgs.  It finds the IIe's beam by
+    // writing a picture into the motherboard's text page and reading the
+    // floating bus back; a IIgs's video is on the card, so there is nothing
+    // to find and the cycles would be spent on the wrong machine's memory.
+    // vbeam free-runs instead (`virt` above).
+    wire        vbl_ovr_gs = vbl_ovr_en && !GS;
+    wire        ovr_en    = boot_ovr_en | hd_ovr_en | vbl_ovr_gs;
     // The DRIVER's override enable waits out an on-card slot op's window
     // (accel_seq sl_win, declared below): the peripherals see the unified
     // op for that window and nothing of the driver's, so no override may
@@ -600,8 +707,8 @@ module master_top #(
     // the ungated level and holds as soon as it sees it.
     wire        sl_win;
     wire        drv_ovr_en = ovr_en && !sl_win;
-    wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_en ? vbl_ovr_addr  : boot_ovr_addr;
-    wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_en ? vbl_ovr_rw    : 1'b1;
+    wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_gs ? vbl_ovr_addr  : boot_ovr_addr;
+    wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_gs ? vbl_ovr_rw    : 1'b1;
     wire [7:0]  ovr_wdata = hd_ovr_en ? hd_ovr_wdata : vbl_ovr_wdata;
     wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim | vidhd_rd_claim | mouse_rd_claim | u2_rd_claim | prn_rd_claim;
     wire [7:0]  slot_rd_data  = hd_rd_claim    ? hd_rd_data    :
@@ -619,7 +726,14 @@ module master_top #(
     // a sample into kbd_inject's latch; the sequencer serves the program's
     // $C00x reads from it (accel_seq swi_*), and int_rd applies the read's
     // bookkeeping once, at the retirement.
-    wire sw_int = accel_on && (accel_mode == 2'd2) && mem_serve &&
+    // OFF ON THE IIgs BUILD (docs/GS.md rung 4).  The IIe's internalization is
+    // its own $Cxxx apparatus - the keyboard latch, the status shadow, the
+    // floating-bus simulator, the on-card slots - and a IIgs has none of it:
+    // rtl/gs_io.sv answers the chipset's registers instead, and every other
+    // $C0xx address is BUS class and rides a real cycle, which is what "Your
+    // Card" means on this machine.  With it low, q_slot never fires and the
+    // peripherals see the driver's op stream, as they did before docs/CXXX.md.
+    wire sw_int = !GS && accel_on && (accel_mode == 2'd2) && mem_serve &&
                   !accel_swint_dis && !boot_held;
     // ...and the game port in the same dummies (rtl/game_port.sv; docs/
     // CXXX.md "The game port"): the loop that visits the buttons and the
@@ -633,14 +747,33 @@ module master_top #(
     // or the floating-bus simulator ($C05x, $C08x); a write wants no byte,
     // its whole effect is the shadow's at the synthetic commit.
     wire        swi_commit, kbd_int_ok, fb_int_ok, fb_vbl_bar;
-    wire        q_swi, q_swi_quiet;
+    wire        q_swi_mmu, q_swi_quiet;
+    // The four registers apple_mmu owns at GS = 1 and gs_io shows, the VGC's
+    // border colour, the battery RAM's landed flag, and the host's seconds.
+    wire [7:0]  gs_shadow_w, gs_cyareg_w, gs_sltrom_w, gs_state_w;
+    wire [3:0]  gs_border;
+    wire        gs_bram_ok;
+    // What the clock believes before the host's first GS_TIME lands: seconds
+    // since 1904-01-01 for 2026-01-01 00:00:00.  The host sends the real
+    // seconds before RES' is released, as it sends the battery RAM, so this
+    // is only ever what a card with no host on it would show.
+    wire [31:0] gs_seed_time = 32'd3849940800;
     wire [7:0]  kbd_int_byte, mmu_swi_stat;
+    // THE CHIPSET'S FACE joins the dispatcher's internalized-op question
+    // (rtl/gs_io.sv, "the two faces of an op"): `claim` off the LIVE address
+    // the dispatcher is deciding on, `u_claim` off the REGISTERED op for the
+    // byte mux.  apple_mmu's own swi is off at GS = 1, so the two never both
+    // claim.  Both are zero at GS = 0 and the OR folds away.
+    wire        gsio_claim, gsio_u_claim;
+    wire [7:0]  gsio_byte;
+    wire        q_swi = q_swi_mmu || gsio_claim;
     wire [6:0]  kbd_int_low;
     // ...and the card's own slots (docs/CXXX.md, "The on-card slots"): a
     // slot op's byte is the peripheral's registered answer, keyed FIRST -
     // a slot ROM page's low nibble would otherwise read as the keyboard's.
     wire        q_slot, seq_slot_q, q_nsc;
-    wire [7:0]  swi_byte = seq_slot_q             ? slot_rd_data
+    wire [7:0]  swi_byte = GS ? (gsio_u_claim ? gsio_byte : mmu_swi_stat)
+                         : seq_slot_q             ? slot_rd_data
                          : (u_addr[7:4] == 4'h0) ? kbd_int_byte
                          : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
                          : (u_addr[7:4] == 4'h6) ? game_int_byte
@@ -748,8 +881,11 @@ module master_top #(
     // clock (rtl/no_slot_clock.sv): one LUT on one bit, behind the clock's
     // registered verdict, whichever path served the rest of the byte.
     wire [7:0]  seq_din;
-    assign cpu_din = nsc_sub ? {seq_din[7:1], nsc_bit} : seq_din;
-    accel_seq u_seq (
+    // The No-Slot Clock's bit, and never the IIgs's: a IIgs has a clock of
+    // its own at $C033/$C034 (rtl/gs_clock.sv) and no reason to look for one
+    // hiding behind a slot ROM.
+    assign cpu_din = (nsc_sub && !GS) ? {seq_din[7:1], nsc_bit} : seq_din;
+    accel_seq #(.GS (GS)) u_seq (
         .clk           (apple_clk),
         .rst           (apple_rst),
         .cpu_rst       (cpu_rst),
@@ -764,7 +900,16 @@ module master_top #(
         .sl_win        (sl_win),
         .fast_tick     (seq_fast_tick),
         .fev_quiet     (fev_quiet),
-        .target        (accel_target),
+        // THE IIgs's OWN SPEED SWITCH (docs/GS.md; KEGS moremem.c CYAREG).
+        // $C036 bit 7 is the machine's high-speed bit and the ROM, the
+        // Control Panel and every disk routine drive it: CLEAR means the
+        // program believes it is on a 1 MHz Apple II and has timed its loops
+        // for one, so the governor must give it exactly one op per bus cycle
+        // (16'h0100 is 1.0 in the 8.8 the bucket counts in).  SET means fast,
+        // and fast is whatever the host asked for in ACCEL_CTRL.  Running a
+        // slow-mode program at the fast target is not "faster", it is wrong -
+        // the ROM's self-test measures things.
+        .target        (GS && !gs_cyareg_w[7] ? 16'h0100 : accel_target),
         .cnt_clr       (accel_cnt_clr),
         .mem_serve     (mem_serve),
         .mem_image_ready (mem_image_ready),
@@ -776,9 +921,10 @@ module master_top #(
         .cpu_dout      (cpu_dout),
         .cpu_sync      (cpu_sync),
         .cyc_is_i      (cpu_cyc_is_i),
-        // A 65C02 has no internal cycle - VDA/VPA are a 65816's - so this
-        // build never has one to skip.  rtl/accel_seq.sv, docs/GS.md rung 3e.
-        .cyc_int       (1'b0),
+        // A 65C02 has no internal cycle - VDA/VPA are a 65816's - so at
+        // GS = 0 this is a constant zero and folds away.  rtl/accel_seq.sv,
+        // docs/GS.md rung 3e.
+        .cyc_int       (cyc_internal),
         .cyc_en        (seq_cyc_en),
         .cpu_din       (seq_din),
         .turbo_en      (turbo_en),
@@ -841,6 +987,14 @@ module master_top #(
         .wait_clocks   (accel_wait),
         .retries       (accel_retries)
     );
+
+    // ---- the fronts ---------------------------------------------------------
+    // BOTH ARE THE IIe BUILD'S.  On the IIgs the core rides the dispatcher
+    // alone (docs/GS.md rung 6 widens them for the 24-bit space and measures
+    // it), so at GS = 1 the two are not built and every seam they drive is
+    // tied still below - which is also what makes room on the die for the
+    // 65816 and the chipset.
+    generate if (!GS) begin : g_fronts
 
     // ---- the instruction front ----------------------------------------------
     // Two lines of the program stream ahead of the sequencer: a fetch that
@@ -989,6 +1143,59 @@ module master_top #(
         .cnt_reval_revive (accel_drevive),
         .cnt_rev_serves   ()
     );
+
+    end else begin : g_nofronts
+
+    // Everything the two fronts drive, held still.  The core takes the
+    // dispatcher's cycle enable directly and the dispatcher's byte directly;
+    // no fetch is ever claimed, no write is ever posted from here, and the
+    // fast event port carries only the dispatcher's own (accel_seq fev_*).
+    assign iline_cyc_en = 1'b0;
+    assign i_din_w      = 8'd0;
+    assign turbo_claim  = 1'b0;
+    assign turbo_commit = 1'b0;
+    assign turbo_sync   = 1'b0;
+    assign turbo_tick   = 1'b0;
+    assign tev_valid    = 1'b0;
+    assign tev_addr     = 16'd0;
+    assign tev_data     = 8'd0;
+    assign tev_sync     = 1'b0;
+    assign p_addr_w     = 16'd0;
+    assign il_req       = 1'b0;
+    assign il_ppn_w     = 16'd0;
+    assign il_line_w    = 4'd0;
+    assign accel_idrop  = 32'd0;
+    assign accel_irevive = 32'd0;
+    assign ws_valid_w   = 1'b0;
+    assign ws_ppn_w     = 16'd0;
+    assign ws_off8_w    = 8'd0;
+
+    assign cpu_cyc_en   = seq_cyc_en;
+    assign d_din_w      = 8'd0;
+    assign turbo_wr     = 1'b0;
+    assign d_commit_w   = 1'b0;
+    assign d_claim_w    = 1'b0;
+    assign dline_tick   = 1'b0;
+    assign d_pending_w  = 1'b0;
+    assign dev_valid    = 1'b0;
+    assign dev_addr     = 16'd0;
+    assign dev_data     = 8'd0;
+    assign dev_rw       = 1'b1;
+    assign ev_fast_room_w = 1'b1;
+    assign dq_addr_w    = 16'd0;
+    assign dq_rw_w      = 1'b1;
+    assign dl_req_w     = 1'b0;
+    assign dl_ppn_w     = 16'd0;
+    assign dl_line_w    = 4'd0;
+    assign pw_valid_w   = 1'b0;
+    assign pw_ppn_w     = 16'd0;
+    assign pw_off_w     = 8'd0;
+    assign pw_data_w    = 8'd0;
+    assign accel_dline  = 32'd0;
+    assign accel_ddrop  = 32'd0;
+    assign accel_drevive = 32'd0;
+
+    end endgenerate
 
     // ---- the hold: the boot menu's door and the runtime menu's -------------
     // On the unified stream: a SYNC the core fetched from the card must count
@@ -1181,7 +1388,7 @@ module master_top #(
     wire        shd_take_w;
     wire [15:0] shd_ppn_w;
     wire [7:0]  shd_off_w;
-    apple_mmu u_mmu (
+    apple_mmu #(.GS (GS)) u_mmu (
         .clk        (apple_clk),
         .rst        (apple_rst),
         .res_sync   (apple_res_sync),
@@ -1202,6 +1409,7 @@ module master_top #(
         .cl_wr_image (cl_wr_image),
         .cl_posted  (cl_posted),
         .cl_wdata   (cl_wdata),
+        .shd_drops  (mem_shd_drops),
         .pw_valid   (pw_any_valid),
         .pw_ppn     (pw_any_ppn),
         .pw_off     (pw_any_off),
@@ -1215,7 +1423,8 @@ module master_top #(
         .sw_state   (mem_sw),
         .vid_sw     (vid_sw),
         .rw_bank    (mem_rw_bank),
-        .gs_shadow_o (), .gs_cyareg_o (), .gs_sltrom_o (), .gs_state_o (),
+        .gs_shadow_o (gs_shadow_w), .gs_cyareg_o (gs_cyareg_w),
+        .gs_sltrom_o (gs_sltrom_w), .gs_state_o (gs_state_w),
         // The driver's next address, in the physical space: the bank is the
         // core's, which is zero on this build and the 65816's on the GS
         // (docs/GS.md rung 3).  An override's cycle belongs to no bank.
@@ -1239,7 +1448,7 @@ module master_top #(
         .swi_prn_slot (printer_slot_active),
         .q_slot     (q_slot),
         .q_nsc      (q_nsc),
-        .q_swi      (q_swi),
+        .q_swi      (q_swi_mmu),
         .q_swi_quiet (q_swi_quiet),
         .swi_stat_byte (mmu_swi_stat),
         .p_addr     ({8'd0, p_addr_w}),
@@ -1264,10 +1473,78 @@ module master_top #(
         .rwb_p1     (rwb_p1_w)
     );
 
+    // ---- the IIgs chipset on $C0xx (docs/GS.md rung 3b, rung 4) -------------
+    // The registers a IIgs answers on the card instead of on the backplane:
+    // the ADB micro, the map's own four registers, the clock and its battery
+    // RAM, the VGC, the interrupt controller, and the IWM and SCC stubs.
+    // ONE INSTANCE, TWO CLAIMS - `claim` off the live address the dispatcher
+    // is deciding on, `u_claim` off the registered op for the byte mux
+    // (rtl/gs_io.sv, "the two faces of an op").  At GS = 0 it is not built
+    // and both claims are constant zero.
+    generate if (GS) begin : g_gsio
+
+    gs_io u_gsio (
+        .clk        (apple_clk),
+        .rst        (apple_rst),
+        .res_sync   (apple_res_sync),
+        // The same address the map is asked, for the same reason: an
+        // override's cycle belongs to no bank.
+        .q_addr     ({ovr_en ? 8'd0 : cpu_bank, nxt_addr}),
+        .q_rw       (cpu_rw),
+        .claim      (gsio_claim),
+        .u_bank     (u_bank),
+        .u_addr     (u_addr),
+        .u_rw       (u_rw),
+        .u_wdata    (u_wdata),
+        .u_commit   (swi_commit),
+        // The four registers the MAP owns and the chipset only shows.
+        .gs_shadow  (gs_shadow_w),
+        .gs_cyareg  (gs_cyareg_w),
+        .gs_sltrom  (gs_sltrom_w),
+        .gs_state   (gs_state_w),
+        // The status page's byte, from the map's switch shadow, and the
+        // beam's VBL level for $C019's top bit.
+        .stat_byte  (mmu_swi_stat),
+        .vbl        (vbl_level),
+        // THE CLOCK IS THE HOST'S FEED, as the No-Slot Clock's is: seconds
+        // since 1904, sent as GS_TIME and re-sent every second, because the
+        // card keeps no time of its own (docs/NSC.md, docs/GS.md).
+        .seed_time  (gs_seed_time),
+        .border     (gs_border),
+        // The battery RAM the host ships before RES' is released.
+        .msg_valid  (app_msg_valid),
+        .msg_type   (app_msg_type),
+        .msg_len    (app_msg_len),
+        .pay_data   (app_pay_data),
+        .pay_valid  (app_pay_valid),
+        .bram_ok    (gs_bram_ok),
+        // The frame origin, from the beam every consumer takes: the quarter-
+        // second and one-second interrupts count frames off it.
+        .frame_tick (beam_mark_bus || beam_mark_fast),
+        .u_claim    (gsio_u_claim),
+        .rd_byte    (gsio_byte),
+        .irq        (gsio_irq)
+    );
+
+    end else begin : g_no_gsio
+
+    assign gsio_claim   = 1'b0;
+    assign gsio_u_claim = 1'b0;
+    assign gsio_byte    = 8'd0;
+    assign gsio_irq     = 1'b0;
+    assign gs_border    = 4'd0;
+    assign gs_bram_ok   = 1'b0;
+
+    end endgenerate
+
     // The system ROM is physical bank $FF now, cached like any other memory,
     // so the host's MEM_ROM message is a producer of PHYSICAL WRITES rather
     // than the filler of a block RAM of its own (rtl/rom_loader.sv).
-    rom_loader u_rom (
+    // 16 KB of IIe ROM in 32 chunks at physical page $FFC0, or ROM 3's
+    // 256 KB in 512 chunks at bank $FC page $00 (docs/GS.md).  The host's
+    // chunk count follows the image's size, so one message loads either.
+    rom_loader #(.N_CHUNKS (GS ? 512 : 32),
+                 .ROM_PPN0 (GS ? 16'hFC00 : 16'hFFC0)) u_rom (
         .clk         (apple_clk),
         .rst         (apple_rst),
         .msg_valid   (app_msg_valid),
@@ -1296,6 +1573,9 @@ module master_top #(
     wire [7:0]  rl_pw_off, rl_pw_data;
     wire        rom_busy;
     wire [7:0]  rom_overruns;
+    // The shadow duplicate's drops (docs/GS.md rung 3e), read back in
+    // MEM_ROM's top byte; zero at GS = 0, where there are no duplicates.
+    wire [7:0]  mem_shd_drops;
     wire        pw_any_valid = pw_valid_w || rl_pw_valid;
     wire [15:0] pw_any_ppn   = pw_valid_w ? pw_ppn_w  : rl_pw_ppn;
     wire [7:0]  pw_any_off   = pw_valid_w ? pw_off_w  : rl_pw_off;
@@ -1381,16 +1661,21 @@ module master_top #(
     // mark.  Every core cycle has a word at the merge's door (the fronts
     // wait for room, the sequencer flags its quiet reads), so the door's
     // in-order counts carry the cycles the host does not see.
-    assign virt = accel_on && !boot_held;
+    // ALWAYS VIRTUAL ON THE IIgs (docs/GS.md rung 4).  The IIe's beam is
+    // found by watching the motherboard's scanner through the floating bus
+    // (rtl/vbl_lock.sv); a IIgs's video is the card's and the host's, and
+    // there is no scanner on the backplane to lock to, so the counter free-
+    // runs on the core's cycles from reset and vbeam is told it is locked.
+    assign virt = GS || (accel_on && !boot_held);
     vbeam u_beam (
         .clk            (apple_clk),
         .rst            (apple_rst),
         .virt           (virt),
-        .real_locked    (vbl_locked),
-        .real_v         (lock_scan_v),
-        .real_h         (lock_scan_h),
+        .real_locked    (GS ? 1'b1 : vbl_locked),
+        .real_v         (GS ? 9'd0 : lock_scan_v),
+        .real_h         (GS ? 7'd0 : lock_scan_h),
         .pal            (vbl_pal),
-        .notify         (vbl_notify),
+        .notify         (GS ? 1'b1 : vbl_notify),
         .real_mark      (vbl_mark),
         .real_mark_free (vbl_mark_free),
         .bus_tick       (bus_tick),
@@ -1594,7 +1879,7 @@ module master_top #(
     // ---- the sound (docs/AUDIO.md) ---------------------------------------------
     // The speaker flip-flop on the same two doors the host toggled on, the
     // sampler's box average at the play rate, the frames to the host.
-    speaker u_spk (
+    speaker #(.GS (GS)) u_spk (
         .clk        (apple_clk),
         .rst        (apple_rst),
         .res_sync   (apple_res_sync),

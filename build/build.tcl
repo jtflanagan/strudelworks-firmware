@@ -37,6 +37,12 @@ set diag      0
 set ft601     0
 set snoop     0
 set master    0
+# -gs is -master with the GS parameter set: one top level, one parameter, and
+# the plain build bit-identical at GS = 0 (docs/GS.md rung 4).  It gets its own
+# source list additions, its own work directory (build/build.sh) and its own
+# bitstream name, so a IIe bit and a IIgs bit can sit side by side in
+# build/results and neither can be mistaken for the other.
+set gs        0
 # YYYYMMDD and HHMMSS as two separate decimal integers. Two args rather than one
 # quoted pair because this reaches Vivado through cmd.exe, which would split the
 # space anyway. Supplied by build/build.sh so the stamp is when the BUILD
@@ -60,6 +66,8 @@ for {set i 0} {$i < $argc} {incr i} {
         --snoop { set snoop 1 }
         -master -
         --master { set master 1 }
+        -gs     -
+        --gs    { set master 1; set gs 1 }
         -stamp-date { incr i; set stamp_date [lindex $argv $i] }
         -stamp-time { incr i; set stamp_time [lindex $argv $i] }
         default { puts "WARNING: ignoring unknown argument [lindex $argv $i]" }
@@ -89,6 +97,11 @@ puts "=========================================================="
 # One place decides the top level, so the source list, the constraint list and
 # the bitstream name below cannot drift apart.
 set topname [expr {$master ? {master_top} : ($snoop ? {snoop_top} : ($ft601 ? {ft601_top} : ($diag ? {diag_top} : {au_top})))}]
+# What the bitstream is CALLED, which is the top's name except for the IIgs
+# build - same top, different machine, and the two must not overwrite each
+# other in build/results.
+set bitname [expr {$gs ? {master_top_gs} : $topname}]
+if {$gs} { puts " machine: Apple IIgs (GS=1)" }
 
 set uber [file join $root third_party UberDDR3]
 if {![file isdirectory [file join $uber rtl]]} {
@@ -207,6 +220,29 @@ if {$snoop || $master} {
             UCODE_FILE=[file join $root rtl cpu65c02_ucode.hex] \
         ] [current_fileset]
         add_files -norecurse [list [file join $root rtl cpu65c02_ucode.hex]]
+        if {$gs} {
+            # The IIgs: the soft 65816 and the chipset's register faces
+            # (docs/GS.md).  The 65C02 and the two fronts stay in the list
+            # above and are simply not instantiated at GS = 1, so one source
+            # list serves both machines.
+            add_files -norecurse [list \
+                [file join $root rtl cpu65816.sv] \
+                [file join $root rtl gs_io.sv] \
+                [file join $root rtl gs_adb.sv] \
+                [file join $root rtl gs_clock.sv] \
+                [file join $root rtl gs_intc.sv] \
+                [file join $root rtl gs_iwm.sv] \
+            ]
+            # Read at elaboration by $readmemh, and resolved by Vivado
+            # against the files in the fileset - the same arrangement the
+            # 65C02's microcode has had since the first master build.
+            add_files -norecurse [list \
+                [file join $root rtl cpu65816_ucode.hex] \
+                [file join $root rtl cpu65816_ucode0.hex] \
+                [file join $root rtl cpu65816_useq0.hex] \
+                [file join $root rtl adb_keymap.hex] \
+            ]
+        }
     } else {
         add_files -norecurse [list [file join $root rtl snoop_top.sv]]
     }
@@ -258,6 +294,14 @@ if {$stamp_date != 0 || $stamp_time != 0} {
     puts "build stamp: date=$stamp_date time=$stamp_time"
     set_property generic [list BUILD_DATE=$stamp_date BUILD_TIME=$stamp_time] \
                  [current_fileset]
+}
+# THE MACHINE, as a top-level generic.  Set only when it is 1: an untouched
+# plain build must present Vivado with exactly the source it always did, so
+# that "bit-identical at GS = 0" is a statement about the toolchain's input
+# and not only about the RTL's meaning.
+if {$gs} {
+    set_property generic [concat [get_property generic [current_fileset]] \
+                                 [list GS=1]] [current_fileset]
 }
 
 # ---- constraints ---------------------------------------------------------
@@ -387,11 +431,11 @@ set results [file join $root build results]
 file mkdir $results
 set bit [file join $outdir strudelworks.runs impl_1 $topname.bit]
 if {[file exists $bit]} {
-    file copy -force $bit [file join $results $topname.bit]
-    puts "bitstream: [file join $results $topname.bit]"
+    file copy -force $bit [file join $results $bitname.bit]
+    puts "bitstream: [file join $results $bitname.bit]"
     # Which board the bitstream is for, beside it.  build/load.sh reads this to
     # pick the loader's part, and to refuse to push an Au bitstream at a Pt.
-    set fh [open [file join $results $topname.board] w]
+    set fh [open [file join $results $bitname.board] w]
     puts $fh $board
     close $fh
 }

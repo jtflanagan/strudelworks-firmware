@@ -63,9 +63,19 @@ fi
 fmt() { awk -v v="$1" 'BEGIN{printf "%s%.3f", (v>=0?"+":""), v}'; }
 verdict="MET"
 if awk -v a="$wns" -v b="${whs:-0}" 'BEGIN{exit !(a<0 || b<0)}'; then verdict="MISS"; fi
-bit="$res/master_top.bit"
+# WHICH BITSTREAM THIS VERDICT IS ABOUT.  --gs builds the same top level as an
+# Apple IIgs and lands as master_top_gs.bit (docs/GS.md rung 4), so a verdict
+# read from a IIgs log must not quote the IIe bitstream's name and mtime - that
+# is exactly the stale-results confusion build/build.sh takes such care over.
+# The log says which it was.
+bitname="master_top"
+if [ -n "$log" ] && [ -f "$log" ] && grep -q 'machine: Apple IIgs' "$log"; then
+    bitname="master_top_gs"
+    gs_build=1
+fi
+bit="$res/$bitname.bit"
 bitinfo="none"
-if [ -f "$bit" ]; then bitinfo="build/results/master_top.bit ($(date -r "$bit" '+%Y-%m-%d %H:%M'))"; fi
+if [ -f "$bit" ]; then bitinfo="build/results/$bitname.bit ($(date -r "$bit" '+%Y-%m-%d %H:%M'))"; fi
 line="TIMING $verdict wns=$(fmt "$wns")"
 [ -n "$whs" ] && line+=" whs=$(fmt "$whs")"
 [ -n "$fail" ] && line+=" fail=$fail/$total"
@@ -86,7 +96,16 @@ if [ -f "$depth" ]; then
     max_new="$(awk '$1 ~ /^[0-9]+$/ && $6 == "->" {if ($1>m) m=$1} END{print m+0}' "$depth")"
     n_new="$(awk '$1 ~ /^[0-9]+$/ && $6 == "->"' "$depth" | wc -l)"
     t_new="$(rows "$tail_lvl" | wc -l)"
-    if [ -f "$baseline" ]; then
+    # THE BASELINE IS THE IIe's.  A IIgs netlist has a different core, no
+    # fronts and a chipset the IIe has never had, so diffing its census
+    # against the IIe's baseline compares two designs and calls the
+    # difference a regression.  The census is still PRINTED - the max depth
+    # and the tail count are worth reading on their own - but nothing is
+    # called new until the IIgs has a baseline of its own, which it gets when
+    # the design settles rather than now (docs/GS.md rung 4).
+    if [ "${gs_build:-0}" = 1 ]; then
+        echo "depth: max $max_new, $n_new paths >= 10; tail >= $tail_lvl: $t_new  (IIgs build: no baseline of its own yet, so nothing is called new)"
+    elif [ -f "$baseline" ]; then
         max_old="$(grep -v '^#' "$baseline" | awk '{if ($1>m) m=$1} END{print m+0}')"
         t_old="$(grep -vc '^#' "$baseline" || true)"
         new_tail="$(comm -13 <(grep -v '^#' "$baseline" | awk '{print $2, $3, $4}' | sort -u) \

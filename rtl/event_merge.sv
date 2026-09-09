@@ -63,6 +63,7 @@ module event_merge #(
     // The sequencer's fast op, and the levels its word carries.
     input  wire        fast_valid,
     input  wire [15:0] fast_addr,
+    input  wire [7:0]  fast_bank,      // the 65816's bank; 0 on the IIe
     input  wire        fast_rw,
     input  wire [7:0]  fast_data,
     input  wire        fast_sync,
@@ -107,8 +108,23 @@ module event_merge #(
     localparam integer AW = $clog2(DEPTH);
     localparam integer W  = 1 + 16 + 1 + 16 + 1 + 64;   // carrier, drop, dummy, mark_free, mark, data
     localparam [3:0] CLS_FAST = 4'd1, CLS_DUMMY = 4'd2;
+    // THE BANK RIDES THE RECORD, and until rung 4b it did not.  Word 0's
+    // [27:20] is the 65816's bank byte (docs/PROTOCOL.md, "The event
+    // record"), and this was a hardwired 8'd0 - correct on a IIe, where the
+    // bank is always zero and the comment in master_top said as much, and
+    // WRONG on a IIgs, where 98.7% of ops are fast ops and any one of them
+    // may name a bank.  accel_seq computed it, master_top declared it, and
+    // nothing carried it here: the host was told every fast op happened in
+    // bank $00, so a write to auxiliary memory, to a Mega II bank or to any
+    // bank above the first landed in bank $00 of the mirror and nowhere
+    // near where the machine had put it.
+    //
+    // NO ORACLE COULD SEE IT.  The mirror replay (tools/gs_mirror_test.sh)
+    // takes the BENCH's op stream, which sim/boot_gs_tb.sv writes directly in
+    // the host's record shape - it never passes through this module - so the
+    // replay's banks were right and the hardware's were zero.
     wire [63:0] fast_word = {fast_data, CLS_FAST, 4'd0, 16'd0,
-                             T_FAST, 8'd0, vbl_level, fast_sync, res_level, fast_rw, fast_addr};
+                             T_FAST, fast_bank, vbl_level, fast_sync, res_level, fast_rw, fast_addr};
     // The bus's record, its class marked when the cycle carried no op.
     wire [63:0] bus_word  = {bus_data[63:56], bus_dummy ? CLS_DUMMY : bus_data[55:52], bus_data[51:0]};
 
@@ -119,8 +135,22 @@ module event_merge #(
     wire fast_sw   = (fast_addr[15:8] == 8'hC0) &&
                      (fast_addr[7:4] == 4'h5 || fast_addr[7:4] == 4'h8 || fast_addr[7:4] == 4'h3);
     wire fast_edge = (vbl_level != last_vbl);
-    wire fast_keep = fast_mark || fast_edge || fast_force ||
-                     (!fast_quiet && (!sparse || !fast_rw || fast_sw));
+    // FULL CAPTURE IS FULL, and it was not.  `!sparse` used to sit INSIDE the
+    // `!fast_quiet` conjunction, so a quiet op - one apple_mmu believes
+    // changes no switch (q_swi_quiet) - was dropped from the stream even when
+    // the host had asked for every cycle.  Two things are wrong with that.
+    // The lesser: a full capture that silently omits ops is not one, and
+    // rtl/bus_event_filter.sv has always had `!sparse` as a TOP-LEVEL term
+    // for the bus's side, so the two halves of the same stream disagreed
+    // about what "full" means.  The greater: "quiet" is the CARD's opinion
+    // that the op changes nothing, and it is only safe while the card's
+    // switch state and the host's already agree - once they have diverged,
+    // suppressing the op suppresses the very event that would have corrected
+    // the host, and the divergence STICKS instead of healing on the next
+    // touch.  So `!sparse` comes out to the top: in full capture nothing is
+    // ever dropped, and a divergence is visible in the trace that finds it.
+    wire fast_keep = fast_mark || fast_edge || fast_force || !sparse ||
+                     (!fast_quiet && (!fast_rw || fast_sw));
 
     // ---- the queue -----------------------------------------------------------------
     // A LUTRAM with ONE write port, behind a two-wide staging stage.  The

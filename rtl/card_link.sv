@@ -45,7 +45,10 @@ module card_link #(
     // 1 only in a top that can actually drive the Apple bus.  Reaches
     // wb_regfile, where it is what stops a watching build from ever latching
     // itself into "the soft core is driving".
-    parameter bit CAN_MASTER = 1'b0
+    parameter bit CAN_MASTER = 1'b0,
+    // Passed straight to wb_regfile: which machine this bitstream is
+    // (docs/GS.md rung 4).
+    parameter bit GS = 1'b0
 ) (
     input  wire        clk_pin,
     input  wire        rst_n,
@@ -92,6 +95,9 @@ module card_link #(
     input  wire        fast_force,      // keep this fast word whatever the rule (rtl/event_merge.sv)
     input  wire        fast_valid,
     input  wire [15:0] fast_addr,
+    // The 65816's bank byte for that op (docs/GS.md rung 4b).  Zero on the
+    // IIe, where a snooper's tie-off is the right answer too.
+    input  wire [7:0]  fast_bank,
     input  wire        fast_rw,
     input  wire [7:0]  fast_data,
     input  wire        fast_sync,
@@ -253,6 +259,7 @@ module card_link #(
     input  wire [31:0] mem_declines,
     input  wire        mem_rom_busy,
     input  wire [7:0]  mem_rom_over,
+    input  wire [7:0]  mem_shd_drops,
     input  wire [7:0]  mem_fifo_drops,
     input  wire [31:0] mem_hits,
     input  wire [31:0] mem_misses,
@@ -858,6 +865,7 @@ module card_link #(
         .bus_dummy     (source_real && real_dummy),
         .fast_valid    (source_real && fast_valid),
         .fast_addr     (fast_addr),
+        .fast_bank     (fast_bank),
         .fast_rw       (fast_rw),
         .fast_data     (fast_data),
         .fast_sync     (fast_sync),
@@ -966,7 +974,8 @@ module card_link #(
         .MEM_PAGES_LOG2 (MEM_PAGES_LOG2),
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
-        .CAN_MASTER (CAN_MASTER)
+        .CAN_MASTER (CAN_MASTER),
+        .GS (GS)
     ) u_regfile (
         .clk      (clk_ctrl),
         .rst      (rst),
@@ -1050,6 +1059,7 @@ module card_link #(
         .mem_declines      (mem_declines),
         .mem_rom_busy      (mem_rom_busy),
         .mem_rom_over      (mem_rom_over),
+        .mem_shd_drops     (mem_shd_drops),
         .mem_fifo_drops    (mem_fifo_drops),
         .mem_hits          (mem_hits),
         .mem_misses        (mem_misses),

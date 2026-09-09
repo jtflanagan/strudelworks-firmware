@@ -72,6 +72,16 @@ module ft601_msg_rx (
     localparam [7:0] T_U2_RX      = 8'h2A;   // rtl/uthernet2_card.sv
     localparam [7:0] T_U2_STAT    = 8'h2B;
     localparam [7:0] T_PRINTER_ROM = 8'h2D;  // rtl/printer_card.sv
+    // The IIgs's three (docs/GS.md).  Missing from the list below until
+    // rung 4b, which cost nothing but a lie: an unknown type is still
+    // decoded and its payload still delivered (see hdr_known's use), so the
+    // battery RAM landed and the keys arrived all along - while the card
+    // announced each one as "a type the gateware does not consume, is the
+    // bitstream older than this host?", which is exactly backwards and
+    // buries the notices that mean something.
+    localparam [7:0] T_GS_BRAM   = 8'h2E;   // rtl/gs_clock.sv
+    localparam [7:0] T_ADB_KEY   = 8'h2F;   // rtl/gs_adb.sv
+    localparam [7:0] T_GS_TIME   = 8'h30;   // rtl/gs_clock.sv
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -95,7 +105,9 @@ module ft601_msg_rx (
                      (hdr_type == T_VIDHD_ROM) || (hdr_type == T_MOUSE_MOVE) ||
                      (hdr_type == T_MOUSE_ROM)  || (hdr_type == T_NSC_TIME)   ||
                      (hdr_type == T_U2_RX)      || (hdr_type == T_U2_STAT)   ||
-                     (hdr_type == T_PRINTER_ROM);
+                     (hdr_type == T_PRINTER_ROM) ||
+                     (hdr_type == T_GS_BRAM)    || (hdr_type == T_ADB_KEY)   ||
+                     (hdr_type == T_GS_TIME);
 
     always_ff @(posedge clk) begin
         if (rst) begin

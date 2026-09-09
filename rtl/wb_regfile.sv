@@ -50,7 +50,13 @@ module wb_regfile #(
     // the same way everywhere; this is how the host tells a snooper from a
     // master, and it is what stops a snoop build ever latching itself into
     // "the soft CPU is driving" when nothing in it can drive.
-    parameter bit CAN_MASTER = 1'b0
+    parameter bit CAN_MASTER = 1'b0,
+    // WHICH MACHINE THIS BITSTREAM IS (docs/GS.md rung 4).  Read back in
+    // CPU_SOURCE bit 17 so the host can refuse a `machine = iigs` config on
+    // a IIe bitstream, and the other way round, instead of running a machine
+    // whose ROM and whose map disagree about what it is - which looks like a
+    // dead screen and nothing else.
+    parameter bit GS = 1'b0
 ) (
     input  wire            clk,
     input  wire            rst,
@@ -217,6 +223,13 @@ module wb_regfile #(
     input  wire [31:0]     mem_declines,    // line requests a page was not resident for
     input  wire            mem_rom_busy,    // the ROM load is draining: the host waits
     input  wire [7:0]      mem_rom_over,    // ...and chunks it had to drop
+    // THE SHADOW DUPLICATE'S DROPS (the IIgs's $C035; docs/GS.md rung 3e).
+    // The map emits a shadowed write's duplicate one clock behind the write
+    // itself, one deep - and a drop is a write the Mega II banks never got,
+    // which is a byte missing from the picture and from nothing else, so
+    // nothing else would ever report it.  A bench asserts this is zero;
+    // hardware has to be able to say so too.  Always zero at GS = 0.
+    input  wire [7:0]      mem_shd_drops,
     input  wire [31:0]     mem_hits,
     input  wire [31:0]     mem_misses,
     input  wire [31:0]     mem_mismatch,
@@ -451,7 +464,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] cpu_source_rd = {cpu_src_latches, 7'd0, CAN_MASTER,
+    wire [31:0] cpu_source_rd = {cpu_src_latches, 6'd0, GS, CAN_MASTER,
                                  7'd0, cpu_src_active, 7'd0, cpu_src_desired};
 
     // ---- MB_SLOT ------------------------------------------------------------
@@ -978,7 +991,7 @@ module wb_regfile #(
     // not send the next chunk until they have drained.
     wire [31:0] mem_stat_rd = {mem_fifo_drops, mem_late_fills, mem_rom_loaded,
                                mem_invalidating, mem_intc8rom, mem_image_ready, mem_sw};
-    wire [31:0] mem_rom_rd  = {16'd0, mem_rom_over, 7'd0, mem_rom_busy};
+    wire [31:0] mem_rom_rd  = {mem_shd_drops, 8'd0, mem_rom_over, 7'd0, mem_rom_busy};
 
     // ---- ACCEL_CTRL ---------------------------------------------------------
     // (ACCEL_STAT, read straight through from the sequencer: [0] accelerating,

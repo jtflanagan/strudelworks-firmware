@@ -123,6 +123,18 @@ module gs_io #(
             || (lo == 8'h29) || (lo == 8'h2A) || (lo == 8'h2B) || (lo == 8'h2C)  // the VGC
             || (lo[7:4] == 4'h1 && lo != 8'h10)                    // $C011-$C01F, the status page
             || (lo == 8'h2D)                                       // SLOTROMSEL
+            // $C030 IS THE SPEAKER, AND IT MUST NOT REACH THE BACKPLANE.
+            // A IIgs's speaker is the card's and the host's, but the machine
+            // this card lives in decodes $C030-$C03F for ITS OWN speaker -
+            // partially, as real Apple II hardware does - so any one of those
+            // addresses riding a real cycle clicks the motherboard's speaker
+            // audibly.  Every other address in the range is already claimed
+            // below (the clock, SHADOW, CYAREG, the SCC, the sound GLU), so
+            // claiming this one closes the range: nothing in $C03x is ever
+            // presented to the bus again.  The card's own speaker model still
+            // sees it - it watches the fast event, not the backplane
+            // (rtl/speaker.sv) - so the sound still reaches the host.
+            || (lo == 8'h30)                                       // the speaker
             || (lo == 8'h31) || (lo == 8'h32)                      // DISKREG, SCANINT
             || (lo == 8'h33) || (lo == 8'h34)                      // the clock and battery RAM
             || (lo == 8'h35) || (lo == 8'h36) || (lo == 8'h37)     // SHADOW, CYAREG, $C037
@@ -194,6 +206,11 @@ module gs_io #(
             8'h2B:   rd_byte = c02b_langsel;
             8'h2C:   rd_byte = 8'h00;   // the character-ROM test port, out of test mode
             8'h2D:   rd_byte = gs_sltrom;
+            // Reading $C030 toggles the speaker and returns the floating
+            // bus.  Zero, which is what the backplane returned for it before
+            // it was claimed - so the bench's comparison against KEGS is
+            // unmoved by the claim.
+            8'h30:   rd_byte = 8'h00;
             8'h31:   rd_byte = c031_diskreg;
             8'h32:   rd_byte = 8'h00;   // SCANINT reads zero (moremem.c:1112)
             8'h33,

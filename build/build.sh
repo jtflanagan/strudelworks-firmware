@@ -14,7 +14,10 @@
 #      path.  Hence the wslpath conversions below.  Passing /home/... makes
 #      Vivado report the script as missing.
 #
-# Usage: build/build.sh [--master|--snoop|--ft601|--diag] [--board <b>] [extra tclargs...]
+# Usage: build/build.sh [--master|--gs|--snoop|--ft601|--diag] [--board <b>] [extra tclargs...]
+#   --gs is --master with the GS parameter set: the same top level built as an
+#   Apple IIgs, into its own work directory, landing as
+#   build/results/master_top_gs.bit (docs/GS.md rung 4).
 #   VIVADO=/mnt/c/AMDDesignTools/2026.1/Vivado/bin/vivado.bat build/build.sh
 #   BOARD=au_v2 build/build.sh --master      # same as --board au_v2
 #
@@ -117,6 +120,11 @@ case "${1:-}" in
   --ft601) WORKDIR="${WORKDIR}-ft601" ;;
   --snoop) WORKDIR="${WORKDIR}-snoop" ;;
   --master) WORKDIR="${WORKDIR}-master" ;;
+  # The IIgs is the same top level with a different parameter, which is
+  # exactly the case the note above is about: sharing one work directory with
+  # --master would let a IIe project's state stand in for a IIgs build's, and
+  # a stale bitstream that looks plausible is the worst of the failures here.
+  --gs) WORKDIR="${WORKDIR}-gs" ;;
 esac
 # And per board, for the same reason: a pt_v2 project must not inherit an
 # au_v2 project's state.

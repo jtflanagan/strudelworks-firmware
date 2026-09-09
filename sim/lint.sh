@@ -21,9 +21,12 @@ cd "$root"
 COMMON=(--lint-only -Wall -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM)
 
 fail=0
+# LINT_LABEL renames a run in the output without renaming the top: master_top
+# is linted twice, once per value of GS, and the two lines have to be tellable
+# apart.
 run() {
     local top="$1"; shift
-    printf '%-16s ' "$top"
+    printf '%-16s ' "${LINT_LABEL:-$top}"
     if verilator "${COMMON[@]}" --top-module "$top" "$@" 2>/tmp/lint.$$; then
         echo "OK"
     else
@@ -124,6 +127,31 @@ run cpu65c02      -Irtl rtl/cpu65c02.sv
 # The exploratory 65816 (branch ucode_65816).  Same generated-include
 # arrangement as the 65C02 core.
 run cpu65816      -Irtl rtl/cpu65816.sv
+
+# ---- the top level, at both machines -------------------------------------
+# master_top used to be on the "not linted" list below, because it
+# instantiates Xilinx primitives, an XPM macro and UberDDR3's top and
+# Verilator cannot resolve any of them - which left a mistyped connection or
+# an undriven wire in the top level to be found by Vivado, after a fifteen-
+# minute elaboration.  sim/stubs/prims.v gives the linter the port names and
+# nothing else, so it can walk the whole design in a second.  The stubs are
+# never in a synthesis source list; if one disagrees with the real primitive,
+# Vivado still says so.
+#
+# BOTH VALUES OF GS (docs/GS.md rung 4).  The IIe build and the IIgs build
+# are one file and one parameter, and the arm that is not being built is the
+# one that rots - so each is elaborated on every lint.  The suppressions are
+# the ones the modules underneath already carry in this file: ft601_fifo's
+# INITIALDLY, card_link's SYNCASYNCNET, the third-party width idioms.
+TOPRTL=$(ls rtl/*.sv rtl/*.v | grep -v 'master_top\|snoop_top\|au_top\|diag_top\|ft601_top')
+for gs in 0 1; do
+    LINT_LABEL="master_top GS=$gs" \
+    run master_top -GGS=$gs \
+        rtl/master_top.sv $TOPRTL sim/stubs/prims.v \
+        -Wno-MULTIDRIVEN -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY \
+        -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-PINMISSING \
+        -Wno-INITIALDLY -Wno-SYNCASYNCNET -Irtl
+done
 
 # Not linted, deliberately:
 #   clk_gen.v      - nothing but IBUF/BUFG/MMCME2_BASE instantiation.  Verilator

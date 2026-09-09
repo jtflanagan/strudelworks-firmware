@@ -30,9 +30,12 @@
 // host sends it as the No-Slot Clock's time already is (docs/NSC.md), and in
 // sim/boot_gs_tb.sv it is pinned to the same value tools/kegs/trace_rom.sh
 // pins KEGS's to, or the two machines would disagree about a byte the ROM
-// checksums.  IT DOES NOT TICK YET: a clock that advanced would make the
-// bench's comparison against a recorded trace depend on when the run started.
-// Rung 3c gives it the host's seconds and a virtual-time tick.
+// checksums.  ON THE CARD IT IS THE HOST'S FEED THAT MOVES IT: a GS_TIME
+// message carries one word of seconds and the host re-sends it every second,
+// exactly as it feeds the No-Slot Clock, because the card has no oscillator
+// of its own to count.  NOTHING TICKS IN RTL, deliberately: a clock that
+// advanced here would make the bench's comparison against a recorded trace
+// depend on when the run started, and the bench sends no GS_TIME at all.
 //
 // THE BATTERY RAM is 256 bytes, all zero from reset, which is exactly what
 // KEGS boots with when its config file names no `bram` lines - so the ROM
@@ -45,7 +48,8 @@
 // across the clocks the dispatcher takes to serve it.
 //////////////////////////////////////////////////////////////////////////////////
 module gs_clock #(
-    parameter [7:0] T_GS_BRAM = 8'h2E
+    parameter [7:0] T_GS_BRAM = 8'h2E,
+    parameter [7:0] T_GS_TIME = 8'h2F
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -60,7 +64,8 @@ module gs_clock #(
     output logic [7:0] rd_byte,
 
     // Seconds since 1904-01-01, as the machine believes them.  Sampled at
-    // reset; see the header.
+    // reset, and thereafter whatever the host last sent as a GS_TIME; see
+    // the header.
     input  wire [31:0] seed_time,
 
     // The border colour, $C034[3:0], for the host to paint.
@@ -126,6 +131,16 @@ module gs_clock #(
     wire rx_last   = rx_word && (rx_left == 8'd1);
     wire hdr_bram  = msg_valid && (msg_type == T_GS_BRAM);
     wire word_bram = rx_word && (rx_type == T_GS_BRAM);
+    // THE HOST'S SECONDS.  One word, seconds since 1904-01-01, and the feed
+    // IS the clock: the card has no oscillator of its own to count and a
+    // clock that ticked in RTL would make the bench's comparison against a
+    // recorded trace depend on when the run started.  The host re-sends it
+    // every second, exactly as it feeds the No-Slot Clock (docs/NSC.md), so
+    // the machine reads the Pi's time to the second.  It lands whenever it
+    // arrives - the ROM reads the register a byte at a time and a seam
+    // between two seconds is the same seam a real clock chip has.
+    wire hdr_time  = msg_valid && (msg_type == T_GS_TIME);
+    wire word_time = rx_word && (rx_type == T_GS_TIME);
 
     // One write port a bank.  The host's image wins a clock it shares with
     // the machine's byte, which cannot happen in practice - the image lands
@@ -162,6 +177,7 @@ module gs_clock #(
                 // would checksum it, find it wrong, and write its own
                 // defaults over the slot settings this was shipping.
                 if (hdr_bram && msg_len != 8'd64) rx_type <= 8'd0;
+                if (hdr_time && msg_len != 8'd1)  rx_type <= 8'd0;
             end else if (rx_word) begin
                 rx_idx  <= rx_idx + 8'd1;
                 rx_left <= rx_left - 8'd1;
@@ -208,9 +224,18 @@ module gs_clock #(
             cnt_strobes <= 8'd0;
             cnt_bad <= 8'd0;
             // The battery RAM survives RES' - it is a BATTERY RAM - and the
-            // host reloads it at start, so nothing here clears it.
+            // host reloads it at start, so nothing here clears it.  So does
+            // the time: a real clock chip does not forget the date because
+            // somebody pressed Control-Reset.
             if (rst) cur_time <= seed_time;
+            else if (word_time) cur_time <= pay_data;
         end else begin
+            // The host's feed, and the machine's own SET TIME, share this
+            // register.  A feed that landed on the clock the machine wrote
+            // would lose the write; that cannot happen (the machine's write
+            // is a strobe far from a message word) and is stated anyway by
+            // giving the machine's write the later assignment below.
+            if (word_time) cur_time <= pay_data;
             if (act && !op_rw && (op_lo == 8'h33)) c033 <= op_wdata;
             if (wr_c034) c034 <= op_wdata[6:0];
 
