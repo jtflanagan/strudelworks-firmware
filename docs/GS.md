@@ -1,6 +1,13 @@
 # Apple IIgs on the card: the run sheet
 
-Status: **RUNG 4b, PARTS 7-9, 2026-09-09**: the Apple's own keyboard types
+Status: **RUNG 7, THE ENSONIQ, 2026-09-09**: the DOC 5503 is built -
+32 oscillators, 64 KB of wave RAM, the modes, and the arrival-ordered
+interrupt queue - and "Unclaimed Sound Interrupt" is gone.  WNS +0.022 / WHS
++0.057, 0 of 62,799 failing endpoints; `sim/suite.sh gs` **10/10** (KEGS floor
+67,398, unmoved), host 43/43.  **GS/OS still does not reach the Finder**: it
+now dies further on, in the ROM's monitor, in banks that do not exist, with
+the DOC quiescent - see "What is NOT working".  Before it, RUNG 4b PARTS
+7-9**: the Apple's own keyboard types
 into the IIgs, A VECTOR PULL COMES FROM THE ROM (which is what was killing
 GS/OS), and the ADB mouse is fed.  WNS **+0.140** / WHS +0.057, 0 of 52,524
 failing endpoints, `sim/suite.sh gs` **9/9** (KEGS floor 67,398, unmoved),
@@ -1946,6 +1953,134 @@ access landing on the same clock as a frame tick is dropped.  It is
 pre-existing (it affects `$C010` and `$C026` the same way) and rare - one
 clock in ~17,000 - but it is real.
 
+## Rung 7: the Ensoniq (2026-09-09)
+
+GS/OS booted past its splash once the vector pull was fixed, and then the
+screen began flashing **"Unclaimed Sound Interrupt"**.  The user's call: don't
+stub it, build the chip.
+
+**WHY A FACE COULD NEVER HAVE WORKED.**  $C03C-$C03F were four latches that
+read back what the ROM wrote, with the data port answering $00 to everything.
+Register $E0 is the DOC's interrupt register and **BIT 7 CLEAR MEANS AN
+INTERRUPT IS PENDING** (doc.c:769, "Clear IRQ on read of e0, if any irq
+pend"), so a face answering zero claims oscillator 0 is interrupting, for
+ever.  GS/OS's dispatcher believed it, found nobody to claim it, and said so.
+This is the IWM's constant $C0 from rung 3e exactly - a stub whose one
+constant happens to mean "I need attention" - and the lesson repeats: a stub's
+default is not neutral, it is an assertion.
+
+### The scan, and where the "+2" comes from
+
+The 5503 services ONE OSCILLATOR PER SLOT at `DOC_SCAN_RATE` = 28.63636 MHz /
+32 = 894886.25 Hz, and an oscillator's own rate is that over `osc_en + 2`.
+With the usual 32 enabled that is 26320 Hz, the IIgs's familiar sample rate.
+So `rtl/gs_doc.sv` has no per-oscillator timer: one NCO, one slot counter
+running `0 .. osc_en + 1`, and the last two slots do nothing - they are the
+chip's refresh slots, which is what the `+ 2` IS.  At 100 MHz a slot is ~112
+clocks, room enough for the register read, the wave fetch and the multiply.
+
+### The accumulator, and the check that confirms it
+
+Each oscillator has a 24-bit accumulator and its slot adds `freq`.  The byte
+played is at `index = acc >> (17 - sz + res)` masked to `sz` bits, where
+`sz = ((wavesize >> 3) & 7) + 8` and `res = wavesize & 7`, based at
+`(waveptr << 8) & ~(size - 1)`.  KEGS carries the same arithmetic folded into
+its own SND_PTR_SHIFT fixed point together with the host's audio rate;
+unfolded it is that.  The table plays through once, so the end is
+
+    acc >= (1 << (17 + res))
+
+**and that is what says the model is right**: at `res = 7`, `sz = 15` - the
+largest table at the finest resolution - the end is `1 << 24`, exactly the
+accumulator's width.  It fills the register the chip has, at the corner, with
+nothing left over.  A wrong shift would not do that.
+
+### Two ways to stop, and they are not the same
+
+`doc_sound_end`'s `can_repeat`: a fetched byte of ZERO is the wavetable's
+terminator (can_repeat = 0), and running the accumulator out means the table
+was played to its end (can_repeat = 1).  Then, with `mode = (ctl >> 1) & 3`:
+
+- mode 0 free-running with can_repeat: **start again**.  That is how a held
+  note is made, and it does not halt.
+- mode 3, **or the partner in mode 3**: swap.  "If either this osc or it's
+  partner is in swap mode, treat the pair as being in swap mode" (doc.c:311,
+  credited to Ian Schmidt), with the exception that a one-shot which hit a
+  zero byte just stops (credited to Olivier Goguel).  Neither is guessable
+  from the datasheet; both come from the reference.
+- otherwise halt.
+
+### THE INTERRUPT IS A QUEUE, NOT A BIT VECTOR
+
+The part a reasonable implementation gets wrong.  **$E0 does not name the
+lowest-numbered interrupting oscillator; it names the OLDEST.**  KEGS keeps
+`has_irq_pending` as a 1-based ARRIVAL RANK and renumbers the survivors when
+one is removed from the middle (`doc_remove_sound_irq`'s loop).  A bit vector
+with a priority encoder answers differently the moment two oscillators
+interrupt out of index order, and software servicing them in turn sees the
+wrong one.  So it is a real queue here, compacted on removal.  The bench
+makes oscillator 9 finish before oscillator 8 and checks $E0 says 9.
+
+**And every FETCH of $E0 clears the head** - so a register read, which costs
+two fetches because of the chip's one-access read delay, consumes TWO
+interrupts.  The bench asked the wrong question before it was written that way
+round, and the answer is the chip's, not a bug.
+
+### The output
+
+The byte is unsigned with silence at $80, so the sample is `(byte - 128) * vol`
+- one multiply, asked for as a DSP48 by name (the user's steer: take the
+slices).  Control bit 4 picks the channel and the channel's low bit is the
+stereo side, so each slot adds to a running left/right pair and the scan's
+wrap latches them.
+
+`rtl/audio_sampler.sv` box-averages the pair, but **not on the shared
+multiplier walk**: the DOC's mix is signed where everything else there is an
+unsigned magnitude, and two decimal orders wider.  It has two DSP48s of its
+own.  It does need the box - the scan completes at up to ~298 kHz with few
+oscillators enabled, above the 44.1 kHz Nyquist.
+
+The wire format grew from three words a sample to four
+(`{doc_l, ay3}`, `{seq, doc_r}`): 706 kB/s where it was 529, on a link that
+runs at 335 MB/s.
+
+### And it is not what crashes GS/OS
+
+Worth recording, because the chip was built to fix a crash and did not fix
+the one that follows it.  With the DOC in, "Unclaimed Sound Interrupt" is
+gone and GS/OS's sound driver initialises against a real chip - and the
+machine then dies further on, in the ROM's monitor, with BRK and COP traps in
+banks that do not exist.  The bench's end-of-run dump settles the DOC's part
+in it:
+
+    the Ensoniq: osc_en 32, ends 0, irqs 0, queue 0, irq 0, ctl $C03C=9d
+
+**No oscillator ever ran and no interrupt was ever raised.**  A swap pair
+ping-ponging over dead wave tables was the theory - the unit bench shows the
+pair really does hand back and forth for ever, which is KEGS's behaviour and
+not guarded against - but it is not what is happening here.  The DOC is
+quiescent while the machine dies.
+
+`dump_doc` in `sim/boot_gs_tb.sv` is the instrument that said so, and it took
+two wrong turns to reach it: treating a build that MET TIMING as a suspect
+(it met timing; that is the whole of it), and reading "the sim is clean" from
+a 3M-instruction run that never got as far as GS/OS starting an oscillator.
+A counter at zero is only evidence once the run reaches the code that would
+move it.
+
+### Gates
+
+`sim/gs_doc_tb.sv` is **21 checks**: $E0 with nothing interrupting, $E1's
+`((val & $3E) >> 1) + 1`, the register round trip and the read delay, the wave
+RAM, halt-on-zero with its interrupt, the free-running loop, the swap
+handover, and the arrival-ordered queue.  `sim/suite.sh gs` **10/10** with the
+KEGS divergence floor UNMOVED at 67,398.  The audio bench caught the wire
+format change and was rebased with it (a 32-sample message is 128 words now,
+and the stall test's FIFO holds DEPTH/4 samples where it held DEPTH/3).  Host
+`card_audio_test` **43/43**, including that a negative DOC channel stays
+negative - a path treating the pair as unsigned would put a very loud positive
+value there.
+
 ## What is NOT working, as of the end of rung 4b
 
 Said plainly, because the first write-up of this rung claimed more than it
@@ -1959,6 +2094,20 @@ blocks`), so the failure is the machine's and not the disk's.
 
 Also open:
 
+- **GS/OS 6.0.1 DIES IN THE ROM's MONITOR (2026-09-09), the rung-7 crash.**
+  Past the splash and past the sound driver now, it traps into the monitor
+  with BRK and COP in banks $83, $18, $80 and $CF - banks with no RAM behind
+  them, where `apple_mmu`'s void page reads `02 40`, which disassembles as
+  `COP $40`.  So something is JUMPING into nonexistent memory.  The stack
+  pointers in successive traps march down page one ($01C1, $01AB, $017F,
+  $0164, $0137, then a wild $3278), which is the shape of an interrupt storm
+  eating the stack rather than of a single wild jump.  **NOT the DOC** (ends
+  0, irqs 0 - see rung 7) and **NOT the mouse** (the same failure with
+  `mouse = off`).  **IT REPRODUCES IN THE BENCH IN ~3 MINUTES**:
+  `sim/run_boot_gs_tb.sh --instrs=7000000 --ref=none --hdv=.../system6.hdv`
+  ends with the monitor's own register dump on the text screen, the same one
+  the panel shows, and the machine spinning in a ROM loop at $FF/C978-C99B
+  with bus traffic and cache fills frozen since ~6.2M instructions.
 - **GS/OS 6.0.1 REACHES ITS SPLASH AND THE CORE HALTS (2026-09-09).**  Tried
   for the first time this session, from `disks/system6.hdv` on the slot-7
   SmartPort with `gs_os.conf`: the machine draws **"Welcome to the IIgs /

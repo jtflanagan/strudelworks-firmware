@@ -16,7 +16,8 @@
 //      -> 996.5 Hz: 49.8 periods in 2205 samples, at a third of full scale
 //   4. the time base: three fast ticks a cycle quadruple the tone in core
 //      time and leave it alone in real time
-//   5. the framing: every header {drops, 32, 0x2C, 96}, every sequence number
+//   5. the framing: every header {drops, 32, 0x2C, 128} - FOUR words a
+//      sample since the Ensoniq - every sequence number
 //      one more than the last
 //   6. the drops: the taker stalls past the FIFO, the header's drops equal
 //      the gap in the sequence, AUDIO_STAT agrees
@@ -165,13 +166,17 @@ module audio_tb;
         if (au_take) begin
             if (!in_body) begin
                 last_hdr <= au_word;
-                if (au_word[15:8] !== 8'h2C || au_word[7:0] !== 8'd96 || au_word[23:16] !== 8'd32) begin
+                // FOUR words a sample since the Ensoniq (docs/GS.md rung 7),
+                // so a 32-sample message is 128 words, not 96.
+                if (au_word[15:8] !== 8'h2C || au_word[7:0] !== 8'd128 || au_word[23:16] !== 8'd32) begin
                     msg_errs = msg_errs + 1;
                     $display("bad header %08x", au_word);
                 end
-                in_body = 1; body_left = 96; widx = 0; msgs = msgs + 1;
+                in_body = 1; body_left = 128; widx = 0; msgs = msgs + 1;
             end else begin
-                if (widx % 3 == 2) begin
+                // The sequence number moved into the fourth word when the
+                // Ensoniq's stereo pair took the third.
+                if (widx % 4 == 3) begin
                     if (have_seq && au_word[31:16] !== last_seq + 16'd1) begin
                         seq_gaps = seq_gaps + 1;
                         gap_at_seq = last_seq;
@@ -314,7 +319,7 @@ module audio_tb;
 
         // 6. the drops: stall the taker past the FIFO
         take_en = 1'b0;
-        repeat (600000) @(posedge clk);          // 6 ms: 264 samples into a 170-sample FIFO
+        repeat (600000) @(posedge clk);          // 6 ms: 264 samples into a 128-sample FIFO
         take_en = 1'b1;
         wait_samples(100);
         if (seq_gaps != 1) fail("expected exactly one sequence gap after the stall");
@@ -322,7 +327,11 @@ module audio_tb;
             gap_expect = au_stat[23:16];
             $display("  stall: gap of %0d samples after seq %0d, drops %0d", gap_size, gap_at_seq, gap_expect);
             if (gap_size != gap_expect) fail("the header's drops and the sequence gap disagree");
-            if (gap_size < 60 || gap_size > 120) fail("gap size not the stall's excess");
+            // 264 samples arrive and the FIFO holds 128 of them - DEPTH/4
+            // since the Ensoniq took a fourth word, where it was DEPTH/3 -
+            // so the excess is ~136.  The check that MATTERS is the one
+            // above: the header's drops and the sequence gap agree.
+            if (gap_size < 110 || gap_size > 175) fail("gap size not the stall's excess");
         end
         if (msg_errs != 0) fail("bad headers after the stall");
 

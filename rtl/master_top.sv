@@ -195,6 +195,8 @@ module master_top #(
     wire        smp_valid;
     wire [15:0] smp_spk;
     wire [63:0] smp_ay;
+    // The Ensoniq's stereo pair, the sample stream's fourth word.
+    wire [15:0] smp_doc_l, smp_doc_r;
     wire        u2_valid, u2_take;
     wire        nsc_enable, nsc_sub, nsc_bit, nsc_time_loaded, nsc_ring_en, nsc_wr_en;
     wire [5:0]  nsc_cmp_idx, nsc_ring_idx;
@@ -812,6 +814,9 @@ module master_top #(
     // claim.  Both are zero at GS = 0 and the OR folds away.
     wire        gsio_claim, gsio_u_claim;
     wire [7:0]  gsio_byte;
+    // The Ensoniq's mix, out of gs_io and into the audio sampler; zero on the
+    // IIe build, where the DOC is not instantiated (docs/GS.md rung 7).
+    wire signed [20:0] doc_l, doc_r;
     wire        q_swi = q_swi_mmu || gsio_claim;
     wire [6:0]  kbd_int_low;
     // ...and the card's own slots (docs/CXXX.md, "The on-card slots"): a
@@ -1610,6 +1615,8 @@ module master_top #(
         // The frame origin, from the beam every consumer takes: the quarter-
         // second and one-second interrupts count frames off it.
         .frame_tick (beam_mark_bus || beam_mark_fast),
+        .doc_l      (doc_l),
+        .doc_r      (doc_r),
         .u_claim    (gsio_u_claim),
         .rd_byte    (gsio_byte),
         .irq        (gsio_irq)
@@ -1624,6 +1631,10 @@ module master_top #(
     assign gs_border    = 4'd0;
     assign gs_bram_ok   = 1'b0;
     assign gs_park_addr = 16'hC000;
+    // No Ensoniq on a IIe, so the sampler's DOC box averages silence and its
+    // two multipliers fold away.
+    assign doc_l        = 21'sd0;
+    assign doc_r        = 21'sd0;
 
     end endgenerate
 
@@ -1989,9 +2000,13 @@ module master_top #(
         .rate_inc  (audio_rate),
         .spk       (spk_level),
         .ay_out    (mb_ay_out),
+        .doc_l     (doc_l),
+        .doc_r     (doc_r),
         .smp_valid (smp_valid),
         .smp_spk   (smp_spk),
-        .smp_ay    (smp_ay)
+        .smp_ay    (smp_ay),
+        .smp_doc_l (smp_doc_l),
+        .smp_doc_r (smp_doc_r)
     );
 
     audio_tx u_atx (
@@ -2001,6 +2016,8 @@ module master_top #(
         .smp_valid (smp_valid),
         .smp_spk   (smp_spk),
         .smp_ay    (smp_ay),
+        .smp_doc_l (smp_doc_l),
+        .smp_doc_r (smp_doc_r),
         .word      (au_word),
         .valid     (au_valid),
         .take      (au_take),

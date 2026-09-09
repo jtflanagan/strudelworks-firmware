@@ -19,7 +19,7 @@
 // A sample that arrives with no room for its three words is dropped whole:
 // `drops` counts it and `seq` still advances, so the host sees the gap in
 // the numbers and keeps its time base by playing that many frames of
-// silence.  The FIFO takes DEPTH/3 samples - 170 at 512, 3.9 ms - which is
+// silence.  The FIFO takes DEPTH/4 samples - 128 at 512, 2.9 ms - which is
 // longer than any reply or capture burst holds the bus, so the drops are for
 // a link that is down, not for a busy one.
 //
@@ -38,6 +38,9 @@ module audio_tx #(
     input  wire        smp_valid,
     input  wire [15:0] smp_spk,
     input  wire [63:0] smp_ay,
+    // The Ensoniq's stereo pair (rtl/gs_doc.sv), zero on the IIe build.
+    input  wire [15:0] smp_doc_l,
+    input  wire [15:0] smp_doc_r,
 
     // TO msg_master
     output wire [31:0] word,
@@ -49,50 +52,57 @@ module audio_tx #(
 );
 
     localparam [7:0] T_AUDIO_FRAMES = 8'h2C;
-    localparam integer WORDS_PER_MSG = 3 * SAMPLES_PER_MSG;
+    localparam integer WORDS_PER_MSG = 4 * SAMPLES_PER_MSG;
     localparam integer CW = $clog2(DEPTH + 1);
 
-    // ---- the writer: three words a sample ------------------------------------
+    // ---- the writer: FOUR words a sample -------------------------------------
+    // It was three until the Ensoniq arrived (docs/GS.md rung 7).  The DOC is
+    // stereo - the channel's low bit is the side - so its pair is a word of
+    // its own, and the sequence number moves into it rather than growing a
+    // fifth.  At 44.1 kHz that is 706 kB/s where it was 529, against a link
+    // that runs at 335 MB/s (docs/PROTOCOL.md, host-load-model).
     logic [15:0] seq = 16'd0;
     logic [7:0]  drops = 8'd0;
-    logic [31:0] w1_q, w2_q;
-    logic [1:0]  wr_left = 2'd0;        // words of the current sample still to write
+    logic [31:0] w1_q, w2_q, w3_q;
+    logic [2:0]  wr_left = 3'd0;        // words of the current sample still to write
     logic [31:0] fifo_din;
     logic        fifo_wr;
     wire         fifo_full;
     wire  [CW-1:0] fifo_count;
-    wire         room = (fifo_count <= (CW)'(DEPTH - 6));
+    wire         room = (fifo_count <= (CW)'(DEPTH - 8));
 
     // Samples committed to the FIFO, less samples sent: a message may start
     // when a whole message's worth is in.
     logic [CW-1:0] queued = '0;
-    wire   sample_in  = (wr_left == 2'd1);          // the third word goes this clock
+    wire   sample_in  = (wr_left == 3'd1);          // the last word goes this clock
     logic  sample_out;                               // a whole message's samples left the FIFO
 
     always_ff @(posedge clk) begin
         if (rst || !enable) begin
             seq     <= 16'd0;
             drops   <= 8'd0;
-            wr_left <= 2'd0;
+            wr_left <= 3'd0;
             fifo_wr <= 1'b0;
             queued  <= '0;
         end else begin
             fifo_wr <= 1'b0;
             if (smp_valid) begin
                 seq <= seq + 16'd1;
-                if (room && wr_left == 2'd0) begin
+                if (room && wr_left == 3'd0) begin
                     fifo_din <= {smp_ay[15:0], smp_spk};
                     fifo_wr  <= 1'b1;
                     w1_q     <= {smp_ay[47:32], smp_ay[31:16]};
-                    w2_q     <= {seq, smp_ay[63:48]};
-                    wr_left  <= 2'd2;
+                    w2_q     <= {smp_doc_l, smp_ay[63:48]};
+                    w3_q     <= {seq, smp_doc_r};
+                    wr_left  <= 3'd3;
                 end else begin
                     drops <= drops + 8'd1;
                 end
-            end else if (wr_left != 2'd0) begin
-                fifo_din <= (wr_left == 2'd2) ? w1_q : w2_q;
+            end else if (wr_left != 3'd0) begin
+                fifo_din <= (wr_left == 3'd3) ? w1_q :
+                            (wr_left == 3'd2) ? w2_q : w3_q;
                 fifo_wr  <= 1'b1;
-                wr_left  <= wr_left - 2'd1;
+                wr_left  <= wr_left - 3'd1;
             end
             case ({sample_in, sample_out})
                 2'b10:   queued <= queued + 1'b1;

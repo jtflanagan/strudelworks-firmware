@@ -127,7 +127,7 @@ srcs=(
     "$root/sim/boot_gs_tb.sv"
     "$root/rtl/cpu65816.sv" "$root/rtl/accel_seq.sv"
     "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv"
-    "$root/rtl/gs_io.sv" "$root/rtl/gs_adb.sv" "$root/rtl/gs_clock.sv" "$root/rtl/gs_intc.sv" "$root/rtl/gs_iwm.sv"
+    "$root/rtl/gs_io.sv" "$root/rtl/gs_adb.sv" "$root/rtl/gs_doc.sv" "$root/rtl/gs_clock.sv" "$root/rtl/gs_intc.sv" "$root/rtl/gs_iwm.sv"
     "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv"
     "$root/rtl/way_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv"
     "$root/rtl/hd_card.sv" "$root/rtl/ft601_msg_rx.sv"

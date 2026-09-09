@@ -967,6 +967,27 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                      u_gsio.u_iwm.apple35_sel);
         end
     endtask
+    // The Ensoniq's state (rtl/gs_doc.sv, docs/GS.md rung 7): which
+    // oscillators the machine left running, how they are configured, and how
+    // busy the interrupt queue is.  A pair handing back and forth over dead
+    // wave tables, or a queue that never empties, shows here.
+    integer dj;
+    task dump_doc;
+        begin
+            $display("    the Ensoniq: osc_en %0d, ends %0d, irqs %0d, queue %0d, irq %0d, ctl $C03C=%02x",
+                     u_gsio.u_doc.osc_en, u_gsio.u_doc.cnt_ends,
+                     u_gsio.u_doc.cnt_irqs, u_gsio.u_doc.q_n,
+                     u_gsio.u_doc.irq, u_gsio.u_doc.sound_ctl);
+            for (dj = 0; dj < 32; dj = dj + 1)
+                if (u_gsio.u_doc.running[dj] || !u_gsio.u_doc.ctl[dj][0])
+                    $display("      osc %2d RUNNING=%0d ctl=%02x (halt %0d mode %0d int %0d chan %0d) freq=%04x vol=%02x wptr=%02x wsize=%02x",
+                             dj, u_gsio.u_doc.running[dj], u_gsio.u_doc.ctl[dj],
+                             u_gsio.u_doc.ctl[dj][0], u_gsio.u_doc.ctl[dj][2:1],
+                             u_gsio.u_doc.ctl[dj][3], u_gsio.u_doc.ctl[dj][7:4],
+                             u_gsio.u_doc.freq[dj], u_gsio.u_doc.vol[dj],
+                             u_gsio.u_doc.wptr[dj], u_gsio.u_doc.wsize[dj]);
+        end
+    endtask
     task dump_clash;
         begin
             $display("    the cache's clash counters: ppn_clash %0d, land_clash %0d, posted %0d, posted_miss %0d",
@@ -1787,6 +1808,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         dump_lc_census();
         dump_clash();
         dump_iwm();
+        dump_doc();
         // A shipped image the ROM ACCEPTS is one it does not rewrite: it
         // checksums the battery RAM at startup and writes its own defaults
         // over an image it does not believe (docs/GS.md, "The battery RAM the

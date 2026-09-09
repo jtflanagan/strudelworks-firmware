@@ -41,6 +41,7 @@ __pycache__/
 # the suite states no licence, and the full set is 2.9 GB.
 /sim/cpu816_work/
 /sim/adb_work/
+/sim/doc_work/
 /sim/kbd_a2_work/
 /sim/mirror_work/
 /sim/mem_work/

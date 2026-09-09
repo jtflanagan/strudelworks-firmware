@@ -113,6 +113,11 @@ module gs_io #(
     // the interrupt controller's only clock.
     input  wire        frame_tick,
 
+    // The Ensoniq's mix, signed, for rtl/audio_sampler.sv to box-average the
+    // way it already does the AYs.
+    output wire signed [20:0] doc_l,
+    output wire signed [20:0] doc_r,
+
     // The one interrupt line into the core.
     output wire        irq
 );
@@ -238,10 +243,7 @@ module gs_io #(
             8'h39:   rd_byte = scc_reg_rd;
             8'h3A,
             8'h3B:   rd_byte = 8'h00;   // the SCC's data ports: nothing received
-            8'h3C:   rd_byte = doc_ctl;
-            8'h3D:   rd_byte = doc_saved;
-            8'h3E:   rd_byte = doc_ptr[7:0];
-            8'h3F:   rd_byte = doc_ptr[15:8];
+            8'h3C, 8'h3D, 8'h3E, 8'h3F: rd_byte = doc_rd;
             8'h68:   rd_byte = gs_state;
             8'h69:   rd_byte = 8'h00;   // reserved, reads zero (moremem.c:1328)
             8'hE0, 8'hE1, 8'hE2, 8'hE3, 8'hE4, 8'hE5, 8'hE6, 8'hE7,
@@ -265,9 +267,6 @@ module gs_io #(
     logic [7:0] c02b_langsel;       // $C02B: language and NTSC/PAL
     logic [7:0] c031_diskreg;       // $C031: bit 7 APPLE35SEL, bit 6 drive select
     logic [7:0] scc_ptr;            // the SCC's write-register pointer, per channel-pair
-    logic [7:0] doc_ctl;            // $C03C: bit 6 RAM/register, bit 5 auto-increment, 3:0 volume
-    logic [7:0] doc_saved;          // $C03D's ONE-ACCESS READ DELAY: the previous fetch
-    logic [15:0] doc_ptr;           // $C03E/$C03F: the DOC's 16-bit address
 
     // The SCC's reset values, from KEGS scc.c's scc_read_reg (line 655) and
     // scc_reset: RR0 is $60 with CTS and the transmit buffer empty, plus $08
@@ -305,6 +304,26 @@ module gs_io #(
         .cnt_mode_wr (iwm_cnt_mode_wr)
     );
 
+    // ---- the Ensoniq (docs/GS.md rung 7) ------------------------------------
+    // The four registers at $C03C-$C03F were a FACE until this: latches that
+    // read back what the ROM wrote, with a data port answering $00.  That is
+    // what put "Unclaimed Sound Interrupt" on the screen - register $E0's bit
+    // 7 CLEAR means an interrupt is pending, so a face answering zero claims
+    // oscillator 0 is interrupting for ever.  rtl/gs_doc.sv is the chip.
+    wire [7:0] doc_rd;
+    wire       doc_irq;
+    // Diagnostics a bench reads through the hierarchy; named rather than left
+    // empty so the lint stays quiet about the pins.
+    wire [7:0] doc_cnt_ends, doc_cnt_irqs;
+    gs_doc u_doc (
+        .clk (clk), .rst (rst), .res_sync (res_sync),
+        .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
+        .rd_byte (doc_rd),
+        .snd_l (doc_l), .snd_r (doc_r),
+        .irq (doc_irq),
+        .cnt_ends (doc_cnt_ends), .cnt_irqs (doc_cnt_irqs)
+    );
+
     // ---- the interrupt controller -------------------------------------------
     wire [7:0] intc_rd;
     gs_intc u_intc (
@@ -312,6 +331,7 @@ module gs_io #(
         .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
         .rd_byte (intc_rd), .frame_tick (frame_tick),
         .irq_adb (adb_irq_data || adb_irq_mouse), .irq_scan (1'b0),
+        .irq_doc (doc_irq),
         .irq (irq)
     );
 
@@ -333,9 +353,6 @@ module gs_io #(
             c02b_langsel <= 8'h00;
             c031_diskreg <= 8'h00;
             scc_ptr <= 8'd0;
-            doc_ctl <= 8'd0;
-            doc_saved <= 8'd0;
-            doc_ptr <= 16'd0;
         end else if (act) begin
             if (!u_rw) begin
                 case (u_addr[7:0])
@@ -356,24 +373,12 @@ module gs_io #(
                     // the command port selects a register, and the write
                     // after it goes there and returns the pointer to 0.
                     8'h38, 8'h39: scc_ptr <= (scc_ptr == 8'd0) ? (u_wdata & 8'h0F) : 8'd0;
-                    8'h3C: doc_ctl <= u_wdata;
-                    8'h3D: begin
-                        doc_saved <= u_wdata;
-                        if (doc_ctl[5]) doc_ptr <= doc_ptr + 16'd1;
-                    end
-                    8'h3E: doc_ptr[7:0]  <= u_wdata;
-                    8'h3F: doc_ptr[15:8] <= u_wdata;
                     default: ;
                 endcase
             end else begin
                 case (u_addr[7:0])
                     // A read of the command port returns the pointer to 0 too.
                     8'h38, 8'h39: scc_ptr <= 8'd0;
-                    8'h3D: begin
-                        // The delayed fetch: nothing behind it yet.
-                        doc_saved <= 8'h00;
-                        if (doc_ctl[5]) doc_ptr <= doc_ptr + 16'd1;
-                    end
                     default: ;
                 endcase
             end

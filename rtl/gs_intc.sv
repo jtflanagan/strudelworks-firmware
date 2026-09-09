@@ -38,7 +38,7 @@
 // the 200-bit side copy of the SCB bit-6 column snooped from writes landing in
 // $E1/$9D00-$9DC7 (docs/GS.md, the `fb_sim` tap pattern).  The enable, the
 // status bit and the clear are all here and behave; nothing sets it.  The ADB
-// and DOC sources arrive with their own modules.
+// source arrives with its own module; the DOC's is here (irq_doc).
 //////////////////////////////////////////////////////////////////////////////////
 module gs_intc (
     input  wire        clk,
@@ -59,6 +59,12 @@ module gs_intc (
     // The other sources, each already gated by its own enable.
     input  wire        irq_adb,
     input  wire        irq_scan,       // the scan-line comparator, when it exists
+    // The Ensoniq's (rtl/gs_doc.sv).  IT HAS NO ENABLE AND NO INTFLAG BIT:
+    // the DOC's interrupt is not one of the Mega II's or the VGC's, it goes
+    // to the processor through the FPI, and the enable that gates it is the
+    // oscillator's own control-register bit 3.  KEGS's add_irq(IRQ_PENDING_DOC)
+    // ORs it into the pending mask and nothing else; so does this.
+    input  wire        irq_doc,
 
     // The one line into the core.
     output wire        irq
@@ -106,7 +112,7 @@ module gs_intc (
                  (p_25sec && (c041 & C041_EN_25SEC) != 8'd0) ||
                  (p_1sec  && (c023[2])) ||
                  (p_scan  && (c023[1])) ||
-                 irq_adb;
+                 irq_adb || irq_doc;
 
     wire wr = act && !op_rw;
     wire rd = act &&  op_rw;

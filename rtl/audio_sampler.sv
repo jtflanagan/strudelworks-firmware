@@ -31,7 +31,11 @@
 //////////////////////////////////////////////////////////////////////////////////
 module audio_sampler #(
     parameter integer K_SPK = 118378,   // 32767 * 2^22 / (2267.57 * 512): the count arrives shifted up 9
-    parameter integer K_AY  = 79225     // 32767 * 2^22 / (765 * 2267.57)
+    parameter integer K_AY  = 79225,    // 32767 * 2^22 / (765 * 2267.57)
+    // The Ensoniq's, on the same plan: the mix is taken down 5 bits first so
+    // full scale is 32640 rather than 1044480, and 32767 * 2^22 / (32640 *
+    // 2267.57) = 1856.  See the note on its accumulator below.
+    parameter integer K_DOC = 1856
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -40,10 +44,16 @@ module audio_sampler #(
 
     input  wire        spk,             // the speaker flip-flop's level
     input  wire [39:0] ay_out,          // {chip3, chip2, chip1, chip0}, 10 bits each
+    // The Ensoniq's mix (rtl/gs_doc.sv), signed, already summed across the
+    // oscillators.  Zero on the IIe build, where the DOC is not built.
+    input  wire signed [20:0] doc_l,
+    input  wire signed [20:0] doc_r,
 
     output logic        smp_valid,      // one clock: a sample is on the outputs
     output logic [15:0] smp_spk,
-    output logic [63:0] smp_ay          // {chip3, chip2, chip1, chip0}, 16 bits each
+    output logic [63:0] smp_ay,         // {chip3, chip2, chip1, chip0}, 16 bits each
+    output logic [15:0] smp_doc_l,      // the Ensoniq, stereo
+    output logic [15:0] smp_doc_r
 );
 
     // ---- the NCO -----------------------------------------------------------
@@ -78,6 +88,57 @@ module audio_sampler #(
             for (i = 0; i < 4; i = i + 1) begin
                 if (ay_acc[i] > 22'h3FFC00) ay_acc[i] <= 22'h3FFFFF;   // saturate
                 else ay_acc[i] <= ay_acc[i] + {12'd0, ay_out[i*10 +: 10]};
+            end
+        end
+    end
+
+    // ---- the Ensoniq's own box, and its own multipliers ---------------------
+    // WHY IT IS NOT ON THE WALK ABOVE.  That walk shares one UNSIGNED DSP, and
+    // the DOC's mix is SIGNED and two decimal orders wider - full scale is 32
+    // oscillators at +-128 * 255.  Biasing it non-negative to borrow the
+    // shared multiplier would cost an offset subtraction afterwards and a
+    // constant nobody could read; two dedicated signed multiplies cost two of
+    // the 238 idle DSP48s.  The user's call, and the cheaper one.
+    //
+    // IT DOES NEED THE BOX.  The scan completes - and so snd_l/snd_r change -
+    // at DOC_SCAN_RATE / (osc_en + 2), which with few oscillators enabled is
+    // ~298 kHz, well above the 44.1 kHz Nyquist.  Sample-and-hold would alias
+    // that; the window average is the same anti-aliasing the AYs get.
+    //
+    // The mix comes down 5 bits on the way in so the accumulator stays inside
+    // 28 bits over a 2268-clock window: 32640 * 2268 < 2^27.
+    logic signed [27:0] dl_acc, dr_acc, dl_lat, dr_lat;
+    wire signed [15:0]  dl_in = doc_l[20:5];
+    wire signed [15:0]  dr_in = doc_r[20:5];
+
+    always_ff @(posedge clk) begin
+        if (rst || !enable) begin
+            dl_acc <= 28'sd0; dr_acc <= 28'sd0;
+        end else if (tick) begin
+            dl_acc <= {{12{dl_in[15]}}, dl_in};
+            dr_acc <= {{12{dr_in[15]}}, dr_in};
+        end else begin
+            dl_acc <= dl_acc + {{12{dl_in[15]}}, dl_in};
+            dr_acc <= dr_acc + {{12{dr_in[15]}}, dr_in};
+        end
+    end
+
+    wire signed [17:0] k_doc = 18'(K_DOC);
+    (* use_dsp = "yes" *) logic signed [45:0] dl_prod, dr_prod;
+    logic dmul_v = 1'b0;
+    always_ff @(posedge clk) begin
+        if (rst || !enable) begin
+            dmul_v <= 1'b0; smp_doc_l <= 16'd0; smp_doc_r <= 16'd0;
+        end else begin
+            if (tick) begin dl_lat <= dl_acc; dr_lat <= dr_acc; end
+            dmul_v  <= tick;
+            dl_prod <= dl_lat * k_doc;
+            dr_prod <= dr_lat * k_doc;
+            // Ready two clocks after the tick, where the walk above takes
+            // seven, so both are standing when smp_valid goes out.
+            if (dmul_v) begin
+                smp_doc_l <= clamp16s(dl_prod >>> 22);
+                smp_doc_r <= clamp16s(dr_prod >>> 22);
             end
         end
     end
@@ -136,6 +197,16 @@ module audio_sampler #(
             end
         end
     end
+
+    // The signed clamp, for the Ensoniq: the unsigned one below cannot serve,
+    // its whole job being to catch a 17th bit that means "too loud".
+    function automatic [15:0] clamp16s(input signed [45:0] v);
+        begin
+            if (v >  46'sd32767) clamp16s = 16'h7FFF;
+            else if (v < -46'sd32768) clamp16s = 16'h8000;
+            else clamp16s = v[15:0];
+        end
+    endfunction
 
     function automatic [15:0] clamp16(input [16:0] v);
         clamp16 = (v > 17'd32767) ? 16'd32767 : v[15:0];

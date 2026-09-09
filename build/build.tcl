@@ -229,6 +229,7 @@ if {$snoop || $master} {
                 [file join $root rtl cpu65816.sv] \
                 [file join $root rtl gs_io.sv] \
                 [file join $root rtl gs_adb.sv] \
+                [file join $root rtl gs_doc.sv] \
                 [file join $root rtl gs_kbd_a2.sv] \
                 [file join $root rtl gs_clock.sv] \
                 [file join $root rtl gs_intc.sv] \

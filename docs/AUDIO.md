@@ -39,13 +39,32 @@ BRAM 46 %, 0 of 240 DSP48s used before this).
  phi0 (real time) ───┐    │         │            ▲ ay_ce           │ [3:0]  │
  core tick ──────────┴► ay clock    └────────────┴──────────────────┼───────┘
                                                                     ▼
-                 audio_sampler: NCO 44.1 kHz ─ box-average accumulators ─ DSP48 ─ 3 words/sample
+                 audio_sampler: NCO 44.1 kHz ─ box-average accumulators ─ DSP48 ─ 4 words/sample
+                                (+ the Ensoniq's own signed box and its two DSP48s)
                                                                     ▼
                  audio_tx: FIFO ─ 32 samples/message ─ msg_master port 7 ─ tx_ring ─ FT601
                                                                     ▼
       host: ingest thread ─ jitter buffer ─ audio thread: pan/level, speaker filter,
             SSI-263 (real time), chime ─ ALSA;  depth error ─► AUDIO_RATE trim (ppm)
 ```
+
+## The Ensoniq, added 2026-09-09 (GS.md rung 7)
+
+The DOC is on the GS build only and it does not go through the shared
+multiplier walk.  Two reasons, both structural: its mix is **signed** where
+the speaker and the AYs are unsigned magnitudes, and it is two decimal orders
+wider - 32 oscillators at ±128 × 255.  Biasing it non-negative to borrow the
+shared unsigned DSP would cost an offset subtraction and a constant nobody
+could read, so it has two DSP48s of its own out of the 238 idle.
+
+It **does** need the box average, which is not obvious: the DOC's scan
+completes at `DOC_SCAN_RATE / (osc_en + 2)`, and with only a few oscillators
+enabled that is ~298 kHz - well above the 44.1 kHz Nyquist.  Sample-and-hold
+would alias it.  The mix comes down 5 bits on the way into the accumulator so
+28 bits covers a 2268-clock window.
+
+The wire format grew from three words a sample to four.  At 44.1 kHz that is
+706 kB/s where it was 529, against a link that runs at 335 MB/s.
 
 ## The chips
 

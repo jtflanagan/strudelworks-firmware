@@ -41,6 +41,7 @@ declare -A B=(
   [adb_revmap]="python3 tools/gen_adb_revmap.py --check|ADB reverse keymap up to date"
   [gs_adb]="sim/run_gs_adb_tb.sh|^PASS$"
   [gs_kbd_a2]="sim/run_gs_kbd_a2_tb.sh|^PASS$"
+  [gs_doc]="sim/run_gs_doc_tb.sh|^PASS$"
   [cpu816_cycles]="python3 sim/gen_cycle_table816.py|every observed cycle count is reachable"
   [cpu816_trace]="sim/run_cpu816_trace.sh --limit 400 --flags|^PASS$"
   [boot_hold]="sim/run_boot_hold_tb.sh|^PASS$"
@@ -94,7 +95,7 @@ declare -A B=(
 )
 QUICK="lint microcode boot_hold bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
-GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 cpu816_cycles cpu816_trace mmu_xlate_gs boot_gs"
+GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 gs_doc cpu816_cycles cpu816_trace mmu_xlate_gs boot_gs"
 BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"
 [ "$iverilog" = 1 ] && BATTERY="$BATTERY accel_iv"
 
