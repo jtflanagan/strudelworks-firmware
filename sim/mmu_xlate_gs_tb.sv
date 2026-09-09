@@ -42,6 +42,9 @@ module mmu_xlate_gs_tb;
     logic clk = 0, rst = 1, res_sync = 0;
     always #5 clk = ~clk;
 
+    // The op path is only ever used here to move switches, which live in
+    // bank $00's I/O page; the map itself is swept through the query ports.
+    logic [7:0]  op_bank = 8'd0;
     logic [15:0] op_addr = 16'd0;
     logic        op_rw = 1'b1;
     logic [7:0]  op_wdata = 8'd0;
@@ -69,7 +72,7 @@ module mmu_xlate_gs_tb;
 
     apple_mmu #(.GS (1'b1)) dut (
         .clk (clk), .rst (rst), .res_sync (res_sync),
-        .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
+        .op_bank (op_bank), .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit), .rom_ok (rom_ok),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),

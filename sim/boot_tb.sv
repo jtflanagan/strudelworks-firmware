@@ -134,6 +134,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     );
 
     wire [15:0] cpu_addr;
+    // The 65C02 has no bank: the IIe's unified stream is bank zero, which is
+    // what a 24-bit map is asked when a IIe asks it (docs/GS.md rung 3).
+    wire [7:0]  cpu_bank = 8'd0;
     wire        cpu_rw, cpu_sync, cpu_cyc_en, cpu_cyc_is_i;
     wire [15:0] cpu_pc_addr;
     wire [7:0]  cpu_dout, cpu_din, i_din_w, cpu_p_flags;
@@ -169,9 +172,11 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     wire        u_present, u_commit, u_rw, u_sync, u_ovr, u_divert;
     wire [15:0] u_addr;
+    wire [7:0]  u_bank;
     wire [7:0]  u_wdata;
     wire        fev_valid, fev_rw, fev_sync;
     wire [15:0] fev_addr;
+    wire [7:0]  fev_bank;
     wire [7:0]  fev_data;
     wire        accel_on, decided, busy, mq_valid_w;
     wire [1:0]  q_cls;
@@ -287,7 +292,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .stall (1'b0),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
-        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
+        .cpu_addr (cpu_addr), .cpu_bank (cpu_bank), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
         .cyc_en (seq_cyc_en), .cpu_din (cpu_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok),
         .turbo_commit (turbo_commit), .d_commit (d_commit_w),
@@ -301,9 +306,9 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .mem_sub_en (mem_sub_en), .mem_sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .mq_valid (mq_valid_w),
         .bus_tick (bus_tick),
-        .u_present (u_present), .u_commit (u_commit), .u_addr (u_addr), .u_rw (u_rw),
+        .u_present (u_present), .u_commit (u_commit), .u_addr (u_addr), .u_bank (u_bank), .u_rw (u_rw),
         .u_wdata (u_wdata), .u_sync (u_sync), .u_ovr (u_ovr), .u_divert (u_divert),
-        .fev_valid (fev_valid), .fev_addr (fev_addr), .fev_rw (fev_rw), .fev_data (fev_data),
+        .fev_valid (fev_valid), .fev_addr (fev_addr), .fev_bank (fev_bank), .fev_rw (fev_rw), .fev_data (fev_data),
         .fev_sync (fev_sync),
         .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
         .fast_ops (fast_ops), .map_changed (map_changed), .map_settling (map_settling), .maps (accel_maps), .cen_v (), .cen_sel (), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
@@ -420,7 +425,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     apple_mmu u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
-        .op_addr (u_addr), .op_rw (u_rw), .op_wdata (u_wdata),
+        .op_bank (u_bank), .op_addr (u_addr), .op_rw (u_rw), .op_wdata (u_wdata),
         .op_present (u_present), .op_commit (u_commit),
         .rom_ok (rom_loaded),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),

@@ -96,7 +96,12 @@
 // after that, the first opcode fetch, is decided normally; an armed boot
 // hold takes it through the override path as before.
 //////////////////////////////////////////////////////////////////////////////////
-module accel_seq (
+module accel_seq #(
+    // THE MACHINE, as apple_mmu takes it (docs/GS.md).  0 = the Apple IIe;
+    // 1 = the IIgs the soft 65816 runs.  The one thing it changes here is
+    // the reset sequence: see reset_seq below.
+    parameter bit GS = 1'b0
+) (
     input  wire        clk,
     input  wire        rst,             // the card's
     input  wire        cpu_rst,         // the core's: the card's OR RES'
@@ -115,6 +120,12 @@ module accel_seq (
 
     // The core.
     input  wire [15:0] cpu_addr,
+    // The core's bank (docs/GS.md rung 3).  Zero on the IIe build - the
+    // 65C02 has no such output and the caller ties it - and the 65816's
+    // addr[23:16] on the IIgs.  It is latched with the op it belongs to and
+    // rides the unified stream, so the classifier and the event record see
+    // the same twenty-four bits the core put up.
+    input  wire [7:0]  cpu_bank,
     input  wire        cpu_rw,
     input  wire [7:0]  cpu_dout,
     input  wire        cpu_sync,
@@ -212,6 +223,7 @@ module accel_seq (
     // The unified op stream, registered.
     output logic        u_present,
     output wire         u_commit,
+    output logic [7:0]  u_bank,
     output logic [15:0] u_addr,
     output logic        u_rw,
     output logic [7:0]  u_wdata,
@@ -222,6 +234,7 @@ module accel_seq (
     // A fast op's event, for the capture (rtl/event_merge.sv): the op and the
     // byte the core read or wrote, on the clock the core takes it.
     output logic        fev_valid,
+    output logic [7:0]  fev_bank,
     output logic [15:0] fev_addr,
     output logic        fev_rw,
     output logic [7:0]  fev_data,
@@ -275,6 +288,7 @@ module accel_seq (
 
     logic bus_owns_q, core_valid_q;
     logic fast_rw;                      // the fast op in flight is a read
+    logic [7:0] bus_bank;               // the bank of the op handed to the driver
     logic reset_seq;                    // the reset sequence has not reached $FFFD on the bus
 
     wire off = (mode == MODE_OFF);
@@ -493,18 +507,27 @@ module accel_seq (
 
         // From reset until $FFFD has ridden the bus (see the header).  Cleared
         // in mode 0 too, where it could not be observed but must not stick.
-        if (cpu_rst)                 reset_seq <= 1'b1;
+        // THE IIgs HAS NO SUCH SEQUENCE TO RIDE.  The reason the IIe's seven
+        // reset cycles go out on the bus is that the motherboard's MMU
+        // infers a reset from them and only then restores its own switches
+        // (the header).  On the IIgs the card holds the whole memory map
+        // itself, the motherboard's is not the machine's, and the vector at
+        // $00/FFFC is the GS ROM's - which is on the card.  Sending it to
+        // the bus would fetch the IIe's vector instead and start the core in
+        // the wrong ROM entirely.  So the sequence is over before it begins.
+        if (cpu_rst)                 reset_seq <= !GS;
         else if (vector_done || off) reset_seq <= 1'b0;
 
         if (rst) begin
             st <= S_RST;
-            reset_seq <= 1'b1;
+            reset_seq <= !GS;
             settled <= 1'b0;
             bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0; quiet_q <= 1'b0; slot_q <= 1'b0;
             credit <= 20'd0; grant_q <= 1'b0; spent_q <= 1'b0;
-            u_addr <= 16'd0; u_rw <= 1'b1; u_wdata <= 8'd0;
+            u_addr <= 16'd0; u_bank <= 8'd0; u_rw <= 1'b1; u_wdata <= 8'd0;
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
-            fev_addr <= 16'd0; fev_rw <= 1'b1; fev_data <= 8'd0; fev_sync <= 1'b0;
+            bus_bank <= 8'd0;
+            fev_addr <= 16'd0; fev_bank <= 8'd0; fev_rw <= 1'b1; fev_data <= 8'd0; fev_sync <= 1'b0;
             fast_ops <= 32'd0; turbo_ops <= 32'd0; bus_ops <= 32'd0; cycles <= 32'd0;
             wait_clocks <= 32'd0; retries <= 8'd0; maps <= 32'd0;
         end else begin
@@ -513,6 +536,11 @@ module accel_seq (
             if (bus_op_present) begin
                 u_present <= 1'b1;
                 u_addr    <= op_addr;
+                // The driver carries sixteen bits, so the bank of a BUS op
+                // is the one this module latched when it decided the op -
+                // and zero for an override's cycle, which is the card's own
+                // and belongs to no bank.
+                u_bank    <= op_ovr ? 8'd0 : bus_bank;
                 u_rw      <= op_rw;
                 u_wdata   <= op_wdata;
                 u_sync    <= op_sync;
@@ -586,6 +614,7 @@ module accel_seq (
                             st <= S_BUS;
                             bus_owns_q   <= 1'b1;
                             core_valid_q <= 1'b1;
+                            bus_bank     <= cpu_bank;
                         end else if (fast_ok) begin
                             st <= S_FAST;
                             bus_owns_q   <= 1'b0;
@@ -599,6 +628,7 @@ module accel_seq (
                             // The op, onto the stream.
                             u_present <= 1'b1;
                             u_addr    <= cpu_addr;
+                            u_bank    <= cpu_bank;
                             u_rw      <= cpu_rw;
                             u_wdata   <= cpu_dout;
                             u_sync    <= cpu_sync;
@@ -614,6 +644,7 @@ module accel_seq (
                             fev_valid <= 1'b1;
                             fev_quiet <= swi_q && quiet_q;
                             fev_addr  <= u_addr;
+                            fev_bank  <= u_bank;
                             fev_rw    <= u_rw;
                             fev_data  <= u_rw ? (swi_q ? swi_byte_q : mem_sub_data)
                                               : u_wdata;

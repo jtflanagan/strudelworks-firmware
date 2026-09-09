@@ -251,7 +251,7 @@ module fb_sim_tb #(parameter UCODE = "cpu65c02_ucode.hex");
 
     apple_mmu u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
-        .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
+        .op_bank (8'd0), .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
         .rom_ok (1'b1), .intc8rom (), .q_rw (1'b1), .q_cls (),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),

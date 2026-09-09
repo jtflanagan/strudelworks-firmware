@@ -276,10 +276,17 @@ module master_top #(
     wire        accel_reset_seq;
     wire        u_present, u_commit, u_rw, u_sync, u_ovr, u_divert;
     wire [15:0] u_addr;
+    wire [7:0]  u_bank;
     wire [7:0]  u_wdata;
     wire        fev_valid, fev_rw, fev_sync;
     wire        fd_stall;           // the floppy's fill pending: the accelerated core waits
     wire [15:0] fev_addr;
+    // The fast event's bank.  NOTHING TAKES IT ON THIS BUILD, and that is
+    // right: the v6 record has the field (word 0 [27:20], docs/PROTOCOL.md)
+    // but card_link's fast port is sixteen bits and a IIe's bank is always
+    // zero, so the merge hardwires it.  The capture path widens at rung 3c,
+    // when the host learns to classify a IIgs stream (docs/GS.md).
+    wire [7:0]  fev_bank;
     wire [7:0]  fev_data;
     wire        core_valid, op_dummy, op_inflight, drv_cyc_done;
     wire [7:0]  drv_din;
@@ -506,6 +513,9 @@ module master_top #(
     wire cpu_rst = apple_rst || !apple_res_sync;
 
     wire [15:0] cpu_addr;
+    // The 65C02 has no bank: the IIe's unified stream is bank zero, which is
+    // what a 24-bit map is asked when a IIe asks it (docs/GS.md rung 3).
+    wire [7:0]  cpu_bank = 8'd0;
     wire        cpu_rw;
     wire [7:0]  cpu_dout, cpu_din, cpu_p_flags;
     wire        cpu_cyc_en, cpu_sync;
@@ -761,6 +771,7 @@ module master_top #(
         .mem_invalidating (mem_invalidating),
         .q_cls         (q_cls),
         .cpu_addr      (cpu_addr),
+        .cpu_bank      (cpu_bank),
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
         .cpu_sync      (cpu_sync),
@@ -799,6 +810,7 @@ module master_top #(
         .u_present     (u_present),
         .u_commit      (u_commit),
         .u_addr        (u_addr),
+        .u_bank        (u_bank),
         .u_rw          (u_rw),
         .u_wdata       (u_wdata),
         .u_sync        (u_sync),
@@ -806,6 +818,7 @@ module master_top #(
         .u_divert      (u_divert),
         .fev_valid     (fev_valid),
         .fev_addr      (fev_addr),
+        .fev_bank      (fev_bank),
         .fev_rw        (fev_rw),
         .fev_data      (fev_data),
         .fev_sync      (fev_sync),
@@ -1164,6 +1177,7 @@ module master_top #(
         .clk        (apple_clk),
         .rst        (apple_rst),
         .res_sync   (apple_res_sync),
+        .op_bank    (u_bank),
         .op_addr    (u_addr),
         .op_rw      (u_rw),
         .op_wdata   (u_wdata),
@@ -1192,7 +1206,10 @@ module master_top #(
         .sw_state   (mem_sw),
         .vid_sw     (vid_sw),
         .rw_bank    (mem_rw_bank),
-        .q_addr     ({8'd0, nxt_addr}),
+        // The driver's next address, in the physical space: the bank is the
+        // core's, which is zero on this build and the 65816's on the GS
+        // (docs/GS.md rung 3).  An override's cycle belongs to no bank.
+        .q_addr     ({ovr_en ? 8'd0 : cpu_bank, nxt_addr}),
         .q_divert   (mmu_q_divert),
         .q_rw       (cpu_rw),
         .q_cls      (q_cls),

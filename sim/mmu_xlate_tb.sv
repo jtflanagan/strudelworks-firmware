@@ -55,7 +55,7 @@ module mmu_xlate_tb;
 
     apple_mmu dut (
         .clk (clk), .rst (rst), .res_sync (res_sync),
-        .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
+        .op_bank (8'd0), .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit), .rom_ok (rom_ok),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),

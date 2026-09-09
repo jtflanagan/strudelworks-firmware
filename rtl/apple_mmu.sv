@@ -225,6 +225,12 @@ module apple_mmu #(
     input  wire        res_sync,
 
     // The presented op, from apple_bus_write.
+    // THE BANK RIDES WITH IT (docs/GS.md rung 3).  On the IIe the unified
+    // stream is 16 bits and this is tied to zero, which is exactly what it
+    // means; on the IIgs it is the 65816's addr[23:16], and it decides both
+    // the bank class the address is translated under and whether $C0xx is
+    // the I/O page at all - only a PAIR bank has I/O there.
+    input  wire [7:0]  op_bank,
     input  wire [15:0] op_addr,
     input  wire        op_rw,          // 1 = read
     input  wire [7:0]  op_wdata,       // a write's byte: the bank register's value
@@ -441,7 +447,13 @@ module apple_mmu #(
     logic [7:0] gs_cyareg;
     logic [7:0] gs_sltrom;
 
-    wire io_page = (op_addr[15:8] == 8'hC0);
+    // $C0xx is the I/O page in a PAIR bank ($00/$01/$E0/$E1) and nowhere
+    // else: on the IIgs bank $02's $C0xx is plain RAM and moves no switch.
+    // gs_pair() itself is declared with the bank classes below, so the test
+    // is written out here rather than called.
+    wire op_pair = !GS || (op_bank == 8'h00) || (op_bank == 8'h01) ||
+                          (op_bank == 8'hE0) || (op_bank == 8'hE1);
+    wire io_page = op_pair && (op_addr[15:8] == 8'hC0);
     wire sw_c00x = io_page && (op_addr[7:4] == 4'h0);      // $C000-$C00F
     wire sw_c05x = io_page && (op_addr[7:4] == 4'h5);      // $C050-$C05F
     // $C071 and $C073: the RamWorks bank register, a write of the bank number.
@@ -1145,11 +1157,20 @@ module apple_mmu #(
     // ---- the map's edge -----------------------------------------------------------
     // Everything classification reads, watched as one word; sw_state carries
     // the LC and every switch, and the bank register and INTC8ROM ride along.
-    logic [20:0] map_q;
+    // THE IIgs's REGISTERS ARE PART OF THE MAP TOO.  SHADOW decides where a
+    // write lands a second time and, in bit 6, whether $Cxxx-$Fxxx of the
+    // fast pair is I/O and language card at all; SLOTROMSEL decides which
+    // $Cnxx pages are the internal ROM's.  Both are constant zero at GS = 0,
+    // so this word folds back to the IIe's twenty-one bits there and
+    // map_changed is bit-for-bit what the IIe sweep has always seen.
+    // STATEREG needs no entry: its write moves the seven switches that are
+    // already in sw_state.
+    logic [35:0] map_q;
     logic        map_s1, map_s2;
+    wire [35:0] map_now = {gs_shadow, gs_sltrom, sw_state, intc8rom, rw_bank};
     always_ff @(posedge clk) begin
-        map_q       <= {sw_state, intc8rom, rw_bank};
-        map_changed <= rst || !res_sync || (map_q != {sw_state, intc8rom, rw_bank});
+        map_q       <= map_now;
+        map_changed <= rst || !res_sync || (map_q != map_now);
         // ...and its three-clock stretch's two delays.  map_settling itself
         // is COMBINATIONAL over them, so it covers map_changed's OWN clock:
         // registering the OR would start it one clock late, and that clock
@@ -1194,7 +1215,7 @@ module apple_mmu #(
     // one mux on a registered switch, beside the fetch, not in front of it.
     assign pf_off = (in_d && !lc_bank2) ? {4'hC, op_addr[11:0]} : op_addr;
 
-    wire [XL_W-1:0] n_x   = xlate({8'd0, op_addr}, op_rw);
+    wire [XL_W-1:0] n_x   = xlate({op_bank, op_addr}, op_rw);
     wire [1:0] n_cls      = xl_cls(n_x);
     wire       n_sh       = xl_sh(n_x);
     wire       n_wr_image = xl_wr(n_x);
@@ -1213,11 +1234,27 @@ module apple_mmu #(
     //
     // ONE DEEP IS ENOUGH, and that is a property of the machine rather than a
     // hope.  The op path presents a write at most once every bus cycle, and
-    // the duplicate goes out on the very next idle clock - which is the clock
-    // after the op, since op_present is a pulse.  Two shadowed writes can
-    // therefore never be in hand at once.  `shd_drop` counts the case that
-    // says otherwise, and a bench that ever sees it non-zero has found a
-    // machine this reasoning does not describe.
+    // the duplicate goes out on the next clock the page cache's pipeline is
+    // clear.  Two shadowed writes can therefore never be in hand at once: an
+    // op that would make the second cannot be dispatched while the cache is
+    // working, because the dispatcher's `fast_ok` waits on that same `busy`
+    // (rtl/accel_seq.sv), and a bus-cycle-paced write is a hundred clocks
+    // behind.  `shd_drop` counts the case that says otherwise, and a bench
+    // that ever sees it non-zero has found a machine this reasoning does not
+    // describe.
+    //
+    // AND IT WAITS FOR `pw_ready`, WHICH IT DID NOT AT FIRST.  A duplicate
+    // offered "on the very next idle clock" is offered one clock behind its
+    // own op - and that op may have MISSED and started a fill in that very
+    // clock.  The duplicate then arrives at the classified stage with the
+    // engine busy, is blocked (page_cache's dec_block), counted as a late
+    // fill, and, being a write, ITS BYTE IS GONE - silently, because the
+    // drop happens downstream of `shd_drop`.  sim/boot_gs_tb.sv caught it
+    // once in a million instructions of the GS ROM: a shadowed write to
+    // $00/$04FB missing page $0004, and its duplicate to $E004 blocked by
+    // the fill its own op had just started.  So the duplicate takes the same
+    // gate a posted write takes - the page cache's pipeline clear - which is
+    // exactly what `pw_ready` means and was already wired in.
     logic        shd_valid;
     logic [15:0] shd_ppn;
     logic [7:0]  shd_off, shd_data;
@@ -1225,7 +1262,7 @@ module apple_mmu #(
     assign shd_drops = shd_drop;
 
     wire shd_new  = cl_valid && !cl_rw && cl_wr_image && cl_sh;
-    wire shd_take = shd_valid && !op_present && !rst;
+    wire shd_take = shd_valid && pw_ready && !op_present && !rst;
 
     // The duplicate is offered before the front's posted write: it belongs to
     // an op that has already been classified, and holding it back behind a
