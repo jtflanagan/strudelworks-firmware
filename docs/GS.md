@@ -248,7 +248,7 @@ parity check on every rung that touches shared RTL.
 | 3b | `gs_io.sv`: the IIgs chipset's register faces - ADB micro, the map's own registers, `gs_clock` + battery RAM, VGC, `gs_intc`, the IWM and SCC stubs, the sound GLU face - answered on the card instead of by the backplane | the divergence index moves; `boot_gs_tb`'s floor raised | **IN PROGRESS**: ADB micro, the map registers and the clock done, 41,877 -> 67,398 events |
 | 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face) and the host side: the GS map in the mirror, `machine = iigs`, `gs_rom` | the ROM runs past the chipset with no spin; the host's map agrees with the card's | **DONE 2026-09-09** - see below |
 | 3d | `hd_card` in `boot_gs_tb` with the bench playing host, so the scan has something to find | the ROM finds slot 7, runs its firmware and reads blocks | **DONE 2026-09-09** - and the boot block runs; see below |
-| 3e | Why the ProDOS boot block gives up after the first directory block; then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | |
+| 3e | Why the third block read asks for $0203 instead of $0003 (the high byte of the block number); then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
 | 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | |
@@ -655,15 +655,31 @@ volume directory into `$0C00`.  All of that is new.
     094D  JMP $094D
     0950  "UNABLE TO LOAD PRODOS" (high ASCII)
 
-It copies its own error message to the text page and halts.  The directory it
-read is sound - block 2 holds the volume header, `VIEW.README`, `BITSY.BOOT`
-and a next-block pointer to block 3 - so the walk should have followed to
-block 3 and did not.  THE FAULT IS IN THE GS MACHINE, NOT THE DISK PATH: the
-same image and the same `hd_card` boot correctly on the IIe bench
-(`sim/images.local`, `sim/suite.sh boot`).  Finding out why is rung 3e, and
-the difference to look at first is that `$0800` - where the boot block itself
-lands and runs - is TEXT PAGE 2, a SHADOWED region on the IIgs, which it is
-not on the IIe.
+It copies its own error message to the text page and halts.  **`PRODOS` is in
+directory block 3, not block 2** - block 2 holds the volume header,
+`VIEW.README`, `BITSY.BOOT` and eleven more, with a next-block pointer to 3 -
+so the walk had to follow that pointer, and the instruments say exactly what
+happened when it tried:
+
+    disk: EXEC cmd $01 unit $70   READ block 0 -> $0800
+    disk: EXEC cmd $01 unit $70   READ block 2 -> $0c00
+    disk: EXEC cmd $01 unit $70   REFUSED block 515 -> $0e00 (past the end of the image)
+
+**THE THIRD READ ASKS FOR BLOCK 515, WHICH IS $0203.**  The low byte is right
+and the high byte is $02 where it should be $00.  The host model refuses a
+block past the end of the image - correctly - and the boot block takes its
+error path.  Two things are already ruled out: the blocks that DID arrive are
+byte-for-byte correct in the card's memory (`check_landed`, which reads the
+page cache and the DDR3 stub the way `boot_tb` does), so neither the DMA nor
+shadowing is corrupting them; and the same image with the same `hd_card` boots
+on the IIe bench, so the disk path itself is sound.
+
+What remains is how the block number reaches the card's registers on this
+machine - the host model assembles it from the `$C0Fx` writes it sees on the
+op stream, and a stale or missed high byte would look exactly like this.  That
+is rung 3e's first question.  The bench now names every EXEC, every READ and
+every REFUSAL with its reason, which is what turned "the boot fails" into a
+one-line fact.
 
 ## Verification
 

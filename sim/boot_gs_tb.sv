@@ -684,6 +684,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 hm_armed = 0;
                 host_execs = host_execs + 1;
                 u = hm_resolve();
+                $display("    disk: EXEC cmd $%02X unit $%02X -> resolved %0d at instruction %0d",
+                         hm_cmd, hm_unit_num, u, trace_instrs);
                 q_cmd[qw % QN] = hm_cmd; q_unum[qw % QN] = hm_unit_num;
                 q_unit[qw % QN] = u; q_sc[qw % QN] = hm_sc; q_at[qw % QN] = now;
                 if (u != UNIT_NONE) begin
@@ -857,6 +859,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                         CMD_BLK_READ, CMD_SP_READ: begin
                             if (diskblock >= HDV_BLOCKS || dma_hits_io(memblock, 512)) begin
                                 err = ERR_IO; ans_n = 0;
+                                $display("    disk: REFUSED block %0d -> $%04X (%0s) at instruction %0d",
+                                         diskblock, memblock,
+                                         (diskblock >= HDV_BLOCKS) ? "past the end of the image"
+                                                                   : "the DMA would cross the I/O page",
+                                         trace_instrs);
                             end else begin
                                 base = diskblock * 512;
                                 for (k = 0; k < 512; k = k + 1) begin ans[k] = himg[base + k]; end
@@ -1065,6 +1072,63 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         end
     endtask
 
+    // ---- reading the card's memory back (boot_tb's, verbatim) ---------------------
+    // Hash the physical page to its set, scan the ways, take the one that
+    // holds it - else the DDR3 stub has it.  The bench needs this to check
+    // that a block the host DMA'd in actually landed where the machine will
+    // look for it.
+    localparam integer MEM_SETS = 128, MEM_WAYS = 8;
+    localparam integer SIDX = $clog2(MEM_SETS);
+    function automatic [7:0] card_byte(input [15:0] ppn, input [7:0] off);
+        int st, w, hit;
+        logic [127:0] row;
+        begin
+            st  = int'(ppn[SIDX-1:0] ^ ppn[2*SIDX-1 -: SIDX]);
+            hit = -1;
+            for (w = 0; w < MEM_WAYS; w = w + 1)
+                if (u_cache.dir[w][st][17] && u_cache.dir[w][st][15:0] == ppn) hit = w;
+            row = 128'd0;
+            case (hit)
+                0: row = u_cache.g_way[0].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                1: row = u_cache.g_way[1].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                2: row = u_cache.g_way[2].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                3: row = u_cache.g_way[3].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                4: row = u_cache.g_way[4].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                5: row = u_cache.g_way[5].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                6: row = u_cache.g_way[6].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                7: row = u_cache.g_way[7].u_way.mem[{st[SIDX-1:0], off[7:4]}];
+                default: ;
+            endcase
+            card_byte = (hit >= 0) ? row[8 * off[3:0] +: 8] : smem[{ppn, off}];
+        end
+    endfunction
+
+    // Did the blocks the host sent actually land?  A boot that reads the
+    // right blocks and then gives up is either being told the wrong bytes or
+    // reading them from the wrong place, and this tells the two apart.
+    task check_landed(input [15:0] addr, input integer blk, input string what);
+        integer k, bad, first;
+        reg [7:0] got, wnt;
+        begin
+            bad = 0; first = -1;
+            for (k = 0; k < 512; k = k + 1) begin
+                got = card_byte({8'd0, 16'(addr + k) >> 8}, 8'(16'(addr + k)));
+                wnt = himg[blk * 512 + k];
+                if (got !== wnt) begin
+                    bad = bad + 1;
+                    if (first < 0) first = k;
+                end
+            end
+            if (bad == 0) ok($sformatf("%0s: block %0d is intact at $%04X", what, blk, addr));
+            else begin
+                fail($sformatf("%0s: %0d of 512 bytes wrong at $%04X, first at +%0d (got $%02X, want $%02X)",
+                               what, bad, addr, first,
+                               card_byte({8'd0, 16'(addr + first) >> 8}, 8'(16'(addr + first))),
+                               himg[blk * 512 + first]));
+            end
+        end
+    endtask
+
     // ---- the run -----------------------------------------------------------------
     integer a, c;
     initial begin
@@ -1133,7 +1197,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             $display("    (no image given: the scan had nothing to find)");
         else if (hd_blocks_read == 0)
             fail("no block was ever read: the scan did not boot from slot 7");
-        else ok($sformatf("%0d blocks read from the slot-7 SmartPort", hd_blocks_read));
+        else begin
+            ok($sformatf("%0d blocks read from the slot-7 SmartPort", hd_blocks_read));
+            // The two the boot takes: the boot block at $0800 - which is TEXT
+            // PAGE 2, a shadowed region on this machine - and the volume
+            // directory at $0C00, which is not.
+            check_landed(16'h0800, 0, "the boot block");
+            check_landed(16'h0C00, 2, "the volume directory");
+        end
 
         // The machine itself, not the ROM's opinion of it.
         if (trace_instrs == 0) fail("the core executed nothing");
