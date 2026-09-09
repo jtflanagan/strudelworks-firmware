@@ -550,14 +550,67 @@ finding none, and ending at $FF/A5F1 - the ROM's "no bootable device, wait a
 frame and try again" loop.  That is the right end state for a machine with no
 boot device, and it is what KEGS does with no disks.
 
-**$C7xx WAS TOUCHED TEN TIMES**, and that is the one thing between here and
-the milestone: the ROM never scans slot 7's ROM page because SLOTROMSEL leaves
-it INTERNAL, and bank $FF's $C700 is 256 zero bytes (rung 3b's finding - the
-IIgs ROM has no slot-7 firmware; KEGS substitutes its own).  For the card's
-SmartPort HDC to be found, SLOT 7 MUST BE MARKED "YOUR CARD" in $C02D, which
-on a IIgs comes from the battery RAM's slot configuration - so the BRAM has to
-be preset rather than left all zero (docs/GS.md already plans "Preset slots
-6/7 = Your Card").  That, and putting `hd_card` in the bench, is rung 3d.
+**$C7xx WAS TOUCHED TEN TIMES**, and asking the machine what it had decided
+settled why - and corrected a guess.  The bench now dumps the configuration
+the ROM settles on, and it says:
+
+    $C02D SLOTROMSEL = $80        slot 7: the SLOT's card
+    BRAM $FC-$FF = 36 2d 9c 87
+
+**SLOT 7 IS ALREADY "YOUR CARD" BY THE ROM's OWN DEFAULTS.**  The ten touches
+were the scan looking at slot 7's page, finding no signature because the bench
+has no card there, and moving on - not the ROM declining to look.  And the
+checksum the ROM computed for its own defaults is **$2D36**, which is exactly
+the value KEGS had at the rung-3b divergence, with $879C = $2D36 XOR $AAAA
+beside it: our clock and battery RAM produce byte-for-byte what the reference
+does.
+
+So the battery RAM is not what blocks the slot-7 boot.  What is left is
+putting `hd_card` in the bench - rung 3d.
+
+## The battery RAM the host ships (2026-09-09)
+
+The user's decision: **the host ships a battery RAM, and every slot the host
+has configured with an emulated card is marked "Your Card"** - the host is the
+only thing that knows which those are.  Two things had to be derived from the
+machine rather than assumed, and both took being wrong first.
+
+**WHICH BYTES ARE THE SLOTS.**  Found by tracing who writes $C02D - the
+routine at $FF/BB9A:
+
+    LDX #$07 / LDA #$00
+    ORA $E102E0,X / ASL A / DEX / BNE       ; slots 7..1, one bit each
+    AND #$F0                                ; keep only slots 4-7
+    LDA $E102E2 / CMP #$01 / ORA #$04       ; slot 2, re-derived
+    LDA $E10318 / CMP #$01 / ORA #$02       ; slot 1, from somewhere else
+    STA $C02D
+
+The ROM's working copy of the battery RAM is at $E1/$02C0, so $E102E0+X is
+BRAM byte $20+X: **BRAM $21-$27 ARE SLOTS 1-7**, and 1 means the slot's card.
+The `AND #$F0` throws slots 1-3 away, so slot 1 is taken from **BRAM $58**
+instead and slot 2 from **BRAM $22** - both have to be written or the ROM's
+two passes disagree.  **SLOT 3 CAN NEVER BE GIVEN TO A SLOT**: the routine has
+no term for it, because slot 3 is the IIgs's internal 80-column video.  The
+predicted register from the ROM's defaults, $80, matches what it wrote.
+
+**AND THE CHECKSUM, WHICH TOOK THREE TRIES.**  A shipped image whose checksum
+is wrong is silently replaced by the ROM's defaults, taking the slot settings
+with it.  The routine is at $FF/BA57:
+
+    LDX #$FA / REP #$20 / CLC / LDA #$0000
+    loop: ROL A / ADC $02C0,X / DEX / CPX #$FF / BNE loop / TAX / EOR #$AAAA
+
+Two details defeated reading the opcodes, and only walking the bench's own
+trace register by register settled them.  The ADC is **sixteen bits wide over
+a byte array**, so each pass adds the OVERLAPPING pair {b[x], b[x+1]}.  And
+**`CPX #$FF` ends every pass and CLEARS THE CARRY** - X is below $FF
+throughout - so the `ROL` rotates in ZERO every time and the only carry
+reaching the ADC is the ROL's own.  Modelled that way it reproduces the ROM's
+$2D36 and $879C exactly; modelled any other way it does not.  `src/gs_bram.cpp`
+in the host is that transcription and `tests/gs_bram_test.cpp` holds it to
+those numbers, with a copy of the ROM's slot routine to check the images it
+builds.
+
 
 **The host's half.**  `AppleMemory` gains a `Machine` and a
 `classify_gs(bank, addr, rw)` - the four bank classes, the pair-bank side, the
@@ -568,7 +621,7 @@ space on a IIgs, one to one.  `tests/gs_memory_test.cpp` sweeps it against a
 SECOND model written as a flat decision tree with no shared helpers, the same
 rule as rung 2: twelve banks, 256 pages, read and write, over every SHADOW
 state and the language card's.  `machine = iie | iigs` and `gs_rom` join the
-config.  Host tests 37/37 on the Pi.
+config.  Host tests 38/38 on the Pi (the map sweep and the battery RAM's).
 
 ## Verification
 

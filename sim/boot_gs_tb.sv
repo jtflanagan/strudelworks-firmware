@@ -541,6 +541,33 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         end
     endtask
 
+    // What the ROM made of the machine's configuration: the slot register it
+    // ended up with, and the battery RAM it wrote.  With an all-zero BRAM the
+    // ROM finds a bad checksum and writes its own defaults, and THOSE are
+    // what decide which slots are "Your Card" - which is what the slot-7
+    // SmartPort boot turns on (docs/GS.md rung 3d).
+    task dump_config;
+        integer k, r;
+        string line;
+        begin
+            $display("    ---- the configuration the ROM settled on ----");
+            $display("      $C02D SLOTROMSEL = $%02X  (a SET bit gives that page to the slot)",
+                     gs_sltrom_w);
+            for (k = 1; k < 8; k = k + 1)
+                $display("        slot %0d: %0s", k,
+                         gs_sltrom_w[k] ? "the SLOT's card" : "internal ROM");
+            $display("      $C035 SHADOW = $%02X   $C036 CYAREG = $%02X   $C068 STATEREG = $%02X",
+                     gs_shadow_w, gs_cyareg_w, gs_state_w);
+            $display("    ---- the battery RAM the ROM wrote ----");
+            for (r = 0; r < 16; r = r + 1) begin
+                line = $sformatf("      %02X:", r * 16);
+                for (k = 0; k < 16; k = k + 1)
+                    line = $sformatf("%s %02X", line, u_gsio.u_clock.bram[r*16 + k]);
+                $display("%0s", line);
+            end
+        end
+    endtask
+
     task dump_io_census;
         integer k, touched;
         begin
@@ -555,6 +582,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             $display("    %0d distinct $C0xx addresses touched", touched);
         end
     endtask
+
+    // Who writes $C02D, and with what: the slot register is built from the
+    // battery RAM, and finding the BRAM bytes behind it means finding this
+    // routine (docs/GS.md rung 3d).
+    always @(posedge clk)
+        if (swi_commit && !u_rw && (u_addr[15:0] == 16'hC02D))
+            $display("    $C02D <= $%02X written from %02X/%04X at instruction %0d",
+                     u_wdata, last_sync[23:16], last_sync[15:0], trace_instrs);
 
     // ---- the engine's overruns, named ---------------------------------------------
     // late_fills is "an op missed while the fill engine was busy, and was not
@@ -643,6 +678,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         $display("    last PC $%02X/%04X", last_sync[23:16], last_sync[15:0]);
         dump_io_census();
         dump_slot_census();
+        dump_config();
 
         // The machine itself, not the ROM's opinion of it.
         if (trace_instrs == 0) fail("the core executed nothing");
