@@ -2165,16 +2165,46 @@ Also open:
   comment asserted the wrong bit while citing the right constant by name.
   The suite is unmoved by the fix (10/10, floor 67,398) and it does not by
   itself change the boot - because of the next item.
-- **STILL OPEN, and the next link**: with the swap fixed, `$FF/4981` still
-  reads `$8F`, because our IWM's MOTOR LATCH is 0 where KEGS's is 1.
-  KEGS gates the whole multiplexer on `if(state & IWM_STATE_MOTOR_ON)` and
-  returns a flat 1 with the motor off - which is exactly the arm we take.  So
-  the mux never walks.  This runs into the standing decision recorded in
-  `gs_iwm.sv`: bit 5 of the status byte reports NO MOTOR on purpose, so that
-  the ROM's motor-wait loops at $FF/4717 and $FF/5B71 fall through.  Note
-  KEGS keeps TWO motor bits - `IWM_STATE_MOTOR_ON` gates the mux,
-  `IWM_STATE_MOTOR_ON35` is what case $08 reports - and we have one.  That
-  distinction is probably the whole of it.
+- **THE REAL ONE, FIXED 2026-09-09: THE IWM WAS ACTING ON EVERY CHIPSET
+  REGISTER.**  `gs_iwm`'s switch decode ran on `act` - which is **gs_io's**,
+  fired for every register that module claims - and switched on `op_lo[3:1]`
+  WITHOUT EVER CHECKING THE ADDRESS WAS $C0Ex.  So a read of `$C025` set
+  phase 2, a read of `$C02D` set Q6, `$C047` set phase 3, `$C010` cleared
+  phase 0: every keyboard poll, every SLOTROMSEL touch, every interrupt
+  acknowledge was scribbling on the IWM's switches.  The phase lines then
+  held whatever register the machine touched last, the 3.5" status
+  multiplexer was indexed by THAT instead of by what the ROM asked for, and
+  the sense line the ROM steps through looked stuck.  One gate,
+  `act && (op_lo[7:4] == 4'hE)`.
+  Rung 3e had already named "spurious $C0Ex strobes flipping Q6, the phases
+  and the motor" as something that had happened once, and fixed the internal
+  cycles that were PRESENTING those addresses.  This was the other half, and
+  the one that mattered: the module was acting on addresses that were never
+  $C0Ex at all.
+  **What it bought**: the status register now answers `$2F` where KEGS
+  answers `$2F`, at the same instruction; the runaway ROM recursion is GONE
+  (799 distinct PCs in the last 200,000 instructions where there were 16);
+  the stack no longer marches into the I/O page; and **the machine is still
+  servicing interrupts at the end of the run** - `irq 0`, `$C047`
+  acknowledged 77 times with the last at instruction 6,950,286, nothing
+  pending - where before it deadlocked with VBL stuck high.
+- **ALSO FIXED: the two motors were collapsed into one.**  `iwm.h` keeps
+  `IWM_BIT_MOTOR_ON` (5, the IWM's own latch, which the status byte reports
+  and which gates the 3.5" multiplexer) apart from `IWM_BIT_MOTOR_ON35` (9,
+  the DRIVE's motor, which only case $08 reports).  This module had one and
+  hardcoded the status bit to zero.  The reasoning - no drive, so no motor -
+  is right about the drive and wrong about the latch: the latch is inside the
+  IWM whether or not anything is plugged into it, and the ROM steers by it.
+- **STILL OPEN**: GS/OS does not reach the Finder.  The remaining divergence
+  is at instruction 618,565, and it may not be a fault: the ROM probes the
+  3.5" drive by stepping a phase and checking the SENSE LINE CHANGES, and
+  KEGS answers `$2F` then `$AF` because it emulates a drive whose
+  step-direction latch moves.  We answer `$2F` twice - case $00 of the
+  multiplexer is a constant 0 - so the ROM takes its "no drive" error return
+  at `$FF/4821`.  **That is the right answer for a machine with no drive**,
+  and KEGS stops being a clean oracle from here, since it has one.  What
+  needs checking next is whether the ROM's no-drive path is then handled
+  correctly, not whether it is taken.
 
   Past the splash and past the sound driver now, it traps into the monitor
   with BRK and COP in banks $83, $18, $80 and $CF - banks with no RAM behind

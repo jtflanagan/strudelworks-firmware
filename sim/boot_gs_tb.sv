@@ -1016,6 +1016,19 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // on a RAM flag that a handler is supposed to set wants this: which
     // sources are pending, which are ENABLED, and whether the line into the
     // core has ever gone up.
+    // Every read of the IWM's status register, with the multiplexer index the
+    // phase lines and $C031 selected: which sense line the ROM is asking for.
+    always @(posedge clk) begin
+        if (swi_commit && u_rw && (u_addr[15:0] == 16'hC0EE) && (n_iwmstat < 12)) begin
+            $display("    IWM status read #%0d at instruction %0d: stat35 =$%01X -> sense %0d, motor %0d, apple35 %0d, phases %04b",
+                     n_iwmstat, trace_instrs, u_gsio.u_iwm.stat35,
+                     u_gsio.u_iwm.status35, u_gsio.u_iwm.motor_on,
+                     u_gsio.u_iwm.apple35_sel, u_gsio.u_iwm.phases);
+            n_iwmstat = n_iwmstat + 1;
+        end
+    end
+    integer n_iwmstat = 0;
+
     task dump_intc;
         begin
             $display("    the interrupt controller: irq %0d, taken %0d; $C041=%02x $C023=%02x $C046=%02x; pending vbl %0d .25s %0d 1s %0d scan %0d; adb %0d doc %0d",

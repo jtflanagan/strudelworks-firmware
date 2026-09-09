@@ -130,6 +130,8 @@ module gs_iwm (
                 4'h4: status35 = 1'b1;       // 1 = not stepping
                 4'h5: status35 = 1'b1;       // ROM 3's unknown function
                 4'h6: status35 = 1'b0;       // disk locked: !write_prot, and it is
+                // The DRIVE's motor (IWM_BIT_MOTOR_ON35), not the IWM's latch:
+                // 0 = on, 1 = off, and with no drive it is never on.
                 4'h8: status35 = 1'b1;       // motor: 1 = off, and it always is
                 4'h9: status35 = 1'b1;       // 1 = two sides
                 4'hA: status35 = 1'b0;       // at track 0: 0 = there
@@ -150,21 +152,36 @@ module gs_iwm (
     // is motor_on with the mode in [4:0].  Bit 6 is outside that mask and
     // reads zero.
     //
-    // BIT 5 READS ZERO HERE, AND THAT IS THE WHOLE POINT OF THE MODULE.  KEGS
-    // reports the IWM's own motor LATCH, because KEGS has drives for it to
-    // spin; a real machine's latch is followed by a real motor, and the ROM
-    // waits for that motor to stop:
+    // THERE ARE TWO MOTORS, AND COLLAPSING THEM WAS THE BUG (2026-09-09).
+    // `iwm.h` keeps them apart: IWM_BIT_MOTOR_ON is 5 - the IWM's OWN latch,
+    // set by $C0E8/$C0E9, which is what the status byte reports and what
+    // gates the 3.5" status multiplexer - and IWM_BIT_MOTOR_ON35 is 9, the
+    // 3.5" DRIVE's motor, which only case $08 of that multiplexer reports.
+    // This module had one `motor_on` and hardcoded the status bit to zero, on
+    // the reasoning that there is no drive so there is no motor.  The
+    // reasoning is right about the DRIVE and wrong about the LATCH: the latch
+    // is inside the IWM, it exists whether or not anything is plugged into
+    // it, and the ROM steers by it.  With bit 5 stuck low the ROM never sees
+    // the motor it just turned on, and iwm_read_status35's gate - KEGS
+    // returns a flat 1 with the motor off - meant the 3.5" multiplexer never
+    // walked at all: every phase the ROM stepped to answered the same, so the
+    // sense line looked stuck and the SmartPort scan took its error return.
+    //
+    // The two loops the old comment worried about,
     //
     //     FF/4717  LDA $C0EE / AND #$20 / BNE $4717     ; and again at
     //     FF/5B71  LDA $C08E,X / AND #$20 / BNE $5B71   ; ...$FF/5B71
     //
-    // Reporting the latch makes both of those spin for ever, because nothing
-    // here ever stops spinning.  THERE IS NO DRIVE, SO THERE IS NO MOTOR: the
-    // status says so, both loops fall straight through, and the scan moves on
-    // to slot 7.  The latch itself is kept - `motor_on` still gates the data
-    // register below, as the chip's own does - it simply is not what the
-    // drive's status line reports.
-    wire [7:0] status_byte = {wr_prot, 2'b00, mode};
+    // wait for bit 5 to CLEAR.  They are safe with the latch reported, for
+    // the reason docs/GS.md rung 3e already recorded when it re-examined
+    // them: what had been flipping the motor was SPURIOUS $C0Ex STROBES from
+    // internal cycles, and those are gone.  KEGS reports the latch and the
+    // ROM gets past both.  So does this now - and if it ever does not, the
+    // answer is the strobe that set it, not a constant here.
+    //
+    // The DRIVE's motor is the one that is always off, and it is `motor35`
+    // below: there is no drive, so nothing spins, so case $08 says so.
+    wire [7:0] status_byte = {wr_prot, 1'b0, motor_on, mode};
     wire [7:0] handshake   = (hs_count == 2'd3) ? 8'h80 : 8'hC0;
 
     // ---- the data register, with no disk under the head --------------------
@@ -215,6 +232,26 @@ module gs_iwm (
         end
     end
 
+    // ---- AND IT HAS TO BE ONE OF OURS -------------------------------------
+    // `act` is gs_io's: it fires for EVERY register that module claims - the
+    // keyboard at $C000, $C010, $C025, SLOTROMSEL at $C02D, CYAREG at $C036,
+    // the interrupt controller at $C041-$C047, the whole of $C03x.  The
+    // switch decode below reads op_lo[3:1] and nothing else, so without this
+    // gate every one of those accesses lands on an IWM switch: a read of
+    // $C025 sets phase 2, a read of $C02D sets Q6, $C047 sets phase 3, $C010
+    // clears phase 0.  The phase lines then hold whatever register the
+    // machine touched last, the 3.5" status multiplexer is indexed by that
+    // instead of by what the ROM asked for, and the sense line the ROM steps
+    // through looks stuck - which is what took the SmartPort scan's error
+    // return and, eventually, put GS/OS in the monitor.
+    //
+    // docs/GS.md rung 3e already named "spurious $C0Ex strobes flipping Q6,
+    // the phases and the motor" as a thing that had happened once.  That fix
+    // removed the internal cycles which were PRESENTING those addresses; this
+    // is the other half, and the one that mattered: the module was acting on
+    // addresses that were never $C0Ex in the first place.
+    wire iwm_act = act && (op_lo[7:4] == 4'hE);
+
     always_ff @(posedge clk) begin
         if (rst || !res_sync) begin
             mode <= 5'd0;
@@ -225,7 +262,7 @@ module gs_iwm (
             hs_count <= 2'd0;
             fbit <= 24'd0;
             cnt_mode_wr <= 8'd0;
-        end else if (act) begin
+        end else if (iwm_act) begin
             // ---- every access touches its switch first --------------------
             case (op_lo[3:1])
                 3'd0, 3'd1, 3'd2, 3'd3:
