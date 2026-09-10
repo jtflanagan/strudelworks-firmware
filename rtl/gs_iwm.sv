@@ -104,6 +104,15 @@ module gs_iwm (
     wire       t_q7 = (op_lo[3:1] == 3'd7) ? op_lo[0] : q7;
     wire [1:0] q7q6 = {t_q7, t_q6};
 
+    // ---- the 3.5" drive's own state (iwm_do_action35) -----------------------
+    // Three latches and a head position.  They are the DRIVE's, not the
+    // IWM's: the IWM's motor latch is `motor_on` above, set by $C0E8/$C0E9,
+    // and this `motor35` is what the drive's own motor does when the ROM
+    // strobes the command for it.
+    logic       step_dir35;         // 0 = inward (higher tracks), 1 = outward
+    logic       motor35;            // the drive's motor
+    logic [7:0] track35;            // the head's track, for "at track 0"
+
     // ---- the 3.5" status is a MULTIPLEXER (iwm_read_status35) ---------------
     // Not one bit: the phase lines and $C031's control bit select WHICH sense
     // line bit 7 carries, and the answers differ.  A single constant here is
@@ -113,9 +122,29 @@ module gs_iwm (
     //
     //   stat35 = {phase[1], phase[0], $C031 bit 6, phase[2]}
     //
-    // KEGS's own answers, with dsk->num_tracks 0, write_prot 1, the motor35
-    // off and the head at track 0 - except $0F, "drive installed", where KEGS
-    // says drive 0 exists because it emulates one and this says neither does.
+    // A DRIVE IS ATTACHED, AND IT IS EMPTY.  That is the model, and it changed
+    // on 2026-09-09 from "no drive at all".  The reason is the ROM's own
+    // probe: it does not ask "is a drive there" and take the answer, it STEPS
+    // A PHASE AND CHECKS THE SENSE LINE MOVES.  A machine that answers every
+    // index with the same constant fails that test however truthful each
+    // constant is, and the ROM takes its error return.  KEGS answers $2F then
+    // $AF across two probes because it emulates a drive whose step-direction
+    // latch actually moves - and KEGS boots this image.
+    //
+    // Modelling the same thing costs three flops and a track counter, and it
+    // buys back the ORACLE: with an empty drive our machine and the reference
+    // are the same machine again, and a divergence means a bug rather than a
+    // difference of configuration.  KEGS has no "no drive" option to
+    // configure - its s5d1/s6d1 lines choose an IMAGE, and the drive hardware
+    // is always emulated - so this is the only shape in which the reference
+    // can be held against us at all.
+    //
+    // The ROM still ends up skipping the IWM, which is what was wanted: it
+    // finds a drive, finds NO DISK IN IT (case $02), and moves on to slot 7.
+    //
+    //   stat35 = {phase[1], phase[0], $C031 bit 7, phase[2]}
+    //
+    // iwm_read_status35, case for case.
     wire [3:0] stat35 = {phases[1], phases[0], c031_ctrl, phases[2]};
     logic status35;
     always_comb begin
@@ -123,23 +152,22 @@ module gs_iwm (
             status35 = 1'b1;                 // "Read 3.5 status with drive off"
         end else begin
             case (stat35)
-                4'h0: status35 = 1'b0;       // step direction
-                4'h1: status35 = 1'b0;       // lower head: instantaneous data
-                4'h2: status35 = 1'b1;       // disk in place: 1 = NO disk
-                4'h3: status35 = 1'b0;       // upper head
+                4'h0: status35 = step_dir35; // the step direction LATCH
+                4'h1: status35 = 1'b0;       // lower head: data, and there is none
+                4'h2: status35 = 1'b1;       // disk in place: 1 = NO DISK
+                4'h3: status35 = 1'b0;       // upper head: likewise
                 4'h4: status35 = 1'b1;       // 1 = not stepping
                 4'h5: status35 = 1'b1;       // ROM 3's unknown function
                 4'h6: status35 = 1'b0;       // disk locked: !write_prot, and it is
-                // The DRIVE's motor (IWM_BIT_MOTOR_ON35), not the IWM's latch:
-                // 0 = on, 1 = off, and with no drive it is never on.
-                4'h8: status35 = 1'b1;       // motor: 1 = off, and it always is
+                // The DRIVE's motor (IWM_BIT_MOTOR_ON35), not the IWM's latch.
+                4'h8: status35 = !motor35;   // 0 = on, 1 = off
                 4'h9: status35 = 1'b1;       // 1 = two sides
-                4'hA: status35 = 1'b0;       // at track 0: 0 = there
-                4'hB: status35 = 1'b1;       // ready: 1 = not ready
-                4'hC: status35 = 1'b0;       // switched: 0 = not
+                4'hA: status35 = (track35 != 8'd0);   // 1 = NOT at track 0
+                4'hB: status35 = !motor35;   // ready: 0 = ready
+                4'hC: status35 = 1'b0;       // switched: 0 = not, nothing ejected
                 4'hD: status35 = 1'b1;       // the false read when ejecting
                 4'hE: status35 = 1'b0;       // tachometer
-                4'hF: status35 = 1'b1;       // drive installed: 1 = NO DRIVE
+                4'hF: status35 = 1'b0;       // DRIVE INSTALLED: 0 = drive 0 exists
                 default: status35 = 1'b1;
             endcase
         end
@@ -257,6 +285,7 @@ module gs_iwm (
             mode <= 5'd0;
             phases <= 4'd0;
             motor_on <= 1'b0;
+            step_dir35 <= 1'b0; motor35 <= 1'b0; track35 <= 8'd0;
             drive_sel <= 1'b0;
             q6 <= 1'b0; q7 <= 1'b0;
             hs_count <= 2'd0;
@@ -272,6 +301,31 @@ module gs_iwm (
                 3'd6: q6        <= op_lo[0];
                 default: q7     <= op_lo[0];
             endcase
+
+            // ---- the 3.5" ACTION, on a phase-3 strobe (iwm_do_action35) ---
+            // KEGS performs it whenever $C0E7 is touched with the motor on
+            // and the 3.5" path selected: phase 3 is the STROBE, which is why
+            // it is not one of stat35's four select bits.  The index is read
+            // from the phases as they stand, which this access has not
+            // changed - it touched phase 3.
+            if ((op_lo[3:1] == 3'd3) && op_lo[0] && motor_on && apple35_sel) begin
+                case (stat35)
+                    4'h0: step_dir35 <= 1'b0;   // step inward, higher tracks
+                    4'h1: step_dir35 <= 1'b1;   // step outward, lower tracks
+                    4'h3: ;                     // reset the disk-switched flag
+                    4'h4: begin                 // STEP the head
+                        if (step_dir35) begin
+                            if (track35 != 8'd0) track35 <= track35 - 8'd1;
+                        end else begin
+                            if (track35 != 8'hFF) track35 <= track35 + 8'd1;
+                        end
+                    end
+                    4'h8: motor35 <= 1'b1;      // the drive's motor on
+                    4'h9: motor35 <= 1'b0;      // ...and off
+                    4'hD: ;                     // eject: there is nothing to eject
+                    default: ;                  // KEGS ignores $02, $07, $0B
+                endcase
+            end
 
             // ---- then the data path ---------------------------------------
             if (!op_rw && op_lo[0] && (q7q6 == 2'b11) && !motor_on) begin

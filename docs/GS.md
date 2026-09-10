@@ -2195,16 +2195,34 @@ Also open:
   hardcoded the status bit to zero.  The reasoning - no drive, so no motor -
   is right about the drive and wrong about the latch: the latch is inside the
   IWM whether or not anything is plugged into it, and the ROM steers by it.
-- **STILL OPEN**: GS/OS does not reach the Finder.  The remaining divergence
-  is at instruction 618,565, and it may not be a fault: the ROM probes the
-  3.5" drive by stepping a phase and checking the SENSE LINE CHANGES, and
-  KEGS answers `$2F` then `$AF` because it emulates a drive whose
-  step-direction latch moves.  We answer `$2F` twice - case $00 of the
-  multiplexer is a constant 0 - so the ROM takes its "no drive" error return
-  at `$FF/4821`.  **That is the right answer for a machine with no drive**,
-  and KEGS stops being a clean oracle from here, since it has one.  What
-  needs checking next is whether the ROM's no-drive path is then handled
-  correctly, not whether it is taken.
+- **AND THE MODEL CHANGED: A DRIVE IS ATTACHED, AND IT IS EMPTY** (2026-09-09).
+  It was "no drive at all".  The ROM does not ask "is a drive there" and take
+  the answer - **it steps a phase and checks the sense line MOVES**.  A
+  machine that answers every multiplexer index with the same constant fails
+  that test however truthful each constant is.  KEGS answers `$2F` then `$AF`
+  across two probes because it emulates a drive whose step-direction latch
+  actually moves, and KEGS boots this image.
+  KEGS HAS NO "NO DRIVE" OPTION to configure against - its `s5d1`/`s6d1`
+  lines choose an IMAGE and the drive hardware is always emulated - so an
+  empty drive is the only shape in which the reference can be held against us
+  at all.  Modelling it costs three flops and a track counter
+  (`iwm_do_action35`: the step-direction latch, the drive's own motor, the
+  head position, all strobed by phase 3) and buys back the oracle.
+  **The ROM still skips the IWM, which is what was wanted** - it finds a
+  drive, finds NO DISK IN IT (case $02), and moves on to slot 7.
+- **WHERE IT GETS TO NOW**: the sense line ALTERNATES as the ROM steps the
+  phases, the multiplexer walks ($0, $5, $C, $2, $6 instead of one index for
+  ever), the divergence moves from 618,565 to **622,075** - and that one is
+  BY DESIGN: it is `JMP ($FAD4)` into `$00/C700`, the machine booting from
+  slot 7's firmware, which KEGS does not have (it constructs its own $C700).
+  The set-difference oracle has run out at exactly the point docs/GS.md
+  always said it would.  154 blocks read, back up from the 63 the no-drive
+  model managed.
+- **STILL OPEN**: GS/OS does not reach the Finder.  What remains is the
+  downstream crash this chase started from - the ROM routine at
+  $FF/C973-C99B that retries by calling itself - now reached with the IWM
+  behaving.  The three IWM faults were real and are fixed; they were not the
+  whole of it.
 
   Past the splash and past the sound driver now, it traps into the monitor
   with BRK and COP in banks $83, $18, $80 and $CF - banks with no RAM behind
