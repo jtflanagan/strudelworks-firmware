@@ -2261,6 +2261,41 @@ Also open:
   The IIe is unaffected: `sim/suite.sh boot` is 2/2 (ProDOS 2.4.3 and Nox)
   and `hd_card` passes.
 
+- **AND THE NEXT ONE, FOUND AND NOT FIXED: THE DIB's DEVICE SUBTYPE.**
+  `$CnFE` was investigated first and is INNOCENT - ours `$FF` against KEGS's
+  `$BF` (bit 6, "interruptible") changes nothing at all, identical counters
+  and block counts.  The byte that matters is further in.
+
+  With `$CnFB` fixed the loader calls the card's SmartPort entry - the
+  self-modified `JSR $C70D` at `$00/2578`, inline command $00 with a
+  parameter list at `$259B`: **STATUS, status code $03, Return Device
+  Information Block**, buffer at `$25A0`.  It then does
+
+        $257E: LDA $25B6      ; $25A0 + 22 = the DIB's DEVICE SUBTYPE
+        $2581: BPL $2594      ; bit 7 clear -> give up
+
+  and bit 7 is "supports extended SmartPort calls".  **We report `$20`**
+  (which is "removable media", something a hard disk is not); KEGS reports
+  **`$C0`**, and says so in its own comment - "Profile hard disk supporting
+  extended calls+disk_sw", `set_memory16_c(status_ptr + 21, 0xc002)`.
+  That one byte is why our loader bails and KEGS's does not, and it is what
+  leaves `$22D4` unwritten: KEGS's `STA $22D4,X` loop at `$00/258E` runs five
+  times and puts `$41` there, so its `LDA $22D3` reads `$41C7` and falls
+  through where ours reads `$EAC7` and branches.
+
+  **BUT $C0 CANNOT SIMPLY BE WRITTEN**, and the bench says so: with the
+  subtype changed and nothing else, the machine gets WORSE - 10 blocks
+  instead of 117, no interrupts at all, dead in bank $FE ROM.  Bit 7 is a
+  PROMISE, and `hdc_smartport.s` breaks it: `Cn_SP` does
+  `cmp #SP_Cmd_format / bcs Cn_SP_E_BADCALL`, so every extended call
+  (command with bit 6 set) is refused.  KEGS honours the promise - its
+  handler is full of `if(cmd & 0x40)`, taking a four-byte block number and
+  returning 26 DIB bytes instead of 25.
+  **So the work is: implement the extended SmartPort calls, then report
+  $C0.**  Three places - `firmware/hdc_smartport.s` in the host repo,
+  `src/hd_card.cpp`'s `sp_status`/command path, and this bench's model of it,
+  which mirrors the host deliberately.
+
   **The earlier reading of `$00/2218`, kept because the method is the point.**  `LDA $22D3` / `BMI`:
   KEGS executes that pair **219 times and falls through every time**; we
   branch away on the FIRST pass, because $22D3/$22D4 reads `$C7 $EA` =

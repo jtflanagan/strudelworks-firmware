@@ -1389,6 +1389,15 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                                         if (sc == 8'h03) begin
                                             id_string($sformatf("STRUDELWORKS D#%0d", unum));
                                             ans[ans_n] = 8'h02; ans_n = ans_n + 1;
+                                            // The DEVICE SUBTYPE, and it is
+                                            // where the IIgs boot stops: see
+                                            // docs/GS.md.  $20 is "removable
+                                            // media", which a hard disk is
+                                            // not; KEGS reports $C0, "extended
+                                            // calls + disk-switched", and
+                                            // GS/OS's loader tests BIT 7.
+                                            // $C0 cannot go here until the
+                                            // extended calls behind it exist.
                                             ans[ans_n] = 8'h20; ans_n = ans_n + 1;
                                             ans[ans_n] = 8'h01; ans_n = ans_n + 1;
                                             ans[ans_n] = 8'h00; ans_n = ans_n + 1;
