@@ -2218,11 +2218,46 @@ Also open:
   The set-difference oracle has run out at exactly the point docs/GS.md
   always said it would.  154 blocks read, back up from the 63 the no-drive
   model managed.
-- **STILL OPEN**: GS/OS does not reach the Finder.  What remains is the
-  downstream crash this chase started from - the ROM routine at
-  $FF/C973-C99B that retries by calling itself - now reached with the IWM
-  behaving.  The three IWM faults were real and are fixed; they were not the
-  whole of it.
+- **STILL OPEN**: GS/OS does not reach the Finder.  The three IWM faults were
+  real and are fixed; they were not the whole of it.
+
+  **THE ORACLE IS STILL GOOD, AND SAYING "IT HAS RUN OUT" WAS WRONG.**  KEGS
+  boots this image: at the end of a 20M-instruction run it is executing 1,953
+  distinct PCs across banks $04, $05 and $07 - GS/OS tool sets and
+  applications - which is a live Finder, not a hang.  And it DOES execute the
+  region we die in, `$FF/C973-C99B`: 31 instructions, once, at ~202,494, and
+  never again.  It never executes `$FF/CDF4`, the `JSR` that traps us, at
+  all.  So the divergence that matters happens BEFORE that call, in code KEGS
+  runs.
+
+  Two maskings make the set-difference useful again:
+  - **ROM banks only** ($FC-$FF), which are common to both machines whatever
+    card booted them.  That moves the first divergence from 622,075 (our slot
+    7 firmware, by design) to **990,023**.
+  - **The boot loader from the disk image**, which is better still: both
+    machines load the SAME blocks from the SAME image, so $00/2000-24FF is
+    common ground.  KEGS runs 450 distinct addresses there.
+
+  **THE SHARPEST POINT FOUND SO FAR IS `$00/2218`.**  `LDA $22D3` / `BMI`:
+  KEGS executes that pair **219 times and falls through every time**; we
+  branch away on the FIRST pass, because $22D3/$22D4 reads `$C7 $EA` =
+  `$EAC7`, which is negative.  The block-landing oracle says 152 of 154
+  blocks landed intact, so this is not disk data gone wrong - **$22D3 is a
+  value the loader COMPUTED**, and `$C7` is slot 7's ROM page.  The loader
+  probes the card's firmware and stores what it finds.  Next: find what the
+  loader reads out of $C7xx to build that word, and what our `hd_card` ROM
+  answers there that KEGS's synthetic $C700 does not.
+- **The ROM is NOT at fault, checked 2026-09-09.**  `assets/apple2gs_rom3.bin`
+  IS `Apple IIGS ROM 3 Tenspeed Late 1988 Early 1989 v25`, byte for byte - a
+  pre-release prototype.  The released ROM 03 assembles from
+  `341-0728` (banks FC-FD) plus `341-0748` (banks FF-FE, and that file really
+  is ordered FF FIRST, so its halves swap), md5 `ba89edf2...`.  It differs
+  from the Tenspeed by **85 bytes in 12 runs** - $FE/345F-349D, $FF/6232-6260,
+  $FF/7B72-7B7B and the reserved vector word at $FF/FFF6 - none of them near
+  any code in this chase.  Booting it changes NOTHING: same 154 blocks, same
+  deadlock, identical counters.  Worth switching to the shipping part anyway
+  for correctness, but that re-pins `rom3.kegs.trc` and the 67,398 floor, so
+  it is a deliberate act, not a tidy-up.
 
   Past the splash and past the sound driver now, it traps into the monitor
   with BRK and COP in banks $83, $18, $80 and $CF - banks with no RAM behind
