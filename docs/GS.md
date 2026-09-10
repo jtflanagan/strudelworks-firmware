@@ -2081,6 +2081,79 @@ and the stall test's FIFO holds DEPTH/4 samples where it held DEPTH/3).  Host
 negative - a path treating the pair as unsigned would put a very loud positive
 value there.
 
+## Rung 7b: the IIgs gets its own SmartPort (2026-09-09)
+
+The user's call, after the DIB subtype turned out to be one byte in a chain
+of them: **a different ROM entirely, not a patched one.**  The //e's slot ROM
+is AppleWin's, it is a plain ProDOS block device that happens to carry a
+SmartPort entry, and it stays exactly as it is - byte for byte, checked
+against the commit before this work began.  The IIgs gets
+`firmware/hdc_smartport_gs.s`, ported from KEGS's `smartport.c`, and the host
+driver is built around it.
+
+### Why one ROM could not serve both
+
+A IIgs does not ask "are you a block device", it INTERROGATES: STATUS with
+status code $03, read the DIB, test bit 7 of the device subtype - "do you
+support EXTENDED SmartPort calls".  Extended means a FOUR-BYTE block number
+and a buffer anywhere in the 16 MB space, and the //e's ROM cannot express
+either: its parameters are 16-bit throughout and it is assembled for a 6502.
+Claiming the bit without keeping the promise is worse than not claiming it.
+
+The new ROM may use the 65816, because it only ever runs on a machine that
+has one, so it reads a parameter list in ANY bank with `lda [dp],y`.
+
+### Three things the port ran into, all of them the ROM's own shape
+
+- **A $Cn00 ROM CANNOT HAVE SUBROUTINES.**  It is assembled at one address
+  and served at another, so an internal `jsr` assembles as `jsr $00xx` and
+  jumps into zero page - which is exactly what happened, and the boot went to
+  $00AE and executed a BRK.  The //e's ROM has no internal calls at all and
+  that is not a style choice.  This one is assembled AT $C700, which fixes
+  the slot; the host refuses to load it anywhere else.  **The proper answer
+  is the $C800 expansion space** - a fixed address whatever the slot, which
+  is why real cards put their driver there - and `rtl/slot_switches.sv` says
+  outright that neither the expansion select nor its $CFFF clear is carried.
+  That is a rung of its own.
+- **The slot trick is stack-relative.**  `tsx / lda $0100,x` reads the byte at
+  the CURRENT stack pointer, so reaching it through a `jsr` of its own reads
+  that call's return address instead.  Factoring it out broke the boot.
+- **The boot block wants the PRODOS UNIT BYTE in X**, %DSSS0000, not $Cn.
+  Block 0 does `stx $43` to keep it as the unit for its own reads and only
+  then derives the ROM page from it.  Handing it $C7 makes `$C7 & $70` = $40,
+  so it looks for a card in slot 4, finds none, and jumps to itself at
+  $0955 without ever calling the driver.
+
+### The command shape, and what it did NOT need
+
+The ROM pushes ELEVEN bytes at $C0nA where the //e's pushes seven: the
+command with bit 6 intact, the parameter count, then the list from its unit
+byte on, RAW - nine bytes, which is what an extended list holds after the
+count.  The bytes are raw because 256 bytes of ROM is not where the widening
+belongs; `src/hd_card.cpp`'s `gs_decode()` does it.
+**No gateware was needed for any of that**: the card forwards register writes
+and the host reconstructs the command from the stream, so the FIFO's depth is
+a host-side matter.
+
+### The DMA bank, which WAS gateware, and was not a restriction
+
+An extended call may put its buffer in any bank, and the card's DMA was bank
+zero's.  That turned out to be an assumption rather than a limit - the
+comment said "an override's cycle belongs to no bank", which was true of the
+three things that drive an override, all built for a IIe.  At GS = 1 a DMA
+does not reach the backplane at all: it rides the override through apple_mmu
+into the card's own memory, and that map has always taken 24 bits.  So the
+bank is now carried - `hd_card.sv`'s `ovr_bank`, master_top's override mux,
+and the spare upper half of HD_DONE's size word - and boot_hold and the
+vapor lock drive zero exactly as before.
+
+### Where it stands
+
+In simulation the machine boots block 0, the ProDOS loader chain runs, and
+blocks 0, 2, 3, 4, 5, 1242, 1243 come off the disk.  `sim/suite.sh gs` is
+10/10 with the KEGS divergence floor unmoved; host tests 40/40.  NOT YET
+tried on hardware at the time of writing.
+
 ## What is NOT working, as of the end of rung 4b
 
 Said plainly, because the first write-up of this rung claimed more than it
@@ -2392,6 +2465,76 @@ Also open:
   wait/idle discipline), asserting on `screen`/`peek` from the mirror; MCP
   `screenshot` for SHR.
 - Reference: the KEGS trace for the boot; KEGS on WSL for behaviour questions.
+
+### GS/OS RUNS: the three bugs the LIVE TRACE found (2026-09-09)
+
+The bench had the ROM reading blocks happily, so the port went to hardware.
+It got stuck at the splash screen, and **every one of the three bugs below
+was found by the LIVE FULL TRACE, not by simulation**: `sparse = off`,
+`tools/swtrace --now`, `tools/swtrace_census.py`, then walking the SYNC PCs
+backwards from the loop.  On a machine that runs but misbehaves this is the
+first tool to reach for, not the last.
+
+1. **$Cn0D FELL INTO THE BOOT STUB.**  `Cn_Entry_SP: clc` was written
+   directly above `Cn_Boot0: brl Cn_Bootstrap`, so the SmartPort entry fell
+   through into a reboot: EVERY SmartPort call restarted the machine.  The
+   trace read `00/2578 -> 00/C70D -> 00/C70E -> 00/C7C6` and the loop was
+   ten blocks a pass, ~80 passes a second - block 0, the volume directory,
+   PRODOS, round again - which from the outside is a machine sitting on the
+   splash screen doing nothing.  Fixed with `bra Cn_Entry`, two bytes.  The
+   same fact from the other side: **$C0FA was never written once in 52
+   million ops.**
+2. **BIT 6 REACHED THE EXECUTOR** (`src/hd_card.cpp`).  `gs_decode()` left
+   EXTENDED in `command_`, so an extended read arrived as $C1, missed
+   `kSpReadBlock` ($81) in the dispatch switch and answered I/O ERROR out of
+   `default:`.  The DIB call worked only because ITS command byte was $00,
+   with bit 6 clear.  Bit 6 now comes off into `gs_ext_` at decode.
+3. **AN EXTENDED CALL'S INLINE BLOCK IS FIVE BYTES, NOT FOUR.**  A plain call
+   leaves the command and a two-byte pointer; an extended one leaves the
+   command and a LONG pointer, four bytes.  Skipping four returned onto the
+   last byte of the pointer - a $00, which is BRK - and that is precisely
+   where GS/OS's loader stopped, at $22D8.  The caller made it unarguable:
+
+       22D1: 20 0D C7      JSR $C70D
+       22D4: 41            command, extended read
+       22D5: E2 22 00 00   the FOUR-byte parameter-list pointer
+       22D9: 08            PHP   <- the resume point
+
+**RESULT ON HARDWARE**: the DIB call, then 32 EXTENDED reads streaming GS/OS
+in, and the graphic boot screen draws.  Three of the loaded buffers were
+compared against `system6.hdv` BYTE FOR BYTE and match.  **The disk path is
+done** - plain calls, extended calls, and the DMA into memory.
+
+**WHERE IT STOPS NOW, undiagnosed**: GS/OS reaches native-mode code of its
+own and dies - `COP $AF` in bank $02, then `BRK` at `00/68DE` with `B=$E0`,
+and more errors behind those.  The census of the crashed run has it in ROM
+loops hammering **$C036 (156k writes)** and **$C03D (131k, the DOC's 64 KB)**.
+That is a 65816/toolbox/DOC question, not a card one, and the KEGS oracle is
+usable for it again now that GS/OS itself is running.
+
+**NOT DONE, and it should be**: `tests/hd_test.cpp` has NO IIgs coverage at
+all - 167 checks passed straight through both host-side bugs above.  A
+`test_gs_smartport()` driving the eleven-byte FIFO and asserting that an
+extended call arrives as $81 with `extended` beside it is the obvious guard.
+
+### Procedure: a programmatic reset does NOT boot, unless Open-Apple is held
+
+USER CORRECTION 2026-09-09.  `swctl reset` / MCP `machine reset` is a SOFT
+reset: it produces a reset-vector fetch in the trace, so a capture across one
+LOOKS like a boot, but the ROM does not rescan slots.  What such a capture
+actually contains is a ProDOS driver probe - $Cn05, $Cn03, $Cn01, $CnFF read
+once each, no $Cn07, no execution in $Cnxx - which was twice misread here as
+"slot 7 failed to boot".
+
+**THE USER'S FIX WORKS**: hold Open-Apple across the reset, the machine's own
+cold start.
+
+    swctl button open down && swctl reset && sleep 3 && swctl button open hardware
+
+That gives the full boot scan - 10 block calls plus 32 extended SmartPort
+reads, `hd 43/43`, identical to a physical cold boot.  Do NOT look for the
+boot by $FFFC reads: on a IIgs, bank $FE code reads $00FFFC as ordinary data,
+so those are not resets.  Find it by SYNC at $Cn00.
 
 ## Risks
 

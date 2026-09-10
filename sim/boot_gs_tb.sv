@@ -65,6 +65,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // already mark slot 7 "Your Card" ($C02D = $80), so the
                     // scan looks here.
                     parameter HDROMF = "hdrom.hex",
+                    // The IIgs's SmartPort ROM is loaded, so its eleven-byte
+                    // command FIFO is what the host model must decode.  The
+                    // run script sets it from which ROM was named.
+                    parameter bit GS_HD_ROM = 1'b1,
                     parameter HDVF   = "hdv.hex",
                     parameter integer HDV_BLOCKS = 2880,
                     // 0 when no image was given: the bench still runs the
@@ -723,6 +727,16 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     reg [7:0] himg [0:HDV_BLOCKS*512-1];
 
     reg [7:0]  hm_cmd, hm_unit_num, hm_fifo, hm_sc;
+    // ---- the IIgs's SmartPort FIFO (firmware/hdc_smartport_gs.s) ---------
+    // A DIFFERENT ROM, not a patched one, so a different command shape: the
+    // //e's pushes seven bytes that map onto the registers above, and the
+    // IIgs's pushes ELEVEN that do not, because an extended call's pointer
+    // and block are wider than those registers.  Collected whole and decoded
+    // at the end, exactly as the host's src/hd_card.cpp does it.
+    reg [7:0]  hm_gs [0:15];
+    reg [7:0]  hm_gsn;
+    reg        hm_ext;
+    reg [7:0]  hm_membank [0:8];
     reg        hm_armed;
     reg [15:0] hm_memblock [0:8];       // 8 = the controller's
     reg [23:0] hm_diskblock [0:8];
@@ -731,6 +745,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         integer k;
         begin
             hm_cmd = 0; hm_fifo = 0; hm_sc = 0; hm_armed = 0;
+            hm_gsn = 0; hm_ext = 0;
+            for (int gi = 0; gi <= 8; gi = gi + 1) hm_membank[gi] = 8'd0;
             hm_unit_num = {1'b0, 3'(HD_SLOT), 4'd0};        // slot << 4
             for (k = 0; k <= 8; k = k + 1) begin
                 hm_memblock[k] = 0; hm_diskblock[k] = 0; hm_uerr[k] = 0;
@@ -767,6 +783,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         begin
             idx = idx_in; d = d_in;
             if (idx >= 8'h2 && idx <= 8'hA) hm_armed = 1;
+            if (GS_HD_ROM && idx == 8'hA) begin
+                hm_gs[hm_gsn[3:0]] = d;
+                hm_gsn = hm_gsn + 8'd1;
+                if (hm_gsn >= 8'd11) begin hm_gs_decode(); hm_gsn = 0; end
+                r = -1;                       // handled: nothing else to do
+            end else begin
             r = -2;                                          // -2: not needed
             if (idx != 8'h2 && idx != 8'h3 &&
                 !((idx == 8'h9 || idx == 8'hA) && hm_fifo < 2)) begin
@@ -799,6 +821,30 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 default: ;
             endcase
             if (r >= 0 && (hm_cmd & 8'h80) == 0) hm_diskblock[r] = hm_diskblock[r] & 24'h00FFFF;
+            end
+            end
+        end
+    endtask
+
+    // The eleven bytes, decoded.  The host's gs_decode(), same order:
+    //   0 command (bit 6 = extended, the card's $80 marks it SmartPort)
+    //   1 the parameter count   2 the unit
+    //   3.. the buffer pointer, then the block number or the status code
+    task automatic hm_gs_decode;
+        integer r;
+        reg [7:0] pb;
+        begin
+            hm_cmd      = hm_gs[0] | 8'h80;
+            hm_ext      = (hm_gs[0] & 8'h40) != 0;
+            hm_unit_num = hm_gs[2];
+            r = hm_resolve();
+            if (r == UNIT_CTL) r = 8;
+            if (r >= 0) begin
+                hm_memblock[r] = {hm_gs[4], hm_gs[3]};
+                hm_membank[r]  = hm_ext ? hm_gs[5] : 8'd0;
+                pb             = hm_ext ? 8'd7 : 8'd5;   // where the block starts
+                if ((hm_gs[0] & 8'h3F) == 8'h00) hm_sc = hm_gs[pb];
+                hm_diskblock[r] = {hm_gs[pb+2], hm_gs[pb+1], hm_gs[pb]};
             end
         end
     endtask

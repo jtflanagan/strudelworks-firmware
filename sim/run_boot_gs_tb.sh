@@ -19,7 +19,9 @@
 #     --trace=FILE     trace output (default sim/boot_work/boot_gs_<tag>.trc)
 #     --tag=NAME       names the log and the trace
 #     --hdv=FILE       the SmartPort image to boot from (slot 7)
-#     --hdrom=FILE     its slot ROM (default ../strudelworks-host/assets/hdc_smartport.bin)
+#     --hdrom=FILE     its slot ROM (default the IIgs's,
+#                      ../strudelworks-host/assets/hdc_smartport_gs.bin; the //e's
+#                      is a different firmware and speaks a different FIFO)
 #     --disktrace      name every $C0Fx write and every $40-$47 write from the
 #                      first EXECUTE on (docs/GS.md rung 3e)
 #     --lctrace        name every $C08x touch with the state it left
@@ -45,7 +47,7 @@ mkdir -p "$work"
 
 instrs=20000 clks=400000000 mode=2 target=0 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0 keyhold=20000 mirror="" pagewatch=0
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
-hdrom="$root/../strudelworks-host/assets/hdc_smartport.bin"
+hdrom="$root/../strudelworks-host/assets/hdc_smartport_gs.bin"
 hdv=""
 trace=""
 for a in "$@"; do
@@ -121,6 +123,14 @@ else
     : > "$work/gsbram_$tag.hex"
 fi
 [ -f "$hdrom" ] || { echo "no slot ROM at $hdrom" >&2; exit 2; }
+# WHICH ROM decides the command FIFO's shape, so the host model is told.  The
+# two are different firmware (the host's firmware/hdc_smartport_gs.s header
+# says why); named by the file, so pointing --hdrom at the //e's ROM tests
+# the //e's protocol on this bench too.
+case "$hdrom" in
+    *_gs.bin) gs_hd_rom=1 ;;
+    *)        gs_hd_rom=0 ;;
+esac
 xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
 
 srcs=(
@@ -149,6 +159,7 @@ if [ "$vl" = 1 ]; then
         -GMAX_INSTRS="$instrs" \
         -GMAX_CLKS="$clks" \
         -GHDROMF="\"$work/hdrom.hex\"" \
+        -GGS_HD_ROM=$gs_hd_rom \
         -GHDVF="\"$work/hdv_$tag.hex\"" \
         -GHDV_BLOCKS="$blocks" \
         -GHAS_HDV="$has_hdv" \

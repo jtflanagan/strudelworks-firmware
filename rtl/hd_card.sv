@@ -105,6 +105,7 @@ module hd_card #(
     // To apple_bus_write, through the top's mux with the boot hold's.
     output wire        ovr_en,
     output wire [15:0] ovr_addr,
+    output wire [7:0]  ovr_bank,        // the DMA buffer's bank; 0 on a //e
     output wire        ovr_rw,
     output wire [7:0]  ovr_wdata,
 
@@ -209,6 +210,14 @@ module hd_card #(
     // What a DMA has been told: base address, byte count, and the status the
     // command ends with.  `size` is the size-in-blocks latch for $C0n9/$C0nA.
     logic [15:0] dma_base;
+    // ...AND ITS BANK.  A IIgs SmartPort call may name a buffer anywhere in
+    // the 16 MB space, and at GS = 1 a DMA does not go to the backplane at
+    // all: it rides the override through apple_mmu into the card's own
+    // memory, and that map has always taken a 24-bit address.  The bank was
+    // simply never carried, because the three things that drive an override
+    // - boot_hold, this card and vbl_lock - were all built for a machine
+    // where bank zero is all there is.  They still drive zero.
+    logic [7:0]  dma_bank;
     logic [9:0]  dma_count;         // 0..512
     logic [7:0]  status;
     logic [15:0] size;
@@ -257,6 +266,7 @@ module hd_card #(
             rx_left   <= 8'd0;
             rom_ok    <= 1'b0;
             dma_base  <= 16'd0;
+            dma_bank  <= 8'd0;
             dma_count <= 10'd0;
             status    <= 8'h51;     // no device connected, until told otherwise
             size      <= 16'd0;
@@ -293,7 +303,8 @@ module hd_card #(
                         dma_base  <= pay_data[15:0];
                         dma_count <= clamp512(pay_data[31:16]);
                     end else if (rx_idx == 8'd1) begin
-                        size <= pay_data[15:0];
+                        size     <= pay_data[15:0];
+                        dma_bank <= pay_data[23:16];   // spare, until now
                     end
                     if (rx_last) done_evt <= 1'b1;
                 end
@@ -301,6 +312,8 @@ module hd_card #(
                     if (rx_idx == 8'd0) begin
                         dma_base  <= pay_data[15:0];
                         dma_count <= clamp512(pay_data[31:16]);
+                    end else if (rx_idx == 8'd1) begin
+                        dma_bank  <= pay_data[7:0];
                     end
                     if (rx_last) fetch_evt <= 1'b1;
                 end
@@ -322,6 +335,7 @@ module hd_card #(
     // the cycle after the last one is presented.
     assign ovr_en    = dma_w_active || dma_r_active;
     assign ovr_addr  = dma_addr;
+    assign ovr_bank  = dma_bank;
     assign ovr_rw    = !dma_w_active;
 
     // The byte for the write being offered, from the bank pidx selects.

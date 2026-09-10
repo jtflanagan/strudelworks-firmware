@@ -675,6 +675,11 @@ module master_top #(
     wire [7:0]  mb_rd_data, hd_rd_data, fd_rd_data, vidhd_rd_data, mouse_rd_data, u2_rd_data, prn_rd_data;
     wire        boot_ovr_en, hd_ovr_en, hd_ovr_rw, vbl_ovr_en, vbl_ovr_rw;
     wire [15:0] boot_ovr_addr, hd_ovr_addr, vbl_ovr_addr;
+    // The override's BANK.  Only the hard disk has one - a IIgs SmartPort
+    // call may put its buffer anywhere in the 16 MB space - and it is zero
+    // for every call the //e's ROM can make, so the IIe build's overrides
+    // are bank zero exactly as they always were.
+    wire [7:0]  hd_ovr_bank;
     wire [7:0]  hd_ovr_wdata, vbl_ovr_wdata;
 
     // Three overrides into one driver: the hold's is always a read of its
@@ -714,6 +719,8 @@ module master_top #(
     wire        sl_win;
     wire        drv_ovr_en = ovr_en && !sl_win;
     wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_gs ? vbl_ovr_addr  : boot_ovr_addr;
+    // boot_hold and the vapor lock are bank zero's by construction.
+    wire [7:0]  ovr_bank  = (GS && hd_ovr_en) ? hd_ovr_bank : 8'd0;
     wire        ovr_rw    = hd_ovr_en ? hd_ovr_rw    : vbl_ovr_gs ? vbl_ovr_rw    : 1'b1;
     wire [7:0]  ovr_wdata = hd_ovr_en ? hd_ovr_wdata : vbl_ovr_wdata;
     wire        slot_rd_claim = mb_rd_claim | hd_rd_claim | fd_rd_claim | vidhd_rd_claim | mouse_rd_claim | u2_rd_claim | prn_rd_claim;
@@ -1478,8 +1485,10 @@ module master_top #(
         .gs_sltrom_o (gs_sltrom_w), .gs_state_o (gs_state_w),
         // The driver's next address, in the physical space: the bank is the
         // core's, which is zero on this build and the 65816's on the GS
-        // (docs/GS.md rung 3).  An override's cycle belongs to no bank.
-        .q_addr     ({ovr_en ? 8'd0 : cpu_bank, nxt_addr}),
+        // (docs/GS.md rung 3).  AN OVERRIDE BRINGS ITS OWN BANK - the hard
+        // disk's DMA target, zero for everything else - where it used to be
+        // forced to zero because nothing that drove an override had one.
+        .q_addr     ({ovr_en ? ovr_bank : cpu_bank, nxt_addr}),
         .q_divert   (mmu_q_divert),
         .q_rw       (cpu_rw),
         .q_cls      (q_cls),
@@ -1573,9 +1582,9 @@ module master_top #(
         .clk        (apple_clk),
         .rst        (apple_rst),
         .res_sync   (apple_res_sync),
-        // The same address the map is asked, for the same reason: an
-        // override's cycle belongs to no bank.
-        .q_addr     ({ovr_en ? 8'd0 : cpu_bank, nxt_addr}),
+        // The same address the map is asked, and for the same reason: an
+        // override brings its own bank.
+        .q_addr     ({ovr_en ? ovr_bank : cpu_bank, nxt_addr}),
         .q_rw       (cpu_rw),
         .claim      (gsio_claim),
         .u_bank     (u_bank),
@@ -1855,6 +1864,7 @@ module master_top #(
         .din           (drv_din),
         .ovr_en        (hd_ovr_en),
         .ovr_addr      (hd_ovr_addr),
+        .ovr_bank      (hd_ovr_bank),
         .ovr_rw        (hd_ovr_rw),
         .ovr_wdata     (hd_ovr_wdata),
         .rd_claim      (hd_rd_claim),
