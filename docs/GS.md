@@ -2238,7 +2238,30 @@ Also open:
     machines load the SAME blocks from the SAME image, so $00/2000-24FF is
     common ground.  KEGS runs 450 distinct addresses there.
 
-  **THE SHARPEST POINT FOUND SO FAR IS `$00/2218`.**  `LDA $22D3` / `BMI`:
+  **FOUND, 2026-09-09: OUR SLOT ROM SAID IT WAS NOT A SMARTPORT.**  The
+  card's `$CnFB`, the SmartPort ID type byte, was **$00**; KEGS's own
+  synthetic $C700 has **$80**.  GS/OS's loader - in the code it reads off the
+  disk, at $00/2562 - does `LDY #$FB / LDA (ptr),Y / BPL`, and with bit 7
+  clear it takes the branch at $2566 and abandons the card as a SmartPort
+  before asking it anything.  The reference took that branch the other way,
+  which is how the byte was found.
+  The ROM has ALWAYS had the SmartPort entry: `$Cn0A` is `SEC / BCS`, `$Cn0D`
+  is `CLC`, both converging at `$Cn0E` with the carry telling them apart -
+  the classic dual entry - and `hdc_smartport.s` even ASSERTS
+  `Cn_Entry_SP = $000D`.  It implemented it, asserted it, and never
+  advertised it.  One byte in `firmware/hdc_smartport.s`.
+  **What it buys**: our machine now takes the SmartPort path at $2568/$256B
+  exactly as the reference does, where before it bailed to $2594; the
+  SmartPort STATUS call is made (2 status calls, where there was 1); and the
+  VBL deadlock is GONE - `irq 0`, `$C046 = 00`, nothing pending.  It does NOT
+  yet reach the Finder: the machine still ends in the monitor, now with BRK
+  traps in several banks rather than one wedged loop.  `$CnFE` is a second
+  candidate, ours `$FF` against KEGS's `$BF` (bit 6, "interruptible"), not
+  yet investigated.
+  The IIe is unaffected: `sim/suite.sh boot` is 2/2 (ProDOS 2.4.3 and Nox)
+  and `hd_card` passes.
+
+  **The earlier reading of `$00/2218`, kept because the method is the point.**  `LDA $22D3` / `BMI`:
   KEGS executes that pair **219 times and falls through every time**; we
   branch away on the FIRST pass, because $22D3/$22D4 reads `$C7 $EA` =
   `$EAC7`, which is negative.  The block-landing oracle says 152 of 154
