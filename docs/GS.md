@@ -13,13 +13,49 @@ a mistake this document invites, and it has been made.
 | 4 - first light on hardware | **PARTLY**: 4a built the bitstream and 4b brought first light, and hardware has run both keyboards, SHR and a boot.  The rung's own gate - self-test pass, Control Panel navigable - is not recorded as met |
 | 4c - the memory corruption | **DONE, ON HARDWARE 2026-09-10 evening** (two more of the same family found there: the bus record's bank and the host's bank-blind switch decoders).  The page cache was NOT the hole (a bench mask that began at `boot_go`; the audit is a gate now, 0/0).  The corruption was the 65816 returning from EVERY hardware interrupt two bytes late (fixed, `cpu816_irq` in the suite), the DMA's bank dropped on the op that lands so bank-$7E reads wrote bank zero (fixed in `accel_seq`, master_top and the bench), and the host refusing `$7E/C000` as "the I/O page" (fixed).  GS/OS now runs 8M instructions into the toolbox instead of dying at 4M |
 | 5 - GS/OS Finder (milestone 1) | **MILESTONE 1 REACHED, 2026-09-11 01:15: A WINDOW OPENS BY MOUSE** (`shots/scanint_double_click.png` - GSHardDrive double-clicked, "ProDOS, 6 items, 31.9 MB used"), build gs_scanint (TIMING MET +0.041 / +0.053, 0 of 63,517).  The pointer needed two things: the ADB staging registers synthesis had zeroed (multi-driven, gs_mvfix) and the VGC scan-line interrupt QuickDraw II redraws the cursor from (gs_scanint: SCBs snooped at the page cache's write tap, `irq_scan` at the start of a marked line).  The desktop had been on HDMI since 2026-09-10 evening (`shots/gs4c2_hostgate.png`).  Still unchecked from the row's list: BRAM persistence, border, `$C022`; `tools/gs_test.sh` not written |
-| 6 - speed: the split interface and the fronts | **NOT STARTED.**  Mentioned only in the future tense everywhere it appears |
+| 6 - speed: the split interface and the fronts | **NOT STARTED - and now MEASURED as the whole gap (2026-09-11).**  Nox on the overworld map at an unlimited governor: 6.6 FPGA clocks per core cycle, 14.8x (PLAIN), `0 turbo + 0 dline` - `master_top.sv` builds neither front at GS = 1 (`generate if (!GS) begin : g_fronts`), so every op walks the dispatcher's S_DECIDE -> S_FAST -> page-cache decided -> retire loop.  The census on the map: I 66 %, RAM 11 %, WR 8 %, KBD 2.4 %.  The istream front alone takes two thirds of the ops to one clock (~2.9 clk/op, ~34x); both fronts ~1.8 clk/op, the IIe's 50-70x.  Trimming the dispatcher path itself (the 3-clock serve, the DECIDE/FAST handshake) is worth 6.6 -> ~4 at most.  Do it in ladder order; the numbers above are the baseline to beat |
 | 7 - sound (milestone 2) | **ENTERED OUT OF ORDER, NOT CLOSED.**  The DOC was built because GS/OS needed its sound interrupts serviced to get past "Unclaimed Sound Interrupt" - that much works.  The gate, a tracker player against a KEGS recording with interrupts timed, is untouched |
 | 8 | Later |
 
-So: **milestone 1 has not been reached**, and nothing between rung 4 and rung
-7 is closed.  The sections named "rung 7b" and "rung 7c" are rung-5 work; the
-names are kept because commits and the memory file reference them.
+So: **milestone 1 IS reached (2026-09-11 01:15, a window opens by mouse)**,
+and nothing between rung 4 and rung 7 is CLOSED - rung 4's own gate
+(self-test pass, Control Panel navigable) is unrecorded, rung 5's list has
+BRAM persistence, border, `$C022` and `tools/gs_test.sh` open, rung 6 is not
+started, rung 7 is not gated.  The sections named "rung 7b" and "rung 7c" are
+rung-5 work; the names are kept because commits and the memory file reference
+them.  **THE NEXT SESSION WALKS THE LADDER IN ORDER FROM RUNG 4's GATE AND
+CHECKS EVERYTHING OFF** (user, 2026-09-11 morning); acceleration is rung 6
+and is reached when it is reached.
+
+## Hand-off from the night of 2026-09-10/11 (read before walking the ladder)
+
+Open, in no order of importance:
+
+- **Speaker clicks at the GS/OS desktop** (user-reported, undiagnosed).  The
+  sound is the card's own `$C030`-only flip-flop on a IIgs (`speaker.sv`);
+  the host's `$C03x` match in `apple_audio.cpp` only counts.  Next suspects:
+  the mixer's rate servo (`sndtrim` 92 k in one run, 0 in others), and
+  whether GS/OS itself clicks `$C030`.
+- **The 4-cycle turnaround idle** in `ft601_fifo.sv` (S_IDLE, `TURN_IDLE`)
+  was added as a hypothesis for the misparse and disproved as its cause;
+  kept, provisional, harmless.  Remove or keep on evidence.
+- **`IOB TRUE` on the tristate enable** is the cleaner alternative to the
+  per-lane `OE_lane[3:0]`; the XDC's note says it made placement infeasible
+  once (control-set clash with `DATA_OUT`).  Untried since.
+- **The ADB mouse feed showed `msent = 0` with motion delivered** in one
+  session (the link_dump run); arming (`adb_mouse_on_`) may differ between
+  runs.  Not seen since the link fix.
+- **PLAIN vs the classified census** diverge across a boot (47 M ops more in
+  the census); agree on the map.  The census over-counts somewhere.
+- `GS_ADB_STAT` (0x124), `ACCEL_CORE_CYC`/`ACCEL_BUS_CYC` (0x128/0x12C) are
+  new registers; `run_build.sh` now prints MULTI-DRIVEN as not green; the
+  host has `link_dump = PATH` (debugging only, never live: it stalls the
+  ingest thread and trips the card's watchdog).
+- The programmatic reset works; the whole load -> start -> reset -> desktop
+  cycle is self-serve.  A double-click needs its four button edges sent in
+  order on the Pi's socket (parallel MCP calls are not ordered).
+- Nox Archaist on the IIgs (`gs_nox.conf`, `nox_los.HDV`) boots and plays at
+  14.8x unlimited; `gs_os.conf` is the Finder.
 
 ## The night of 2026-09-10/11: five faults, none of them the IIgs
 
