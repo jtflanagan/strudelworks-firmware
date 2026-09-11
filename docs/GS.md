@@ -1,70 +1,57 @@
 # Apple IIgs on the card: the run sheet
 
-## WHERE WE ARE ON THE LADDER
+## WHERE WE ARE ON THE LADDER (2026-09-11 afternoon - start here)
 
 **READ THE STATUS COLUMN OF THE LADDER TABLE, NOT THE HEADINGS.**  The rungs
-below were NOT climbed in order, and the paragraph that follows this one
-records THE LAST THING BUILT, not the rung reached.  Taking it for the rung is
-a mistake this document invites, and it has been made.
+below were not climbed in order; the sections carry the names they were
+committed under.  This block is the hand-off for the next session.
 
 | Rung | State |
 |---|---|
 | 0, 1, 1b, 2, 3a-3e | **DONE** |
-| 4 - first light on hardware | **GATE WALKED 2026-09-11** (see "Rung 4's gate").  Control Panel: **NAVIGABLE** from the Pi's socket (Ctrl-Command-Esc is the ADB micro's Desk Manager interrupt now, `adb 35 82`; the Apple keys read at `$C061/$C062`).  Self-test: **tests 1-4 and 7-10 PASS**; test 5 (speed) FAILS BY DESIGN - it counts a loop between two changes of VERTCNT and on this card the beam runs in the core's time; test 6 (serial) needs an SCC with a loopback (rung 8); test 11 (interrupts) failed on `$C041` clearing INTFLAG, FIXED, in the next build; test 12 not yet reached.  Found on the way: the ROM was patched (KEGS's SmartPort byte) and failed its own checksum - unpatched now; `$C02E/$C02F` were the floating bus - built; GS_TIME was decoded as `$2F` (ADB_KEY) so every key set the clock - fixed |
-| 4c - the memory corruption | **DONE, ON HARDWARE 2026-09-10 evening** (two more of the same family found there: the bus record's bank and the host's bank-blind switch decoders).  The page cache was NOT the hole (a bench mask that began at `boot_go`; the audit is a gate now, 0/0).  The corruption was the 65816 returning from EVERY hardware interrupt two bytes late (fixed, `cpu816_irq` in the suite), the DMA's bank dropped on the op that lands so bank-$7E reads wrote bank zero (fixed in `accel_seq`, master_top and the bench), and the host refusing `$7E/C000` as "the I/O page" (fixed).  GS/OS now runs 8M instructions into the toolbox instead of dying at 4M |
-| 5 - GS/OS Finder (milestone 1) | **MILESTONE 1 REACHED, 2026-09-11 01:15: A WINDOW OPENS BY MOUSE** (`shots/scanint_double_click.png` - GSHardDrive double-clicked, "ProDOS, 6 items, 31.9 MB used"), build gs_scanint (TIMING MET +0.041 / +0.053, 0 of 63,517).  The pointer needed two things: the ADB staging registers synthesis had zeroed (multi-driven, gs_mvfix) and the VGC scan-line interrupt QuickDraw II redraws the cursor from (gs_scanint: SCBs snooped at the page cache's write tap, `irq_scan` at the start of a marked line).  The desktop had been on HDMI since 2026-09-10 evening (`shots/gs4c2_hostgate.png`).  **2026-09-11: BRAM persistence BUILT AND PROVEN** (host `gs_bram = FILE`, the machine's writes followed from the stream; a Display setting changed in the Control Panel came back after a swhost restart), **border and `$C022` PAINTED** (the CDA menu is white on blue; the panel's clear is the border colour), **`tools/gs_test.sh` WRITTEN and run**.  **The user's eye found coloured pixels in the menu bar: THE DMA ADDRESS WRAPPED IN ITS BANK, fixed (`hd_card` carries at GS = 1), proven on hardware** (see "The menu bar's coloured pixels").  (The "down arrow does nothing" seen mid-day was misdiagnosed - the user watched both arrows move the highlight on the gate bitstream, and the capture shows the ROM taking $8A from $C000 - dropped.) |
-| 6 - speed: the split interface and the fronts | **NOT STARTED - and now MEASURED as the whole gap (2026-09-11).**  Nox on the overworld map at an unlimited governor: 6.6 FPGA clocks per core cycle, 14.8x (PLAIN), `0 turbo + 0 dline` - `master_top.sv` builds neither front at GS = 1 (`generate if (!GS) begin : g_fronts`), so every op walks the dispatcher's S_DECIDE -> S_FAST -> page-cache decided -> retire loop.  The census on the map: I 66 %, RAM 11 %, WR 8 %, KBD 2.4 %.  The istream front alone takes two thirds of the ops to one clock (~2.9 clk/op, ~34x); both fronts ~1.8 clk/op, the IIe's 50-70x.  Trimming the dispatcher path itself (the 3-clock serve, the DECIDE/FAST handshake) is worth 6.6 -> ~4 at most.  Do it in ladder order; the numbers above are the baseline to beat |
-| 7 - sound (milestone 2) | **ENTERED OUT OF ORDER, NOT CLOSED.**  The DOC was built because GS/OS needed its sound interrupts serviced to get past "Unclaimed Sound Interrupt" - that much works.  The gate, a tracker player against a KEGS recording with interrupts timed, is untouched |
-| 8 | Later |
+| 4 - first light on hardware | **DONE 2026-09-11, as far as this card can pass it.**  Control Panel NAVIGABLE from the Pi (Ctrl-Command-Esc is the ADB micro's Desk Manager interrupt; `adb 35 82` on the socket).  Self-test: tests 1-4 and 7-10 PASS; **5 (speed) fails BY DESIGN** (the beam runs in the core's time at GS = 1; the ROM's count also encodes the Mega II's 1 MHz I/O sync); 6 (serial) wants an SCC with a loopback (rung 8); 11 fixed (INTFLAG); 12 not reached.  **Do not spend time on the self-test again unless asked** (user, 2026-09-11) |
+| 4c - the memory corruption | **DONE ON HARDWARE 2026-09-10** |
+| 5 - GS/OS Finder (milestone 1) | **DONE 2026-09-11.**  Milestone 1 reached 01:15 (a window opens by mouse); the row's list closed in the afternoon: BRAM persistence (`gs_bram = FILE`, proven across a restart), `$C022` and the border painted, `tools/gs_test.sh` (its self-test step is opt-in, `GS_TEST_SELFTEST=1`).  The menu bar's coloured pixels were THE DMA WRAPPING AT A BANK EDGE - `hd_card` carries into the bank at GS = 1 now, proven on hardware |
+| 6 - speed: the split interface and the fronts | **NEXT.  NOT STARTED.**  Baseline on the Nox overworld map at an unlimited governor: **14.8x PLAIN, ~6.6 FPGA clocks per core cycle, `0 turbo + 0 dline`** - `master_top.sv` builds neither front at GS = 1 (`generate if (!GS) begin : g_fronts`), so every op walks the dispatcher.  Census on the map: I 66 %, RAM 11 %, WR 8 %, KBD 2.4 %.  The istream front alone takes two thirds of the ops to one clock (~34x); both fronts ~1.8 clk/op, the IIe's 50-70x.  The PLAIN ratio (core cycles over bus cycles) is THE displayed metric, HUD and report; the classified census is the breakdown and carries a ~6 % residual against PLAIN not yet explained (the census's `bus_ops` sees 6 k where PLAIN's bus term sees 21 M on the map) - chase it as part of this rung, not before |
+| 7 - sound (milestone 2) | **ENTERED OUT OF ORDER, NOT CLOSED.**  The DOC exists (GS/OS needed its interrupts serviced); the gate - a tracker player against a KEGS recording, interrupts timed - is untouched |
+| 8 | Later: 3.5" IWM, ROM 01, real serial (the SCC with a loopback, which self-test 6 wants), 3200-colour palettes, shadow-in-all-banks |
 
-So: **milestone 1 IS reached (2026-09-11 01:15, a window opens by mouse)**,
-and nothing between rung 4 and rung 7 is CLOSED - rung 4's own gate
-(self-test pass, Control Panel navigable) is unrecorded, rung 5's list has
-BRAM persistence, border, `$C022` and `tools/gs_test.sh` open, rung 6 is not
-started, rung 7 is not gated.  The sections named "rung 7b" and "rung 7c" are
-rung-5 work; the names are kept because commits and the memory file reference
-them.  **THE NEXT SESSION WALKS THE LADDER IN ORDER FROM RUNG 4's GATE AND
-CHECKS EVERYTHING OFF** (user, 2026-09-11 morning); acceleration is rung 6
-and is reached when it is reached.
+### How the machine is driven now (the self-serve cycle)
 
-## Hand-off from the night of 2026-09-10/11 (read before walking the ladder)
+- Confs on the Pi: `gs_os.conf` (the Finder), `gs_nox.conf` (Nox, unlimited
+  governor - the rung 6 measure screen), both **SPARSE** (user's note: full
+  capture saturates the Pi's decode core under acceleration; the map
+  measures the same 14.8x either way).  `gs_trace.conf`/`gs_noxtrace.conf`
+  are the FULL-capture twins for `tools/pi.sh trace --now`; `gs_dump.conf`
+  carries `link_dump` (debugging only).  All share `gs_bram.bin`.
+- Cycle: `swhost stop` -> `build/load.sh build/results/master_top_gs.bit`
+  -> `tools/pi.sh push` (host) -> `swhost start CONF` -> `machine reset`
+  -> ~45 s -> the Finder, checked with `peek E120A1 16` (16 x FF = the
+  menu bar) or a screenshot.  The FT601 re-enumerates for ~0.5 s after a
+  stop; a start that lands in that gap says "no FTDI device" - start again.
+- Socket: `adb CODE MODS [down|up]` (a raw ADB event; `adb 35 82` opens the
+  Desk Accessories menu), `button open|closed down|hardware` (the Apple
+  keys, read at `$C061/$C062`), `peek BBAAAA N` (24-bit, the physical
+  image), `accel status` (PLAIN first).  In the CDA menus the up arrow
+  wraps; `\x8b` typed is up, `\x8a` down, `\x88`/`\x95` left/right.
+- Latest builds: firmware **gs_dmabank** (TIMING MET +0.025, 0 of 63,753),
+  the bitstream on the card; commits fw fca0dd3 / host 196e375 (branch
+  `gs_emulation`, not pushed).  `sim/suite.sh gs` 11/11 at the KEGS floor
+  67,398; `sim/suite.sh battery` 35/35 at GS = 0; host tests 40/40 on the Pi.
+- The full-capture method found every fault today: `tools/pi.sh trace
+  OUT.swbt --now --seconds N`, then numpy over the 64-bit records (tag `F`
+  bus / `C` card, bank `[27:20]`, addr `[15:0]`, rw `[16]`, sync `[18]`,
+  data `[63:56]`), walking backwards from the write that is wrong.
 
-Open, in no order of importance:
+### Dropped from the list (2026-09-11, user)
 
-- **Speaker clicks at the GS/OS desktop**: CLOSED 2026-09-11 as not
-  reproducible - no `$C030` at the desktop in either capture mode, no
-  mixer starvation under full capture; see "Speaker clicks at the desktop".
-- **The 4-cycle turnaround idle** in `ft601_fifo.sv` (S_IDLE, `TURN_IDLE`)
-  was added as a hypothesis for the misparse and disproved as its cause;
-  kept, provisional, harmless.  Remove or keep on evidence.
-- **`IOB TRUE` on the tristate enable** is the cleaner alternative to the
-  per-lane `OE_lane[3:0]`; the XDC's note says it made placement infeasible
-  once (control-set clash with `DATA_OUT`).  Untried since.
-- **The ADB mouse feed showed `msent = 0` with motion delivered** in one
-  session (the link_dump run); arming (`adb_mouse_on_`) may differ between
-  runs.  Not seen since the link fix.
-- **PLAIN vs the classified census**: RESOLVED 2026-09-11 - it was POLLING
-  SKEW, not counting.  The census's three registers (FAST, BUS, CYCLES) are
-  HUD registers refreshed every ~800 ms; the PLAIN pair sat at the END of
-  the slow rotation, seconds older in the same report, so the two ratios
-  were snapshots of different instants (on a map moving at 15 M ops/s, a
-  five-second lag is the whole 8 %).  The PLAIN pair now rides the HUD
-  rotation just before the CYCLES snapshot.  Same-snapshot deltas on the
-  map: bus cycles agree to 26 in 24.3 M; PLAIN core 359.7 M against the
-  census's 338.6 M ops, a 6 % residual in the CLASSIFICATION (the census's
-  `bus_ops` sees 6 k where PLAIN's bus term sees 21 M) that is not chased
-  yet.  **THE USER'S DECISION: PLAIN IS THE DISPLAYED METRIC** - the HUD's
-  corner figure and the report's headline are core cycles over bus cycles;
-  the census follows as the breakdown.  Chase the classification later.
-- `GS_ADB_STAT` (0x124), `ACCEL_CORE_CYC`/`ACCEL_BUS_CYC` (0x128/0x12C) are
-  new registers; `run_build.sh` now prints MULTI-DRIVEN as not green; the
-  host has `link_dump = PATH` (debugging only, never live: it stalls the
-  ingest thread and trips the card's watchdog).
-- The programmatic reset works; the whole load -> start -> reset -> desktop
-  cycle is self-serve.  A double-click needs its four button edges sent in
-  order on the Pi's socket (parallel MCP calls are not ordered).
-- Nox Archaist on the IIgs (`gs_nox.conf`, `nox_los.HDV`) boots and plays at
-  14.8x unlimited; `gs_os.conf` is the Finder.
+- The two provisional link items - the 4-cycle turnaround idle in
+  `ft601_fifo.sv` and `IOB TRUE` on the tristate enable in place of the
+  per-lane `OE_lane` - stay as built, on the evidence of a clean day
+  (`torn=0`, no link reset but the card's watchdog during a swhost stop).
+- Speaker clicks at the desktop: not reproducible in either capture mode;
+  `snddoc` (the Ensoniq's peak) is on the status line for next time.
+- The ADB mouse `msent = 0` observation: not seen since the link fix.
 
 ## The night of 2026-09-10/11: five faults, none of them the IIgs
 
