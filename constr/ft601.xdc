@@ -186,7 +186,7 @@ set_input_delay -clock [get_clocks ft_clk_12] -min [expr {$FT601_PERIOD - $FT601
 #
 #   IOB TRUE on FT601_OE_N_reg, FT601_RD_N_reg, FT601_WR_N_reg,
 #              FT601_DATA_OUT_reg[0][*]
-#   set_multicycle_path 2 -from OE_reg/C -to the data and be ports
+#   set_multicycle_path 2 -from OE_lane_reg[*]/C -to the data and be ports (one enable flop per byte lane)
 #
 # The head of the output queue is what drives the pins, so only slot 0 is packed.
 # The tristate enable is deliberately NOT packed - an IOB's output and tristate
@@ -204,4 +204,4 @@ set_property IOB TRUE [get_cells -hier -filter {NAME =~ *u_ft/ft_wr_reg}]
 
 set_property SLEW FAST [get_ports {ft_data[*] ft_be[*] ft_wr ft_rd ft_oe}]
 
-set_multicycle_path 2 -from [get_pins -hier -filter {NAME =~ *u_ft/OE_reg/C}] -to [get_ports {ft_data[*] ft_be[*]}]
+set_multicycle_path 2 -from [get_pins -hier -filter {NAME =~ *u_ft/OE_lane_reg[*]/C}] -to [get_ports {ft_data[*] ft_be[*]}]

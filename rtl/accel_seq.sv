@@ -155,6 +155,7 @@ module accel_seq #(
     input  wire [7:0]  drv_din,
     input  wire        op_inflight,
     input  wire        ovr_en,
+    input  wire [7:0]  ovr_bank,        // the override's bank - the DMA buffer's, zero for the rest
     output wire        bus_owns,
     output wire        core_valid,
 
@@ -348,6 +349,7 @@ module accel_seq #(
     // says they describe the op the core has up now (see the header).
     logic [1:0] dq_cls, fast_cls_q;
     logic       dq_rw, dq_ovr, dq_swi, dq_quiet, swi_q, quiet_q, fast_i_q, settled;
+    logic [7:0] dq_bank;               // the override's bank, held while it is live
     logic       dq_slot, slot_q;
     assign slot_q_o = slot_q;
     assign sl_win   = slot_q && ((st == S_FAST) || swi_commit);
@@ -355,6 +357,9 @@ module accel_seq #(
         dq_cls   <= q_cls;
         dq_rw    <= cpu_rw;
         dq_ovr   <= ovr_en;
+        // Held, not sampled: the override's last cycle retires after ovr_en
+        // has dropped, and must still be stamped with the bank it had.
+        if (ovr_en) dq_bank <= ovr_bank;
         dq_swi   <= q_swi;
         dq_slot  <= q_slot;
         dq_quiet <= q_swi_quiet;
@@ -559,10 +564,16 @@ module accel_seq #(
                 u_present <= 1'b1;
                 u_addr    <= op_addr;
                 // The driver carries sixteen bits, so the bank of a BUS op
-                // is the one this module latched when it decided the op -
-                // and zero for an override's cycle, which is the card's own
-                // and belongs to no bank.
-                u_bank    <= op_ovr ? 8'd0 : bus_bank;
+                // is the one this module latched when it decided the op.  AN
+                // OVERRIDE'S CYCLE HAS A BANK TOO - the hard disk's DMA
+                // buffer's, latched with dq_ovr when the override was taken
+                // in.  It was stamped zero here "because the card's own cycle
+                // belongs to no bank", which held for a IIe and not for a
+                // IIgs: apple_mmu classifies the retired op from THIS bank,
+                // so an extended read into bank $7E was decided in $7E by the
+                // lookahead query and then WRITTEN INTO BANK ZERO - over zero
+                // page and the stack (docs/GS.md rung 4c).
+                u_bank    <= op_ovr ? dq_bank : bus_bank;
                 u_rw      <= op_rw;
                 u_wdata   <= op_wdata;
                 u_sync    <= op_sync;

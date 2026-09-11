@@ -223,6 +223,7 @@ module wb_regfile #(
     input  wire [31:0]     mem_declines,    // line requests a page was not resident for
     input  wire            mem_rom_busy,    // the ROM load is draining: the host waits
     input  wire [7:0]      mem_rom_over,    // ...and chunks it had to drop
+    input  wire [31:0]     gs_adb_stat,     // GS_ADB_STAT, the ADB micro's mouse path (rtl/gs_adb.sv)
     // THE SHADOW DUPLICATE'S DROPS (the IIgs's $C035; docs/GS.md rung 3e).
     // The map emits a shadowed write's duplicate one clock behind the write
     // itself, one deep - and a drop is a write the Mega II banks never got,
@@ -406,6 +407,7 @@ module wb_regfile #(
     localparam [13:0] R_MEM_FLUSHES     = 'd70; // 0x8000_0118, RO
     localparam [13:0] R_MEM_DECLINES    = 'd71; // 0x8000_011C, RO
     localparam [13:0] R_MEM_ROM         = 'd72; // 0x8000_0120, RO
+    localparam [13:0] R_GS_ADB          = 'd73; // 0x8000_0124, RO (rtl/gs_adb.sv dbg_stat)
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -1353,6 +1355,7 @@ module wb_regfile #(
                         R_MEM_FLUSHES:  wb_dat_r <= mem_flushes;
                         R_MEM_DECLINES: wb_dat_r <= mem_declines;
                         R_MEM_ROM:      wb_dat_r <= mem_rom_rd;
+                        R_GS_ADB:       wb_dat_r <= gs_adb_stat;
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
                         R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
                         R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;

@@ -119,7 +119,17 @@ module gs_adb #(
 
     // Diagnostics a bench reads through the hierarchy.
     output logic [7:0] cnt_cmds,
-    output logic [7:0] cnt_unknown
+    output logic [7:0] cnt_unknown,
+    // ...and one the HOST reads: GS_ADB_STAT (0x8000_0124), the mouse's
+    // path through this block made visible after a mouse that would not
+    // move on hardware while the unit bench passed (2026-09-10).
+    //   [7:0]   MOUSE_MOVE words taken      [15:8]  moves applied (mv_go)
+    //   [16]    mouse_valid                 [17]    mv_v    [18] ev_v
+    //   [19]    mouse_coord                 [23:20] mouse_ctl_addr
+    //   [24]    adb_mode[1] (mouse off)     [25]    $C027 MOUSE_INT enable
+    //   [26]    $C027 DATA_INT enable       [27]    dev addr == ctl addr
+    //   [31:28] cnt_unknown[3:0]
+    output wire [31:0] dbg_stat
 );
 
     localparam [1:0] S_IDLE = 2'd0, S_IN_CMD = 2'd1, S_SENDING = 2'd2;
@@ -243,6 +253,12 @@ module gs_adb #(
     logic mouse_btn;                      // the button as the host last said
     logic mouse_btn_rep;                  // ...and as the machine last read
     logic [3:0] mouse_dev_addr;           // the mouse's own ADB address
+    // A MOUSE_MOVE staged by the receive block (below) for the main block
+    // to apply: owned by the receive block alone - see its reset.
+    logic        mv_v;
+    logic signed [15:0] mv_dx, mv_dy;
+    logic        mv_btn;
+    logic [7:0]  cnt_mw = 8'd0, cnt_ma = 8'd0;   // GS_ADB_STAT's two counters
 
     // The micro's own 256 bytes, read combinationally at the clock a Read Mem
     // command completes.
@@ -313,6 +329,11 @@ module gs_adb #(
         endcase
     end
 
+    assign dbg_stat = {cnt_unknown[3:0],
+                       (mouse_dev_addr == mouse_ctl_addr),
+                       c027_val[4], c027_val[6], adb_mode[1],
+                       mouse_ctl_addr, mouse_coord, ev_v, mv_v, mouse_valid,
+                       cnt_ma, cnt_mw};
     assign irq_data  = ((c027_val & C027_DATA_INT)  != 8'd0) && data_valid;
     assign irq_mouse = ((c027_val & C027_MOUSE_INT) != 8'd0) && mouse_valid;
 
@@ -358,9 +379,6 @@ module gs_adb #(
     // A MOUSE_MOVE, staged the way an ADB_KEY is and for the same reason: one
     // sequential block owns the state, so the receive side parks the message
     // here and the block below applies it on a clock of its own.
-    logic        mv_v;
-    logic signed [15:0] mv_dx, mv_dy;
-    logic        mv_btn;
 
     logic        ev_v;
     logic [6:0]  ev_code;
@@ -424,6 +442,15 @@ module gs_adb #(
         if (rst) begin
             rx_type_k <= 8'd0; rx_left_k <= 8'd0;
             ev_v <= 1'b0;
+            // THE ONE BLOCK THAT DRIVES THE MOUSE STAGING.  These four were
+            // also reset from the main block below, and two always blocks
+            // driving one register is a thing a simulator resolves (last
+            // write wins, the bench passed) and synthesis does not: Vivado
+            // kept the constant driver and IGNORED this block's (Synth
+            // 8-6859), so mv_v was a hard 0 in every bitstream and the mouse
+            // never moved on hardware - 98 MOUSE_MOVE words counted, 0
+            // applied, by GS_ADB_STAT on 2026-09-11.
+            mv_v <= 1'b0; mv_dx <= 16'sd0; mv_dy <= 16'sd0; mv_btn <= 1'b0;
         end else begin
             if (msg_valid) begin
                 rx_type_k <= msg_type;
@@ -439,6 +466,8 @@ module gs_adb #(
             // been read ACCUMULATES rather than replacing - the machine is
             // owed all of the motion, and the clamp above is what meters it
             // out.  So the staging register holds a sum, not a sample.
+            if (word_mouse) cnt_mw <= cnt_mw + 8'd1;
+            if (mv_go)      cnt_ma <= cnt_ma + 8'd1;
             if (word_mouse) begin
                 mv_v   <= 1'b1;
                 mv_dx  <= mv_v ? (mv_dx + $signed(pay_data[15:0]))
@@ -526,7 +555,6 @@ module gs_adb #(
             pend_x <= 16'sd0; pend_y <= 16'sd0;
             mouse_btn <= 1'b0; mouse_btn_rep <= 1'b0;
             mouse_dev_addr <= 4'd3;
-            mv_v <= 1'b0; mv_dx <= 16'sd0; mv_dy <= 16'sd0; mv_btn <= 1'b0;
             cnt_cmds <= 8'd0; cnt_unknown <= 8'd0;
             // The keyboard.  A RESET clears the buffers and the modifiers;
             // c025 bit 5 is "no hard key is down", which is true of a machine

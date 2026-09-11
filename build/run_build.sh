@@ -56,3 +56,15 @@ if [ "$rc" != 0 ]; then
 fi
 echo "== verdict"
 build/wns.sh "$log"
+# MULTI-DRIVEN REGISTERS ARE A MISS.  Two always blocks driving one register
+# is legal to a simulator (last write wins - the bench passes) and silently
+# broken in synthesis: Vivado keeps one driver and IGNORES the other (Synth
+# 8-6859/8-6858), so the hardware runs different logic from the bench.  The
+# IIgs mouse never moved on hardware for exactly this (gs_adb.sv, 2026-09-11)
+# while every bench passed, and Verilator's MULTIDRIVEN never fires for
+# same-clock drivers - so this log line is the only gate there is.
+md=$(grep -c "Synth 8-6859" "$log" 2>/dev/null || true)
+if [ "${md:-0}" != "0" ]; then
+    echo "MULTI-DRIVEN: $md driver conflicts - NOT GREEN, a register's logic was discarded by synthesis:"
+    grep "8-6859.*1st driver" "$log" | sed 's/.*1st driver pin .\([^ ]*\). .*/    \1/' | sort -u | head -20
+fi

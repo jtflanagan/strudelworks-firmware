@@ -91,9 +91,38 @@ module ft601_fifo (
 
                         logic [31:0] DATA_OUT [2];
     (* KEEP = "TRUE" *) wire         FWD;
-    (* KEEP = "TRUE" *) logic        OE               = 1'b1;
+    // THE TRISTATE ENABLE, ONE FLOP PER BYTE LANE.  A single OE fanned out
+    // to all thirty-six pads' T inputs from one fabric flop, and where the
+    // placer happened to put that flop decided the ft_clk_12 group: build
+    // gs_adbstat (2026-09-11) left it at -0.300 after routing, post-route
+    // phys_opt then "adjusted clock skew" for it six times - six BUFGs
+    // cascaded into the whole domain's clock - and moved the miss onto the
+    // data pads' clock-to-out.  Four copies, one per lane of eight data
+    // pads and its BE pad, let each sit by its pins.  The IOB T flop is
+    // still not used: it shares a control set with DATA_OUT's output flop
+    // and cannot be packed beside it (constr/ft601.xdc).  KEEP and the
+    // equivalent-register attribute stop synthesis folding them back into
+    // one.
+    (* KEEP = "TRUE", EQUIVALENT_REGISTER_REMOVAL = "NO" *) logic [3:0] OE_lane = 4'b1111;
     (* KEEP = "TRUE" *) logic [1:0]  data_queue_count = 2'd0;
     (* KEEP = "TRUE" *) logic [3:0]  state            = S_IDLE;
+
+    // TURNAROUND IDLE.  A burst in the direction opposite to the last one
+    // starts only after the bus has sat in S_IDLE for TURN_IDLE cycles, on
+    // top of the two cooldown cycles every burst already ends with.  Found
+    // on hardware 2026-09-10: with the card's TX otherwise idle, a startup
+    // burst of register requests - each reply a TX burst landing between
+    // the host's next words - left ft601_msg_rx parsing the host's stream
+    // one word out of step (the ROM's bytes announced as unknown message
+    // types), the way other FT60x controllers' explicit turnaround states
+    // suggest it would.  A same-direction restart is not a turnaround and
+    // is not delayed, so TX throughput is untouched; while a turnaround is
+    // pending the wanting direction keeps its place, so a busy TX cannot
+    // starve RX of its turn.  Four is a proving number, not a tuned one.
+    localparam [2:0] TURN_IDLE = 3'd4;
+    logic        last_rx  = 1'b0;    // the direction of the last burst
+    logic [2:0]  idle_cnt = 3'd0;    // consecutive cycles spent in S_IDLE
+    wire         turn_ok  = (idle_cnt >= TURN_IDLE);
 
     // -------------------------------------------------------------------------
     // FT245 RX / DATA INPUT
@@ -156,8 +185,13 @@ module ft601_fifo (
     // each produced a bug.
     // -------------------------------------------------------------------------
 
-    assign ft_be        = OE ? 4'b1111 : 4'bzzzz;
-    assign ft_data      = OE ? DATA_OUT[0] : 32'hzzzzzzzz;
+    genvar gl;
+    generate
+        for (gl = 0; gl < 4; gl = gl + 1) begin : g_oe_lane
+            assign ft_be[gl]              = OE_lane[gl] ? 1'b1 : 1'bz;
+            assign ft_data[8*gl+7:8*gl]   = OE_lane[gl] ? DATA_OUT[0][8*gl+7:8*gl] : 8'hzz;
+        end
+    endgenerate
     // Request whenever there is room for one more, INCLUDING when empty.  The
     // reference requests only at count == 2 or 3 and reaches that window from
     // ABOVE - its five-DWORD preload starts the count at 5 and FWD drains it into
@@ -225,9 +259,9 @@ module ft601_fifo (
     // -------------------------------------------------------------------------
 
     always_ff @(posedge clk) begin
-        OE    <= (rst || ft_rxf || ((state != S_RX_ACTIVE)    && (state != S_RX_WAIT3) &&
-                                    (state != S_RX_WAIT2)     && (state != S_RX_COOLDOWN1) &&
-                                    (state != S_RX_COOLDOWN2)));
+        OE_lane <= {4{(rst || ft_rxf || ((state != S_RX_ACTIVE)    && (state != S_RX_WAIT3) &&
+                                         (state != S_RX_WAIT2)     && (state != S_RX_COOLDOWN1) &&
+                                         (state != S_RX_COOLDOWN2)))}};
         ft_oe <= (rst || ft_rxf || ((state != S_RX_ACTIVE)    && (state != S_RX_WAIT3) &&
                                     (state != S_RX_WAIT2)));
         ft_rd <= (rst || ft_rxf || ((state != S_RX_ACTIVE)    && (state != S_RX_WAIT3)));
@@ -238,13 +272,29 @@ module ft601_fifo (
 
     always_ff @(posedge clk) begin
         if (rst) begin
+            idle_cnt <= 3'd0;
+            last_rx  <= 1'b0;
+        end else begin
+            idle_cnt <= (state != S_IDLE) ? 3'd0 : (turn_ok ? idle_cnt : idle_cnt + 3'd1);
+            if (state == S_RX_WAIT1) last_rx <= 1'b1;
+            if (state == S_TX_WAIT1) last_rx <= 1'b0;
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
             state <= S_IDLE;
         end else begin
             case (state)
-                // RX is prioritised above TX when both are available.
+                // RX is prioritised above TX when both are available.  A
+                // change of direction waits out the turnaround idle (above);
+                // the direction that is waiting holds the bus idle meanwhile.
                 S_IDLE:
-                    if (!ft_rxf)                                    state <= S_RX_WAIT1;
-                    else if (!ft_txe && (data_queue_count > 2'd0))  state <= S_TX_WAIT1;
+                    if (!ft_rxf) begin
+                        if (last_rx || turn_ok)                     state <= S_RX_WAIT1;
+                    end else if (!ft_txe && (data_queue_count > 2'd0)) begin
+                        if (!last_rx || turn_ok)                    state <= S_TX_WAIT1;
+                    end
 
                 // RX.  The receiver is assumed never full; if it is, data is
                 // still received and lost.

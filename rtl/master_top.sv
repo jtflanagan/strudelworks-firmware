@@ -147,6 +147,34 @@ module master_top #(
     wire        apple_clk, apple_rst;
     wire        capture_on, capture_real;
     wire [63:0] real_data;
+    // THE BUS RECORD'S BANK.  apple_bus_read snoops an eight-bit bus and
+    // records zero in word 0's [27:20], which is right for a IIe and was left
+    // that way on the IIgs because "a bus cycle is bank zero's" - and the hard
+    // disk's DMA is a bus cycle.  So every extended read into bank $7E reached
+    // the host as bank-zero writes: its mirror put block 1369 at $00/BE00, and
+    // block 1370's bytes at $00/C0F9-C0FA went into the host's own FIFO decode
+    // as register writes, which is where GS/OS's "Error=$0028" came from
+    // (docs/GS.md rung 4c, on hardware).  The bank is the presented op's: the
+    // override's while the hard disk drives the bus, HELD - the last byte's
+    // data sample comes after ovr_en has dropped - else the core's, which is
+    // still for the length of its own bus cycle.  The fast-op word has carried
+    // fev_bank since rung 4b; this is the same fix for the other half of the
+    // stream.  Zero at GS = 0, so the IIe's record is the byte it always was.
+    logic [7:0] ovr_bank_q = 8'd0;
+    always_ff @(posedge apple_clk) if (hd_ovr_en) ovr_bank_q <= hd_ovr_bank;
+    wire [7:0]  ev_bank     = GS ? (op_ovr ? ovr_bank_q : cpu_bank) : 8'd0;
+    wire [63:0] real_data_b = {real_data[63:28], ev_bank, real_data[19:0]};
+    // ...AND THE SPEAKER ASKS THE SAME QUESTION.  $C030 is the speaker in the
+    // four I/O banks only; in bank $7E it is a byte of a GS/OS disk buffer,
+    // and every block that landed over it clicked (the same night, on
+    // hardware).  gs_io already decides its own claims by pair_bank(); the
+    // speaker is fed the bus cycle and the fast op directly, so it is
+    // qualified here.  A IIe's banks are zero: unchanged.
+    function automatic io_bank_f(input [7:0] bk);
+        io_bank_f = (bk == 8'h00) || (bk == 8'h01) || (bk == 8'hE0) || (bk == 8'hE1);
+    endfunction
+    wire real_io = !GS || io_bank_f(ev_bank);
+    wire fast_io = !GS || io_bank_f(fev_valid ? fev_bank : 8'd0);
     wire        real_valid, phi0_live, bus_tick;
     wire        apple_res_sync, apple_irq_sync, apple_phi0_sync;
     wire [7:0]  apple_data_sync;
@@ -369,7 +397,7 @@ module master_top #(
         .usb_rx (usb_rx), .usb_tx (usb_tx),
         .apple_clk (apple_clk), .apple_rst (apple_rst),
         .capture_on (capture_on), .capture_real (capture_real),
-        .real_data (real_data), .real_valid (real_valid),
+        .real_data (real_data_b), .real_valid (real_valid),
         .real_mark (beam_mark_bus), .real_mark_free (beam_mark_free),
         .real_dummy (op_dummy),
         .virt (virt),
@@ -454,6 +482,7 @@ module master_top #(
         .mem_declines   (mem_declines),
         .mem_rom_busy   (rom_busy),
         .mem_rom_over   (rom_overruns), .mem_shd_drops (mem_shd_drops),
+        .gs_adb_stat    (gsio_adb_stat),
         .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
         .mem_served (mem_served), .mem_last (mem_last), .mem_diverted (mem_diverted),
@@ -569,6 +598,7 @@ module master_top #(
     // The IIgs chipset's one interrupt line (rtl/gs_intc.sv inside gs_io),
     // zero on the IIe build.
     wire gsio_irq;
+    wire [31:0] gsio_adb_stat;     // GS_ADB_STAT, zero on a IIe
 
     generate if (!GS) begin : g_65c02
 
@@ -864,6 +894,10 @@ module master_top #(
     wire        p_dummy    = sl_win ? 1'b1       : op_dummy;
     wire        p_ovr      = sl_win ? 1'b0       : op_ovr;
     wire [15:0] p_addr     = sl_win ? u_addr     : op_addr;
+    // ...and its bank: the retired op's in the slot window, the override's
+    // for a DMA cycle, the core's otherwise - the core is held for the length
+    // of its own bus cycle, so its bank is the presented op's.
+    wire [7:0]  p_bank     = sl_win ? u_bank : (op_ovr ? ovr_bank : cpu_bank);
     wire        p_rw       = sl_win ? u_rw       : op_rw;
     wire [7:0]  p_wdata    = sl_win ? u_wdata    : op_wdata;
     logic       sl_claim_fast;
@@ -1006,6 +1040,7 @@ module master_top #(
         .drv_din       (drv_din),
         .op_inflight   (op_inflight),
         .ovr_en        (ovr_en),
+        .ovr_bank      (ovr_bank),
         .bus_owns      (bus_owns),
         .core_valid    (core_valid),
         .mem_sub_en    (mem_sub_en),
@@ -1628,7 +1663,8 @@ module master_top #(
         .doc_r      (doc_r),
         .u_claim    (gsio_u_claim),
         .rd_byte    (gsio_byte),
-        .irq        (gsio_irq)
+        .irq        (gsio_irq),
+        .adb_stat   (gsio_adb_stat)
     );
 
     end else begin : g_no_gsio
@@ -1637,6 +1673,7 @@ module master_top #(
     assign gsio_u_claim = 1'b0;
     assign gsio_byte    = 8'd0;
     assign gsio_irq     = 1'b0;
+    assign gsio_adb_stat = 32'd0;
     assign gs_border    = 4'd0;
     assign gs_bram_ok   = 1'b0;
     assign gs_park_addr = 16'hC000;
@@ -1861,6 +1898,7 @@ module master_top #(
         .op_present    (p_present),
         .op_commit     (p_commit),
         .op_ovr        (p_ovr),
+        .op_bank       (p_bank),
         .din           (drv_din),
         .ovr_en        (hd_ovr_en),
         .ovr_addr      (hd_ovr_addr),
@@ -1994,10 +2032,10 @@ module master_top #(
         .clk        (apple_clk),
         .rst        (apple_rst),
         .res_sync   (apple_res_sync),
-        .real_valid (real_valid),
+        .real_valid (real_valid && real_io),
         .real_dummy (op_dummy),
         .real_addr  (real_data[15:0]),
-        .fast_valid (fev_valid || tev_valid || dev_valid),
+        .fast_valid ((fev_valid || tev_valid || dev_valid) && fast_io),
         .fast_addr  (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
         .level      (spk_level),
         .toggle     (spk_toggle)

@@ -119,7 +119,9 @@ module gs_io #(
     output wire signed [20:0] doc_r,
 
     // The one interrupt line into the core.
-    output wire        irq
+    output wire        irq,
+    // GS_ADB_STAT for the host (rtl/gs_adb.sv).
+    output wire [31:0] adb_stat
 );
 
     // A IIgs sees I/O at $C0xx in a PAIR bank only - $00/$01 and the Mega
@@ -192,7 +194,8 @@ module gs_io #(
         .pay_data (pay_data), .pay_valid (pay_valid),
         .c025_rd (adb_c025),
         .irq_data (adb_irq_data), .irq_mouse (adb_irq_mouse),
-        .cnt_cmds (adb_cnt_cmds), .cnt_unknown (adb_cnt_unknown)
+        .cnt_cmds (adb_cnt_cmds), .cnt_unknown (adb_cnt_unknown),
+        .dbg_stat (adb_stat)
     );
 
     // The map's registers read straight back.  $C037 reads zero on a IIgs

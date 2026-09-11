@@ -108,11 +108,25 @@ module gs_intc (
 
     // The line into the core.  Each source is ANDed with its own enable where
     // the enable lives: the Mega II's two in $C041, the VGC's two in $C023.
-    assign irq = (p_vbl   && (c041 & C041_EN_VBL)   != 8'd0) ||
-                 (p_25sec && (c041 & C041_EN_25SEC) != 8'd0) ||
-                 (p_1sec  && (c023[2])) ||
-                 (p_scan  && (c023[1])) ||
-                 irq_adb || irq_doc;
+    wire irq_now = (p_vbl   && (c041 & C041_EN_VBL)   != 8'd0) ||
+                   (p_25sec && (c041 & C041_EN_25SEC) != 8'd0) ||
+                   (p_1sec  && (c023[2])) ||
+                   (p_scan  && (c023[1])) ||
+                   irq_adb || irq_doc;
+
+    // AND IT IS A REGISTER.  Combinational, this OR put the ADB micro's state
+    // machine, its own enables and master_top's mux in front of the core's
+    // take_int - which decides the microcode address in the fetch cycle - and
+    // the first rung-4c build failed timing on exactly that path: sixteen
+    // levels, seven of its nine nanoseconds in routing across three modules
+    // (docs/GS.md rung 4c).  A flop here takes the whole generation cone out
+    // of the core's cycle.  The clock of latency is invisible: the core
+    // samples interrupts at instruction boundaries, a hundred clocks apart,
+    // and the IIe's pin IRQ already arrives through a synchroniser - this
+    // makes the GS's line the same shape.
+    logic irq_q;
+    always_ff @(posedge clk) irq_q <= (rst || !res_sync) ? 1'b0 : irq_now;
+    assign irq = irq_q;
 
     wire wr = act && !op_rw;
     wire rd = act &&  op_rw;

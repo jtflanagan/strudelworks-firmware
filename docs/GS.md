@@ -11,7 +11,8 @@ a mistake this document invites, and it has been made.
 |---|---|
 | 0, 1, 1b, 2, 3a-3e | **DONE** |
 | 4 - first light on hardware | **PARTLY**: 4a built the bitstream and 4b brought first light, and hardware has run both keyboards, SHR and a boot.  The rung's own gate - self-test pass, Control Panel navigable - is not recorded as met |
-| 5 - GS/OS Finder (milestone 1) | **OPEN, and it is where the work actually is.**  The slot-7 HDC boots GS/OS (see rungs 7b and 7c, which are rung-5 work under the wrong name), but the gate is the FINDER DESKTOP and GS/OS does not reach it |
+| 4c - the memory corruption | **DONE, ON HARDWARE 2026-09-10 evening** (two more of the same family found there: the bus record's bank and the host's bank-blind switch decoders).  The page cache was NOT the hole (a bench mask that began at `boot_go`; the audit is a gate now, 0/0).  The corruption was the 65816 returning from EVERY hardware interrupt two bytes late (fixed, `cpu816_irq` in the suite), the DMA's bank dropped on the op that lands so bank-$7E reads wrote bank zero (fixed in `accel_seq`, master_top and the bench), and the host refusing `$7E/C000` as "the I/O page" (fixed).  GS/OS now runs 8M instructions into the toolbox instead of dying at 4M |
+| 5 - GS/OS Finder (milestone 1) | **THE FINDER IS ON HDMI, 2026-09-10 evening** (`shots/gs4c2_hostgate.png`), booted from the slot-7 HDC on build gs4c2 + the bank-gated host: menu bar, GSHardDrive, the 5.25 drives, Trash.  Of the row's list, BRAM persistence, border and `$C022` are unchecked and "a window opens by mouse" is untried; the speaker click on bank-$7E DMA is fixed in gs4c3 |
 | 6 - speed: the split interface and the fronts | **NOT STARTED.**  Mentioned only in the future tense everywhere it appears |
 | 7 - sound (milestone 2) | **ENTERED OUT OF ORDER, NOT CLOSED.**  The DOC was built because GS/OS needed its sound interrupts serviced to get past "Unclaimed Sound Interrupt" - that much works.  The gate, a tracker player against a KEGS recording with interrupts timed, is untouched |
 | 8 | Later |
@@ -20,7 +21,87 @@ So: **milestone 1 has not been reached**, and nothing between rung 4 and rung
 7 is closed.  The sections named "rung 7b" and "rung 7c" are rung-5 work; the
 names are kept because commits and the memory file reference them.
 
-Last built: **THE ENSONIQ - rung 7, reached out of order, 2026-09-09**: the DOC 5503 is built -
+## The night of 2026-09-10/11: five faults, none of them the IIgs
+
+Hardware only - no bench saw any of these, and two of them could not have.
+
+1. **The link's messages were not atomic.**  `LinkSession::read_reg` was
+   two USB writes and `write_reg` three, with no lock between threads.  The
+   start order was changed that evening (readers first, `BUS_ENABLE` last,
+   a `MEM_ROM_STAT` busy handshake per ROM chunk - all correct and kept),
+   and the moment the ingest thread ran during `start()` its `RING_STATUS`
+   poll and `GS_TIME` feed landed between another thread's header and
+   address.  `ft601_msg_rx` has no sync word by design; it parsed the ROM
+   upload's payload as headers for the rest of the session - the
+   `card: unknown message type 0x29 (len 152)` floods are ROM bytes.  Proven
+   by a `link_dump` of the host's own bytes replayed through a copy of the
+   card's parser (word 5-8: `hdr, hdr, addr, addr`).  Fixed: one write per
+   message under `tx_mu_` (host).  The earlier "silent card after start"
+   flakiness was the old order's version of the same race, plus full capture
+   filling the TX ring with nobody reading.
+2. **A dump on the ingest thread stalls the link.**  744 MB of `fwrite` from
+   the thread whose one job is never blocking; >1 s without a host message
+   and the card's watchdog reset the FT601 ("device gone").  `link_dump`
+   stays a debugging key, never in a live run.
+3. **The FT601 tristate enable's fanout** (one fabric flop to 36 pad T
+   inputs) decided the `ft_clk_12` group per build; post-route phys_opt
+   "adjusted clock skew" for it six times and cascaded six BUFGs into the
+   domain's clock.  Now one enable flop per byte lane (`OE_lane[3:0]`,
+   `ft601_fifo.sv`).  A 4-cycle turnaround idle between RX and TX bursts was
+   added on the way (hypothesis disproved as the cause; kept, provisional).
+4. **Four registers synthesis had silently zeroed.**  `gs_adb.sv`'s mouse
+   staging (`mv_v/mv_dx/mv_dy/mv_btn`) was driven from two `always_ff`
+   blocks (set in the receive block, reset in the main block).  Simulators
+   let the last write win - the 46-check bench passes - and Vivado kept the
+   constant driver and IGNORED the other (`Synth 8-6859`, CRITICAL WARNING,
+   unread in every build).  `mv_v` was a hard 0: the mouse never moved on
+   hardware, ever.  Found in five minutes by a new register, `GS_ADB_STAT`
+   (0x8000_0124, `adb=` in status): 98 MOUSE_MOVE words taken, 0 applied.
+   Fixed (one block owns them); `build/run_build.sh` prints `MULTI-DRIVEN`
+   as not green from now on, because Verilator's MULTIDRIVEN never fires for
+   same-clock drivers.
+5. **The cursor is waiting on the scan-line interrupt.**  With 4 fixed the
+   ROM reads `$C027` `$D0/$D2` and `$C024` `+10/+7` exactly as sent and
+   integrates them into `$E1/0190-0193` - and the arrow stays at (0,0).
+   QuickDraw II redraws the cursor from the VGC scan-line interrupt: the
+   trace shows `$C023 = $02` (enabled) and SCBs written with bit 6 on the
+   cursor's lines, and `gs_io.sv` ties `irq_scan` to `1'b0`.  Rung-4b part 8
+   was right that this was not the boot hang; it is the pointer.  NEXT.
+
+Also that night: the programmatic Ctrl-Reset works on the IIgs build again
+(it had been a split message on a busy link), so the load -> start -> reset
+-> desktop cycle is self-serve.
+
+Status: **GS/OS 6.0.1 BOOTS TO THE FINDER ON HARDWARE AND THE MACHINE STAYS
+UP, 2026-09-11 00:27**, branch `gs_emulation`, build gs_mvfix (TIMING MET
++0.026 / +0.055, 0 of 63,076, stamp 00:27:24; the verdict now also gates
+multi-driven registers, 0) with the one-write-per-message host.  The night's
+finds are in "The night of 2026-09-10/11" below: the link's split messages,
+the ingest thread stalled by a dump, the FT601 enable fanout, four registers
+synthesis had silently zeroed (the mouse), and the scan-line interrupt the
+cursor is waiting on.  Before that:
+GS/OS 6.0.1 BOOTS TO THE FINDER ON HARDWARE, 2026-09-10 evening,
+build gs4c2 (TIMING MET +0.265 / +0.059, 0 of 62,923,
+stamp 21:30:24) with the bank-gated host - milestone 1's desktop on HDMI.  The
+day's rung 4c: five faults of one family, all "the bank stopped one stage
+short" - the 65816 pushed PC+2 on every interrupt, the override's retired op
+stamped bank 0, the host refused `$7E/C000` as I/O, the bus RECORD carried no
+bank so bank-$7E blocks landed in bank 0 and fed the host's FIFO, and the
+host's switch decoders read a disk buffer at `$7E/C029` as NEWVIDEO.  The
+speaker's copy of the same fault is fixed in gs4c3 (TIMING MET +0.174, loaded).  Uncommitted.  Earlier the same
+day, in simulation: three
+memory-corruption faults found and fixed - the 65816 pushed PC+2 on every
+hardware interrupt (`rtl/cpu65816.sv`, `sim/cpu816_irq_tb.sv`), the hard
+disk's DMA landed in bank zero whatever bank it was for
+(`rtl/accel_seq.sv`, `rtl/master_top.sv`), and the host refused `$7E/C000`
+as the I/O page (`src/hd_card.cpp`); the "page cache hole" was a bench-mask
+artefact and its audit is a gate.  GS/OS 6.0.1 runs eight million instructions
+into the toolbox dispatcher where it used to die at four.  `sim/suite.sh gs`
+**11/11** (floor 67,398 unmoved), battery **35/35**, lint/ports clean, host
+cross-built.  NO HARDWARE THIS SESSION: no bitstream, no WNS, the HW gate is
+open.  Uncommitted at the time of writing.
+
+Last built before it: **THE ENSONIQ - rung 7, reached out of order, 2026-09-09**: the DOC 5503 is built -
 32 oscillators, 64 KB of wave RAM, the modes, and the arrival-ordered
 interrupt queue - and "Unclaimed Sound Interrupt" is gone.  WNS +0.022 / WHS
 +0.057, 0 of 62,799 failing endpoints; `sim/suite.sh gs` **10/10** (KEGS floor
@@ -82,13 +163,15 @@ untouched and stays bit-identical at `GS=0`, which the 35-bench battery checks
 on every rung.  Branch `gs_emulation` in both repos, taken from master at fw
 `62b21ab` / host `98d46d2` (the `memory_refactor` merge).
 
-**KNOWN AND NOT FIXED**, found by the mirror replay: the page cache can hold a
-previous tenant's bytes in lines a page never had written - page $0001 took
-17,865 writes with the lowest offset ever written $70, and the cache holds
-junk below that where DDR3 correctly holds zeros.  Nothing wrote them and
-nothing reads them, but cache and backing store disagree there, so an eviction
-and refill would change bytes under the machine.  See "the mirror against the
-machine" below.
+**RESOLVED 2026-09-10 (rung 4c): the page cache does NOT hold a previous
+tenant's bytes.**  The mirror replay's finding - page $0001 with junk below
+the lowest offset ever written, $70 - was true and its reading was not: the
+"junk" is the stack frames of a BRK loop the core runs BEFORE the bench loads
+the ROM, and the mirror's mask begins at `boot_go`.  An audit with a power-up
+mask is a gate in the boot bench now and reads 0/0 on a ROM boot and a GS/OS
+boot.  What WAS corrupting memory was the 65816 returning from every interrupt
+two bytes late, and the DMA's bank being dropped on the op that lands - both
+fixed in rung 4c.
 
 The plan itself (inventory, decisions, memory-path design, rung ladder) was
 written with the user on 2026-09-08 and is reproduced here so the sheet stands
@@ -324,6 +407,7 @@ parity check on every rung that touches shared RTL.
 | 3d | `hd_card` in `boot_gs_tb` with the bench playing host, so the scan has something to find | the ROM finds slot 7, runs its firmware and reads blocks | **DONE 2026-09-09** - and the boot block runs; see below |
 | 3e | Why the third block read asks for $0203 instead of $0003; then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | **DONE 2026-09-09.** The $0203 was an internal cycle (VDA and VPA both low) taken as an access - as a WRITE and as a STROBE - and the eviction pressure that uncovered turned up a real page-cache bug (the shadow duplicate had no P0). ProDOS 2.4.3 boots off the slot-7 SmartPort to its BYE selector and a Return launches a file. The battery RAM ships (GS_BRAM `$2E`) and the ROM believes it; ADB_KEY carries keycodes to a micro that holds the keymap, with auto-repeat; `mock_card` speaks a GS stream (`gs_source.hpp`); and the mirror replays a real boot - 1,817,727 ops, 481 pages, ZERO bytes different - which found three host bugs of its own |
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | **PARTLY, 2026-09-09**: 4a and 4b below - the bitstream, first light, both keyboards, SHR, a boot from the slot-7 SmartPort.  The GATE ITSELF is not recorded as met: no self-test pass and no Control Panel walk is written up |
+| 4c | **The page cache holds no stale line.**  An audit that walks every resident line at end of run and compares it against the DDR3 for bytes the machine never wrote, with the page's fill history beside each disagreement; then the fix.  Not a GS item: `rtl/page_cache.sv` is master's, so the IIe build carries the same hazard, and the per-page dirty bit with a whole-page flush makes a stale line a WRITE-BACK over good memory rather than only a read disagreement | the audit reports zero disagreements on an IIe boot and on a GS/OS boot; the IIe battery and the KEGS floor unmoved | **DONE IN SIMULATION 2026-09-10**: audit 0/0 on both boots (and it was never the cache - see the section); the real faults were the 65816's interrupt entry, the override's bank, and the I/O-page refusal, all three fixed; gs 11/11 at the floor, battery 35/35.  HW gate open: no hardware this session |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | **OPEN - THIS IS THE CURRENT RUNG.**  The image boots and GS/OS loads off the slot-7 HDC (written up as rungs 7b and 7c, which belong here), but it does not reach the Finder |
 | 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | **NOT STARTED** |
 | 7 | Sound (milestone 2): the DOC on card + mixer channels; a SoundSmith/NinjaTracker player against a KEGS recording | audible, interrupts timed | **ENTERED OUT OF ORDER, NOT CLOSED**: the DOC is built because GS/OS needed its sound interrupts serviced (see rung 7 below); the gate - a player against a KEGS recording, interrupts timed - is untouched |
@@ -2397,6 +2481,256 @@ reads land at $0800-$9A00), the block-landing oracle passes, and the 32
 SmartPort calls all completed.  Who owns $36/$37 at that moment - the ROM's
 init, ProDOS, or GS/OS's own loader - is the next rung.
 
+## Rung 4c: the page cache was not the hole - two other things were (2026-09-10)
+
+Taken next at the user's direction: "an obvious broken thing that obviously
+needs fixing".  It was, twice over, and neither of the broken things was the
+page cache.
+
+### The audit, and what the "previous tenant's bytes" really were
+
+`sim/boot_gs_tb.sv` now walks physical banks 0 and 1 at the end of a run and,
+for every byte the machine never wrote, checks the cache's copy AND the DDR3's
+against the power-up value (all zeros in the bench).  Both, deliberately: a
+non-zero byte in a resident page is the cache holding someone else's bytes, a
+READ hazard; a non-zero byte in the DDR3 is a whole-page flush having already
+written another page's bytes over memory the machine owns, which with a
+per-page dirty bit is what a stale line turns into.
+
+It reproduced at once - 136 bytes of page $0001, the run sheet's own example,
+on a 250,000-instruction ROM boot with no disk - and the bisection settled it
+in three runs:
+
+- **The fill delivered.**  Counted eight clocks after page $0001's retag:
+  0 of 256 bytes non-zero.  So the junk arrived later.
+- **Nothing the mask could see wrote it.**  A watch on both write ports of
+  set 1, line 0 printed nothing - until the `boot_go` gate came off it.
+- **The writer is the core itself, before the ROM is loaded.**  Sixteen
+  writes at bus rate, offsets $0F down to $00, a repeating `$00 $02 $34`:
+  `PCH=$00 PCL=$02 P=$34`, which is a `BRK` at `$0000` in emulation mode
+  pushing its frame.  The core leaves reset before the bench loads the ROM,
+  executes zeros, BRKs through a zero vector, BRKs again, and wraps the stack
+  round page one until the bench pulls reset.  Those pushes are real writes
+  the cache rightly kept.  `pg_mask` starts recording at `boot_go`, because
+  the mirror's op stream does, so it called them "never written".  The ROM's
+  own stack never goes below $0170 - and "lowest offset ever written $70,
+  junk below it" was the finding.
+
+So the mirror replay's observation was true and its conclusion was not: the
+cache and the backing store disagreed only in a mask that began late.  The
+audit uses a second mask taken from power-up and is now a GATE in the boot
+bench (`fail` on any non-zero byte): **0 wrong in the cache, 0 in the DDR3**
+on the ROM boot and on an eight-million-instruction GS/OS boot with 1,690
+fills and 665 whole-page flushes.  (That the core runs before the ROM arrives
+is a bench artefact worth knowing about, not a machine fault: reset
+re-initialises everything it touched.)
+
+### The memory corruption was real, and it was the CPU
+
+With the cache exonerated, the COUT vector: 1,431 good calls through `$36/$37`,
+then `$8484`, then zero.  The writer of the zero was an ordinary store -
+`E1/D4EE`, `STA ($9B),Y`, stack safely at $01F5 - a loop copying $0200-$027F
+over zero page $01-$83: GS/OS's zero-page RESTORE, from a save area holding
+zeros.  KEGS never executes that entry (`E1/D4E7`, 0 visits in 6M
+instructions of the same image), so it was reached wrongly.  Walking back:
+the caller was `00/93F9`, reached after an `RTS` at `FF/CFD7` returned to
+**`FF/5C85` - one byte into `STX $45`** - and executed operand bytes as
+opcodes (`EOR $E2 / BMI` into the tail of the real `STA [$42],Y` loop, which
+is where the `$8484` came from, `$84` filled through a long pointer at zero).
+The frame that `RTS` consumed was one byte off: its low byte was a `PHA`'d
+`$84` and its high byte the real return's `$5C`.  And the first thing wrong
+in that whole chain, by the trace's own timeline:
+
+    1092486  FF/CFA2 op=22  S=01D6   <- JSL $E10000; S dropped by 4, the JSL never ran
+    1092487  00/C074 op=B8            the IRQ handler
+    ...
+    1092752  FF/BF7D op=40            RTI
+    1092753  FF/CFA4 op=00            <- returned to CFA4: the JSL's operand, a $00, a BRK
+
+**Every hardware interrupt the machine took returned to PC+2.**  All 41 of
+them in the run, IRQ and NMI, native and emulation, whatever the interrupted
+opcode - `JSL`, `RTS`, `RTL`, `LDA`, `JMP`:
+
+       op=22 E=0 ret+2 : 1      op=60 E=0 ret+2 : 2      op=AF E=1 ret+2 : 12
+       op=6B E=0 ret+2 : 1      op=83 E=0 ret+2 : 5      op=4C E=0 ret+2 : 1   ...
+
+The mechanism is the one `rtl/cpu65c02.sv` already documents and guards
+against: a hardware interrupt hijacks the opcode fetch and runs BRK's
+microcode, and BRK is a two-byte instruction whose return address DOES
+advance to PC+2.  The 65C02 holds PC across the hijacked fetch and the
+operand slot (`int_pc_hold`, added after the first Mockingboard timer
+interrupt locked a game - `sim/cpu_irq_tb.sv`).  The 65816 core was written
+after it with the same shape and without the hold, and SingleStepTests hold
+it instruction by instruction without ever driving `irq_n` - so its first
+real interrupts were GS/OS's, and every one of them landed two bytes late:
+into a JSL's operand, into the tool dispatcher's exit sequence (the
+`PLP / XCE / PLY / PLX / PLA / RTS` frame walk at `$FF/CFCF`, which is what
+threw the frame off by a byte), and once into `RTL`'s successor.  Whether the
+earlier rung-7 crash - "a JSR $C978 recursion entered moments after an RTI at
+$FF/BF7D" - was the same fault is not proven here, but it is the same RTI.
+
+**The fix** mirrors the 65C02's exactly: `int_pc_hold = take_int | (~in_rst &
+~int_brk & ir==$00 & use_dec)` gating `UC_LD_PC_INC` (`rtl/cpu65816.sv`).
+BRK and COP keep their PC+2, the sequence's trailing fetch still advances,
+the microcode is untouched.  **`sim/cpu816_irq_tb.sv`** is the missing test,
+in the GS suite as `cpu816_irq`: IRQ and NMI in both modes taken inside a
+store (the store lands first), three- and four-byte frames with PBR on top,
+the boundary pushed and RTI's first fetch dead on it, B clear and D cleared
+with the old D in the pushed status, BRK unaffected in both modes, and the I
+mask.  Run against the core WITHOUT the hold it fails exactly as the machine
+did: `pushed $0309, the boundary is $0307`.
+
+### The second one: the DMA's bank stopped one stage short
+
+With interrupts returning to the right place the boot ran on to a new
+failure at instruction 911,487: two bytes of `$36/$37` written in one
+instruction while the core was stalled on the card's EXECUTE - a DMA.  The
+nine raw bytes our ROM had pushed decode to a buffer at **`$7E/0000`**, a
+perfectly good GS/OS buffer in high RAM, and the bench had put block 1275
+into **bank zero**, over zero page and the stack.
+
+That is not a bench fault, it is master_top's.  Rung 7b carried the DMA bank
+into `apple_mmu`'s lookahead QUERY (`{ovr_en ? ovr_bank : cpu_bank,
+nxt_addr}`) and stopped there; the op that actually LANDS is classified from
+`op_bank`, which `rtl/accel_seq.sv` stamped as
+
+    u_bank <= op_ovr ? 8'd0 : bus_bank;   // "belongs to no bank"
+
+- the exact assumption 7b's commit said it had removed.  An extended read
+into any bank but zero was decided in its bank and written into bank zero.
+The 32 hardware-verified buffers were all bank zero's, so it never showed.
+`accel_seq` now takes `ovr_bank`, holds it while the override is live (the
+last cycle retires after `ovr_en` has dropped), and stamps it under `op_ovr`;
+`master_top` feeds its `ovr_bank`; the IIe benches tie it low; the GS bench
+mirrors master_top's mux, prints every READ as `$bank/addr`, and verifies the
+landing IN THAT BANK - the old check looked in bank zero and passed block
+1275 there, the same wrong place it had landed.
+
+### And a third, one stage further along the same path
+
+With the bank carried, the boot ran on to `REFUSED block 1370 -> $7E/C000 (the
+DMA would cross the I/O page)`.  `$7E/C000` is ordinary RAM: the I/O page
+exists in banks $00/$01/$E0/$E1 alone, and `dma_hits_io` - in the host
+(`src/hd_card.cpp`) and in the bench's mirror of it - took a sixteen-bit
+address.  GS/OS took the I/O ERROR and sat in the ROM's VBL wait.  Both take
+the bank now, `tests/hd_test.cpp` asserts `$7E/C000` and `$02/CF00` are RAM
+and `$E1/C000` is not, and the REFUSED line names the bank.  (`gs_io` already
+had this right - `pair_bank()` on both its query and its retired op - and
+`hd_card.sv` excludes override cycles from its EXECUTE decode.)
+
+**The same rule, closed everywhere it was open (same day).**  `hd_card.sv`'s
+register page, its `$Cn00` ROM page and the `slot_switches` it feeds were all
+sixteen-bit decodes, and `arm_write` did not exclude overrides - so a
+program's own bytes at `$7E/C0Fx` would have armed the card and `$7E/C7xx`
+would have read as its ROM.  It takes the presented op's bank now (`op_bank`;
+`master_top`'s `p_bank` is the retired op's in the slot window, the override's
+for a DMA, the core's otherwise) and answers in the four I/O banks alone.
+`sim/hd_card_tb.sv` case 10 reruns its own program with the bank forced to
+`$7E` and the card must stay silent.  The host's stream-side `apply()` had the
+identical blind spot and asks `hd::io_bank()` first now, with `test_bank_gate`
+(`$7E` silent, `$E1` heard).  `quick` 31/31, `boot` 2/2, `gs` 11/11.
+
+### Where it stands
+
+Eight million instructions of GS/OS 6.0.1 off the slot-7 SmartPort, in
+simulation, after the three fixes (`sim/boot_work/boot_gs_io.log`):
+
+- **1,280 blocks read and 302 STATUS calls, 1,267 blocks verified landed in
+  their own bank** across $00, $7E and $7F (the other 13 the machine had
+  already written into before the check); the rung-4c audit 0/0.
+- **Every interrupt returned to its boundary**: 164 VBL interrupts taken and
+  164 acknowledged, the line low at the end, the last one up and down within
+  120 instructions.  The stack never left page one until GS/OS moved it to
+  its own at $BCxx.
+- The end state is not a loop: GS/OS is executing its own code in banks $01
+  and $04, native sixteen-bit, S at $BCD3 - the kernel running, the text
+  screen blank because it is in SHR.  KEGS on the same image is in bank 1
+  GS/OS code at six million.  Before rung 4c the same run died at four
+  million with a zero COUT vector; before that, at 900 thousand; with the
+  first two fixes alone it stopped at 143 blocks on the `$7E/C000` refusal.
+
+Gates: `sim/suite.sh gs` **11/11** with the KEGS floor unmoved at 67,398 (no
+interrupt fires before it); `sim/suite.sh battery` **35/35** (accel_seq and
+master_top changed at GS=0 too); lint and the port check at both values of
+GS; the host cross-builds.  **NOT DONE: no hardware this session**, so the
+hardware gate - a GS bitstream carrying the three fixes, and a GS/OS boot on
+the card - is open; and the host's tests were built, not run.
+
+### On hardware, the same evening
+
+**The first bitstream missed by four picoseconds** (WNS -0.004, one endpoint:
+`u_adb/st_reg[0]` -> `u_cpu/urom_reg_0/ADDRARDADDR[6]`, 16 levels, 74% route)
+and the user's rule held: no placement games, cut depth.  The path is the
+IRQ's GENERATION - the ADB micro's state, its enables, gs_intc's OR and
+master_top's mux, combinational across three modules - riding into the
+core's fetch-cycle decision (`take_int` -> `useq0` -> `nslot` -> the microcode
+address), which the core takes deliberately.  The IIe's pin IRQ arrives
+through a synchroniser; the GS's `gsio_irq` did not.  `gs_intc`'s `irq` is a
+register now: one clock of latency against a core that samples interrupts at
+instruction boundaries, and the 8M-instruction boot is byte-for-byte the same
+(1,280 blocks, 164 interrupts).  Second build: **TIMING MET +0.000 / +0.066,
+0 of 62,965**, stamp 2026-09-10 20:56:57, loaded, confirmed over USB3.
+(Recorded against myself: the physopt progress lines said -0.27 on the way
+and I narrated them as a likely miss.  They are not the verdict; `wns.sh` on
+the finished log is - memory `vivado-verdict-is-final-only`.)
+
+**The boot: text splash, the SHR splash, then "Error loading GS.OS file.
+Error=$0028" at `hd 144/146`.**  `$28` is NO DEVICE CONNECTED - the host's
+answer when a call's UNIT resolves to nothing.  EXEC #144 in the simulation
+is the read into `$7E/C000`, the block that lands over the card's own register
+addresses `$7E/C0F0-C0FF`; hardware completed 144 and failed 145 and 146.
+
+**The mirror dump said where the blocks went.**  `memdump` of the host's 16 MB
+mirror: block 1369 is at **`$00/BE00`, 512 of 512 bytes**; bank `$7E` holds
+nothing at all.  Every bank-$7E DMA reached the host as BANK-ZERO writes, so
+block 1370's bytes at `$00/C0F9-C0FA` went into the host's FIFO decode as
+register writes, the eleven-byte frame slipped, and the next call's unit was
+garbage.  (`shadow=$3E`, bit 6 clear: the I/O-inhibit route was not this one.)
+
+**Why: the bus record has no bank.**  `apple_bus_read` snoops an eight-bit bus
+and records zero in word 0's [27:20] by design; the fast-op word has carried
+`fev_bank` since rung 4b, but the hard disk's DMA is a BUS cycle, and rung 4c's
+`u_bank` fix reached the retired op and not the record the host actually
+reads.  The simulation could not show it: the bench writes its own DMA events
+with `u_bank`, as event_merge's header already lamented for the fast word.
+Fix in `master_top`: the record's bank is the presented op's - the override's
+while the hard disk drives the bus, HELD past `ovr_en` because the last byte's
+data sample comes after it drops, else the core's - and zero at GS = 0.
+
+**With the bus record carrying its bank (build gs4c2, TIMING MET +0.265 /
++0.059, 0 of 62,923), GS/OS BOOTED TO THE FINDER** - `hd 2,600+` commands
+and climbing, the desktop polling its keyboard and its disk - but the panel
+flicked from SHR to text and back on every block for a while, stuck in text80
+near the end, and the speaker clicked throughout.  The user called it before
+the numbers did: not the monitor, the machine was fine.  Every `$C0xx`
+decoder on the HOST was bank-blind - `AppleVideo::apply` took a block's byte
+at `$7E/C029` as NEWVIDEO (`newvideo=$66`, a value no software writes),
+`$7E/C050-57` as the text switches, `AppleAudio` counted `$7E/C030` as the
+speaker, the printer watched `$7E/C08x` - and the bytes that used to be
+misdelivered to bank zero were now correctly delivered to `$7E` and read
+as switches there.  `proto::io_bank()` / `is_io()` gate them all now
+(`tests/shr_test.cpp`: `$7E/C029 <= $66` moves nothing, `$E1/C029` does),
+`AppleMemory`'s tracker already had the pair test from rung 3e.  With that
+host, **the Finder desktop came up on HDMI with SHR solid from first light**
+(`shots/gs4c2_hostgate.png`: menu bar, GSHardDrive, the two 5.25 drives,
+Trash) - milestone 1's gate.  The CLICKS are the card's: `speaker.sv` toggles
+on `real_addr[15:0] == $C030` for every bus cycle with no bank, so each DMA
+byte landing at `$7E/C030` clicked the card's own speaker; master_top now
+qualifies both its bus and fast feeds with the same four-bank test (build
+gs4c3: TIMING MET +0.174 / +0.075, 0 of 62,945, stamp 21:48:47, loaded, the
+Finder up again with SHR solid from first light - `shots/gs4c3_finder.png`).
+
+**Seen and not yet chased.**  (1) The error box had drawn in 80-column text
+with every EVEN column NUL: the auxiliary text page (`$E1/0400`) is empty in
+the mirror while the main one has the text.  (2) Every "is this an I/O bank"
+predicate is static - the host's `proto::io_bank()`, `hd_card.sv`'s,
+master_top's, `gs_io`'s `pair_bank()` - and under SHADOW bit 6 (the IOLC
+inhibit, which GS/OS sets to make banks $00/$01 flat RAM) bank-zero `$C0Fx` is
+RAM, not the card: the right predicate is "$E0/$E1, or $00/$01 while bit 6 is
+clear".  `apple_mmu` already knows (`gs_flat`); the others should ask it, on
+both sides at once so the mirror keeps agreeing with the card.  (3) The card
+answers no register after a swhost restart without a reload, as before.
+
 ## What is NOT working, as of the end of rung 4b
 
 Said plainly, because the first write-up of this rung claimed more than it
@@ -2790,8 +3124,9 @@ so those are not resets.  Find it by SYNC at $Cn00.
   memory: aliasing cannot express `$C035` turning a region off, gets the
   direction wrong (a write to $E0 does not appear at $00), and would put us
   off the KEGS reference that every oracle here is built from.
-- The page cache can leave a previous tenant's bytes in lines a page never had
-  written (see the status block).  Not a map disagreement; its own rung.
+- ~~The page cache can leave a previous tenant's bytes in lines a page never
+  had written.~~  It cannot: rung 4c audited it and found the mirror's mask
+  starting late.  The audit is a gate now.
 - A 65816 in emulation mode is not the 65C02 cycle for cycle; a real slot
   card in the IIe sees a GS-like CPU, which is what a real GS gives it.
 - GS/OS image sourcing is host-side work with KEGS as the installer.

@@ -259,6 +259,7 @@ module card_link #(
     input  wire [31:0] mem_declines,
     input  wire        mem_rom_busy,
     input  wire [7:0]  mem_rom_over,
+    input  wire [31:0] gs_adb_stat,     // GS_ADB_STAT (rtl/gs_adb.sv), zero on a IIe
     input  wire [7:0]  mem_shd_drops,
     input  wire [7:0]  mem_fifo_drops,
     input  wire [31:0] mem_hits,
@@ -1059,6 +1060,7 @@ module card_link #(
         .mem_declines      (mem_declines),
         .mem_rom_busy      (mem_rom_busy),
         .mem_rom_over      (mem_rom_over),
+        .gs_adb_stat       (gs_adb_stat),
         .mem_shd_drops     (mem_shd_drops),
         .mem_fifo_drops    (mem_fifo_drops),
         .mem_hits          (mem_hits),

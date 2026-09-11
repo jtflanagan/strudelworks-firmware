@@ -670,6 +670,27 @@ module cpu65816 #(
     wire irq_ready = nmi_pend | (~irq_n & ~f_i);
     wire take_int  = f_sync & irq_ready & ~in_rst;
 
+    // A HARDWARE INTERRUPT PUSHES THE BOUNDARY, NOT BOUNDARY+2.  IRQ and NMI
+    // hijack the opcode fetch and run BRK's microcode, and BRK is a two-byte
+    // instruction whose return address DOES advance to PC+2 - int_brk is what
+    // tells them apart, both running the same sequence.  Two cycles increment
+    // PC on the way into it and both must be held for an interrupt:
+    //   * the hijacked opcode fetch          - take_int, the boundary cycle
+    //   * BRK's operand-read slot (slot 0)    - use_dec, ir==0, and NOT a BRK
+    // On the real part both are dummy reads at the SAME address, the boundary,
+    // which is exactly what holding PC across them produces.  The sequence's
+    // own trailing fetch is not slot 0, so the handler's first opcode still
+    // advances PC as it should.
+    //
+    // The 65C02 core learned this from a Mockingboard timer (rtl/cpu65c02.sv,
+    // sim/cpu_irq_tb.sv); this core was written after it with the same shape
+    // and without the hold, and no test drove its irq_n until sim/cpu816_irq_tb.
+    // Every interrupt GS/OS took returned two bytes late: into a JSL's operand
+    // (a $00, so a BRK), into the middle of the tool dispatcher's exit, and
+    // once into RTL's successor - docs/GS.md rung 4c.
+    wire int_pc_hold = take_int |
+                       (~in_rst & ~int_brk & (ir == 8'h00) & use_dec);
+
     // WAI parks by looping slot 1 on itself (cond NEVER, alt 1), so the
     // sequential successor port is already pointing at slot 2 - its exit - every
     // cycle it waits.  Waking is therefore just forcing the condition true.
@@ -780,7 +801,8 @@ module cpu65816 #(
                     default: ;
                 endcase
                 case (f_ld_pc)
-                    UC_LD_PC_INC:    pc <= pc_inc;
+                    // Held on an interrupt entry - see int_pc_hold above.
+                    UC_LD_PC_INC:    if (!int_pc_hold) pc <= pc_inc;
                     UC_LD_PC_AGU:    pc <= {agu_hi, agu_lo};
                     UC_LD_PC_AGU_LO: pc[7:0]  <= agu_lo;
                     UC_LD_PC_AGU_HI: pc[15:8] <= agu_hi;

@@ -178,12 +178,17 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire        tx_valid, tx_take;
     wire        rom_loaded, busy;
     wire [7:0]  execs;
+    // The presented op's bank.  Zero - a //e - for every case but the last,
+    // which forces $7E: the same program, and the card must not hear it.
+    logic [7:0] tb_bank = 8'd0;
+    integer     claims_7e = 0;
+    always @(posedge clk) if (tb_bank != 8'd0 && rd_claim) claims_7e = claims_7e + 1;
 
     hd_card #(.STALL_TIMEOUT (STALL_TIMEOUT)) dut (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .res_sync (res_n),
         .master_active (master_active), .slot_assign (3'd7),
         .op_addr (op_addr), .op_rw (op_rw), .op_present (op_present),
-        .op_commit (op_commit), .op_ovr (op_ovr), .din (cpu_din),
+        .op_commit (op_commit), .op_ovr (op_ovr), .op_bank (tb_bank), .din (cpu_din),
         .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw),
         .ovr_wdata (ovr_wdata),
         .rd_claim (rd_claim), .rd_data (rd_data),
@@ -656,6 +661,29 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
 
         if (unknowns != 0) fail("the receiver reported an unknown type - a disk type is missing from its list");
         else $display("  ok: HD_ROM, HD_DONE and HD_FETCH are known types");
+
+        // --- case 10 / the same program in bank $7E, and the card must not hear it
+        // On a IIgs $C000-$CFFF is I/O in banks $00/$01/$E0/$E1 alone; in
+        // bank $7E it is RAM GS/OS keeps code in.  The op's bank is forced to
+        // $7E and the program runs again from reset: its read of $C700 must
+        // get the float rather than the ROM, its FIFO write must not arm, and
+        // its read of $C0F0 must neither be claimed nor count as an EXECUTE.
+        // (It then spins on the float's bit 7 - which is the point.)
+        tb_bank = 8'h7E;
+        for (i = 16'h0300; i < 16'h0310; i = i + 1) mem[i] = 8'hxx;
+        machine_reset(4);
+        wait_store(16'h0300, 100);
+        wait_store(16'h0301, 200);
+        cycles(300);
+        if (mem[16'h0300] !== 8'hEE) fail("in bank $7E the card still answered $C700 as its ROM");
+        else $display("  ok: $7E/C700 is RAM - the ROM did not answer");
+        if (dut.armed !== 1'b0) fail("a FIFO write in bank $7E armed the card");
+        else $display("  ok: $7E/C0F9 is RAM - the card did not arm");
+        if (mem[16'h0301] !== 8'hEE) fail("in bank $7E the port read was claimed");
+        if (execs !== 8'd7) fail("a read of $7E/C0F0 counted as an EXECUTE");
+        else $display("  ok: $7E/C0F0 is RAM - no EXECUTE, no claim (%0d claims seen)", claims_7e);
+        if (claims_7e != 0) fail("the card claimed a read in bank $7E");
+        tb_bank = 8'd0;
 
         $display("");
         if (errors == 0) $display("PASS");

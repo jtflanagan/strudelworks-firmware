@@ -99,6 +99,7 @@ module hd_card #(
     input  wire        op_present,     // pulse: a new op has been presented
     input  wire        op_commit,      // pulse: the cycle's data phase
     input  wire        op_ovr,
+    input  wire [7:0]  op_bank,        // the presented op's bank; zero on a //e
     // The byte the bus returned, valid at op_commit.
     input  wire [7:0]  din,
 
@@ -140,10 +141,21 @@ module hd_card #(
     // ---- what this card answers as -----------------------------------------
     wire enabled = master_active && (slot_assign != 3'd0) && rom_loaded;
 
+    // THE I/O SPACE IS FOUR BANKS' ALONE.  $C000-$CFFF is slots and switches
+    // in $00/$01 and their Mega II images $E0/$E1; in every other bank of a
+    // IIgs it is ordinary RAM that GS/OS puts code and data in.  Every decode
+    // below was sixteen-bit, so a program's own bytes at $7E/C0Fx would have
+    // armed this card and $7E/C7xx would have read as its ROM (docs/GS.md rung
+    // 4c).  gs_io.sv keeps the same rule as pair_bank().
+    function automatic io_bank(input [7:0] bk);
+        io_bank = (bk == 8'h00) || (bk == 8'h01) || (bk == 8'hE0) || (bk == 8'hE1);
+    endfunction
+    wire in_io = io_bank(op_bank);
+
     wire io_select;
     slot_switches u_sw (
         .clk (clk), .rst (rst), .res_sync (res_sync),
-        .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit),
+        .op_addr (op_addr), .op_rw (op_rw), .op_commit (op_commit && in_io),
         .slot (slot_assign),
         .io_select (io_select)
     );
@@ -172,11 +184,14 @@ module hd_card #(
 
     // ---- the command port ----------------------------------------------------
     // What the ROM does to the page, seen in the presented ops.
-    wire       hit_page = enabled && (op_addr[15:4] == {8'hC0, 1'b1, slot_assign});
+    wire       hit_page = enabled && in_io && (op_addr[15:4] == {8'hC0, 1'b1, slot_assign});
     wire [3:0] idx      = op_addr[3:0];
 
     // A register write arms a command; the core's read of $C0n0 executes it.
-    wire arm_write = op_commit  && hit_page && !op_rw && (idx >= 4'h2) && (idx <= 4'hA);
+    // Neither is ever the card's own DMA cycle: an override lands where the
+    // host said, and a buffer that happens to sit under the page must not
+    // arm the port it is being filled through.
+    wire arm_write = op_commit  && !op_ovr && hit_page && !op_rw && (idx >= 4'h2) && (idx <= 4'hA);
     wire exec_read = op_present && !op_ovr && hit_page && op_rw && (idx == 4'h0);
 
     logic       armed;
@@ -476,7 +491,7 @@ module hd_card #(
     // Decided in the address phase from the presented op, registered so it is
     // stable long before the emit window.  A DMA read is never claimed: those
     // cycles are the memory's to answer.
-    wire hit_rom = enabled && op_rw && io_select &&
+    wire hit_rom = enabled && in_io && op_rw && io_select &&
                    (op_addr[15:8] == {4'hC, 1'b0, slot_assign});
 
     always_ff @(posedge clk) begin
