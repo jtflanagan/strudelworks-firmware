@@ -412,12 +412,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [31:0] hd_tx_word;
     wire        hd_tx_valid;
     wire        hd_exec_q;
-    // hd_card at its //e default here, NOT #(.GS (1)): Verilator 5.020
-    // segfaults building this bench with the IIgs DMA carry in it (the
-    // generate and the ?: forms both), so the bank carry is proven by
-    // sim/hd_card_tb.sv under iverilog at both GS values instead.  Nothing
-    // in this bench's boot lands a block across a bank edge.
-    hd_card u_hd (
+    // The IIgs's card: the DMA's bank carries.  (Overriding ANY hd_card
+    // parameter here used to segfault Verilator 5.020 - see host_pump
+    // below for the cause and the one-line workaround.)
+    hd_card #(.GS (1)) u_hd (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .res_sync (res_sync),
         .master_active (master_active), .slot_assign (3'(HD_SLOT)),
         .op_addr (op_addr), .op_rw (op_rw), .op_present (op_present),
@@ -1647,7 +1645,16 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     initial begin : host_pump
         forever begin
             @(posedge clk);
-            if (qr < qw && (now - q_at[qr % QN]) >= HOST_DELAY && u_hd.st == u_hd.S_IDLE)
+            // `u_hd.st == 2'd0` and not `== u_hd.S_IDLE`: S_IDLE is the enum's
+            // first item (value 0), and a HIERARCHICAL REFERENCE TO AN ENUM
+            // ITEM of a module specialised by a parameter override is what
+            // the simulator, 5.020, segfaults on: V3Broken "Broken link in
+            // node", the ENUMITEMREF left pointing at the unspecialised module
+            // (and a comment line may not begin with the tool's name: that is
+            // a directive to it) - found with --debugi 1 after the
+            // hd_card #(.GS (1)) above took
+            // the whole bench down (docs/GS.md, 2026-09-11).
+            if (qr < qw && (now - q_at[qr % QN]) >= HOST_DELAY && u_hd.st == 2'd0)
                 host_serve_one();
         end
     end

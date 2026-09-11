@@ -31,11 +31,9 @@ and is reached when it is reached.
 
 Open, in no order of importance:
 
-- **Speaker clicks at the GS/OS desktop** (user-reported, undiagnosed).  The
-  sound is the card's own `$C030`-only flip-flop on a IIgs (`speaker.sv`);
-  the host's `$C03x` match in `apple_audio.cpp` only counts.  Next suspects:
-  the mixer's rate servo (`sndtrim` 92 k in one run, 0 in others), and
-  whether GS/OS itself clicks `$C030`.
+- **Speaker clicks at the GS/OS desktop**: CLOSED 2026-09-11 as not
+  reproducible - no `$C030` at the desktop in either capture mode, no
+  mixer starvation under full capture; see "Speaker clicks at the desktop".
 - **The 4-cycle turnaround idle** in `ft601_fifo.sv` (S_IDLE, `TURN_IDLE`)
   was added as a hypothesis for the misparse and disproved as its cause;
   kept, provisional, harmless.  Remove or keep on evidence.
@@ -45,8 +43,19 @@ Open, in no order of importance:
 - **The ADB mouse feed showed `msent = 0` with motion delivered** in one
   session (the link_dump run); arming (`adb_mouse_on_`) may differ between
   runs.  Not seen since the link fix.
-- **PLAIN vs the classified census** diverge across a boot (47 M ops more in
-  the census); agree on the map.  The census over-counts somewhere.
+- **PLAIN vs the classified census**: RESOLVED 2026-09-11 - it was POLLING
+  SKEW, not counting.  The census's three registers (FAST, BUS, CYCLES) are
+  HUD registers refreshed every ~800 ms; the PLAIN pair sat at the END of
+  the slow rotation, seconds older in the same report, so the two ratios
+  were snapshots of different instants (on a map moving at 15 M ops/s, a
+  five-second lag is the whole 8 %).  The PLAIN pair now rides the HUD
+  rotation just before the CYCLES snapshot.  Same-snapshot deltas on the
+  map: bus cycles agree to 26 in 24.3 M; PLAIN core 359.7 M against the
+  census's 338.6 M ops, a 6 % residual in the CLASSIFICATION (the census's
+  `bus_ops` sees 6 k where PLAIN's bus term sees 21 M) that is not chased
+  yet.  **THE USER'S DECISION: PLAIN IS THE DISPLAYED METRIC** - the HUD's
+  corner figure and the report's headline are core cycles over bus cycles;
+  the census follows as the breakdown.  Chase the classification later.
 - `GS_ADB_STAT` (0x124), `ACCEL_CORE_CYC`/`ACCEL_BUS_CYC` (0x128/0x12C) are
   new registers; `run_build.sh` now prints MULTI-DRIVEN as not green; the
   host has `link_dump = PATH` (debugging only, never live: it stalls the
@@ -2918,27 +2927,48 @@ a Finder boot, walked backwards from the write of `$F7` into `$E1/23D2`:
   **PROVEN ON HARDWARE**: the Finder's menu bar is black on white, and row 6
   at Edit reads `F0 F0 FF FF FF FF F0 0F`, every byte a 00/11 pair.
 
-### Speaker clicks at the desktop: what the capture rules out
+### Speaker clicks at the desktop: a null result, and a likely history
 
 The boot capture has **93 reads of `$C030`, all in its first twelfth and
-all from `FF/9AE7`** - the ROM's boot beep - and none after.  GS/OS does
-not touch the speaker at the desktop, and the card's `speaker.sv` at GS = 1
-watches `$C030` alone, so the clicks the user hears are not that
-flip-flop.  The status line's `sndspk=32762` is the flip-flop parked high
-after the beep, which the mixer's Q8 DC blocker removes.  Next candidate is
-the Ensoniq's channel, which is signed and has no blocker: the status line
-now carries `snddoc`, the DOC's loudest sample of the second, so a click
-can be caught in the act (`status full=true` while listening).  Also seen:
-`sndsil=4608`, one run-dry of ~100 ms since start, and `sndtrim=0`.
+all from `FF/9AE7`** - the ROM's boot beep - and none after; a 90 s sparse
+capture at the idle desktop has **zero** `$C030` touches (and 132,506 of
+the DOC's `$C03C-$C03F`, GS/OS's sound interrupt handler polling, which
+the card's `speaker.sv` at GS = 1 does not decode and the host's
+`apple_audio.cpp` only counts).  The user's thought that FULL capture might
+be the difference was tested directly: 90 s at the desktop under
+`gs_trace.conf` (full) and under `gs_os.conf` (sparse), the mixer's
+counters polled every 15 s - `sndsil` stayed at its priming 4608, `sndgap`,
+`sndtrim`, `sndcdrop`, `dropped`, `mlost` all zero, the depth swinging
+3.5-5.4 k either way, `snddoc` 0.  Nothing on the host misreads the full
+stream as a click, and nothing starves.  The status line now carries
+`snddoc`, the DOC's loudest sample of the second, for the day a click is
+heard again.  The likely history: before the night's link-message
+atomicity fix a misparsed stream could put spurious words - `$C030` among
+them - in front of the card's flip-flop, and that path is closed; the user
+does not recall hearing a click since.  **CLOSED AS NOT REPRODUCIBLE.**
 
-### A Verilator 5.020 fault, worked around
+### A Verilator 5.020 segfault, run to ground
 
-`boot_gs_tb` cannot be built with `hd_card #(.GS (1))` in it: Verilator
-segfaults (`-j 1` too, the generate and the `?:` forms alike; `lint.sh`
-and Vivado take the same source without complaint).  The bench keeps
-`hd_card` at its //e default, where nothing in its boot crosses a bank
-edge, and the carry is proven by `hd_card_tb` under iverilog at both
-values.
+Putting `hd_card #(.GS (1))` into `boot_gs_tb` made Verilator 5.020
+segfault with no diagnostic ("Verilator internal fault, sorry"); `-j 1`, the
+generate and the `?:` forms, `bit` and integer parameters, the parameter's
+name and its position all made no difference, and hd_card alone at GS = 1
+built cleanly.  The bisect that told: overriding STALL_TIMEOUT to a
+DIFFERENT value crashed too, and overriding it to its own default did not -
+so any real specialisation of hd_card in this bench died, and the
+parameter was innocent.  `--debugi 1` then let V3Broken name it:
+
+    Internal Error: boot_gs_tb.sv:1650: Broken link in node
+    -node: ENUMITEMREF S_IDLE -> ENUMITEM S_IDLE
+
+The bench's host pump tested `u_hd.st == u_hd.S_IDLE`: a HIERARCHICAL
+REFERENCE TO AN ENUM ITEM inside a module that a parameter override has
+specialised, and 5.020 leaves that reference pointing at the unspecialised
+module.  The bench compares against the encoded value (`2'd0`, S_IDLE
+being the enum's first item) and `hd_card #(.GS (1))` is back in it; the
+KEGS floor is unmoved at 67,398.  Two tool facts for the file: `--gdbbt` is
+the wrapper's option and does nothing on `verilator_bin`, and a comment
+line beginning with the tool's name is read as a directive.
 
 ### Rung 5's list, closed
 
