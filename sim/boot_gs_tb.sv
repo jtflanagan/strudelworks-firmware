@@ -660,7 +660,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .loc_valid (1'b0), .loc_code (7'd0), .loc_up (1'b0),
         .loc_mods (8'd0), .live_mods (8'd0), .pb_sel (6'd0),
 
-        .frame_tick (frame_tick),
+        // The bench's frame is counted in BUS cycles, which is wall time
+        // here, so the micro's wall tick is the same pulse.
+        .frame_tick (frame_tick), .wall_tick (frame_tick),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
 

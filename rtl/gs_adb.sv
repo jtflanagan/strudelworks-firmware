@@ -75,10 +75,17 @@ module gs_adb #(
     // resolved - shift, control, caps, option and command, in $C025's own
     // bit order.  The micro holds the keymap, as a real one does, so what
     // arrives is a keycode and not an ASCII byte.
-    // One pulse a video frame, the machine's own (rtl/vbeam.sv): the ADB
-    // micro's auto-repeat counts in frames because KEGS's does - its delay
-    // and rate are in g_vbl_count units, out of the set-config byte.
-    input  wire        frame_tick,
+    // ONE PULSE A SIXTIETH OF A SECOND, WALL CLOCK - NOT THE MACHINE'S
+    // FRAME.  The auto-repeat counts in frames because KEGS's does (its delay
+    // and rate are in g_vbl_count units, out of the set-config byte), and in
+    // KEGS a frame IS a sixtieth of a wall second.  Here it is not: the
+    // beam's frame (rtl/vbeam.sv) runs in the core's cycles, so accelerated
+    // thirty-fold a 45-frame delay was 25 ms and the rate 450 a second, and
+    // a tap shorter than a finger repeated several times before it was let
+    // go (2026-09-11).  The micro is a processor of its own with its own
+    // oscillator; nothing about the 65816's speed reaches it, so its tick is
+    // rtl/master_top.sv's divider off the 100 MHz clock.
+    input  wire        wall_tick,
 
     // THE APPLE IIe's OWN KEYBOARD, beside the host's (rtl/gs_kbd_a2.sv).
     // The same event shape as ADB_KEY, made on the card by running the IOU's
@@ -621,7 +628,7 @@ module gs_adb #(
             pend_y      <= pend_y + mv_dy;
             mouse_btn   <= mv_btn;
             mouse_valid <= 1'b1;
-        end else if (frame_tick) begin
+        end else if (wall_tick) begin
             if (rpt_left != 16'd0) rpt_left <= rpt_left - 16'd1;
         end else if (act && op_rw && (op_lo == 8'h24)) begin
             // ---- mouse_read_c024 ----------------------------------------

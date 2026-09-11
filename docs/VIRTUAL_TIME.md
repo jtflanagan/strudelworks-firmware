@@ -98,6 +98,29 @@ the real one (free[1] = 0).  The floating-bus monitor compares at the
 bus's pace only, as before.  The internalized reads of CXXX.md step 3 are
 the same reads; only their position source changed.
 
+## What is NOT in virtual time (2026-09-11)
+
+**The IIgs, all of it.**  Virtual time is the IIe's: it exists so a
+cycle-counting program on an accelerated core sees the beam it expects,
+floating bus included.  A IIgs accelerator does the opposite - it cannot
+speed up the 1 MHz bus or the VGC, so the beam, the VBL, the scan-line
+interrupt and the toolbox's ticks come at wall speed whatever the CPU does
+(user decision 2026-09-11).  So at `GS = 1` `vbeam` runs with `wall` high:
+its counter steps on EVERY bus cycle, dummies and overrides included, never
+on a fast tick, the mark lands on bus words only, and the VIRTUAL flag in the
+mark is LOW - to the host the IIgs is always in the bus's base, one rendered
+frame per 17,030 bus cycles.  `master_top`'s `virt_base` (the stream's base,
+to the merge's door and the event filter) is `!GS && virt`.  docs/GS.md,
+"The beam on the IIgs runs at the bus's cadence".
+
+**Two timers that stand for the user's hands** count wall time by their own
+divider - a sixtieth of a second off the 100 MHz clock in `master_top`
+(`wall_tick`): the ADB micro's auto-repeat (`rtl/gs_adb.sv`) and the IIe
+keyboard's held-key timeout (`rtl/gs_kbd_a2.sv`).  On the beam's frame, when
+that was the core's, the micro's 750 ms delay was 24 ms at 31x and a tap
+repeated before the finger lifted (docs/GS.md, "The ADB micro keeps its own
+time").
+
 ## What proves it
 
 - `sim/run_bus_event_filter_tb.sh` case 10: the table above in the virtual

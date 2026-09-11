@@ -34,11 +34,25 @@
 // word (mark_fast, rtl/event_merge.sv's fast side).  mark_free carries the
 // frame count, PAL, and in bit 1 the VIRTUAL flag the host switches its
 // time base on.
+//
+// WALL: THE IIgs's BEAM RUNS AT THE BUS'S CADENCE (user decision 2026-09-11).
+// A real IIgs accelerator cannot speed up the 1 MHz bus or the VGC hanging
+// off it: the beam, the VBL, the scan-line interrupt and the toolbox's ticks
+// arrive at wall speed whatever the CPU does, and a program that counts
+// cycles against the beam simply finds it slower.  So with `wall` high the
+// counter steps on EVERY bus cycle - dummy, override or the core's own, each
+// of them one microsecond of the IIe's bus this card lives on - and never on
+// a fast tick; the mark lands on a bus word only; and the VIRTUAL flag is
+// LOW, because to the host this IS the bus's base: a dummy's cycle counts,
+// a fast word's does not, and every frame is shown.  `virt` stays high with
+// it, since there is no real scanner to pass through on that machine
+// (rtl/master_top.sv, "the beam every consumer takes").
 //////////////////////////////////////////////////////////////////////////////////
 module vbeam (
     input  wire        clk,
     input  wire        rst,
     input  wire        virt,
+    input  wire        wall,        // the counter runs on the bus's cadence (above)
 
     // The real counter (rtl/vbl_lock.sv), and its own mark.
     input  wire        real_locked,
@@ -81,9 +95,10 @@ module vbeam (
         end
     endfunction
 
-    wire tick_bus = bus_tick && !op_dummy && !op_ovr;
+    wire tick_bus  = bus_tick && (wall || (!op_dummy && !op_ovr));
+    wire tick_fast = fast_tick && !wall;
     wire [15:0] after_bus = tick_bus ? step(v, h, lines) : {v, h};
-    wire [15:0] after_all = fast_tick ? step(after_bus[15:7], after_bus[6:0], lines) : after_bus;
+    wire [15:0] after_all = tick_fast ? step(after_bus[15:7], after_bus[6:0], lines) : after_bus;
 
     always_ff @(posedge clk) begin
         virt_q <= virt && !rst;
@@ -106,7 +121,7 @@ module vbeam (
     assign scan_h    = virt_q ? h : real_h;
     assign vbl_level = virt_q ? (real_locked && (v >= 9'd192)) : (real_locked && (real_v >= 9'd192));
     assign mark_bus  = virt_q ? (tick_bus  && real_locked && notify && at0_bus)  : real_mark;
-    assign mark_fast = virt_q && fast_tick && real_locked && notify && at0_fast;
-    assign mark_free = virt_q ? {frames, 6'd0, 1'b1, pal} : real_mark_free;
+    assign mark_fast = virt_q && tick_fast && real_locked && notify && at0_fast;
+    assign mark_free = virt_q ? {frames, 6'd0, !wall, pal} : real_mark_free;
 
 endmodule

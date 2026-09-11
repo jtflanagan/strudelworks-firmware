@@ -253,7 +253,7 @@ not used; the host draws the GS picture on HDMI as it draws the IIe's.
 | First milestone | GS/OS 6.0.1 Finder with mouse and keyboard, SHR desktop on HDMI, booted from the slot-7 SmartPort HDC. Sound is the milestone after. |
 | Inputs | Pi keyboard + mouse as ADB devices AND the real IIe keyboard (the dummy-cycle $C000 sample) into the same key buffer; Open/Closed Apple from the real game-port buttons. |
 | Disks | IWM stub (no 3.5" drive, no SmartPort device, so the ROM's scan ends, as KEGS does) + the existing slot-7 HDC and slot-6 Disk II as "Your Card" slots. 3.5" IWM later. |
-| Speed | The governor follows $C036: speed bit clear = 1.0 ops per bus cycle, set = the configured fast target (default 2.8, unlimited allowed). All timers in virtual time. |
+| Speed | The governor follows $C036: speed bit clear = 1.0 ops per bus cycle, set = the configured fast target (default 2.8, unlimited allowed). **Time on the IIgs is the bus's, not the core's (user decision 2026-09-11):** the beam, the VBL, the scan-line interrupt, the quarter- and one-second timers and the frames the host shows all run at the 1 MHz cadence whatever the 65816's speed, as on a real accelerator - see "The beam on the IIgs runs at the bus's cadence". The ADB micro's auto-repeat and the IIe keyboard's held-key timeout are wall time by their own divider ("The ADB micro keeps its own time"). |
 | System image | Fetching and building a bootable GS/OS 6.0.1 image is part of the plan. |
 | Event record | 64-bit event records, uniform for the 65C02 and the 65816: the 24-bit regime needs the bank on every record; the spare bits find uses as the work proceeds. Done on the IIe build first (rung 1b). |
 
@@ -1300,7 +1300,9 @@ behind a slot ROM.
 into the motherboard's text page and reading the floating bus back.  A IIgs's
 video is the card's and the host's and there is nothing on the backplane to
 lock to, so at `GS = 1` the lock takes no override cycle, `virt` is forced on,
-and `vbeam` is told it is locked and notifying from reset.
+and `vbeam` is told it is locked and notifying from reset.  (Since 2026-09-11
+it free-runs at the BUS's cadence, not the core's - "The beam on the IIgs
+runs at the bus's cadence", below.)
 
 **THE CLOCK IS THE HOST'S FEED.**  `gs_clock`'s `cur_time` was loaded from a
 parameter at card reset, which on hardware is before the host has connected.
@@ -1907,10 +1909,13 @@ and a key stuck down for ever is the one failure that wedges a machine.
 
 **AUTO-REPEAT IS THE IIe's, NOT THE MICRO's.**  A held key re-strobes in the
 IIe's own encoder, so repeats arrive as ordinary presses and `gs_adb` must not
-add its own on top - it does not, because its repeat arms from an event's
-modifiers and a fresh press re-arms the delay each time.  The Control Panel's
-repeat setting therefore does not reach the real keyboard, which is the honest
-behaviour: the rate belongs to the hardware the keys are on.
+add its own on top - it does not, BY TIMING: the encoder re-strobes after
+~534 ms, the micro's default delay is 750 ms, and a fresh press re-arms the
+micro's delay each time, so the micro's own never comes due.  That holds only
+while both count wall time, which they did not until 2026-09-11 - see "The
+ADB micro keeps its own time" below.  The Control Panel's repeat setting
+therefore does not reach the real keyboard, which is the honest behaviour: the
+rate belongs to the hardware the keys are on.
 
 ### The Apple keys are the only modifiers that are really held
 
@@ -3654,6 +3659,84 @@ counters.  And **ACCEL_CTRL[29] `fronts_dis`**, a diagnosis level: the core
 takes the dispatcher's byte on both streams and `turbo_en` stays low, so
 the fronts are out of the loop without a rebuild - the A/B the bench cannot
 give.  (`docs/PROTOCOL.md`.)
+
+## The ADB micro keeps its own time (2026-09-11)
+
+**THE COMPLAINT**: on the IIgs, any keypress was accepted several times -
+even a tap too fast for a finger to hold produced a run of the character.
+
+**THE CAUSE WAS THE TIME BASE, NOT THE KEYBOARD.**  `gs_adb`'s auto-repeat
+counts KEGS's units - video frames, 45 of delay and a rate out of the
+set-config table - and `master_top` fed it `beam_mark_bus || beam_mark_fast`,
+the beam's frame from `rtl/vbeam.sv`.  That frame is VIRTUAL TIME: under
+acceleration it advances with the core's cycles, which is right for every
+timer a program can measure (docs/VIRTUAL_TIME.md) and wrong for a timer that
+stands for the user's hands.  At the desktop's 31x the 750 ms delay was 24 ms
+and the 15-a-second rate 465 a second, so a key held for the 80 ms of a tap
+repeated twenty times before it was let go; `gs_kbd_a2`'s four-frame held-key
+timeout was 2 ms on the same tick.  KEGS gets away with frames because a KEGS
+frame is a sixtieth of a wall second; the reference's unit was copied without
+its clock.
+
+**THE FIX**: the micro is a separate processor with a separate oscillator, so
+it gets one - `wall_tick`, a sixtieth of a second divided off the 100 MHz
+clock in `master_top` (declared above every generate block, as the rung-6
+lesson requires), into `gs_adb`'s repeat and `gs_kbd_a2`'s timeout and
+nowhere else.  `gs_intc`'s quarter-second and one-second interrupts stay on
+the beam.  The port is renamed, so a bench cannot wire the beam's frame to it
+by habit; `sim/boot_gs_tb.sv` gives it its bus-cycle frame, which IS wall
+time there.  On the host, `pi_adbmap` now drops evdev's own auto-repeat
+(value 2): the Pi's kernel and the micro were both repeating a held Pi key,
+at two rates.  The same rule already stood on the IIe path (`pi_keymap`).
+
+Sims: gs_adb 63, gs_kbd_a2 31, suite gs; host adbmap_test 246.  Hardware
+(gs_adbwall, MET +0.020): the user's own keyboard test - one character per
+tap at the unlimited target.  The micro keeps its own divider even now that
+the whole IIgs beam is in wall time (next section): it is a separate
+processor, and the beam is not its clock.
+
+## The beam on the IIgs runs at the bus's cadence (2026-09-11)
+
+**THE COMPLAINT, AFTER THE KEYBOARD**: double-click did not work under
+acceleration.  The toolbox's Event Manager decides a double-click by the
+tick count between two mouse-downs against the Control Panel's setting, and
+the ticks are the VBL interrupt - `gs_intc`'s `frame_tick`, the beam's frame,
+which ran in the core's cycles.  At 31x a half-second window was 16 ms.
+
+**THE DECISION (user)**: on the IIgs, time is the bus's.  A real IIgs
+accelerator cannot speed up the 1 MHz bus or the VGC hanging off it: the
+beam, the VBL, the scan-line interrupt and the toolbox's ticks arrive at wall
+speed whatever the CPU does, and a cycle-counting program simply finds the
+beam slower.  The IIe's virtual time (docs/VIRTUAL_TIME.md) was built for
+cycle-perfect floating-bus behaviour that scales with acceleration; the IIgs
+does not want that.  So:
+
+* `vbeam` gains `wall`: with it high the counter steps on EVERY bus cycle -
+  dummy, override or the core's own, each one microsecond of the IIe's bus
+  this card lives on - and never on a fast tick.  The mark lands on bus
+  words only.  `master_top` ties it to `GS`.
+* The floating bus (`fb_sim`), `$C019`, VERTCNT/HORIZCNT, the scan-line
+  interrupt's `line_start` and `gs_intc`'s frame count all take `scan_v`,
+  `scan_h`, `vbl_level` and the mark from that counter, so they follow
+  without a change of their own: a floating-bus read samples wherever the
+  beam happens to be at that moment.
+* **The host's frames are snapped at that cadence.**  The mark's VIRTUAL
+  flag (`mark_free[1]`) is LOW on the IIgs and the stream's `virt` to the
+  merge's door and the event filter (`virt_base`) is low: to the host this
+  is the BUS's base it has always had at 1x - a dummy's cycle counts, a fast
+  word's does not, and every mark is rendered, one frame per 17,030 bus
+  cycles, sixty a second.  No host change.
+* `gs_intc`'s timers therefore count wall frames; the ADB micro's own
+  divider stays (previous section).
+
+Sims: `vbeam_tb` gains the wall section (steps on every kind of bus tick,
+none on fast ticks, marks on bus words only, flag low; 240,300 checks),
+suite quick 31/31 and gs 11/11.  **HARDWARE (gs_wallbeam, MET +0.031, 0 of
+86,550)**: GS/OS boots to the Finder at the unlimited target; the status
+line reads 22,397,732 bus cycles over 1,315 frames = 17,030 a frame, the
+host renders at 60 fps in the bus's base, PLAIN 26.2x on the desktop; and
+**the user confirms double-click works** under acceleration.  Before the
+change, on the same desktop, two clicks 150 ms apart only selected the icon.
 
 ## Risks
 

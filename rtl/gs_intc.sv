@@ -27,12 +27,14 @@
 //       interrupt, bit 5 clear the scan line.  That inverted sense is the
 //       reference's, not a guess (moremem.c:1676).
 //
-// THE TIMERS RUN IN VIRTUAL TIME, from `frame_tick` - one pulse per video
-// frame, from rtl/vbeam.sv, which already counts the machine's own cycles
-// (docs/VIRTUAL_TIME.md).  So an accelerated program sees the same number of
-// VBLs per program-second that a 1x one does, which is the rule the whole
-// design keeps.  A quarter-second is 15 frames and a second is 60; KEGS uses
-// the same frame counting.
+// THE TIMERS COUNT `frame_tick` - one pulse per video frame from
+// rtl/vbeam.sv.  On the IIgs that beam runs at the BUS's cadence, wall time,
+// whatever the 65816's speed (user decision 2026-09-11, rtl/master_top.sv
+// "the beam every consumer takes"): a real accelerator cannot speed up the
+// VGC, so its VBL, its quarter-second and one-second interrupts and the
+// toolbox's ticks come at wall speed, and double-click works at any ratio.
+// A quarter-second is 15 frames and a second is 60; KEGS uses the same
+// frame counting.
 //
 // WHAT IS NOT HERE YET: the scan-line interrupt's actual trigger, which needs
 // the 200-bit side copy of the SCB bit-6 column snooped from writes landing in

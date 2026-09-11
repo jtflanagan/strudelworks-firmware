@@ -53,11 +53,14 @@
 //
 // AUTO-REPEAT IS THE IIe's, NOT THE MICRO's.  A held key on a IIe re-strobes
 // in the keyboard encoder, so repeats arrive here as ordinary presses and
-// gs_adb must not add its own on top.  It does not: its repeat fires on
-// key_down, which is armed from an event's own modifiers, and a repeat that
-// arrives as a fresh press re-arms the delay each time.  The Control Panel's
-// repeat setting therefore does not reach the real keyboard.  That is the
-// honest behaviour - the rate belongs to the hardware the keys are on.
+// gs_adb must not add its own on top.  It does not, BY TIMING: the encoder
+// re-strobes after ~534 ms and the micro's default delay is 750 ms, and a
+// repeat that arrives as a fresh press re-arms the micro's delay each time,
+// so the micro's own never comes due.  That argument holds only while both
+// clocks are wall clocks - which is why the micro's tick is wall time and
+// not the beam's frame (wall_tick, below; rtl/gs_adb.sv).  The Control
+// Panel's repeat setting therefore does not reach the real keyboard.  That
+// is the honest behaviour - the rate belongs to the hardware the keys are on.
 //
 // THE APPLE KEYS ARE REAL AND LIVE.  Open- and Closed-Apple are on the IIe's
 // game port at $C061 and $C062, and on a IIgs those two addresses ARE Command
@@ -90,9 +93,10 @@ module gs_kbd_a2 #(
     // The ADB micro's keymap, run backwards: 128 entries indexed by the ASCII
     // byte, each {ctrl, shift, keycode[6:0]}.  tools/gen_adb_revmap.py.
     parameter REVMAP = "adb_revmap.hex",
-    // Frames a key may be held with nothing confirming it before it is
-    // released anyway.  Four is ~67 ms, shorter than the IIe encoder's own
-    // repeat delay, so a missed release cannot outlive the key it belongs to.
+    // Sixtieths of a wall second a key may be held with nothing confirming
+    // it before it is released anyway.  Four is ~67 ms, shorter than the IIe
+    // encoder's own repeat delay, so a missed release cannot outlive the key
+    // it belongs to.
     parameter [7:0] T_HELD = 8'd4
 ) (
     input  wire        clk,
@@ -108,8 +112,11 @@ module gs_kbd_a2 #(
     input  wire        op_dummy,
     input  wire [7:0]  data_sync,
 
-    // One pulse a video frame, the machine's own: the held-key timeout.
-    input  wire        frame_tick,
+    // One pulse a sixtieth of a WALL second (rtl/master_top.sv's divider,
+    // the same tick the ADB micro's repeat counts): the held-key timeout.
+    // Wall time because the finger is in wall time: on the beam's frame,
+    // which runs in the core's cycles, T_HELD was 2 ms at thirty-fold.
+    input  wire        wall_tick,
 
     // Where the driver's NEXT dummy reads (rtl/apple_bus_write.sv park_addr).
     output logic [15:0] park_addr,
@@ -198,7 +205,7 @@ module gs_kbd_a2 #(
     // AKD, from the clear slot: the only live account of a key still down.
     wire akd   = smp_clr && data_q[7];
     wire rel   = smp_clr && !data_q[7] && held;
-    wire expire = frame_tick && held && (held_left == 8'd0);
+    wire expire = wall_tick && held && (held_left == 8'd0);
 
     always_ff @(posedge clk) begin
         if (rst || !res_sync) begin
@@ -265,7 +272,7 @@ module gs_kbd_a2 #(
                     ev_mods  <= 8'd0;
                     held     <= 1'b0;
                     if (expire || !enable) cnt_timeouts <= cnt_timeouts + 8'd1;
-                end else if (frame_tick && held && (held_left != 8'd0)) begin
+                end else if (wall_tick && held && (held_left != 8'd0)) begin
                     held_left <= held_left - 8'd1;
                 end
             end

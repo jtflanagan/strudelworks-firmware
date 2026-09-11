@@ -296,6 +296,38 @@ module master_top #(
     // stream word.
     wire        vbl_level, beam_locked, beam_mark_bus, beam_mark_fast, virt, fev_quiet;
     wire [15:0] beam_mark_free;
+    // The STREAM's base, for the merge's door and the filter: the virtual
+    // one only on the IIe under acceleration.  The IIgs's beam runs at the
+    // bus's cadence (vbeam `wall`, below), which to the host is the bus's
+    // base - dummies are cycles, fast words are not, every frame is shown.
+    wire        virt_base;
+
+    // ---- the ADB micro's own clock ------------------------------------------
+    // A sixtieth of a WALL second, divided off the 100 MHz clock.  The IIgs's
+    // ADB micro auto-repeats a held key on a timer of its own - a separate
+    // processor with a separate oscillator - and KEGS counts that timer in
+    // video frames only because a KEGS frame is a sixtieth of a wall second.
+    // The card's frame (vbeam, above) is NOT: under acceleration it runs in
+    // the core's cycles, and on the beam's frame the micro's 750 ms delay
+    // was 25 ms at thirty-fold and a tap repeated before the finger lifted
+    // (2026-09-11).  The interrupt controller's timers stay on the beam,
+    // which is the rule for everything the PROGRAM can measure
+    // (docs/VIRTUAL_TIME.md); this tick reaches only the two modules that
+    // stand for the user's hands - gs_adb's repeat and gs_kbd_a2's held-key
+    // timeout.  Declared here, above every generate block, on purpose
+    // (tools/check_generate_scope.py).
+    localparam integer WALL_60HZ = 100_000_000 / 60;
+    logic [20:0] wall_ctr  = 21'd0;
+    logic        wall_tick = 1'b0;
+    always_ff @(posedge apple_clk) begin
+        if (wall_ctr == WALL_60HZ - 1) begin
+            wall_ctr  <= 21'd0;
+            wall_tick <= 1'b1;
+        end else begin
+            wall_ctr  <= wall_ctr + 21'd1;
+            wall_tick <= 1'b0;
+        end
+    end
     wire [8:0]  scan_v;         // ...and where it is, for the floating-bus simulator
     wire [6:0]  scan_h;
     wire [2:0]  vid_sw;         // the MMU shadow's video switches, for the same
@@ -414,7 +446,7 @@ module master_top #(
         .real_data (real_data_b), .real_valid (real_valid),
         .real_mark (beam_mark_bus), .real_mark_free (beam_mark_free),
         .real_dummy (op_dummy),
-        .virt (virt),
+        .virt (virt_base),
         .fast_mark (beam_mark_fast), .fast_mark_free (beam_mark_free),
         .fast_quiet (fev_valid && fev_quiet),
         .fast_force (fev_force),
@@ -1644,9 +1676,9 @@ module master_top #(
         .op_commit  (op_commit),
         .op_dummy   (op_dummy),
         .data_sync  (apple_data_sync),
-        // The held-key timeout counts frames, the machine's own, as the ADB
-        // micro's auto-repeat does.
-        .frame_tick (beam_mark_bus || beam_mark_fast),
+        // The held-key timeout counts wall time, as the ADB micro's
+        // auto-repeat does (the divider above): the finger is in wall time.
+        .wall_tick  (wall_tick),
         .park_addr  (gs_park_addr),
         .ev_valid   (gskbd_ev_valid),
         .ev_code    (gskbd_ev_code),
@@ -1709,6 +1741,8 @@ module master_top #(
         // The frame origin, from the beam every consumer takes: the quarter-
         // second and one-second interrupts count frames off it.
         .frame_tick (beam_mark_bus || beam_mark_fast),
+        // ...and the ADB micro's own clock, wall time (the divider above).
+        .wall_tick  (wall_tick),
         .doc_l      (doc_l),
         .doc_r      (doc_r),
         .u_claim    (gsio_u_claim),
@@ -1861,16 +1895,26 @@ module master_top #(
     // mark.  Every core cycle has a word at the merge's door (the fronts
     // wait for room, the sequencer flags its quiet reads), so the door's
     // in-order counts carry the cycles the host does not see.
-    // ALWAYS VIRTUAL ON THE IIgs (docs/GS.md rung 4).  The IIe's beam is
-    // found by watching the motherboard's scanner through the floating bus
+    // THE IIgs's BEAM RUNS AT THE BUS's CADENCE (user decision 2026-09-11;
+    // docs/GS.md "The beam on the IIgs").  The IIe's beam is found by
+    // watching the motherboard's scanner through the floating bus
     // (rtl/vbl_lock.sv); a IIgs's video is the card's and the host's, and
-    // there is no scanner on the backplane to lock to, so the counter free-
-    // runs on the core's cycles from reset and vbeam is told it is locked.
-    assign virt = GS || (accel_on && !boot_held);
+    // there is no scanner on the backplane to lock to, so vbeam's own
+    // counter runs from reset, told it is locked - and it steps on EVERY
+    // bus cycle, dummies and overrides included, never on a fast tick.
+    // That is what a real accelerator's VGC does: the 1 MHz bus cannot be
+    // sped up, so the VBL, the scan-line interrupt, the toolbox's ticks
+    // (and with them double-click) and the frames the host shows all come
+    // at wall speed however fast the 65816 runs.  A program counting
+    // cycles against the beam finds it slower, exactly as on the real
+    // thing.  To the host that is the BUS's base, so virt_base is low.
+    assign virt      = GS || (accel_on && !boot_held);
+    assign virt_base = !GS && virt;
     vbeam u_beam (
         .clk            (apple_clk),
         .rst            (apple_rst),
         .virt           (virt),
+        .wall           (GS),
         .real_locked    (GS ? 1'b1 : vbl_locked),
         .real_v         (GS ? 9'd0 : lock_scan_v),
         .real_h         (GS ? 7'd0 : lock_scan_h),

@@ -142,6 +142,11 @@ module gs_io #(
     // One pulse per video frame, in the machine's own time (rtl/vbeam.sv):
     // the interrupt controller's only clock.
     input  wire        frame_tick,
+    // One pulse a sixtieth of a WALL second: the ADB micro's own clock, for
+    // its auto-repeat.  The two are the same rate at 1x and part company
+    // under acceleration - rtl/gs_adb.sv says why the micro must not follow
+    // the beam.
+    input  wire        wall_tick,
 
     // The Ensoniq's mix, signed, for rtl/audio_sampler.sv to box-average the
     // way it already does the AYs.
@@ -218,7 +223,7 @@ module gs_io #(
         // The keys, from the host (docs/GS.md, ADB_KEY) and from the IIe's
         // own keyboard; the micro holds the keymap and $C025's modifiers, as
         // a real one does.
-        .frame_tick (frame_tick),
+        .wall_tick (wall_tick),
         .loc_valid (loc_valid), .loc_code (loc_code),
         .loc_up (loc_up), .loc_mods (loc_mods), .live_mods (live_mods),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),

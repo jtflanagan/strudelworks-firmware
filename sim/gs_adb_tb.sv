@@ -40,7 +40,7 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
     gs_adb #(.KEYMAP (KEYMAP)) dut (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (op_lo), .op_rw (op_rw), .op_wdata (op_wdata), .act (act),
-        .rd_byte (rd_byte), .frame_tick (frame_tick),
+        .rd_byte (rd_byte), .wall_tick (frame_tick),
         // The IIe's own keyboard, driven here as a second source into the one
         // buffer; sim/gs_kbd_a2_tb.sv drives it through rtl/gs_kbd_a2.sv from
         // a model IOU, which is where the reverse keymap is proved.
