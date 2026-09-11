@@ -427,7 +427,14 @@ module apple_mmu #(
     // recomputes a held line's validity from its stored region against
     // these, without re-classifying the line's address.
     output wire [NREG*RT_W-1:0] rt_rd_flat,
-    output wire [7:0]  rwb_p1
+    output wire [7:0]  rwb_p1,
+    // THE 65816's BANK REGISTERS ARE PART OF THE MAP (docs/GS.md rung 6):
+    // the fronts' lines are valid in the bank they were fetched in, and a
+    // JSL, a PLB or an RTL moves the bank exactly as a switch moves the
+    // side - so both join map_now and a change of either is a map change,
+    // revalidating every held line.  Zero on a IIe, where they fold away.
+    input  wire [7:0]  core_dbr,
+    input  wire [7:0]  core_pbr
 );
 
     // RamWorks banks: 0..RW_BANKS-1 exist; a write of any other number is
@@ -829,6 +836,15 @@ module apple_mmu #(
     // {sh, cls[1:0], wr, fs, reg[3:0], ppn[15:0], fold} - `sh` at the TOP, so
     // every accessor below keeps the bit it had.
     localparam int XL_W = 26;
+    // rom_ok, ONE CLOCK LATE, for the query cones (docs/GS.md rung 6).  It is
+    // the ROM loader's 512-wide "every chunk landed" reduction, and the IIgs's
+    // per-slot ROM arm below reads it live where the region table reads it
+    // registered (rt_r_q); the first rung-6 build put that reduction at the
+    // head of a 9 ns route into the page cache's request queue.  A clock of
+    // lag is nothing: the ROM lands long before any fetch depends on it, and
+    // the table already stands a clock behind.
+    logic rom_ok_q;
+    always_ff @(posedge clk) rom_ok_q <= !rst && rom_ok;
     function automatic [XL_W-1:0] xlate(input [23:0] va, input rw);
         logic [3:0]      r;
         logic [RT_W-1:0] e;
@@ -916,7 +932,7 @@ module apple_mmu #(
                     if ((r == R_CXL || r == R_C3) && rw) begin
                         // The slot is the page's low nibble, and $C1-$C7 is
                         // all this arm sees, so three bits index the register.
-                        if (rom_ok && (intcxrom || !gs_sltrom[va[10:8]])) begin
+                        if (rom_ok_q && (intcxrom || !gs_sltrom[va[10:8]])) begin
                             cls = CLS_ROM; wr = 1'b0; bank = 8'hFF;
                             pg  = va[15:8]; sh = 1'b0;
                             fs  = (r == R_C3) ? intc8rom : 1'b1;
@@ -1210,9 +1226,9 @@ module apple_mmu #(
     // map_changed is bit-for-bit what the IIe sweep has always seen.
     // STATEREG needs no entry: its write moves the seven switches that are
     // already in sw_state.
-    logic [35:0] map_q;
+    logic [51:0] map_q;
     logic        map_s1, map_s2;
-    wire [35:0] map_now = {gs_shadow, gs_sltrom, sw_state, intc8rom, rw_bank};
+    wire [51:0] map_now = {core_dbr, core_pbr, gs_shadow, gs_sltrom, sw_state, intc8rom, rw_bank};
     always_ff @(posedge clk) begin
         map_q       <= map_now;
         map_changed <= rst || !res_sync || (map_q != map_now);

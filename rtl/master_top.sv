@@ -174,7 +174,7 @@ module master_top #(
         io_bank_f = (bk == 8'h00) || (bk == 8'h01) || (bk == 8'hE0) || (bk == 8'hE1);
     endfunction
     wire real_io = !GS || io_bank_f(ev_bank);
-    wire fast_io = !GS || io_bank_f(fev_valid ? fev_bank : 8'd0);
+    wire fast_io = !GS || io_bank_f(fev_valid ? fev_bank : tev_valid ? tev_bank : dev_bank);
     wire        real_valid, phi0_live, bus_tick;
     wire        apple_res_sync, apple_irq_sync, apple_phi0_sync;
     wire [7:0]  apple_data_sync;
@@ -311,7 +311,10 @@ module master_top #(
     wire [7:0]  fb_peek_data;
     // The sequencer: ACCEL_CTRL in, its stream, status and counters out.
     wire [1:0]  accel_mode;
-    wire        accel_swint_dis, accel_game_dis;
+    wire        accel_swint_dis, accel_game_dis, accel_fronts_dis;
+    // The debug pair (rtl/wb_regfile.sv DBG_SEL/DBG_VAL, docs/GS.md rung 6).
+    wire [7:0]  dbg_sel;
+    wire [31:0] dbg_val, il_dbg, dl_dbg, pc_dbg;
     // The game port in the dummies (rtl/game_port.sv).
     wire [15:0] game_park_addr;
     wire        game_pb_ok, game_pdl_ok;
@@ -356,13 +359,21 @@ module master_top #(
     wire [15:0] pw_ppn_w, ws_ppn_w;
     wire [7:0]  pw_off_w, ws_off8_w;
     wire        cl_posted;
-    wire [15:0] cpu_d_pred, dev_addr;
+    wire [23:0] cpu_d_pred;
+    wire [15:0] dev_addr;
     wire        cpu_d_pred_v, cpu_d_pred_rw;
+    // THE FRONTS ON THE IIgs (docs/GS.md rung 6): the predicted bank's class,
+    // the program bank, the data bank register, the bank-write hold, and the
+    // banks the two fronts' events carry.  All zero at GS = 0.
+    wire [1:0]  cpu_d_pred_bcls;
+    wire [7:0]  cpu_pc_bank, cpu_dbr, tev_bank, dev_bank;
+    wire        cpu_bank_wr;
     wire [7:0]  d_din_w, dev_data;
     wire         dl_req_w;
     wire [15:0]  dl_ppn_w;
     wire [3:0]   dl_line_w;
-    wire [15:0] dq_addr_w, doff_w;
+    wire [23:0] dq_addr_w;
+    wire [15:0] doff_w;
     wire [1:0]  dcls_w;
     wire        daux_w;
     wire        turbo_tick, tev_valid, tev_sync, ev_fast_room;
@@ -374,7 +385,8 @@ module master_top #(
     wire [2:0]  accel_cen_sel;
     wire [1:0]  p_cls;
     wire        p_aux_w, map_changed;
-    wire [15:0] p_addr_w, p_off_w;
+    wire [23:0] p_addr_w;
+    wire [15:0] p_off_w;
     wire         il_req, il_ack, il_done, il_ok;
     wire [15:0]  il_ppn_w;
     wire [3:0]   il_line_w;
@@ -412,11 +424,9 @@ module master_top #(
         // priority here is form, not arbitration.
         .fast_valid (fev_valid || tev_valid || dev_valid),
         .fast_addr (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
-        // THE BANK, which had no wire to travel on until rung 4b (docs/GS.md).
-        // Only the dispatcher's own event carries one - the two fronts are the
-        // IIe's and are not built at GS = 1 - so theirs is bank zero, which is
-        // what a IIe means.
-        .fast_bank (fev_valid ? fev_bank : 8'd0),
+        // THE BANK, which had no wire to travel on until rung 4b (docs/GS.md);
+        // since rung 6 the two fronts carry theirs too (zero on a IIe).
+        .fast_bank (fev_valid ? fev_bank : tev_valid ? tev_bank : dev_bank),
         .fast_rw (fev_valid ? fev_rw : tev_valid ? 1'b1 : dev_rw),
         .fast_data (fev_valid ? fev_data : tev_valid ? tev_data : dev_data),
         .fast_sync (fev_valid ? fev_sync : tev_valid ? tev_sync : 1'b0),
@@ -493,6 +503,8 @@ module master_top #(
         .accel_mode (accel_mode), .accel_target (accel_target),
         .accel_swint_dis (accel_swint_dis),
         .accel_game_dis (accel_game_dis),
+        .accel_fronts_dis (accel_fronts_dis),
+        .dbg_sel (dbg_sel), .dbg_val (dbg_val),
         .game_pb (game_pb), .game_pb_ok (game_pb_ok), .game_pdl_ok (game_pdl_ok),
         .game_pdl0 (game_pdl0), .game_pdl1 (game_pdl1), .game_pdl2 (game_pdl2), .game_pdl3 (game_pdl3),
         .game_meas (game_meas),
@@ -568,6 +580,47 @@ module master_top #(
         .phi0_active       (phi0_live)
     );
 
+    // DECLARED ABOVE EVERY GENERATE BLOCK THAT NAMES THEM, AND THE REASON IS
+    // A HARDWARE FAULT (docs/GS.md rung 6).  The fronts are instantiated
+    // inside `generate ... begin : g_fronts`, and these wires used to be
+    // declared below it.  Verilator resolves a forward reference to the
+    // module-level wire; Vivado creates an IMPLICIT, UNDRIVEN net in the
+    // generate scope (`Synth 8-3848: Net g_fronts.p_fs_w ... does not have
+    // driver`, seventeen of them), so on the card both fronts saw a
+    // never-servable map, all-zero physical identities and a line-row
+    // completion that could never arrive - and every posted write landed
+    // in physical page zero.  The IIe build had carried the same warnings
+    // since the generate wrapper of 2026-09-08.  Nothing below a generate
+    // block may be named inside it.
+    wire        cl_valid, cl_rw, cl_wr_image, cl_aux;
+    wire [1:0]  cl_cls;
+    wire [7:0]  cl_bank;
+    wire [15:0] cl_off, pf_off;
+
+    // The MMU shadow follows the unified stream - every op, fast or bus or
+    // override - and answers two questions of the address about to be
+    // presented: the driver's (divert this write?) and the sequencer's (what
+    // class is this op?).
+    // The physical space the memory rethink is built on (docs/PAGE_CACHE.md):
+    // the classified op's page and its preview, both fronts' physical
+    // identities, the packed read table and the settle window.  Nothing
+    // consumes them yet - the fronts and the page cache take them in the
+    // rungs that follow - but they are wired so the ports are real.
+    wire [15:0] cl_ppn_w, pf_ppn_w, p_ppn_w, d_ppn_w;
+    wire [3:0]  p_reg_w, d_reg_w;
+    wire        p_fold_w, p_fs_w, d_fold_w, map_settling;
+    wire [103:0] rt_rd_flat;
+    wire [7:0]  rwb_p1_w;
+
+    // The map's shadow duplicate, as its own entrant into the cache
+    // (docs/GS.md rung 3e).
+    wire        shd_take_w;
+    wire [15:0] shd_ppn_w;
+    wire [7:0]  shd_off_w;
+    // The line-row port's source, iline's or dline's, for the answer three
+    // clocks later (assigned beside the page cache below).
+    logic il_src_q;
+
     // ---- the soft CPU -------------------------------------------------------
     // Held in reset while the machine is, so it starts where the machine does.
     wire cpu_rst = apple_rst || !apple_res_sync;
@@ -602,6 +655,11 @@ module master_top #(
     // zero on the IIe build.
     wire gsio_irq;
     wire [31:0] gsio_adb_stat;     // GS_ADB_STAT, zero on a IIe
+    // THE FRONTS BYPASSED (ACCEL_CTRL[29], IIgs only): the core takes the
+    // dispatcher's byte on both streams and the dispatcher keeps turbo_en
+    // low, so the machine runs exactly as it did before rung 6 - the A/B
+    // for a fault the benches do not show (docs/GS.md rung 6).
+    wire front_bypass = GS && accel_fronts_dis;
 
     generate if (!GS) begin : g_65c02
 
@@ -625,7 +683,7 @@ module master_top #(
         .d_addr (),
         .d_rw   (),
         .d_dout (),
-        .d_pred (cpu_d_pred),       // the data front's candidate (rtl/dline.sv)
+        .d_pred (cpu_d_pred[15:0]), // the data front's candidate (rtl/dline.sv)
         .d_pred_v (cpu_d_pred_v),
         .d_pred_rw (cpu_d_pred_rw),
         .p_flags (cpu_p_flags),     // the front resolves branches on them
@@ -634,14 +692,20 @@ module master_top #(
         .sync   (cpu_sync),
         .halted ()                  // STP is not on the base part; see the RTL
     );
+    // A 65C02 lives in bank zero: no bank class, no bank registers, no hold.
+    assign cpu_d_pred[23:16] = 8'd0;
+    assign cpu_d_pred_bcls   = 2'd0;
+    assign cpu_pc_bank       = 8'd0;
+    assign cpu_dbr           = 8'd0;
+    assign cpu_bank_wr       = 1'b0;
 
     end else begin : g_65816
 
-    // ---- the 65816 (docs/GS.md rung 4) --------------------------------------
-    // The core rides the dispatcher alone: no fronts on this build, so the
-    // split interface the 65C02 offers here has no consumer and the part is
-    // wired as sim/boot_gs_tb.sv wires it - one din, one address, and the
-    // valid-data / valid-program lines that say what a cycle IS.
+    // ---- the 65816 (docs/GS.md rung 4, the fronts rung 6) -------------------
+    // The same split interface the 65C02 offers, widened: the byte per
+    // stream, the program bank beside the PC, a 24-bit data prediction with
+    // its bank class, and the bank-write hold.  The valid-data /
+    // valid-program lines still say what a cycle IS, for the parking below.
     wire [23:0] core_a24;
     wire        core_rw, core_vda, core_vpa;
 
@@ -652,7 +716,17 @@ module master_top #(
         .addr   (core_a24),
         .rw     (core_rw),
         .dout   (cpu_dout),
-        .din    (cpu_din),
+        .i_din  (front_bypass ? cpu_din : i_din_w),   // the instruction front's byte
+        .d_din  (front_bypass ? cpu_din : d_din_w),   // the data front's, or the sequencer's through it
+        .cyc_is_i (cpu_cyc_is_i),   // = VPA
+        .pc_addr ({cpu_pc_bank, cpu_pc_addr}),
+        .d_pred (cpu_d_pred),
+        .d_pred_v (cpu_d_pred_v),
+        .d_pred_rw (cpu_d_pred_rw),
+        .d_pred_bcls (cpu_d_pred_bcls),
+        .p_flags (cpu_p_flags),
+        .dbr_o  (cpu_dbr),
+        .bank_wr (cpu_bank_wr),
         // The chipset's line, the backplane's pin, and the on-card cards'.
         // A physical slot card still interrupts through apple_irq_sync,
         // which is what a real GS gives it.
@@ -681,18 +755,17 @@ module master_top #(
     assign cpu_rw       = core_rw | cyc_internal;
     assign cpu_addr     = cyc_internal ? 16'h0000 : core_a24[15:0];
     assign cpu_bank_raw = cyc_internal ?  8'h00   : core_a24[23:16];
-    // The census's "this cycle is an instruction fetch" is the 65816's VPA.
-    assign cpu_cyc_is_i = core_vpa;
-
-    // The fronts are off on this build (docs/GS.md rung 6 turns them on), so
-    // what they would have consumed has no producer.
-    assign cpu_p_flags  = 8'd0;
-    assign cpu_pc_addr  = 16'd0;
-    assign cpu_d_pred   = 16'd0;
-    assign cpu_d_pred_v = 1'b0;
-    assign cpu_d_pred_rw = 1'b1;
 
     end endgenerate
+
+    // THE BANK HOLD (docs/GS.md rung 6).  DBR and PBR are part of the map, so
+    // a write to either is a map change - but map_changed rises one clock
+    // after the write, and on the clock between, the next fetch is already
+    // at the new PBR while every front's valid bit still describes the old
+    // one.  The core's registered bank_wr covers exactly that clock; OR'd
+    // into the settle every consumer already honours, nothing else changes.
+    // Zero at GS = 0.
+    wire front_settling = map_settling || cpu_bank_wr;
 
     // ---- driving ------------------------------------------------------------
     wire [15:0] addr_drive;
@@ -1011,6 +1084,7 @@ module master_top #(
         // finite target still honours the machine's own switch.
         .target        (GS && !gs_cyareg_w[7] && (accel_target != 16'd0) ? 16'h0100 : accel_target),
         .cnt_clr       (accel_cnt_clr),
+        .fronts_dis    (front_bypass),
         .mem_serve     (mem_serve),
         .mem_image_ready (mem_image_ready),
         .mem_invalidating (mem_invalidating),
@@ -1078,7 +1152,7 @@ module master_top #(
         .reset_seq_o   (accel_reset_seq),
         .fast_ops      (accel_fast),
         .map_changed   (map_changed),
-        .map_settling  (map_settling),
+        .map_settling  (front_settling),
         .maps          (accel_maps),
         .cen_v         (accel_cen_v),
         .cen_sel       (accel_cen_sel),
@@ -1095,17 +1169,20 @@ module master_top #(
     // it), so at GS = 1 the two are not built and every seam they drive is
     // tied still below - which is also what makes room on the die for the
     // 65816 and the chipset.
-    generate if (!GS) begin : g_fronts
+    // Both fronts are built on both machines since rung 6; the generate
+    // block keeps its name so the depth census's paths keep theirs.
+    generate if (1) begin : g_fronts
 
     // ---- the instruction front ----------------------------------------------
     // Two lines of the program stream ahead of the sequencer: a fetch that
     // lands in them retires in one clock.  See rtl/iline.sv and
     // docs/ISTREAM.md.
-    iline u_iline (
+    iline #(.GS (GS)) u_iline (
         .clk           (apple_clk),
         .rst           (apple_rst),
         .cpu_rst       (cpu_rst),
         .pc_addr       (cpu_pc_addr),
+        .pc_bank       (cpu_pc_bank),
         .cpu_rw        (cpu_rw),
         .cpu_sync      (cpu_sync),
         .cyc_is_i      (cpu_cyc_is_i),
@@ -1124,6 +1201,7 @@ module master_top #(
         .tev_addr      (tev_addr),
         .tev_data      (tev_data),
         .tev_sync      (tev_sync),
+        .tev_bank      (tev_bank),
         .ev_room       (ev_fast_room),
         .p_addr        (p_addr_w),
         .p_ppn         (p_ppn_w),
@@ -1133,7 +1211,7 @@ module master_top #(
         .cl_ppn        (cl_ppn_w),
         .rt_rd_flat    (rt_rd_flat),
         .rwb_p1        (rwb_p1_w),
-        .map_settling  (map_settling),
+        .map_settling  (front_settling),
         .idrop_o       (accel_idrop),
         .irevive_o     (accel_irevive),
         .map_changed   (map_changed),
@@ -1155,7 +1233,9 @@ module master_top #(
         .ws_ppn        (ws_ppn_w),
         .ws_off8       (ws_off8_w),
         .serve         (mem_serve),
-        .inval         (mem_inval)
+        .inval         (mem_inval),
+        .dbg_sel       (dbg_sel[3:0]),
+        .dbg_val       (il_dbg)
     );
 
     // ---- the data front -----------------------------------------------------
@@ -1164,14 +1244,18 @@ module master_top #(
     // clock, and so does a mode-2 write - spliced into the holders, posted
     // to the page cache through the MMU's classified stage.  See
     // rtl/dline.sv and docs/DLINE.md.
-    dline u_dline (
+    dline #(.GS (GS)) u_dline (
         .clk           (apple_clk),
         .rst           (apple_rst),
         .cpu_rst       (cpu_rst),
         .d_pred        (cpu_d_pred),
         .d_pred_v      (cpu_d_pred_v),
         .d_pred_rw     (cpu_d_pred_rw),
+        .d_pred_bcls   (cpu_d_pred_bcls),
+        .dbr           (cpu_dbr),
         .cpu_addr      (cpu_addr),
+        .cpu_bank      (cpu_bank),
+        .cyc_int       (cyc_internal),
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
         .cyc_is_i      (cpu_cyc_is_i),
@@ -1191,6 +1275,7 @@ module master_top #(
         .dev_addr      (dev_addr),
         .dev_data      (dev_data),
         .dev_rw        (dev_rw),
+        .dev_bank      (dev_bank),
         .ev_room       (ev_fast_room),
         .ev_room_w     (ev_fast_room_w),
         .altzp         (mem_sw[3]),
@@ -1203,7 +1288,7 @@ module master_top #(
         .d_fold        (d_fold_w),
         .rt_rd_flat    (rt_rd_flat),
         .rwb_p1        (rwb_p1_w),
-        .map_settling  (map_settling),
+        .map_settling  (front_settling),
         .rw_bank       (mem_rw_bank),
         .map_changed   (map_changed),
         .dl_req        (dl_req_w),
@@ -1232,6 +1317,8 @@ module master_top #(
         .ws_ppn        (ws_ppn_w),
         .ws_off8       (ws_off8_w),
         .inval         (mem_inval),
+        .dbg_sel       (dbg_sel[3:0]),
+        .dbg_val       (dl_dbg),
         .cnt_clr       (accel_cnt_clr),
         .cnt_serves    (accel_dline),   // ACCEL_DLINE: every retire, reads and writes
         .cnt_claims    (),
@@ -1245,58 +1332,30 @@ module master_top #(
         .cnt_rev_serves   ()
     );
 
-    end else begin : g_nofronts
-
-    // Everything the two fronts drive, held still.  The core takes the
-    // dispatcher's cycle enable directly and the dispatcher's byte directly;
-    // no fetch is ever claimed, no write is ever posted from here, and the
-    // fast event port carries only the dispatcher's own (accel_seq fev_*).
-    assign iline_cyc_en = 1'b0;
-    assign i_din_w      = 8'd0;
-    assign turbo_claim  = 1'b0;
-    assign turbo_commit = 1'b0;
-    assign turbo_sync   = 1'b0;
-    assign turbo_tick   = 1'b0;
-    assign tev_valid    = 1'b0;
-    assign tev_addr     = 16'd0;
-    assign tev_data     = 8'd0;
-    assign tev_sync     = 1'b0;
-    assign p_addr_w     = 16'd0;
-    assign il_req       = 1'b0;
-    assign il_ppn_w     = 16'd0;
-    assign il_line_w    = 4'd0;
-    assign accel_idrop  = 32'd0;
-    assign accel_irevive = 32'd0;
-    assign ws_valid_w   = 1'b0;
-    assign ws_ppn_w     = 16'd0;
-    assign ws_off8_w    = 8'd0;
-
-    assign cpu_cyc_en   = seq_cyc_en;
-    assign d_din_w      = 8'd0;
-    assign turbo_wr     = 1'b0;
-    assign d_commit_w   = 1'b0;
-    assign d_claim_w    = 1'b0;
-    assign dline_tick   = 1'b0;
-    assign d_pending_w  = 1'b0;
-    assign dev_valid    = 1'b0;
-    assign dev_addr     = 16'd0;
-    assign dev_data     = 8'd0;
-    assign dev_rw       = 1'b1;
-    assign ev_fast_room_w = 1'b1;
-    assign dq_addr_w    = 16'd0;
-    assign dq_rw_w      = 1'b1;
-    assign dl_req_w     = 1'b0;
-    assign dl_ppn_w     = 16'd0;
-    assign dl_line_w    = 4'd0;
-    assign pw_valid_w   = 1'b0;
-    assign pw_ppn_w     = 16'd0;
-    assign pw_off_w     = 8'd0;
-    assign pw_data_w    = 8'd0;
-    assign accel_dline  = 32'd0;
-    assign accel_ddrop  = 32'd0;
-    assign accel_drevive = 32'd0;
-
     end endgenerate
+
+    // The debug pair's mux: [5:4] the module, [3:0] the item.  Item 3/0 is
+    // the dispatcher's and the fronts' live state in one word.
+    wire [31:0] top_dbg = (dbg_sel[3:0] == 4'd0) ?
+                              {seq_state, turbo_en, turbo_ok, turbo_claim, d_claim_w, d_pending_w,
+                               cyc_internal, map_settling, cpu_bank_wr, ev_fast_room, ev_fast_room_w,
+                               mem_serve, mem_inval, mem_invalidating, cpu_cyc_is_i, cpu_rw, cpu_sync,
+                               front_bypass, accel_held, 2'd0, cpu_bank} :
+                          (dbg_sel[3:0] == 4'd1) ? {cpu_pc_bank, cpu_pc_addr, 8'd0} :
+                          (dbg_sel[3:0] == 4'd2) ? {cpu_bank, cpu_addr, cpu_dout} :
+                          (dbg_sel[3:0] == 4'd3) ? {cpu_dbr, cpu_d_pred} :
+                          (dbg_sel[3:0] == 4'd4) ? {cpu_d_pred_bcls, cpu_d_pred_v, cpu_d_pred_rw, 4'd0, cpu_p_flags, 8'd0, cpu_din} :
+                                                   accel_maps;
+    // REGISTERED: the top word muxes the core's combinational prediction and
+    // din, and unregistered it was the IIe build's binding path into the
+    // register file's read mux (r6fix_iie, 22 levels at +0.000).  A debug
+    // read is a snapshot; one clock old is what it wants to be.
+    logic [31:0] dbg_val_q;
+    always_ff @(posedge apple_clk)
+        dbg_val_q <= (dbg_sel[5:4] == 2'd0) ? il_dbg :
+                     (dbg_sel[5:4] == 2'd1) ? dl_dbg :
+                     (dbg_sel[5:4] == 2'd2) ? pc_dbg : top_dbg;
+    assign dbg_val = dbg_val_q;
 
     // ---- the hold: the boot menu's door and the runtime menu's -------------
     // On the unified stream: a SYNC the core fetched from the card must count
@@ -1464,31 +1523,6 @@ module master_top #(
     // answered from here instead of from the bus - through the same din
     // substitution the keyboard uses, so the capture records what the core
     // read.  Nothing on the bus changes.  See docs/PAGE_CACHE.md.
-    wire        cl_valid, cl_rw, cl_wr_image, cl_aux;
-    wire [1:0]  cl_cls;
-    wire [7:0]  cl_bank;
-    wire [15:0] cl_off, pf_off;
-
-    // The MMU shadow follows the unified stream - every op, fast or bus or
-    // override - and answers two questions of the address about to be
-    // presented: the driver's (divert this write?) and the sequencer's (what
-    // class is this op?).
-    // The physical space the memory rethink is built on (docs/PAGE_CACHE.md):
-    // the classified op's page and its preview, both fronts' physical
-    // identities, the packed read table and the settle window.  Nothing
-    // consumes them yet - the fronts and the page cache take them in the
-    // rungs that follow - but they are wired so the ports are real.
-    wire [15:0] cl_ppn_w, pf_ppn_w, p_ppn_w, d_ppn_w;
-    wire [3:0]  p_reg_w, d_reg_w;
-    wire        p_fold_w, p_fs_w, d_fold_w, map_settling;
-    wire [103:0] rt_rd_flat;
-    wire [7:0]  rwb_p1_w;
-
-    // The map's shadow duplicate, as its own entrant into the cache
-    // (docs/GS.md rung 3e).
-    wire        shd_take_w;
-    wire [15:0] shd_ppn_w;
-    wire [7:0]  shd_off_w;
     apple_mmu #(.GS (GS)) u_mmu (
         .clk        (apple_clk),
         .rst        (apple_rst),
@@ -1554,7 +1588,7 @@ module master_top #(
         .q_swi      (q_swi_mmu),
         .q_swi_quiet (q_swi_quiet),
         .swi_stat_byte (mmu_swi_stat),
-        .p_addr     ({8'd0, p_addr_w}),
+        .p_addr     (p_addr_w),
         .p_cls      (p_cls),
         .p_aux      (p_aux_w),
         .p_off      (p_off_w),
@@ -1562,7 +1596,7 @@ module master_top #(
         .p_reg      (p_reg_w),
         .p_fold     (p_fold_w),
         .p_fs       (p_fs_w),
-        .d_addr     ({8'd0, dq_addr_w}),
+        .d_addr     (dq_addr_w),
         .d_rw       (dq_rw_w),
         .d_cls      (dcls_w),
         .d_aux      (daux_w),
@@ -1573,7 +1607,9 @@ module master_top #(
         .map_changed (map_changed),
         .map_settling (map_settling),
         .rt_rd_flat (rt_rd_flat),
-        .rwb_p1     (rwb_p1_w)
+        .rwb_p1     (rwb_p1_w),
+        .core_dbr   (cpu_dbr),
+        .core_pbr   (cpu_pc_bank)
     );
 
     // ---- the IIgs chipset on $C0xx (docs/GS.md rung 3b, rung 4) -------------
@@ -1746,7 +1782,6 @@ module master_top #(
     // `done` reaches the one that asked.  A new grant can land on the done's
     // own clock; this register is read before it is written, so that is the
     // old transaction's source, which is right.
-    logic il_src_q;
     always_ff @(posedge apple_clk) if (il_ack) il_src_q <= !il_req;
 
     page_cache #(.SETS (MEM_SETS), .WAYS (MEM_WAYS)) u_cache (
@@ -1798,6 +1833,8 @@ module master_top #(
         .il_row      (il_row),
         .serve       (mem_serve),
         .inval       (mem_inval),
+        .dbg_sel     (dbg_sel[3:0]),
+        .dbg_val     (pc_dbg),
         .cnt_clr     (mem_cnt_clr),
         .image_ready (mem_image_ready),
         .invalidating (mem_invalidating),

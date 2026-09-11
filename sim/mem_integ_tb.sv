@@ -201,7 +201,8 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .mem_fills (), .mem_flushes (), .mem_declines (),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
-        .pr_valid (pr_valid), .pr_data (pr_data)
+        .pr_valid (pr_valid), .pr_data (pr_data),
+        .dbg_sel (4'd0), .dbg_val ()
     );
 
     wire [1:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;

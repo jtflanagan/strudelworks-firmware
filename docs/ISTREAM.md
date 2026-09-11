@@ -12,6 +12,13 @@
 > `docs/MEMORY_REFACTOR.md`; this file was not rewritten (a decision, not an
 > oversight - the user's, 2026-09-08).
 
+> **ON THE IIgs TOO, 2026-09-11 (docs/GS.md rung 6):** the front builds at
+> `GS = 1` and serves the 65816's program stream at `{pc_bank, pc_addr}`.
+> Each line stores the virtual bank it was fetched in; the bank registers are
+> part of the map, so a JSL/RTL revalidates rather than flushes; the I/O
+> window's exclusions apply in the four pair banks alone.  The IIe's netlist
+> is unchanged (`GS = 0` folds every bank to zero).
+
 Status: **built, proven in simulation, and TIMING CLOSED, 2026-09-01;
 branch `page_cache`, both repositories - accel_tb 27.7x mode 2 unlimited
 (48 checks, both sweep points, self-modifying code included), master

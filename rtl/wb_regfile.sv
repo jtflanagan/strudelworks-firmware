@@ -226,6 +226,12 @@ module wb_regfile #(
     input  wire [31:0]     gs_adb_stat,     // GS_ADB_STAT, the ADB micro's mouse path (rtl/gs_adb.sv)
     input  wire [31:0]     cnt_core_cyc,    // ACCEL_CORE_CYC (master_top): the plain ratio's numerator
     input  wire [31:0]     cnt_bus_cyc,     // ACCEL_BUS_CYC: ...and its denominator
+    // THE DEBUG PAIR (docs/GS.md rung 6).  DBG_SEL picks a counter or a state
+    // snapshot out of the fronts, the page cache and the dispatcher; DBG_VAL
+    // reads it.  [5:4] the module (0 iline, 1 dline, 2 the page cache, 3 the
+    // dispatcher and the top), [3:0] the item - rtl/master_top.sv's mux.
+    input  wire [31:0]     dbg_val,
+    output logic [7:0]     dbg_sel,
     // THE SHADOW DUPLICATE'S DROPS (the IIgs's $C035; docs/GS.md rung 3e).
     // The map emits a shadowed write's duplicate one clock behind the write
     // itself, one deep - and a drop is a write the Mega II banks never got,
@@ -248,6 +254,9 @@ module wb_regfile #(
     output logic [1:0]     accel_mode,
     output logic           accel_swint_dis, // [28]: no internalized keyboard, dummies at $0000
     output logic           accel_game_dis,  // [27]: no internalized game port, dummies at $C000 only
+    output logic           accel_fronts_dis, // [29]: the fronts bypassed - the core takes the
+                                             // dispatcher's byte on both streams and neither
+                                             // front retires (a diagnosis level, IIgs only)
     // The game port's samples, for GAME_STAT (rtl/game_port.sv).
     input  wire [2:0]      game_pb,
     input  wire            game_pb_ok,
@@ -412,6 +421,8 @@ module wb_regfile #(
     localparam [13:0] R_GS_ADB          = 'd73; // 0x8000_0124, RO (rtl/gs_adb.sv dbg_stat)
     localparam [13:0] R_ACCEL_CORE_CYC  = 'd74; // 0x8000_0128, RO core cycles (vbeam's ticks)
     localparam [13:0] R_ACCEL_BUS_CYC   = 'd75; // 0x8000_012C, RO raw bus cycles
+    localparam [13:0] R_DBG_SEL         = 'd76; // 0x8000_0130, RW the debug pair's select
+    localparam [13:0] R_DBG_VAL         = 'd77; // 0x8000_0134, RO ...and its value
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -1023,12 +1034,14 @@ module wb_regfile #(
             accel_cnt_clr <= 1'b0;
             accel_swint_dis <= 1'b0;
             accel_game_dis  <= 1'b0;
+            accel_fronts_dis <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
                 accel_mode    <= wb_dat_w[1:0];
                 accel_target  <= wb_dat_w[23:8];
                 accel_swint_dis <= wb_dat_w[28];
                 accel_game_dis  <= wb_dat_w[27];
+                accel_fronts_dis <= wb_dat_w[29];
             end
             accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
         end
@@ -1050,7 +1063,7 @@ module wb_regfile #(
         .fast_drom (accel_fast_drom), .fast_dcx (accel_fast_dcx), .fast_wr (accel_fast_wr),
         .fast_kbd (accel_fast_kbd)
     );
-    wire [31:0] accel_ctrl_rd = {3'd0, accel_swint_dis, accel_game_dis, 3'd0, accel_target, 6'd0, accel_mode};
+    wire [31:0] accel_ctrl_rd = {2'd0, accel_fronts_dis, accel_swint_dis, accel_game_dis, 3'd0, accel_target, 6'd0, accel_mode};
 
     // ---- GAME_STAT ----------------------------------------------------------
     // The game port as the dummy loop last sampled it (rtl/game_port.sv):
@@ -1362,6 +1375,8 @@ module wb_regfile #(
                         R_GS_ADB:       wb_dat_r <= gs_adb_stat;
                         R_ACCEL_CORE_CYC: wb_dat_r <= cnt_core_cyc;
                         R_ACCEL_BUS_CYC:  wb_dat_r <= cnt_bus_cyc;
+                        R_DBG_SEL:        wb_dat_r <= {24'd0, dbg_sel};
+                        R_DBG_VAL:        wb_dat_r <= dbg_val;
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
                         R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
                         R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;
@@ -1436,6 +1451,12 @@ module wb_regfile #(
                          (word == R_FB_PEEK);
     wire wr_accel_ctrl = access && !wb_ack && in_region && wb_we &&
                          (word == R_ACCEL_CTRL);
+    wire wr_dbg_sel    = access && !wb_ack && in_region && wb_we &&
+                         (word == R_DBG_SEL);
+    always_ff @(posedge clk) begin
+        if (rst)            dbg_sel <= 8'd0;
+        else if (wr_dbg_sel) dbg_sel <= wb_dat_w[7:0];
+    end
 
     // A boot-hold RELEASE re-latches MB_SLOT, HD_SLOT, FD_SLOT and VIDHD_SLOT above, so the menu's
     // choices reach the boot it releases into.  Same qualification as the

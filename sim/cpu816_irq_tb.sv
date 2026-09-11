@@ -50,7 +50,9 @@ module cpu816_irq_tb #(parameter UCODE  = "cpu65816_ucode.hex",
 
     cpu65816 #(.UCODE_FILE (UCODE), .UCODE0_FILE (UCODE0), .USEQ0_FILE (USEQ0)) dut (
         .clk (clk), .rst (rst), .cyc_en (1'b1),
-        .addr (addr), .rw (rw), .dout (dout), .din (din),
+        .addr (addr), .rw (rw), .dout (dout), .i_din (din), .d_din (din),
+        .cyc_is_i (), .pc_addr (), .d_pred (), .d_pred_v (), .d_pred_rw (), .d_pred_bcls (),
+        .p_flags (), .dbr_o (), .bank_wr (),
         .irq_n (irq_n), .nmi_n (nmi_n),
         .sync (sync), .vda (vda), .vpa (vpa), .vpb (vpb), .emu (emu), .halted (halted)
     );

@@ -78,6 +78,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     parameter integer HAS_HDV = 0,
                     parameter integer HD_SLOT = 7,
                     parameter integer HOST_DELAY = 2000,
+                    // The DDR3 model's read latency per beat, in clocks.  12
+                    // is the model's original figure; the card's UberDDR3
+                    // behind the arbiter is slower and burstier, and the
+                    // fronts' first hardware run (docs/GS.md rung 6) died
+                    // where this bench passed.
+                    parameter integer DDR_LAT = 12,
                     // Name every $C0Fx write and every write to the ProDOS
                     // block-driver parameters at $40-$47, from the first
                     // EXECUTE on; see "the block number" below.
@@ -215,13 +221,24 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [7:0]  cpu_bank = cpu_a24[23:16];
     wire        cpu_rw, cpu_sync, cpu_cyc_en;
     wire        cpu_vda, cpu_vpa, cpu_vpb, cpu_emu, cpu_halted;
-    wire [7:0]  cpu_dout, cpu_din;
-    // The census's "this cycle is an instruction fetch" is the 65816's VPA.
-    wire        cpu_cyc_is_i = cpu_vpa;
+    wire [7:0]  cpu_dout;
+    // THE SPLIT FRONT (docs/GS.md rung 6), wired as rtl/master_top.sv wires
+    // it: the instruction front owns i_din, the data front d_din, the
+    // sequencer's byte reaches the core through them.  cpu_din below is the
+    // byte the core CONSUMED - the front's on its stream - which is what the
+    // bench's own checks and its trace read.
+    wire        cpu_cyc_is_i, cpu_d_pred_v, cpu_d_pred_rw, cpu_bank_wr;
+    wire [23:0] cpu_pc24, cpu_d_pred;
+    wire [1:0]  cpu_d_pred_bcls;
+    wire [7:0]  cpu_p_flags, cpu_dbr, i_din_w, d_din_w, seq_din;
+    wire [7:0]  cpu_din = cpu_cyc_is_i ? i_din_w : d_din_w;
 
     cpu65816 #(.UCODE_FILE (UCODE), .UCODE0_FILE (UCODE0), .USEQ0_FILE (USEQ0)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
-        .addr (cpu_a24), .rw (cpu_rw), .dout (cpu_dout), .din (cpu_din),
+        .addr (cpu_a24), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (d_din_w),
+        .cyc_is_i (cpu_cyc_is_i), .pc_addr (cpu_pc24), .d_pred (cpu_d_pred),
+        .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls),
+        .p_flags (cpu_p_flags), .dbr_o (cpu_dbr), .bank_wr (cpu_bank_wr),
         // The chipset's one interrupt line, active low into the core.
         .irq_n (!gsio_irq), .nmi_n (1'b1),
         .sync (cpu_sync), .vda (cpu_vda), .vpa (cpu_vpa), .vpb (cpu_vpb),
@@ -303,9 +320,43 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [7:0]  swi_byte = gsio_u_claim ? gsio_byte : mmu_swi_stat;
     wire        map_changed, map_settling;
 
-    // The fronts are OFF on the GS build (docs/GS.md rung 6 turns them on):
-    // everything the core does goes through the dispatcher, so every retire
-    // is the dispatcher's and the front-side books are tied still.
+    // The fronts, as master_top chains them (rung 6): the sequencer's cyc_en
+    // and byte pass through iline then dline to the core; the books ride
+    // turbo_commit/d_commit; the bank-write hold joins the settle.
+    wire        seq_cyc_en, iline_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync;
+    wire        turbo_claim, turbo_wr, turbo_tick, dline_tick;
+    wire        d_commit_w, d_claim_w, d_pending_w;
+    wire        front_settling = map_settling || cpu_bank_wr;
+    wire        tev_valid, tev_sync, dev_valid, dev_rw;
+    wire [15:0] tev_addr, dev_addr;
+    wire [7:0]  tev_data, dev_data, tev_bank, dev_bank;
+    wire [23:0] p_addr_w, dq_addr_w;
+    wire        dq_rw_w;
+    wire        il_req, il_ack, il_done, il_ok, dl_req_w;
+    wire [15:0] il_ppn_w, dl_ppn_w;
+    wire [3:0]  il_line_w, dl_line_w;
+    wire [127:0] il_row;
+    wire        pw_valid_w, ws_valid_w;
+    wire [15:0] pw_ppn_w, ws_ppn_w;
+    wire [7:0]  pw_off_w, pw_data_w, ws_off8_w;
+    logic il_src_q;
+    always_ff @(posedge clk) if (il_ack) il_src_q <= !il_req;
+    // THE MERGE'S BACK-PRESSURE, modelled as sim/accel_tb.sv models it: the
+    // fronts' room comes and goes in bursts (an xorshift LFSR), the write
+    // room a clock behind the read room as the real merge registers it.
+    // Tied high, the first GS run of the fronts passed here and hung on
+    // hardware (docs/GS.md rung 6).
+    logic [31:0] room_lfsr = 32'h2545F491;
+    logic        room_q = 1'b1, room_w_q = 1'b1;
+    logic [5:0]  room_burst = 6'd0;
+    always_ff @(posedge clk) begin
+        room_lfsr <= {room_lfsr[30:0], room_lfsr[31] ^ room_lfsr[21] ^ room_lfsr[1] ^ room_lfsr[0]};
+        if (room_burst != 6'd0) room_burst <= room_burst - 6'd1;
+        else if (room_lfsr[7:0] < 8'd12) room_burst <= room_lfsr[13:8];   // ~5%: a burst of no room
+        room_q   <= (room_burst == 6'd0);
+        room_w_q <= room_q;
+    end
+
     accel_seq #(.GS (1'b1)) u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (1'b0),
@@ -317,10 +368,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .q_cls (q_cls),
         .cpu_addr (cpu_addr_eff), .cpu_bank (cpu_bank_eff), .cpu_rw (cpu_rw_eff), .cpu_dout (cpu_dout),
         .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i), .cyc_int (cyc_internal),
-        .cyc_en (cpu_cyc_en), .cpu_din (cpu_din),
-        .turbo_en (), .turbo_ok (),
-        .turbo_commit (1'b0), .d_commit (1'b0), .turbo_claim (1'b0),
-        .turbo_wr (), .d_pending (1'b0),
+        .cyc_en (seq_cyc_en), .cpu_din (seq_din),
+        .turbo_en (turbo_en), .turbo_ok (turbo_ok),
+        .turbo_commit (turbo_commit), .d_commit (d_commit_w), .turbo_claim (turbo_claim | d_claim_w),
+        .turbo_wr (turbo_wr), .d_pending (d_pending_w),
         .op_present (op_present), .op_commit (op_commit), .op_dummy (op_dummy), .op_ovr (op_ovr),
         .op_divert (op_divert), .op_sync (drv_sync), .op_addr (op_addr), .op_rw (op_rw),
         .op_wdata (op_wdata), .cyc_done (drv_cyc_done), .drv_din (drv_din),
@@ -334,10 +385,83 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .fev_valid (fev_valid), .fev_addr (fev_addr), .fev_bank (fev_bank), .fev_rw (fev_rw),
         .fev_data (fev_data), .fev_sync (fev_sync),
         .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
-        .fast_ops (fast_ops), .map_changed (map_changed), .map_settling (map_settling),
+        .fast_ops (fast_ops), .map_changed (map_changed), .map_settling (front_settling),
         .maps (accel_maps), .cen_v (), .cen_sel (), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
-        .cycles (cycles), .wait_clocks (wait_clocks), .retries (retries)
+        .cycles (cycles), .wait_clocks (wait_clocks), .retries (retries),
+        .fronts_dis (1'b0)
     );
+
+    // ---- the fronts (rtl/iline.sv, rtl/dline.sv at GS = 1) ---------------------
+    // The instruction front: two lines of the program stream ahead of the
+    // sequencer, in the program's bank.
+    iline #(.GS (1'b1)) u_iline (
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
+        .pc_addr (cpu_pc24[15:0]), .pc_bank (cpu_pc24[23:16]),
+        .cpu_rw (cpu_rw_eff), .cpu_sync (cpu_sync),
+        .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
+        .cyc_en (iline_cyc_en), .i_din (i_din_w),
+        .accel_cyc_en (seq_cyc_en), .accel_din (seq_din),
+        .turbo_en (turbo_en), .turbo_ok (turbo_ok), .claim (turbo_claim),
+        .turbo_commit (turbo_commit), .turbo_sync (turbo_sync),
+        .tick_q (turbo_tick),
+        .tev_valid (tev_valid), .tev_addr (tev_addr), .tev_data (tev_data),
+        .tev_sync (tev_sync), .tev_bank (tev_bank), .ev_room (room_q),
+        .p_addr (p_addr_w),
+        .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
+        .cl_ppn (cl_ppn_w), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
+        .map_settling (front_settling), .idrop_o (), .irevive_o (),
+        .map_changed (map_changed), .intc8rom (intc8rom),
+        .il_req (il_req), .il_ppn (il_ppn_w), .il_line (il_line_w),
+        .il_ack (il_ack && il_req), .il_done (il_done && !il_src_q),
+        .il_ok (il_ok), .il_row (il_row),
+        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
+        .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
+        .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
+        .serve (serve), .inval (1'b0),
+        .dbg_sel (4'd0), .dbg_val ()
+    );
+
+    // The data front, chained after it: its cyc_en is the core's.
+    dline #(.GS (1'b1)) u_dline (
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
+        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
+        .d_pred_bcls (cpu_d_pred_bcls), .dbr (cpu_dbr),
+        .cpu_addr (cpu_addr_eff), .cpu_bank (cpu_bank_eff), .cyc_int (cyc_internal),
+        .cpu_rw (cpu_rw_eff), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
+        .il_cyc_en (iline_cyc_en), .accel_din (seq_din), .i_din (i_din_w),
+        .cyc_en (cpu_cyc_en), .d_din (d_din_w),
+        .turbo_en (turbo_en), .turbo_ok (turbo_ok), .wr_en (turbo_wr),
+        .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick), .pending (d_pending_w),
+        .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data), .dev_rw (dev_rw),
+        .dev_bank (dev_bank),
+        .ev_room (room_q), .ev_room_w (room_w_q),
+        .altzp (sw_state[3]),
+        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_off (doff_w),
+        .rw_bank (rw_bank), .map_changed (map_changed),
+        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
+        .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w), .map_settling (front_settling),
+        .dl_req (dl_req_w), .dl_ppn (dl_ppn_w), .dl_line (dl_line_w),
+        .dl_ack (il_ack && !il_req), .dl_done (il_done && il_src_q),
+        .dl_ok (il_ok), .dl_row (il_row),
+        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
+        .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata),
+        .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
+        .pw_data (pw_data_w), .pw_take (pw_take_w && pw_valid_w),
+        .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
+        .inval (1'b0),
+        .cnt_clr (1'b0),
+        .cnt_serves (dl_serves), .cnt_claims (), .cnt_splices (),
+        .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (dl_posts), .cnt_post_waits (),
+        .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
+        .dbg_sel (4'd0), .dbg_val ()
+    );
+    wire [31:0] dl_serves, dl_posts;
+
+    // The posted-write seam, shared with the ROM loader as in master_top.
+    wire        pw_any_valid = pw_valid_w || rl_pw_valid;
+    wire [15:0] pw_any_ppn   = pw_valid_w ? pw_ppn_w  : rl_pw_ppn;
+    wire [7:0]  pw_any_off   = pw_valid_w ? pw_off_w  : rl_pw_off;
+    wire [7:0]  pw_any_data  = pw_valid_w ? pw_data_w : rl_pw_data;
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
@@ -479,8 +603,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_aux (cl_aux), .cl_bank (cl_bank),
         .cl_off (cl_off), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .intc8rom (intc8rom),
         .cl_posted (cl_posted), .cl_sh (cl_sh), .shd_drops (shd_drops), .cl_wdata (cl_wdata),
-        .pw_valid (rl_pw_valid), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
-        .pw_data (rl_pw_data), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
+        .pw_valid (pw_any_valid), .pw_ppn (pw_any_ppn), .pw_off (pw_any_off),
+        .pw_data (pw_any_data), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
         .shd_take_o (shd_take_w), .shd_ppn_o (shd_ppn_w), .shd_off_o (shd_off_w),
         .pf_off (pf_off),
         .sw_state (sw_state), .vid_sw (), .rw_bank (rw_bank),
@@ -496,13 +620,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .swi_mouse_slot (3'd0), .swi_u2_slot (3'd0), .swi_prn_slot (3'd0),
         .q_nsc (), .q_slot (q_slot), .q_swi (q_swi_mmu), .q_swi_quiet (q_swi_quiet),
         .swi_stat_byte (mmu_swi_stat),
-        .p_addr (24'd0), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
-        .d_addr (24'd0), .d_rw (1'b1), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
+        .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
+        .d_addr (dq_addr_w), .d_rw (dq_rw_w), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .map_changed (map_changed),
         .cl_ppn (cl_ppn_w), .pf_ppn (pf_ppn_w),
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
-        .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w)
+        .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
+        .core_dbr (cpu_dbr), .core_pbr (cpu_pc24[23:16])
     );
 
     // ---- the IIgs chipset on $C0xx ------------------------------------------------
@@ -551,7 +676,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .pay_data (pay_data), .pay_valid (pay_valid),
         .op_present (u_present), .image_ready (image_ready),
         .pw_valid (rl_pw_valid), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
-        .pw_data (rl_pw_data), .pw_take (pw_take_w),
+        .pw_data (rl_pw_data), .pw_take (pw_take_w && !pw_valid_w),
         .busy (rom_busy), .overruns (rom_overruns), .rom_ok (rom_loaded)
     );
 
@@ -559,16 +684,17 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_ppn (cl_ppn_w), .cl_off (cl_off[7:0]),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_wdata (cl_wdata), .cl_posted (cl_posted),
-        .pw_pending (1'b0), .pw_ready (pw_ready_w),
+        .pw_pending (d_pending_w), .pw_ready (pw_ready_w),
         .pf_ppn (pf_ppn_w), .pf_off (pf_off[7:0]),
-        .pw_take (pw_take_w), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
+        .pw_take (pw_take_w), .pw_ppn (pw_any_ppn), .pw_off (pw_any_off),
         .shd_take (shd_take_w), .shd_ppn (shd_ppn_w), .shd_off (shd_off_w),
         .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .mw_stb (), .mw_addr (), .mw_byte (), .mwx_stb (), .mw_bank (),
-        .il_req (1'b0), .il_ppn (16'd0), .il_line (4'd0), .il_src (1'b0),
-        .il_ack (), .il_done (), .il_ok (), .il_row (),
+        .il_req (il_req | dl_req_w), .il_ppn (il_req ? il_ppn_w : dl_ppn_w),
+        .il_line (il_req ? il_line_w : dl_line_w), .il_src (!il_req),
+        .il_ack (il_ack), .il_done (il_done), .il_ok (il_ok), .il_row (il_row),
         .serve (serve), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
         .hits (hits), .misses (misses), .served (served), .mismatches (mismatches),
@@ -577,7 +703,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .mem_fills (mem_fills), .mem_flushes (mem_flushes), .mem_declines (mem_declines),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
-        .pr_valid (pr_valid), .pr_data (pr_data)
+        .pr_valid (pr_valid), .pr_data (pr_data),
+        .dbg_sel (4'd0), .dbg_val ()
     );
     wire [31:0] mem_fills, mem_flushes, mem_declines;
 
@@ -685,7 +812,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     dl_d[dl_wp % DL][8*i +: 8] <= smem[wb_to_byte(wb_addr) + i];
             end
             dl_aux[dl_wp % DL] <= wb_aux;
-            dl_time[dl_wp % DL] <= now + 12;
+            dl_time[dl_wp % DL] <= now + DDR_LAT;
             dl_wp <= dl_wp + 1;
         end
         if (dl_rp != dl_wp && now >= dl_time[dl_rp % DL] && !wb_ack_r) begin
@@ -1158,6 +1285,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     integer internal_cycles = 0, internal_writes = 0, internal_io = 0;
     wire internal_pair = (cpu_bank == 8'h00) || (cpu_bank == 8'h01) ||
                          (cpu_bank == 8'hE0) || (cpu_bank == 8'hE1);
+    // A BLOCKED ENTRANT, named: an op or a posted write that reached the
+    // cache's decision while the engine ran (docs/GS.md rung 6, the slow
+    // DDR3 model).  The design says none can; the count says otherwise.
+    always @(posedge clk) if (u_cache.dec_block && !u_cache.iv_run)
+        $display("    BLOCKED at %0d clocks: %s %s ppn $%04X off $%02X (posted %0d, cls %0d) - engine state %0d filling ppn $%04X, hit %0d; last sync %02x/%04x",
+                 $time / 10, u_cache.s_rw ? "read" : "write", u_cache.s_posted ? "posted" : "op",
+                 u_cache.s_ppn, u_cache.s_off, u_cache.s_posted, u_cache.s_cls,
+                 u_cache.state, u_cache.e_ppn, u_cache.s_hit, last_sync[23:16], last_sync[15:0]);
     always @(posedge clk) if (boot_go && cpu_cyc_en && cyc_internal) begin
         internal_cycles = internal_cycles + 1;
         if (!cpu_rw) internal_writes = internal_writes + 1;
@@ -2051,8 +2186,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
 
         $display("boot_gs_tb: done at %0d clocks / %0d bus cycles / %0d instructions",
                  now, bus_cycles, trace_instrs);
-        $display("    counters: fast_ops %0d bus_ops %0d cycles %0d maps %0d retries %0d",
-                 fast_ops, bus_ops, cycles, accel_maps, retries);
+        $display("    counters: fast_ops %0d bus_ops %0d cycles %0d maps %0d retries %0d turbo %0d dline %0d posts %0d",
+                 fast_ops, bus_ops, cycles, accel_maps, retries, turbo_ops, dl_serves, dl_posts);
         $display("    cache: hits %0d misses %0d fills %0d flushes %0d declines %0d late %0d drops %0d",
                  hits, misses, mem_fills, mem_flushes, mem_declines, late_fills, fifo_drops);
         $display("    last PC $%02X/%04X", last_sync[23:16], last_sync[15:0]);

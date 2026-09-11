@@ -26,6 +26,25 @@
 //
 // WAI and STP park: the suite ends those with a null "--------" record, and
 // the check stops one cycle short with no fetch expected.
+//
+// THE SPLIT FRONT'S CONTRACT (docs/GS.md rung 6), sim/cpu_predict_main.cpp's
+// four properties, checked on the same run:
+//
+//   1. LATE CANCEL.  cyc_en is pulled low at random (--cancel=PERCENT, in
+//      bursts), and on every cancelled clock BOTH din ports carry garbage.
+//      A cancelled edge must consume nothing: if the core breathes on one,
+//      the suite fails.
+//   2. RETRY IDENTITY.  Across a cancelled clock the presented cycle - addr,
+//      rw, dout, sync, vda, vpa, vpb, cyc_is_i, pc_addr - must not change.
+//   3. THE I VIEW.  cyc_is_i is VPA, and on every such cycle addr equals
+//      pc_addr.  The byte is driven on i_din alone; d_din carries garbage.
+//      On a data cycle the reverse; on an internal cycle both are garbage.
+//   4. DATA PREDICTION.  d_pred sampled at an advancing edge with d_pred_v
+//      set must equal the address of the cycle that edge begins, d_pred_rw
+//      its direction, and that cycle must be VDA-and-not-VPA; the bank
+//      class must agree with the bank byte (ZERO: $00; DBR: the data bank
+//      register).  Coverage is COUNTED: a data cycle d_pred_v sat out is
+//      reported, and the run expects none.
 
 #include "Vcpu65816.h"
 #include "Vcpu65816___024root.h"
@@ -93,6 +112,37 @@ static bool load_fetch_word(const char *hex) {
 static Vcpu65816 *dut;
 static void tick() { dut->clk = 1; dut->eval(); dut->clk = 0; dut->eval(); }
 
+// xorshift32: cheap, seedable, the same sequence on every machine.
+static unsigned rng_state = 1;
+static unsigned rng() {
+    unsigned x = rng_state;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    return rng_state = x;
+}
+
+// The byte on the port this cycle's stream selects, garbage on the other -
+// and garbage on both when told to (a cancelled clock, an internal cycle).
+static void drive_din(unsigned byte, bool garbage_all) {
+    unsigned g1 = rng() & 0xFF, g2 = rng() & 0xFF;
+    if (garbage_all) { dut->i_din = g1; dut->d_din = g2; return; }
+    if (dut->vpa) { dut->i_din = byte; dut->d_din = g1; }
+    else          { dut->i_din = g1;   dut->d_din = byte; }
+}
+
+struct Presented { unsigned addr, rw, dout, sync, vda, vpa, vpb, cyc_is_i, pc_addr; };
+static Presented presented() {
+    Presented p;
+    p.addr = dut->addr; p.rw = dut->rw; p.dout = dut->dout; p.sync = dut->sync;
+    p.vda = dut->vda; p.vpa = dut->vpa; p.vpb = dut->vpb;
+    p.cyc_is_i = dut->cyc_is_i; p.pc_addr = dut->pc_addr;
+    return p;
+}
+static bool same(const Presented &a, const Presented &b) {
+    return a.addr == b.addr && a.rw == b.rw && a.dout == b.dout && a.sync == b.sync &&
+           a.vda == b.vda && a.vpa == b.vpa && a.vpb == b.vpb &&
+           a.cyc_is_i == b.cyc_is_i && a.pc_addr == b.pc_addr;
+}
+
 static void poke(const Regs &r) {
     auto *R = dut->rootp;
     R->cpu65816__DOT__a = r.a; R->cpu65816__DOT__x = r.x; R->cpu65816__DOT__y = r.y;
@@ -130,11 +180,14 @@ int main(int argc, char **argv) {
     // be held to the reference for that to mean anything.  --no-flags is for
     // bringing a new opcode up, not for a gate.
     bool cmpflags = true;       // compare the core's vda/vpa/vpb (needs the ports)
+    unsigned cancel = 25;       // percent of clocks cancelled (in bursts)
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a.rfind("--tests=", 0) == 0) tests = argv[i] + 8;
         else if (a.rfind("--hex=", 0) == 0) hex = argv[i] + 6;
         else if (a.rfind("--detail=", 0) == 0) detail = strtoul(argv[i] + 9, nullptr, 10);
+        else if (a.rfind("--cancel=", 0) == 0) cancel = strtoul(argv[i] + 9, nullptr, 10);
+        else if (a.rfind("--seed=", 0) == 0) rng_state = strtoul(argv[i] + 7, nullptr, 10) | 1;
         else if (a == "--flags") cmpflags = true;
         else if (a == "--no-flags") cmpflags = false;
     }
@@ -148,10 +201,13 @@ int main(int argc, char **argv) {
     rp = buf.data(); rend = rp + len;
 
     dut = new Vcpu65816;
-    dut->irq_n = 1; dut->nmi_n = 1; dut->cyc_en = 1; dut->din = 0;
+    dut->irq_n = 1; dut->nmi_n = 1; dut->cyc_en = 1; dut->i_din = 0; dut->d_din = 0;
 
     std::map<unsigned, unsigned> pass, fail, shown;   // key = opcode*2 + efile
     unsigned long long total = 0, failed = 0, cycles_run = 0;
+    // The contract's books: cancelled clocks, data cycles predicted and not.
+    unsigned long long cancelled = 0, data_cycles = 0, data_predicted = 0, data_unpredicted = 0;
+    std::map<unsigned, unsigned> unpred_by_op;
     Test t;
     while (rdtest(t)) {
         total++;
@@ -176,12 +232,59 @@ int main(int argc, char **argv) {
         bool bycount = parked || t.opcode == 0x44 || t.opcode == 0x54;
         unsigned ncyc = parked ? t.cyc.size() - 1 : t.cyc.size();
         unsigned k = 0;
+        // The prediction sampled at the last advancing edge, for the cycle
+        // that edge began.
+        bool pred_v = false; unsigned pred_addr = 0, pred_rw = 1, pred_bcls = 0;
         for (;;) {
+            // LATE CANCEL: a burst of cancelled clocks, garbage on both din
+            // ports, and the presented cycle held across every one of them.
+            if (cancel && (rng() % 100) < cancel) {
+                unsigned burst = 1 + (rng() % 4);
+                Presented before = presented();
+                for (unsigned b = 0; b < burst; b++) {
+                    dut->cyc_en = 0;
+                    drive_din(0, true);
+                    dut->eval();
+                    tick(); cancelled++;
+                    dut->cyc_en = 1;
+                    drive_din(0, true);
+                    dut->eval();
+                    Presented after = presented();
+                    if (!same(before, after)) {
+                        snprintf(m, sizeof m, "cycle %u: presented cycle changed across a cancelled clock (addr %06x->%06x rw %u->%u sync %u->%u)\n",
+                                 k, before.addr, after.addr, before.rw, after.rw, before.sync, after.sync);
+                        err += m; break;
+                    }
+                }
+            }
             unsigned addr = dut->addr, rw = dut->rw;
             unsigned din = 0;
             if (rw) { auto it = mem.find(addr); din = (it == mem.end()) ? 0 : it->second; }
-            dut->din = din; dut->eval();
+            drive_din(din, !dut->vda && !dut->vpa);
+            dut->eval();
             unsigned dout = dut->dout, sync = dut->sync;
+            // THE I VIEW, and the prediction made for this cycle.
+            if ((unsigned)dut->cyc_is_i != (unsigned)dut->vpa) { snprintf(m, sizeof m, "cycle %u: cyc_is_i %u but vpa %u\n", k, (unsigned)dut->cyc_is_i, (unsigned)dut->vpa); err += m; }
+            if (dut->cyc_is_i && dut->pc_addr != addr) { snprintf(m, sizeof m, "cycle %u: I cycle at %06x but pc_addr %06x\n", k, addr, (unsigned)dut->pc_addr); err += m; }
+            {
+                unsigned pf = dut->p_flags;
+                if (pf != peek_p()) { snprintf(m, sizeof m, "cycle %u: p_flags %02x but P %02x\n", k, pf, peek_p()); err += m; }
+            }
+            bool is_data = dut->vda && !dut->vpa;
+            if (k > 0) {
+                if (pred_v) {
+                    if (!is_data) { snprintf(m, sizeof m, "cycle %u: predicted a data cycle, got vda %u vpa %u\n", k, (unsigned)dut->vda, (unsigned)dut->vpa); err += m; }
+                    else {
+                        if (pred_addr != addr) { snprintf(m, sizeof m, "cycle %u: d_pred %06x but addr %06x\n", k, pred_addr, addr); err += m; }
+                        if (pred_rw != rw) { snprintf(m, sizeof m, "cycle %u: d_pred_rw %u but rw %u\n", k, pred_rw, rw); err += m; }
+                        unsigned bank = addr >> 16, dbr = dut->rootp->cpu65816__DOT__dbr;
+                        if (pred_bcls == 0 && bank != 0) { snprintf(m, sizeof m, "cycle %u: bank class ZERO but bank %02x\n", k, bank); err += m; }
+                        if (pred_bcls == 1 && bank != dbr) { snprintf(m, sizeof m, "cycle %u: bank class DBR but bank %02x, dbr %02x\n", k, bank, dbr); err += m; }
+                        if (pred_bcls > 2) { snprintf(m, sizeof m, "cycle %u: bank class %u\n", k, pred_bcls); err += m; }
+                    }
+                }
+                if (is_data) { data_cycles++; if (pred_v) data_predicted++; else { data_unpredicted++; unpred_by_op[t.opcode]++; } }
+            }
             // The next fetch ends the instruction - once the expected count is
             // reached.  A block move re-fetches its own opcode per byte, and
             // those syncs are inside the test.
@@ -211,6 +314,8 @@ int main(int argc, char **argv) {
             // that does not exist, and hid the core's dp+1 there for
             // 981,610 tests (docs/GS.md rung 3e).
             if (!rw && dut->vda) { mem[addr] = dout; core_wrote.insert(addr); }
+            // The prediction for the cycle this edge begins.
+            pred_v = dut->d_pred_v; pred_addr = dut->d_pred; pred_rw = dut->d_pred_rw; pred_bcls = dut->d_pred_bcls;
             tick(); cycles_run++;
             k++;
             if (bycount && k >= ncyc) break;
@@ -273,6 +378,13 @@ int main(int argc, char **argv) {
     }
     printf("%llu tests, %llu failed, %u opcode/mode groups failing, %llu cycles\n",
            total, failed, failing_keys, cycles_run);
+    printf("contract: %llu cancelled clocks (%u%%), %llu data cycles, %llu predicted, %llu unpredicted\n",
+           cancelled, cancel, data_cycles, data_predicted, data_unpredicted);
+    if (data_unpredicted) {
+        printf("  unpredicted data cycles by opcode:");
+        for (auto &kv : unpred_by_op) printf(" $%02X:%u", kv.first, kv.second);
+        printf("\n");
+    }
     printf(failed ? "FAIL\n" : "PASS\n");
     delete dut;
     return failed ? 1 : 0;

@@ -1,5 +1,12 @@
 # The dline: 1-clock data
 
+> **ON THE IIgs TOO, 2026-09-11 (docs/GS.md rung 6):** the front builds at
+> `GS = 1` with a 24-bit candidate and its bank CLASS (zero / DBR / other);
+> each cache line keeps its virtual bank as two precomputed valid bits, the
+> shadow and the last byte serve bank zero alone, and writes retire here only
+> in bank zero outside the regions SHADOW duplicates.  The IIe's netlist is
+> unchanged (`GS = 0` folds every bank to zero).
+
 Status: **rungs 1-3 and 5 DONE and ON HARDWARE** (rung 5: 2026-09-07,
 branch `dline_capacity`, fw 52dc698 plus the margin cuts; 72.3x on the
 animated Nox map from 63.4x, wave.dsk 83x drawing / 97x flipping; build

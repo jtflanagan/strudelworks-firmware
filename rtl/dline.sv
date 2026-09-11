@@ -113,17 +113,38 @@
 // as before - correct, only slower.
 //////////////////////////////////////////////////////////////////////////////////
 module dline #(
-    parameter integer PW_DEPTH = 4       // posted writes in flight
+    parameter integer PW_DEPTH = 4,      // posted writes in flight
+    // 1 = the Apple IIgs build (docs/GS.md rung 6): the candidate carries a
+    // bank and a bank CLASS, every cache line the virtual bank it was
+    // filled in with two precomputed valid bits (bank zero / the DBR), the
+    // shadow and the last byte serve bank zero alone, and a write retires
+    // here only in bank zero outside the regions SHADOW can duplicate.  At
+    // 0 every bank is a constant zero and the IIe's netlist is what it was.
+    parameter bit GS = 1'b0
 ) (
     input  wire        clk,
     input  wire        rst,
     input  wire        cpu_rst,
 
     // The core: the prediction, and the live cycle it names.
-    input  wire [15:0] d_pred,
+    input  wire [23:0] d_pred,
     input  wire        d_pred_v,
     input  wire        d_pred_rw,
+    // The predicted bank's CLASS (rtl/cpu65816.sv): 0 = literally zero,
+    // 1 = the data bank register, 2 = other (rides the dispatcher).  A
+    // 65C02's caller ties it to zero.  And the DBR itself, register-direct,
+    // for the DBR-class valid bits; part of the map, so a change of it
+    // revalidates every line here.
+    input  wire [1:0]  d_pred_bcls,
+    input  wire [7:0]  dbr,
     input  wire [15:0] cpu_addr,
+    // The live cycle's bank as the board presents it (the vector pull's
+    // redirect to $FF included - so a vector pull predicted in bank zero
+    // does not match, and rides the dispatcher), and whether the cycle is
+    // the 65816's internal one, which touches nothing and must leave no
+    // last byte behind.  Zero on a IIe.
+    input  wire [7:0]  cpu_bank,
+    input  wire        cyc_int,
     input  wire        cpu_rw,
     input  wire [7:0]  cpu_dout,       // a write's byte, register-direct
     input  wire        cyc_is_i,
@@ -150,6 +171,7 @@ module dline #(
     output logic [15:0] dev_addr,
     output logic [7:0]  dev_data,
     output logic       dev_rw,
+    output logic [7:0] dev_bank,      // the retire's bank (GS); zero on a IIe
     input  wire        ev_room,       // the merge can take a read's word (best effort)
     input  wire        ev_room_w,     // ...and a write's, guaranteed a clock later
 
@@ -161,7 +183,7 @@ module dline #(
     // cycle.  rw_bank is the wanted RamWorks bank - only its being non-zero
     // matters here, as the write retire's qualifier; map_changed is the
     // map's edge.
-    output logic [15:0] dq_addr,
+    output logic [23:0] dq_addr,      // {bank, address}: the MMU's 24-bit query
     output wire        dq_rw,
     input  wire [1:0]  d_cls,
     input  wire [15:0] d_off,
@@ -217,6 +239,10 @@ module dline #(
     // The image.
     input  wire        inval,
 
+    // The debug pair's window (rtl/wb_regfile.sv DBG_SEL/DBG_VAL).
+    input  wire [3:0]  dbg_sel,
+    output logic [31:0] dbg_val,
+
     // Counters.
     input  wire        cnt_clr,
     output logic [31:0] cnt_serves,      // every retire, reads and writes
@@ -239,6 +265,7 @@ module dline #(
     localparam [1:0] CLS_LC  = 2'd2;
     localparam [1:0] CLS_ROM = 2'd3;
     localparam integer PW_AW = $clog2(PW_DEPTH);
+    localparam [1:0] BCLS_ZERO = 2'd0, BCLS_DBR = 2'd1;
 
     // ---- the shadow ---------------------------------------------------------
     // Rows, not bytes: a claim installs il_row whole in one clock, a splice
@@ -264,14 +291,16 @@ module dline #(
     // an ALTZP flip is invisible - the flip itself is a bus op ~98 clocks
     // long, and the flip's own cycle is $C0xx, never served here.  The bank
     // register the same: it moves only at a bus op's commit.
-    logic zs_main_q, rwb_nz_q;
+    logic zs_main_q, rwb_nz_q, dbr_z_q;
     always_ff @(posedge clk) begin
         if (rst) begin
             zs_main_q <= 1'b1;
             rwb_nz_q  <= 1'b0;
+            dbr_z_q   <= 1'b1;
         end else begin
             zs_main_q <= !altzp;
             rwb_nz_q  <= (rw_bank != 8'd0);
+            dbr_z_q   <= !GS || (dbr == 8'd0);
         end
     end
 
@@ -291,6 +320,13 @@ module dline #(
     // the serve cycle from the REGISTERED address instead: register-rooted,
     // a whole cycle to run, sampled by the edge that ends the cycle.
     logic        dq_v, dq_wv;
+    // ...and, on the IIgs, the candidate's bank CLASS as three registered
+    // bits: dq_b0 (the bank is zero - literally, or the DBR while it is
+    // zero), dq_d (the DBR's), dq_wsh (the address lies in a region SHADOW
+    // can duplicate a write of: text pages 1 and 2, hires pages 1 and 2,
+    // the Super Hi-Res range).  Six address bits and a class code, into
+    // registers, like the address itself; no bank byte is compared live.
+    logic        dq_b0, dq_d, dq_wsh;
     // Fanout copies of the byte index (2026-09-06): dq_addr[3:0] drove 165
     // loads - every row mux of the shadow and the four CAM ways, plus the
     // compares - and its first hop alone was 1.27 ns on the worst path.
@@ -322,6 +358,11 @@ module dline #(
         end
         if (cyc_en) begin
             dq_addr   <= d_pred;
+            dq_b0     <= !GS || (d_pred_bcls == BCLS_ZERO) || (d_pred_bcls == BCLS_DBR && dbr_z_q);
+            dq_d      <= GS && (d_pred_bcls == BCLS_DBR);
+            dq_wsh    <= GS && ((d_pred[15:10] == 6'b000001) || (d_pred[15:10] == 6'b000010) ||
+                                (d_pred[15:13] == 3'b001) || (d_pred[15:13] == 3'b010) ||
+                                (d_pred[15:13] == 3'b011) || (d_pred[15:13] == 3'b100));
             dq_ix_sh     <= d_pred[3:0];
             dq_ix_cam[0] <= d_pred[3:0];
             dq_ix_cam[1] <= d_pred[3:0];
@@ -337,7 +378,7 @@ module dline #(
     assign dq_rw = !dq_wv;
     wire [7:0] dq_byte = shrow[dq_addr[8:4]][dq_ix_sh*8 +: 8];
     wire       sh_hit  = dq_v && (dq_addr[15:9] == 7'd0) &&
-                         shv[dq_addr[8:4]] && zs_main_q;
+                         shv[dq_addr[8:4]] && zs_main_q && dq_b0;
 
     // ---- the CAM ------------------------------------------------------------
     // Four lines, FF rows, and TWO tags each: a VIRTUAL one the serve
@@ -372,7 +413,7 @@ module dline #(
     localparam integer WW   = 2;                // a way index
     wire [IW-1:0] sidx = dq_addr[IW+3:4];
     wire [TW-1:0] stag = dq_addr[15:IW+4];
-    wire       in_sh_estate = (dq_addr[15:9] == 7'd0) && zs_main_q;
+    wire       in_sh_estate = (dq_addr[15:9] == 7'd0) && zs_main_q && dq_b0;
     wire       d_cls_ok     = (d_cls == CLS_RAM) || (d_cls == CLS_LC);
     integer k;
     logic [NSET-1:0] cv   [0:NWAY-1];           // valid, per line (flip-flops)
@@ -392,6 +433,15 @@ module dline #(
     logic [7:0]      cbank [0:NWAY-1][0:NSET-1];
     logic [3:0]      creg  [0:NWAY-1][0:NSET-1];
     logic            cfold [0:NWAY-1][0:NSET-1];
+    // ...and (GS) the VIRTUAL bank it was filled in, with the two bits the
+    // serve reads instead of comparing it: cvz, the bank is zero (fixed at
+    // the install); cvd, the bank is the DBR as it stands (recomputed with
+    // every map change - the DBR is part of the map).  A candidate of class
+    // zero reads cvz, of class DBR reads cvd, of any other class nothing:
+    // one registered select on two flops, beside the valid bit.
+    logic [7:0]      cvbank [0:NWAY-1][0:NSET-1];
+    logic [NSET-1:0] cvz   [0:NWAY-1];
+    logic [NSET-1:0] cvd   [0:NWAY-1];
     logic [WW-1:0]   rrp  [0:NSET-1];           // the next victim, per set
     logic [NWAY-1:0] hitv;
     wire  [7:0]      wbyte [0:NWAY-1];
@@ -399,6 +449,11 @@ module dline #(
     // install's inputs (inst_w, t_set, the m_*_t stamp) and the splice's
     // (spc_hit_w, spi, iw_*) are declared ahead of the generate below.
     logic [NWAY-1:0] inst_w, spc_hit;
+    // The splice's inputs, DECLARED HERE, above the generate that names them
+    // (tools/check_generate_scope.py, docs/GS.md rung 6): a name a generate
+    // block uses must be declared above it, or Vivado makes an undriven net.
+    wire             iw_v;
+    wire [7:0]       iw_off8, iw_data;
     logic [IW-1:0]   t_set;
     logic [IW-1:0]   spi;
     logic [PTW-1:0]  spt;
@@ -406,6 +461,7 @@ module dline #(
     logic [15:0]     m_ppn_q_t;
     logic [3:0]      m_reg_q_t;
     logic            m_fold_q_t;
+    logic [7:0]      m_vbank_q_t;
     wire  [127:0]    dl_row_w = dl_row;
     genvar gw;
     generate for (gw = 0; gw < NWAY; gw = gw + 1) begin : g_way
@@ -417,7 +473,8 @@ module dline #(
         logic [PTW-1:0] pt  [0:NSET-1];
         wire [127:0] srow = {rows[3][dq_sx[4*gw+3]], rows[2][dq_sx[4*gw+2]],
                              rows[1][dq_sx[4*gw+1]], rows[0][dq_sx[4*gw+0]]};
-        assign hitv[gw]  = cv[gw][dq_st[gw]] && (vt[dq_st[gw]] == stag);
+        assign hitv[gw]  = cv[gw][dq_st[gw]] && (vt[dq_st[gw]] == stag) &&
+                           (!GS || (dq_b0 ? cvz[gw][dq_st[gw]] : (dq_d && cvd[gw][dq_st[gw]])));
         assign wbyte[gw] = {8{hitv[gw]}} & srow[dq_ix_cam[gw]*8 +: 8];
         // The splice's cut: the write's set, its physical identity - against
         // every RETAINED line, valid or not, so a line written while it is
@@ -494,19 +551,34 @@ module dline #(
             for (rb = 0; rb < NSET; rb = rb + 1)
                 rv1[ra][rb] <= rt_rd[creg[ra][rb]];
 
+    // ON THE IIgs the rule holds inside the four pair banks ($00/$01,
+    // $E0/$E1), where the IIe's switches apply - the side the table names
+    // OR'd with the bank's own low bit, an odd bank named directly being the
+    // auxiliary memory (rtl/apple_mmu.sv xlate) - and nothing outside them
+    // ever moves: RAM $02-$7F and the void page are themselves under every
+    // map.  (ROM-class lines are never held here.)  The DBR-class bit is
+    // recomputed on the same clock, since the DBR moves the map too.
     logic [NSET-1:0] rv_ok [0:NWAY-1];
+    logic [NSET-1:0] rv_d  [0:NWAY-1];
     logic [7:0]      rv_bank;
+    logic            rv_pair;
     integer rc, rd_;
     always_comb begin
         for (rc = 0; rc < NWAY; rc = rc + 1) begin
             for (rd_ = 0; rd_ < NSET; rd_ = rd_ + 1) begin
-                rv_bank = (rv1[rc][rd_][3:2] == BS_AUX) ? rwb_p1 :
-                          (rv1[rc][rd_][3:2] == BS_ROM) ? 8'hFF : 8'd0;
-                rv_ok[rc][rd_] = cr[rc][rd_] && rv1[rc][rd_][0] &&
-                                 ((rv1[rc][rd_][6:5] == CLS_RAM) ||
-                                  (rv1[rc][rd_][6:5] == CLS_LC)) &&
-                                 (cbank[rc][rd_] == rv_bank) &&
-                                 (cfold[rc][rd_] == rv1[rc][rd_][1]);
+                rv_pair = !GS || (cvbank[rc][rd_][7:1] == 7'd0) || (cvbank[rc][rd_][7:1] == 7'h70);
+                if (GS) rv_bank = {cvbank[rc][rd_][7:1],
+                                   cvbank[rc][rd_][0] | (rv1[rc][rd_][3:2] == BS_AUX)};
+                else    rv_bank = (rv1[rc][rd_][3:2] == BS_AUX) ? rwb_p1 :
+                                  (rv1[rc][rd_][3:2] == BS_ROM) ? 8'hFF : 8'd0;
+                rv_ok[rc][rd_] = cr[rc][rd_] &&
+                                 (!rv_pair ||
+                                  (rv1[rc][rd_][0] &&
+                                   ((rv1[rc][rd_][6:5] == CLS_RAM) ||
+                                    (rv1[rc][rd_][6:5] == CLS_LC)) &&
+                                   (cbank[rc][rd_] == rv_bank) &&
+                                   (cfold[rc][rd_] == rv1[rc][rd_][1])));
+                rv_d[rc][rd_]  = !GS || (cvbank[rc][rd_] == dbr);
             end
         end
     end
@@ -570,7 +642,7 @@ module dline #(
     // clears the register - while $Cxxx is excluded whole, so no soft
     // switch fires late and the INTC8ROM latch never misses its food.
     logic        lb_v;
-    logic [15:0] lb_addr;
+    logic [23:0] lb_addr;
     logic [7:0]  lb_byte;
     wire lb_hit = dq_v && lb_v && (dq_addr == lb_addr) && (dq_addr[15:12] != 4'hC);
 
@@ -615,6 +687,27 @@ module dline #(
     wire [7:0] serve_byte = ({8{sh_hit}} & dq_byte) | ({8{cam_hit}} & cam_byte) |
                             ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte);
 
+    // THE IIgs READS AT TWO CLOCKS, REGISTERED (docs/GS.md rung 6).  On the
+    // IIe the served byte goes to the core live, and the 65C02's AGU - an
+    // 8-bit adder under an incrementer - absorbs it.  The 65816's AGU is a
+    // 16-bit adder with a bank incrementer above it (direct page adds D,
+    // (dp),Y adds the index into the pointer's high byte in the same
+    // cycle), and the byte arrives at its din 5.6 ns into the clock: the
+    // first GS build missed by 1.6 ns on exactly that loop, into the
+    // core's own bank register as much as into the prediction.  So at GS
+    // the byte and the hit are REGISTERED at the end of the cycle's first
+    // clock and the read retires on its second: the core's din is
+    // register-direct, and the whole serve cone stays inside this module.
+    // Writes keep their one clock (their verdict is register-rooted
+    // already).  A 2-clock read is still a third of the dispatcher's.
+    logic       sv_hit_q;
+    logic [7:0] sv_byte_q;
+    always_ff @(posedge clk) begin
+        if (rst || cpu_rst) sv_hit_q <= 1'b0;
+        else                sv_hit_q <= GS && serve_hit && !cyc_en;
+        sv_byte_q <= serve_byte;
+    end
+
     wire d_cycle = !cyc_is_i &&  cpu_rw;
     wire w_cycle = !cyc_is_i && !cpu_rw;
     wire pf_near_full;
@@ -623,7 +716,12 @@ module dline #(
         if (rst) w_room <= 1'b0;
         else     w_room <= ev_room_w && !pf_near_full;
     end
-    wire w_serv  = wr_en && dq_wv && (dq_addr[15:14] != 2'b11) && !rwb_nz_q;
+    // ...and on the IIgs, bank zero only (class zero: the direct page, the
+    // stack, and DBR-relative while the DBR is zero) and never a region
+    // SHADOW can duplicate into the Mega II bank - the posted path carries
+    // no duplicate, so those writes ride the dispatcher, which does.
+    wire w_serv  = wr_en && dq_wv && (dq_addr[15:14] != 2'b11) && !rwb_nz_q &&
+                   (!GS || (dq_b0 && !dq_wsh));
 
     logic fc_q, claim_q;
     always_ff @(posedge clk) begin
@@ -634,11 +732,15 @@ module dline #(
             claim_q <= (turbo_en && serve_hit && d_cycle) || (w_serv && w_cycle);
         end
     end
-    wire addr_match = (cpu_addr == dq_addr) && (fc_q || claim_q);
+    wire addr_match = (cpu_addr == dq_addr[15:0]) && (!GS || (cpu_bank == dq_addr[23:16])) &&
+                      (fc_q || claim_q);
     // A read retires only into room on the stream (docs/VIRTUAL_TIME.md):
     // with the merge full the op falls to the dispatcher rather than leave
-    // a cycle without a word.
-    wire r_retire = !cpu_rst && turbo_en && turbo_ok && serve_hit && d_cycle && addr_match && ev_room;
+    // a cycle without a word.  At GS: from the registered hit, and never on
+    // the cycle's first clock (sv_hit_q still describes the previous
+    // candidate there - it was cleared by that clock's cyc_en).
+    wire r_hit    = GS ? (sv_hit_q && !fc_q) : serve_hit;
+    wire r_retire = !cpu_rst && turbo_en && turbo_ok && r_hit && d_cycle && addr_match && ev_room;
     wire w_retire = !cpu_rst && turbo_ok && w_serv && w_room && w_cycle && addr_match;
     wire retire   = r_retire || w_retire;
 
@@ -648,9 +750,10 @@ module dline #(
     // (wbyte is already gated), the last byte's and, when nothing here
     // serves, the sequencer's - not a mux after an OR after an OR: two LUT
     // levels where the build at +0.008 spent three.
-    assign d_din    = ({8{sh_hit}} & dq_byte) | wbyte[0] | wbyte[1] | wbyte[2] | wbyte[3] |
-                      ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte) |
-                      ({8{!serve_hit}} & accel_din);
+    assign d_din    = GS ? (sv_hit_q ? sv_byte_q : accel_din)
+                         : (({8{sh_hit}} & dq_byte) | wbyte[0] | wbyte[1] | wbyte[2] | wbyte[3] |
+                            ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte) |
+                            ({8{!serve_hit}} & accel_din));
     assign claim    = claim_q;
 
     // The last byte follows the retiring edge: whatever READ completed -
@@ -664,10 +767,10 @@ module dline #(
             lb_v <= 1'b0;
         end else begin
             if (cl_valid && !cl_rw) lb_v <= 1'b0;
-            if (cyc_en) begin
+            if (cyc_en && !cyc_int) begin
                 if (cpu_rw) begin
                     lb_v    <= 1'b1;
-                    lb_addr <= cpu_addr;
+                    lb_addr <= {GS ? cpu_bank : 8'd0, cpu_addr};
                     lb_byte <= cyc_is_i ? i_din : d_din;
                 end else lb_v <= 1'b0;
             end
@@ -682,7 +785,7 @@ module dline #(
         if (rst || inval) spl_v <= 1'b0;
         else              spl_v <= w_retire;
         if (w_retire) begin
-            spl_addr <= dq_addr;
+            spl_addr <= dq_addr[15:0];
             spl_data <= cpu_dout;
             spl_ppn  <= d_ppn;
             spl_off8 <= dq_addr[7:0];   // the fold never touches a[11:4]
@@ -725,8 +828,8 @@ module dline #(
     // The ISA argument, checked: no data read of an address is served the
     // clock after a write to it retired (the splice lands on that edge).
     always @(posedge clk)
-        if (r_retire && spl_v && spl_addr == dq_addr)
-            $error("dline: a read of $%04x served on the splice clock of a write to it", dq_addr);
+        if (r_retire && spl_v && spl_addr == dq_addr[15:0])
+            $error("dline: a read of $%04x served on the splice clock of a write to it", dq_addr[15:0]);
     // ...and the FIFO never overflows: a push into a full FIFO is a lost write.
     always @(posedge clk)
         if (spl_v && pf_cnt == (PW_AW+1)'(PW_DEPTH) && !pw_take)
@@ -737,6 +840,7 @@ module dline #(
     // (P1), decided the next (P2) and in the banks the one after that
     // (P3); a bank read presented on the clock after THAT sees it.  So
     // pending covers three clocks past the take.
+    logic [31:0] cnt_shclaims, cnt_decl, cnt_blk_ok, cnt_blk_room, cnt_wblk_room;
     logic [2:0] drain_sr;
     always_ff @(posedge clk) begin
         if (rst) drain_sr <= 3'd0;
@@ -763,6 +867,7 @@ module dline #(
     logic [15:0] m_ppn_q;
     logic [3:0]  m_reg_q;
     logic        m_fold_q;
+    logic [7:0]  m_vbank_q;
 
     // The fill trigger's classify, registered one clock behind: the MMU
     // round trip is too deep to sit live in a miss cone, and a claim is
@@ -784,10 +889,11 @@ module dline #(
         pq_fresh  <= !cyc_en && !rst && !cpu_rst;
     end
 
-    wire live_zs   = (cpu_addr[15:9] == 7'd0);
+    wire live_zs   = (cpu_addr[15:9] == 7'd0) && (!GS || (cpu_bank == 8'd0 && !cyc_int));
     wire live_miss = turbo_en && d_cycle && live_zs && zs_main_q &&
                      !shv[cpu_addr[8:4]] && !inval;
-    wire live_cmiss = turbo_en && d_cycle && dq_v && (dq_addr == cpu_addr) &&
+    wire live_cmiss = turbo_en && d_cycle && dq_v && (dq_addr[15:0] == cpu_addr) &&
+                      (!GS || (dq_addr[23:16] == cpu_bank)) &&
                       pq_fresh && pc_ok_q && !in_sh_estate && !cam_hit &&
                       !inval && !map_settling;
 
@@ -802,10 +908,10 @@ module dline #(
     // The CAM's cut: any entry whose physical tag matches - per-entry FF
     // rows, so every matching entry updates with no port to contend for.
     wire        cl_w     = cl_valid && !cl_rw && cl_wr_image && !cl_posted;
-    wire        iw_v     = cl_w || spl_v;
+    assign      iw_v     = cl_w || spl_v;
     wire [15:0] iw_ppn   = spl_v ? spl_ppn  : cl_ppn;
-    wire [7:0]  iw_off8  = spl_v ? spl_off8 : cl_off[7:0];
-    wire [7:0]  iw_data  = spl_v ? spl_data : wdata;
+    assign      iw_off8  = spl_v ? spl_off8 : cl_off[7:0];
+    assign      iw_data  = spl_v ? spl_data : wdata;
 
     // The shadow's cut: physical main pages 0 and 1, the zero page and the
     // stack, which is exactly PPN 0 and PPN 1.
@@ -848,9 +954,10 @@ module dline #(
         tick_q    <= retire;
         dev_valid <= retire;
         if (retire) begin
-            dev_addr <= dq_addr;
-            dev_data <= cpu_rw ? serve_byte : cpu_dout;
+            dev_addr <= dq_addr[15:0];
+            dev_data <= cpu_rw ? (GS ? sv_byte_q : serve_byte) : cpu_dout;
             dev_rw   <= cpu_rw;
+            dev_bank <= GS ? dq_addr[23:16] : 8'd0;
         end
 
         miss_q      <= live_miss && (cst == C_IDLE);
@@ -858,6 +965,7 @@ module dline #(
         cmiss_q     <= live_cmiss && (cst == C_IDLE);
         m_off_q     <= p_off_q2;
         m_vt_q      <= dq_addr[15:4];
+        m_vbank_q   <= GS ? dq_addr[23:16] : 8'd0;
         m_ppn_q     <= p_ppn_q2;
         m_reg_q     <= p_reg_q2;
         m_fold_q    <= p_fold_q2;
@@ -865,24 +973,32 @@ module dline #(
         if (rst || inval) begin
             shv <= 32'd0;
             for (k = 0; k < NWAY; k = k + 1) begin
-                cv[k] <= '0; cr[k] <= '0; crev[k] <= '0;
+                cv[k] <= '0; cr[k] <= '0; crev[k] <= '0; cvz[k] <= '0; cvd[k] <= '0;
             end
             for (k = 0; k < NSET; k = k + 1) rrp[k] <= '0;
             cst <= C_IDLE; dl_req <= 1'b0; dl_line <= 4'd0; c_line <= 5'd0;
             dl_ppn <= 16'd0; t_cam <= 1'b0; t_way <= '0; t_set <= '0;
-            m_ppn_q_t <= 16'd0; m_reg_q_t <= 4'd0; m_fold_q_t <= 1'b0;
+            m_ppn_q_t <= 16'd0; m_reg_q_t <= 4'd0; m_fold_q_t <= 1'b0; m_vbank_q_t <= 8'd0;
             miss_q <= 1'b0; cmiss_q <= 1'b0;
-            tick_q <= 1'b0; dev_valid <= 1'b0;
+            tick_q <= 1'b0; dev_valid <= 1'b0; dev_bank <= 8'd0;
             if (rst) begin
                 cnt_serves <= 32'd0; cnt_claims <= 32'd0; cnt_splices <= 32'd0;
                 cnt_cam_serves <= 32'd0; cnt_lb_serves <= 32'd0;
                 cnt_posts <= 32'd0; cnt_post_waits <= 32'd0;
                 cnt_reval_drop <= 32'd0; cnt_reval_revive <= 32'd0;
                 cnt_rev_serves <= 32'd0;
+                cnt_shclaims <= 32'd0; cnt_decl <= 32'd0; cnt_blk_ok <= 32'd0;
+                cnt_blk_room <= 32'd0; cnt_wblk_room <= 32'd0;
                 dev_addr <= 16'd0; dev_data <= 8'd0; dev_rw <= 1'b1;
             end
         end else begin
             if (retire) cnt_serves <= cnt_serves + 32'd1;
+            // The hardware's books (docs/GS.md rung 6).
+            if ((cst == C_W2) && !t_cam && !sp_hit) cnt_shclaims <= cnt_shclaims + 32'd1;
+            if ((cst == C_W1) && dl_done && !dl_ok) cnt_decl <= cnt_decl + 32'd1;
+            if (serve_hit && d_cycle && turbo_en && !turbo_ok) cnt_blk_ok <= cnt_blk_ok + 32'd1;
+            if (r_hit && d_cycle && turbo_ok && !ev_room) cnt_blk_room <= cnt_blk_room + 32'd1;
+            if (w_serv && w_cycle && turbo_ok && !w_room) cnt_wblk_room <= cnt_wblk_room + 32'd1;
             if (r_retire) begin
                 if (!sh_hit && cam_hit) cnt_cam_serves <= cnt_cam_serves + 32'd1;
                 if (!sh_hit && !cam_hit) cnt_lb_serves <= cnt_lb_serves + 32'd1;
@@ -924,6 +1040,7 @@ module dline #(
                     m_ppn_q_t <= m_ppn_q;
                     m_reg_q_t <= m_reg_q;
                     m_fold_q_t <= m_fold_q;
+                    m_vbank_q_t <= m_vbank_q;
                     dl_ppn    <= m_ppn_q;
                     dl_line   <= m_off_q[3:0];
                     dl_req    <= 1'b1;
@@ -964,6 +1081,9 @@ module dline #(
                             cbank[t_way][t_set] <= m_ppn_q_t[15:8];
                             creg[t_way][t_set]  <= m_reg_q_t;
                             cfold[t_way][t_set] <= m_fold_q_t;
+                            cvbank[t_way][t_set] <= m_vbank_q_t;
+                            cvz[t_way][t_set]   <= (m_vbank_q_t == 8'd0);
+                            cvd[t_way][t_set]   <= !GS || (m_vbank_q_t == dbr);
                             rrp[t_set]       <= t_way + 1'b1;
                             cnt_claims       <= cnt_claims + 32'd1;
                         end
@@ -1003,6 +1123,7 @@ module dline #(
             if (reval_q) begin
                 for (k = 0; k < NWAY; k = k + 1) begin
                     cv[k]   <= rv_ok[k];
+                    cvd[k]  <= rv_d[k];
                     crev[k] <= crev[k] | (rv_ok[k] & ~cv[k]);
                 end
             end
@@ -1021,6 +1142,29 @@ module dline #(
                 cnt_rev_serves <= 32'd0;
             end
         end
+    end
+
+    // The debug pair's window.
+    always_comb begin
+        case (dbg_sel)
+            4'd0:  dbg_val = cnt_serves;
+            4'd1:  dbg_val = cnt_claims;
+            4'd2:  dbg_val = cnt_splices;
+            4'd3:  dbg_val = cnt_cam_serves;
+            4'd4:  dbg_val = cnt_lb_serves;
+            4'd5:  dbg_val = cnt_posts;
+            4'd6:  dbg_val = cnt_post_waits;
+            4'd7:  dbg_val = cnt_rev_serves;
+            4'd8:  dbg_val = cnt_shclaims;
+            4'd9:  dbg_val = cnt_decl;
+            4'd10: dbg_val = cnt_blk_ok;
+            4'd11: dbg_val = cnt_blk_room;
+            4'd12: dbg_val = cnt_wblk_room;
+            4'd13: dbg_val = {cst, pending, dq_v, dq_wv, dq_b0, dq_d, zs_main_q, turbo_en, wr_en,
+                              sv_hit_q, claim_q, fc_q, 3'd0, shv[15:0]};
+            4'd14: dbg_val = cnt_reval_drop;
+            default: dbg_val = cnt_reval_revive;
+        endcase
     end
 
 endmodule

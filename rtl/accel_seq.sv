@@ -111,6 +111,9 @@ module accel_seq #(
     input  wire [1:0]  mode,            // 0 off, 1 reads fast, 2 reads and writes fast
     input  wire [15:0] target,          // ops per bus cycle, 8.8; 0 = unlimited
     input  wire        cnt_clr,
+    // The fronts bypassed (ACCEL_CTRL[29], a diagnosis level): turbo_en and
+    // turbo_wr stay low, so neither front claims, retires or posts.
+    input  wire        fronts_dis,
 
     // What the card can serve right now.
     input  wire        mem_serve,
@@ -394,8 +397,8 @@ module accel_seq #(
             turbo_en_q <= 1'b0;
             turbo_wr_q <= 1'b0;
         end else begin
-            turbo_en_q <= accel_on && mem_serve && !reset_seq;
-            turbo_wr_q <= accel_on && mem_serve && !reset_seq && (mode == MODE_RW);
+            turbo_en_q <= accel_on && mem_serve && !reset_seq && !fronts_dis;
+            turbo_wr_q <= accel_on && mem_serve && !reset_seq && !fronts_dis && (mode == MODE_RW);
         end
     end
     assign turbo_en = turbo_en_q;

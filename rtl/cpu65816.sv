@@ -103,7 +103,15 @@ module cpu65816 #(
     output wire  [23:0] addr,       // 24-bit: {bank, high, low}
     output wire         rw,         // 1 = read, 0 = write
     output wire  [7:0]  dout,
-    input  wire  [7:0]  din,
+    // The data return, SPLIT BY STREAM as rtl/cpu65c02.sv's is (the user's
+    // design, docs/GS.md rung 6): a program-stream cycle's byte arrives on
+    // i_din, everything else's on d_din, and the core muxes by its own
+    // cyc_is_i - so the instruction front holds its byte on i_din every
+    // clock and the data front its own on d_din, neither caring what the
+    // other speculates.  A consumer with one data source ties them together
+    // (sim/boot_gs_tb.sv, sim/cpu816_irq_tb.sv) and nothing changes.
+    input  wire  [7:0]  i_din,
+    input  wire  [7:0]  d_din,
 
     input  wire         irq_n,      // level sensitive, active low
     input  wire         nmi_n,      // edge sensitive, active low
@@ -113,10 +121,67 @@ module cpu65816 #(
     output wire         vpa,        // valid program address (both on a fetch)
     output wire         vpb,        // vector pull, active high here
     output wire         emu,        // E flag: 1 = 6502 emulation mode
-    output wire         halted      // STP executed; only rst clears it
+    output wire         halted,     // STP executed; only rst clears it
+
+    // ---- the split I/D front (docs/GS.md rung 6) ----------------------------
+    // The 65C02's contract (rtl/cpu65c02.sv), widened to the 24-bit space.
+    // cyc_is_i is VPA: the cycle's byte is the program stream's, and its
+    // address is {pbr, pc} BY CONSTRUCTION - the generator gives VPA only to
+    // PC-sourced cycles, and the harness checks it every cycle.  pc_addr is
+    // REGISTER-DIRECT, free of the AGU and din, which is what the
+    // instruction front's compares want.
+    output wire         cyc_is_i,
+    output wire  [23:0] pc_addr,    // {pbr, pch, pcl}
+    // The data-stream prediction: the address, direction and BANK CLASS of
+    // the NEXT cycle, valid when that cycle is a data access (VDA and not
+    // VPA - an internal cycle is neither and predicts nothing).  Not a
+    // guess: `urom` holds the microinstruction that runs next cycle, its
+    // addr_sel names the source, and every source is a register whose
+    // next-state value this cycle already computes (the same arms as the
+    // register file below).  Slot 0 is never a data cycle - the cycle after
+    // an opcode fetch is at PC on every 65xx - so the fetch cycle needs no
+    // second read of the decode ROM; the harness counts the data cycles
+    // that went unpredicted, and expects none.  It inherits din's timing
+    // (adl/adh/bank load from din); the consumer REGISTERS it, always.
+    output wire  [23:0] d_pred,
+    output wire         d_pred_v,
+    output wire         d_pred_rw,
+    // Which bank register the predicted bank came from - the data front
+    // keeps one valid bit per line per class and never compares bank
+    // bytes in a serve cone (docs/GS.md "Fronts with a bank byte").  ZERO:
+    // the bank is literally $00 (direct page, stack, vectors, a long
+    // pointer's bank of zero, PBR-relative while PBR is zero).  DBR: the
+    // bank is the data bank register as it stands.  OTHER: anything read
+    // from memory (long addressing) or carried across a bank edge by an
+    // index - it rides the dispatcher, counted.
+    output wire  [1:0]  d_pred_bcls,
+    output wire  [7:0]  p_flags,    // {N,V,M,X,D,I,Z,C} register-direct: what
+                                    // a branch will test (rtl/iline.sv)
+    output wire  [7:0]  dbr_o,      // the data bank register, for the data
+                                    // front's DBR-class valid bits and the map
+    // One clock, REGISTERED, after an edge that wrote DBR or PBR (PLB, JSL,
+    // JML, RTL, RTI, a block move, a vector pull).  The bank registers are
+    // part of the map (rtl/apple_mmu.sv map_now) and a change is a map
+    // change - but map_changed rises one clock after the write, and this
+    // is the clock in between, when the next fetch is already at the new
+    // PBR and every front's valid bit still describes the old one.  The
+    // fronts and the dispatcher's turbo_ok take it as a hold.
+    output logic        bank_wr
 );
 
+    // The bank classes (d_pred_bcls).
+    localparam [1:0] BCLS_ZERO = 2'd0, BCLS_DBR = 2'd1, BCLS_OTHER = 2'd2;
+
 `include "cpu65816_ucode.vh"
+
+    // The one data return the datapath sees, muxed from the split ports by
+    // this cycle's own stream classification (cyc_is_i = VPA, below).  The
+    // opcode itself is taken from i_din directly (fetch_op): a fetch is a
+    // program-stream cycle by definition, so the mux is transparent there,
+    // and sourcing it from the I byte keeps the data front's served byte
+    // out of the decode ROM's address cone - the false path the 65C02 cut
+    // the same way (docs/DLINE.md, the serve-byte cone).
+    wire [7:0] din = cyc_is_i ? i_din : d_din;
 
     // ---- microcode ROM ------------------------------------------------------
     // {opcode, ucycle}: 4096 x 66 bits.  Sixteen slots per opcode because a
@@ -185,7 +250,7 @@ module cpu65816 #(
     (* rom_style = "distributed" *) logic [7:0] useq0 [0:255];
     initial $readmemh(USEQ0_FILE, useq0);
 
-    wire [7:0] fetch_op = take_int ? 8'h00 : din;
+    wire [7:0] fetch_op = take_int ? 8'h00 : i_din;
     wire [7:0] seq0     = useq0[fetch_op];
 
     // Field extraction.  Positions come from the generated header, so these
@@ -232,6 +297,7 @@ module cpu65816 #(
     logic        f_n, f_v, f_m, f_x, f_d, f_i, f_z, f_c, f_e;
     logic [7:0]  ir;
     logic [7:0]  adl, adh, bank;    // effective address under construction
+    logic [1:0]  bank_cls;          // ...and which register the bank came from
     logic [15:0] md;                // scratch: RMW result, pointer, jump target
     logic [3:0]  ucyc;      // slot index of THIS cycle's microinstruction
     logic [3:0]  nslot;     // slot index of NEXT cycle's microinstruction
@@ -392,6 +458,12 @@ module cpu65816 #(
     assign vpb    = (f_asel == UC_ADDR_VEC) || (f_asel == UC_ADDR_VEC1);
     assign emu    = f_e;
     assign halted = hlt;
+
+    // The split front's views (docs/GS.md rung 6).
+    assign cyc_is_i = f_bus[0];
+    assign pc_addr  = {pbr, pc};
+    assign p_flags  = p_bits;
+    assign dbr_o    = dbr;
 
     // ---- ALU ----------------------------------------------------------------
     // Two units.  An 8-bit arithmetic core for everything driven by a memory
@@ -712,6 +784,103 @@ module cpu65816 #(
         else              uaddr = {ir, slot_n2};
     end
 
+    // ---- next data address (docs/GS.md rung 6) ------------------------------
+    // d_pred: the address of the NEXT cycle when that cycle is a data access
+    // - rtl/cpu65c02.sv's d_pred, widened.  The microinstruction that runs
+    // next cycle is `urom` (the flop the block RAM lands in; uc_q takes it
+    // at this edge), except after an opcode fetch, where it is slot 0 from
+    // the decode ROM - and slot 0 is never a data cycle, so d_pred_v is
+    // simply low on a fetch.  Its addr_sel names next cycle's source, and
+    // every data source is a register this cycle's loads settle: the
+    // next-state values below are the same expressions the register file's
+    // edge applies, in the same order (a later arm wins, as it does there).
+    // The bank class rides beside the bank register: loaded ZERO/DBR by the
+    // microcode's own bank source, OTHER when the bank came from memory or
+    // an index carried across a bank edge.  PBR-relative data (JMP (abs,X)'s
+    // pointer) is ZERO while PBR is zero and OTHER else - the front has no
+    // third class, and the IIe never leaves bank zero.
+    wire [2:0] n_asel = urom[UCP_ADDR_SEL +: 3];
+    wire       n_rw   = urom[UCP_RW];
+    wire [1:0] n_bus  = urom[UCP_BUS +: 2];
+
+    logic [7:0]  adl_n, adh_n, bank_n;
+    logic [15:0] s_n;
+    logic [1:0]  bcls_n;
+    // The AGU's bank arm moved the bank exactly when it carried or borrowed.
+    wire bk_moved = (f_bk_c == UC_BK_C_BORROW) ? agu_hco : bk_carry;
+    always_comb begin
+        adl_n = adl; adh_n = adh; bank_n = bank; s_n = s; bcls_n = bank_cls;
+        case (f_ld_adl)
+            UC_LD_ADL_AGU: adl_n = agu_lo;
+            UC_LD_ADL_DIN: adl_n = din;
+            UC_LD_ADL_MDL: adl_n = md[7:0];
+            default: ;
+        endcase
+        case (f_ld_adh)
+            UC_LD_ADH_AGU: adh_n = agu_hi;
+            UC_LD_ADH_DIN: adh_n = din;
+            UC_LD_ADH_MDH: adh_n = md[15:8];
+            default: ;
+        endcase
+        case (f_ld_bk)
+            UC_LD_BK_AGU: begin
+                bank_n = agu_bk;
+                bcls_n = ((f_bk_a == UC_BK_A_DIN) || bk_moved) ? BCLS_OTHER : bank_cls;
+            end
+            UC_LD_BK_DIN:  begin bank_n = din;   bcls_n = BCLS_OTHER; end
+            UC_LD_BK_DBR:  begin bank_n = dbr;   bcls_n = BCLS_DBR;   end
+            UC_LD_BK_PBR:  begin bank_n = pbr;   bcls_n = (pbr == 8'h00) ? BCLS_ZERO : BCLS_OTHER; end
+            UC_LD_BK_ZERO: begin bank_n = 8'h00; bcls_n = BCLS_ZERO;  end
+            default: ;
+        endcase
+        case (f_ld_s)
+            UC_LD_S_INC:  s_n = f_e ? {8'h01, s[7:0] + 8'd1} : s + 16'd1;
+            UC_LD_S_DEC:  s_n = f_e ? {8'h01, s[7:0] - 8'd1} : s - 16'd1;
+            UC_LD_S_INCN: s_n = s + 16'd1;
+            UC_LD_S_DECN: s_n = s - 16'd1;
+            UC_LD_S_NORM: if (f_e) s_n = {8'h01, s[7:0]};
+            UC_LD_S_AGU:  s_n = {agu_hi, agu_lo};
+            default: ;
+        endcase
+        // TXS/TCS: the only words that write S whole, and both move a
+        // register (alu_res = alu_m16 for MOV and TCS), so S takes the
+        // operand mux directly - not alu_res, whose cone holds din.  The
+        // simulation assertion below holds the microcode to that.
+        if (f_wb == UC_WB_S16) s_n = f_e ? {8'h01, alu_m16[7:0]} : alu_m16;
+        if (f_alu_op == UC_OP_XCE && f_c) s_n[15:8] = 8'h01;
+    end
+
+    // Reset holds rw high next cycle as this one; the vector fetch's PC load
+    // is what ends in_rst, on this cycle's edge.
+    wire in_rst_n = in_rst && !(cyc_en && f_ld_pc == UC_LD_PC_JMP && f_asel == UC_ADDR_VEC1);
+
+    logic [23:0] d_pred_mux;
+    logic [1:0]  d_bcls_mux;
+    always_comb begin
+        case (n_asel)
+            UC_ADDR_AD:   begin d_pred_mux = {bank_n, adh_n, adl_n};        d_bcls_mux = bcls_n;    end
+            UC_ADDR_SP:   begin d_pred_mux = {8'h00, s_n};                  d_bcls_mux = BCLS_ZERO; end
+            UC_ADDR_VEC:  begin d_pred_mux = {8'h00, 8'hFF, vec_lo};        d_bcls_mux = BCLS_ZERO; end
+            UC_ADDR_VEC1: begin d_pred_mux = {8'h00, 8'hFF, vec_lo + 8'd1}; d_bcls_mux = BCLS_ZERO; end
+            default:      begin d_pred_mux = {pbr, pc};                     d_bcls_mux = BCLS_OTHER; end
+        endcase
+    end
+    assign d_pred      = d_pred_mux;
+    assign d_pred_bcls = d_bcls_mux;
+    // A data access next cycle: VDA without VPA (UC_BUS_D), and not slot 0.
+    assign d_pred_v    = !f_sync && (n_bus == UC_BUS_D) && (n_asel != UC_ADDR_PC);
+    assign d_pred_rw   = n_rw | in_rst_n;
+
+`ifndef SYNTHESIS
+    always_ff @(posedge clk) begin
+        if (!rst && cyc_en && f_wb == UC_WB_S16 &&
+            !(f_alu_op == UC_OP_MOV || f_alu_op == UC_OP_TCS))
+            $error("cpu65816: a microcode word writes S whole from an ALU operation other than MOV/TCS");
+        if (!rst && cyc_en && f_bus[0] && f_asel != UC_ADDR_PC)
+            $error("cpu65816: a VPA cycle whose address is not PC-sourced");
+    end
+`endif
+
     // ---- register file ------------------------------------------------------
     // NOTE, and it is the difference between 115 MHz and 128 MHz: there is no
     // conditional-load gate here.  An earlier version carried a `ld_if` field
@@ -739,6 +908,7 @@ module cpu65816 #(
             // a 65816 comes up as a 6502 and stays one until XCE says otherwise.
             f_e <= 1'b1; f_m <= 1'b1; f_x <= 1'b1;
             ir <= 8'h00; adl <= 8'h00; adh <= 8'h00; bank <= 8'h00;
+            bank_cls <= BCLS_ZERO;
             md <= 16'h0000;
             agu_c <= 1'b0; agu_hc <= 1'b0; hlt <= 1'b0;
             nmi_prev <= 1'b1; nmi_pend <= 1'b0;
@@ -773,8 +943,8 @@ module cpu65816 #(
                     int_nmi  <= nmi_pend;
                     nmi_pend <= 1'b0;
                 end else begin
-                    ir      <= din;
-                    int_brk <= (din == 8'h00);
+                    ir      <= i_din;
+                    int_brk <= (i_din == 8'h00);
                     int_nmi <= 1'b0;
                 end
             end
@@ -792,14 +962,12 @@ module cpu65816 #(
                     UC_LD_ADH_MDH: adh <= md[15:8];
                     default: ;
                 endcase
-                case (f_ld_bk)
-                    UC_LD_BK_AGU:  bank <= agu_bk;
-                    UC_LD_BK_DIN:  bank <= din;
-                    UC_LD_BK_DBR:  bank <= dbr;
-                    UC_LD_BK_PBR:  bank <= pbr;
-                    UC_LD_BK_ZERO: bank <= 8'h00;
-                    default: ;
-                endcase
+                // The bank and its class together (bank_n/bcls_n above are
+                // these same arms, computed for d_pred).
+                if (f_ld_bk != UC_LD_BK_NONE) begin
+                    bank     <= bank_n;
+                    bank_cls <= bcls_n;
+                end
                 case (f_ld_pc)
                     // Held on an interrupt entry - see int_pc_hold above.
                     UC_LD_PC_INC:    if (!int_pc_hold) pc <= pc_inc;
@@ -967,6 +1135,11 @@ module cpu65816 #(
         // holds it primes the pipeline from the forced address, so the first
         // cycle after release already has its successor in hand.
         if (rst || cyc_en) urom <= ucode[uaddr];
+
+        // A bank register written on this edge (the fronts' hold, above).
+        bank_wr <= !rst && cyc_en &&
+                   ((f_wb == UC_WB_PBR) || (f_wb == UC_WB_DBR) ||
+                    (f_ld_pc == UC_LD_PC_JMP && f_asel == UC_ADDR_VEC1));
     end
 
 endmodule

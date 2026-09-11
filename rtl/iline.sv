@@ -85,7 +85,14 @@
 // anything: its wants are classified, filtered and snooped like any fill,
 // so a misread stream only ever wastes a prefetch.
 //////////////////////////////////////////////////////////////////////////////////
-module iline (
+module iline #(
+    // 1 = the Apple IIgs build (docs/GS.md rung 6): the lines carry the
+    // virtual bank they were fetched in, the fill asks the map with a bank,
+    // and the I/O window's exclusions apply in the four pair banks alone.
+    // At 0 every bank below is a constant zero and the IIe's netlist is
+    // what it was.
+    parameter bit GS = 1'b0
+) (
     input  wire        clk,
     input  wire        rst,           // the card's
     // The core's: the card's OR RES'.  The machine resetting kills the
@@ -102,6 +109,11 @@ module iline (
     // construction, and it is free of the AGU and din always - so every
     // compare in this module starts at flip-flop outputs.
     input  wire [15:0] pc_addr,
+    // ...and the bank it is in - the 65816's PBR, register-direct; a 65C02
+    // has none and the caller ties it.  A program-stream fetch is at
+    // {pc_bank, pc_addr} by construction.  PBR is part of the map (the
+    // MMU's map_now), so a change of it revalidates every line here.
+    input  wire [7:0]  pc_bank,
     input  wire        cpu_rw,
     input  wire        cpu_sync,
     input  wire        cyc_is_i,
@@ -125,10 +137,11 @@ module iline (
     output logic [15:0] tev_addr,
     output logic [7:0]  tev_data,
     output logic        tev_sync,
+    output logic [7:0]  tev_bank,     // the retire's bank (GS); zero on a IIe
     input  wire         ev_room,      // the merge can take a word this clock
 
     // The MMU: the prefetch's classification, and the map's edge.
-    output wire [15:0] p_addr,
+    output wire [23:0] p_addr,        // {pc_bank, the line, 4'h0}
     input  wire        map_changed,
     // The PHYSICAL side of the same picture (docs/MEMORY_REFACTOR.md, rung 3):
     // the picked line's page, the REGION it classifies in, the fold bit, and
@@ -182,7 +195,12 @@ module iline (
 
     // The flushes.
     input  wire        serve,         // MEM_CTRL's: off empties the front
-    input  wire        inval
+    input  wire        inval,
+
+    // The debug pair's window (rtl/wb_regfile.sv DBG_SEL/DBG_VAL): the
+    // books below, and a state snapshot, by item.
+    input  wire [3:0]  dbg_sel,
+    output logic [31:0] dbg_val
 );
 
     localparam [1:0] CLS_BUS = 2'd0;
@@ -204,6 +222,10 @@ module iline (
     logic [15:0]  t_ppn  [0:1];
     logic [3:0]   t_reg  [0:1];
     logic         t_fold [0:1];
+    // ...and the VIRTUAL bank it was fetched in (GS): valid only while it is
+    // the program's bank, which the revalidation checks - the tags stay
+    // sixteen bits and no bank byte is compared in a serve cone.
+    logic [7:0]   t_vbank [0:1];
     logic [127:0] ldata  [0:1];
     logic         cur;                // the slot execution is in
 
@@ -236,6 +258,7 @@ module iline (
     logic [15:0]        cam_ppn  [0:CAMN-1];
     logic [3:0]         cam_reg  [0:CAMN-1];
     logic               cam_fold [0:CAMN-1];
+    logic [7:0]         cam_vbank [0:CAMN-1];
     logic [127:0]       cam_data [0:CAMN-1];   // the LUTRAM
     logic [2:0]         cam_wp;                // round-robin allocation
 
@@ -394,7 +417,16 @@ module iline (
 
     // The fourth candidate's serve: exp-independent, so the branch's dummy
     // cycles (and a page cross's second dummy) never disturb it.
-    wire tgt_here  = tgt_v && cyc_is_i && cpu_rw && (pc_addr == tgt_q);
+    // NOT ON THE IIgs (docs/GS.md rung 6).  Its select is a live 16-bit
+    // compare on the PC, and on the 65816 the byte it selects feeds the
+    // slot-0 lookahead - the opcode's decode-ROM read, its condition and
+    // the block RAM's address, the core's binding loop - so the I byte
+    // must be register-direct there: `lhit_q ? i_byte_q : accel_din`.  A
+    // 65816's taken branch spends its add cycle as an internal cycle on
+    // the dispatcher anyway, so the zero-stall target serve bought it
+    // nothing; the target fetch re-aims the predictor and serves a beat
+    // later, as any jump does.
+    wire tgt_here  = !GS && tgt_v && cyc_is_i && cpu_rw && (pc_addr == tgt_q);
     wire tgt_serve = tgt_here && tgt_lhit_q && !(lhit_q && (exp_q == pc_addr));
 
     // ---- the INTC8ROM latch, registered once -------------------------------
@@ -412,8 +444,18 @@ module iline (
     // third would not).
     logic intc8rom_q;
     always_ff @(posedge clk) intc8rom_q <= rst ? 1'b0 : intc8rom;
+    // THE I/O WINDOW EXISTS IN FOUR BANKS ON A IIgs - $00/$01 and $E0/$E1 -
+    // and nowhere else: in bank $FF $C3xx is the ROM's own code and $CFFF
+    // is a byte like any other (rtl/apple_mmu.sv, the bank classes).  So
+    // every exclusion below is qualified by the program bank being one of
+    // the pair, registered: it lags a bank change by one clock, and that
+    // clock is under the bank hold (cpu65816's bank_wr).  A IIe is always
+    // in the window.
+    logic pair_q;
+    always_ff @(posedge clk)
+        pair_q <= !GS || (pc_bank[7:1] == 7'd0) || (pc_bank[7:1] == 7'h70);
     function automatic logic excl(input [11:0] tag);
-        excl = (tag[11:4] == 8'hC3 && !intc8rom_q) || (tag == 12'hCFF);
+        excl = pair_q && ((tag[11:4] == 8'hC3 && !intc8rom_q) || (tag == 12'hCFF));
     endfunction
 
     // A taken branch to a non-resident line asks the engine early (the
@@ -428,7 +470,7 @@ module iline (
         end else begin
             if (ew_taken) ew_v <= 1'b0;
             if (resolving && res_taken &&
-                !(res_tgt[15:8] == 8'hC0) && !excl(res_tgt[15:4])) begin
+                !(pair_q && res_tgt[15:8] == 8'hC0) && !excl(res_tgt[15:4])) begin
                 ew_v   <= 1'b1;
                 ew_tag <= res_tgt[15:4];
             end
@@ -563,23 +605,38 @@ module iline (
     // RAM or LC - and both want the bank and the fold they were filled with.
     // The ROM is bank $FF now, so a line's own bank says which class the
     // table must still be naming: no separate ROM flag per line.
+    // ON THE IIgs the same rule holds inside the four pair banks, where the
+    // IIe's switches apply - with the side the table names OR'd with the
+    // bank's own low bit, since an odd bank named directly IS the auxiliary
+    // memory (rtl/apple_mmu.sv xlate) - and NOTHING outside them ever
+    // moves: the ROM, RAM $02-$7F and the void page are themselves under
+    // every map.  And a line is valid only in the bank it was fetched in:
+    // the tags are sixteen bits, so this compare is what keeps bank $FE's
+    // $1000 line from serving bank $FF's fetch.
     function automatic logic rv_ok(input [RT_W-1:0] e,
-                                   input [7:0] bank, input fold);
+                                   input [7:0] bank, input fold,
+                                   input [7:0] vbank);
         logic [7:0] want;
+        logic       pair;
         begin
-            want = (e[3:2] == BS_AUX) ? rwb_p1 : (e[3:2] == BS_ROM) ? 8'hFF : 8'd0;
-            rv_ok = e[0] &&                                   // front-servable
-                    ((bank == 8'hFF) ? (e[6:5] == CLS_ROM)
-                                     : (e[6:5] == CLS_RAM || e[6:5] == CLS_LC)) &&
-                    (bank == want) && (fold == e[1]);
+            pair = !GS || (vbank[7:1] == 7'd0) || (vbank[7:1] == 7'h70);
+            if (GS) want = (e[3:2] == BS_ROM) ? 8'hFF
+                                              : {vbank[7:1], vbank[0] | (e[3:2] == BS_AUX)};
+            else    want = (e[3:2] == BS_AUX) ? rwb_p1 : (e[3:2] == BS_ROM) ? 8'hFF : 8'd0;
+            rv_ok = (!GS || (vbank == pc_bank)) &&
+                    (!pair ||
+                     (e[0] &&                                   // front-servable
+                      ((bank == 8'hFF) ? (e[6:5] == CLS_ROM)
+                                       : (e[6:5] == CLS_RAM || e[6:5] == CLS_LC)) &&
+                      (bank == want) && (fold == e[1])));
         end
     endfunction
-    wire rv_t0 = r[0] && rv_ok(rv1_t[0], t_ppn[0][15:8], t_fold[0]);
-    wire rv_t1 = r[1] && rv_ok(rv1_t[1], t_ppn[1][15:8], t_fold[1]);
+    wire rv_t0 = r[0] && rv_ok(rv1_t[0], t_ppn[0][15:8], t_fold[0], t_vbank[0]);
+    wire rv_t1 = r[1] && rv_ok(rv1_t[1], t_ppn[1][15:8], t_fold[1], t_vbank[1]);
     wire [CAMN-1:0] rv_c;
     generate for (gr = 0; gr < CAMN; gr = gr + 1) begin : g_rvc
         assign rv_c[gr] = cam_r[gr] &&
-                          rv_ok(rv1_c[gr], cam_ppn[gr][15:8], cam_fold[gr]);
+                          rv_ok(rv1_c[gr], cam_ppn[gr][15:8], cam_fold[gr], cam_vbank[gr]);
     end endgenerate
 
     // The scanner's seams (rtl/iscan.sv, instantiated below).
@@ -592,7 +649,7 @@ module iline (
     wire kill_now = map_settling || inval || !serve ||
                     // The INTC8ROM latch read clear under a $C3 fetch: the
                     // serve is refused before map_changed's kill lands.
-                    (pc_addr[15:8] == 8'hC3 && !intc8rom_q) ||
+                    (pair_q && pc_addr[15:8] == 8'hC3 && !intc8rom_q) ||
                     (hslot ? snp_kill1 : snp_kill0) ||
                     // ...and a retained copy of THIS fetch's line dying on
                     // this very clock cancels a serve sourced from it, the
@@ -631,6 +688,7 @@ module iline (
     logic [15:0] f_ppn;
     logic [3:0]  f_reg;
     logic        f_fold;
+    logic [7:0]  f_vbank;
     wire f_active = (fst != F_IDLE);
 
     // The engine's pick, and the classifier's answer for it.  The demand
@@ -646,7 +704,7 @@ module iline (
     wire        pick_scan  = !want_pending && !ew_v && sw_v;
     wire [11:0] p_tag  = want_pending ? want_tag[pick] :
                          pick_early   ? ew_tag : sw_tag;
-    assign p_addr = {p_tag, 4'h0};
+    assign p_addr = {pc_bank, p_tag, 4'h0};
     // FS replaces `p_cls != BUS`: it is the region table's own answer for
     // whether this front may serve the line, and it carries the page-$C3
     // rule (a $C3 line is servable only while INTC8ROM is set).
@@ -836,13 +894,31 @@ module iline (
     logic [31:0] cnt_reval_drop, cnt_reval_revive;
     assign idrop_o   = cnt_reval_drop;
     assign irevive_o = cnt_reval_revive;
+    // ...and the fill engine's and the retire's, for the hardware (docs/GS.md
+    // rung 6): grants, declines, installs, restarts, unservable wants, and
+    // the clocks a held fetch stood blocked - by turbo_ok, by the merge's
+    // room, by a kill.
+    logic [31:0] cnt_acks, cnt_decl, cnt_inst, cnt_restart, cnt_unserv;
+    logic [31:0] cnt_blk_ok, cnt_blk_room, cnt_blk_kill;
     always_ff @(posedge clk) begin
         if (rst) begin
             cnt_promotes <= 32'd0; cnt_cam_fills <= 32'd0;
             cnt_scan_fills <= 32'd0; cnt_loop_hold <= 32'd0;
             cnt_scan_block <= 32'd0; cnt_cam_serves <= 32'd0;
             cnt_tgt_serves <= 32'd0; cnt_slow_i <= 32'd0;
+            cnt_acks <= 32'd0; cnt_decl <= 32'd0; cnt_inst <= 32'd0; cnt_restart <= 32'd0;
+            cnt_unserv <= 32'd0; cnt_blk_ok <= 32'd0; cnt_blk_room <= 32'd0; cnt_blk_kill <= 32'd0;
         end else begin
+            if (il_ack) cnt_acks <= cnt_acks + 32'd1;
+            if ((fst == F_W1) && il_done && !il_ok) cnt_decl <= cnt_decl + 32'd1;
+            if ((fst == F_W2) && !f_restart && !f_cam) cnt_inst <= cnt_inst + 32'd1;
+            if (f_restart) cnt_restart <= cnt_restart + 32'd1;
+            if ((fst == F_IDLE) && !f_restart && want_pending && !stale_own && !stale_other &&
+                !promote_go && (p_bus || excl(p_tag)))
+                cnt_unserv <= cnt_unserv + 32'd1;
+            if (ihit && turbo_en && !turbo_ok) cnt_blk_ok <= cnt_blk_ok + 32'd1;
+            if (ihit && turbo_ok && !ev_room) cnt_blk_room <= cnt_blk_room + 32'd1;
+            if (ihit && turbo_ok && ev_room && kill_now) cnt_blk_kill <= cnt_blk_kill + 32'd1;
             if (accel_cyc_en && cyc_is_i && cpu_rw)
                 cnt_slow_i <= cnt_slow_i + 32'd1;
             if (want_pending && f_active && f_cam)
@@ -875,7 +951,7 @@ module iline (
         .clk         (clk),
         .rst         (rst),
         .enable      (turbo_en && serve && !cpu_rst),
-        .intc8rom    (intc8rom_q),
+        .intc8rom    (intc8rom_q || !pair_q),
         .anchor_v    (anchor_v),
         .anchor_addr (pc_addr),
         .rd_slot     (sc_slot),
@@ -900,6 +976,7 @@ module iline (
             tev_addr <= pc_addr;
             tev_data <= i_din;
             tev_sync <= cpu_sync;
+            tev_bank <= GS ? pc_bank : 8'd0;
         end
 
         if (rst) begin
@@ -909,15 +986,16 @@ module iline (
             t_ppn[0] <= 16'd0; t_ppn[1] <= 16'd0;
             t_reg[0] <= 4'd0; t_reg[1] <= 4'd0;
             t_fold[0] <= 1'b0; t_fold[1] <= 1'b0;
+            t_vbank[0] <= 8'd0; t_vbank[1] <= 8'd0;
             cur <= 1'b0;
             want_v[0] <= 1'b0; want_v[1] <= 1'b0;
             want_tag[0] <= 12'd0; want_tag[1] <= 12'd0;
             fst <= F_IDLE;
             f_slot <= 1'b0; f_cam <= 1'b0;
             f_vtag <= 12'd0;
-            f_ppn <= 16'd0; f_reg <= 4'd0; f_fold <= 1'b0;
-            tick_q <= 1'b0; tev_valid <= 1'b0;
-            for (s = 0; s < CAMN; s = s + 1) begin cam_v[s] <= 1'b0; cam_r[s] <= 1'b0; end
+            f_ppn <= 16'd0; f_reg <= 4'd0; f_fold <= 1'b0; f_vbank <= 8'd0;
+            tick_q <= 1'b0; tev_valid <= 1'b0; tev_bank <= 8'd0;
+            for (s = 0; s < CAMN; s = s + 1) begin cam_v[s] <= 1'b0; cam_r[s] <= 1'b0; cam_vbank[s] <= 8'd0; end
             cnt_reval_drop <= 32'd0; cnt_reval_revive <= 32'd0;
             cam_wp <= 3'd0;
         end else begin
@@ -951,6 +1029,7 @@ module iline (
                         f_ppn    <= cam_ppn[cam_idx];
                         f_reg    <= cam_reg[cam_idx];
                         f_fold   <= cam_fold[cam_idx];
+                        f_vbank  <= cam_vbank[cam_idx];
                         cam_pidx <= cam_idx;
                         want_v[pick] <= 1'b0;
                         fst <= F_CAM;
@@ -963,6 +1042,7 @@ module iline (
                         f_ppn  <= p_ppn;
                         f_reg  <= p_reg;
                         f_fold <= p_fold;
+                        f_vbank <= GS ? pc_bank : 8'd0;
                         want_v[pick] <= 1'b0;
                         fst <= F_REQ;
                     end
@@ -979,6 +1059,7 @@ module iline (
                         f_ppn  <= p_ppn;
                         f_reg  <= p_reg;
                         f_fold <= p_fold;
+                        f_vbank <= GS ? pc_bank : 8'd0;
                         fst    <= F_REQ;
                     end
                 end
@@ -994,6 +1075,7 @@ module iline (
                         t_ppn[f_slot]  <= f_ppn;
                         t_reg[f_slot]  <= f_reg;
                         t_fold[f_slot] <= f_fold;
+                        t_vbank[f_slot] <= f_vbank;
                     end else begin
                         want_v[f_slot]   <= 1'b1;
                         want_tag[f_slot] <= f_vtag;
@@ -1016,6 +1098,7 @@ module iline (
                         t_ppn[f_slot]  <= f_ppn;
                         t_reg[f_slot]  <= f_reg;
                         t_fold[f_slot] <= f_fold;
+                        t_vbank[f_slot] <= f_vbank;
                     end
                     // EVERY committed line is retained: the CAM records it,
                     // deduplicated - a live entry with this tag keeps its
@@ -1028,6 +1111,7 @@ module iline (
                         cam_ppn[cam_wp]  <= f_ppn;
                         cam_reg[cam_wp]  <= f_reg;
                         cam_fold[cam_wp] <= f_fold;
+                        cam_vbank[cam_wp] <= f_vbank;
                         cam_wp <= cam_wp + 3'd1;
                     end
                     fst <= F_IDLE;
@@ -1114,6 +1198,32 @@ module iline (
                 fst <= F_IDLE;
             end
         end
+    end
+
+    // The debug pair's window.
+    logic [7:0] cam_v_pk;
+    always_comb begin
+        for (int q = 0; q < CAMN; q = q + 1) cam_v_pk[q] = cam_v[q];
+        case (dbg_sel)
+            4'd0:  dbg_val = cnt_slow_i;
+            4'd1:  dbg_val = cnt_cam_fills;
+            4'd2:  dbg_val = cnt_scan_fills;
+            4'd3:  dbg_val = cnt_promotes;
+            4'd4:  dbg_val = cnt_cam_serves;
+            4'd5:  dbg_val = cnt_tgt_serves;
+            4'd6:  dbg_val = cnt_acks;
+            4'd7:  dbg_val = cnt_decl;
+            4'd8:  dbg_val = cnt_inst;
+            4'd9:  dbg_val = cnt_restart;
+            4'd10: dbg_val = cnt_blk_ok;
+            4'd11: dbg_val = cnt_blk_room;
+            4'd12: dbg_val = cnt_blk_kill;
+            4'd13: dbg_val = cnt_unserv;
+            4'd14: dbg_val = {v[1], v[0], r[1], r[0], fst, want_v[1], want_v[0],
+                              turbo_en, serve, inval, pair_q, intc8rom_q, lhit_q, 1'b0,
+                              cam_v_pk, cur, f_cam, f_slot, 5'd0};
+            default: dbg_val = cnt_reval_drop;
+        endcase
     end
 
 endmodule

@@ -314,7 +314,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
         .fast_ops (fast_ops), .map_changed (map_changed), .map_settling (map_settling), .maps (accel_maps), .cen_v (), .cen_sel (), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
         .cycles (cycles), .wait_clocks (wait_clocks),
-        .retries (retries)
+        .retries (retries),
+        .fronts_dis (1'b0)
     );
 
     iline u_iline (
@@ -339,7 +340,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
         .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
-        .serve (serve), .inval (inval)
+        .serve (serve), .inval (inval),
+        .dbg_sel (4'd0), .dbg_val ()
     );
 
     // The data front, chained after the instruction front exactly as in
@@ -371,7 +373,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cnt_clr (cnt_clr),
         .cnt_serves (), .cnt_claims (), .cnt_splices (),
         .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits (),
-        .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves ()
+        .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
+        .dbg_sel (4'd0), .dbg_val ()
     );
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
@@ -502,7 +505,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .mem_fills (), .mem_flushes (), .mem_declines (),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
-        .pr_valid (pr_valid), .pr_data (pr_data)
+        .pr_valid (pr_valid), .pr_data (pr_data),
+        .dbg_sel (4'd0), .dbg_val ()
     );
 
     wire [1:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;

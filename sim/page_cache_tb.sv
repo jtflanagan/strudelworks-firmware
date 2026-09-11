@@ -121,7 +121,8 @@ module page_cache_tb;
         .mem_fills (mem_fills), .mem_flushes (mem_flushes), .mem_declines (mem_declines),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we), .pq_line (pq_line),
         .pq_wdata (pq_wdata), .pq_ready (pq_ready),
-        .pr_valid (pr_valid), .pr_data (pr_data)
+        .pr_valid (pr_valid), .pr_data (pr_data),
+        .dbg_sel (4'd0), .dbg_val ()
     );
 
     // ---- the arbiter, the client, the streaming dummy -------------------------

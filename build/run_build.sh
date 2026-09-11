@@ -43,6 +43,7 @@ if [ "$gs" = 1 ]; then
     python3 tools/gen_adb_revmap.py --check || { echo "pre-flight FAILED: ADB reverse keymap stale (python3 tools/gen_adb_revmap.py)"; exit 1; }
 fi
 sim/lint.sh > "$root/build/lint_$tag.log" 2>&1 || { echo "pre-flight FAILED: lint (build/lint_$tag.log):"; grep -B1 -A6 FAIL "$root/build/lint_$tag.log" | head -40; exit 1; }
+python3 tools/check_generate_scope.py > "$root/build/genscope_$tag.log" 2>&1 || { echo "pre-flight FAILED: a generate block names a later declaration (build/genscope_$tag.log):"; cat "$root/build/genscope_$tag.log"; exit 1; }
 echo "lint: OK ($(grep -c ' OK$' "$root/build/lint_$tag.log") modules)"
 
 flag="--master"; [ "$gs" = 1 ] && flag="--gs"
@@ -63,6 +64,19 @@ build/wns.sh "$log"
 # IIgs mouse never moved on hardware for exactly this (gs_adb.sv, 2026-09-11)
 # while every bench passed, and Verilator's MULTIDRIVEN never fires for
 # same-clock drivers - so this log line is the only gate there is.
+# AN UNDRIVEN NET IN A GENERATE SCOPE IS A MISS TOO.  A name used inside a
+# generate block but declared below it is a forward reference Verilator
+# resolves and Vivado does not: it makes an implicit, undriven net in the
+# block's scope (Synth 8-3848 "does not have driver") and the logic runs on
+# zeros.  Both fronts on the IIgs did exactly that - timing met, every want
+# unservable, every posted write into page zero (docs/GS.md rung 6).
+# tools/check_generate_scope.py catches it before the build; this line is
+# the gate on the log itself.
+ud=$(grep -c "Synth 8-3848" "$log" 2>/dev/null || true)
+if [ "${ud:-0}" != "0" ]; then
+    echo "UNDRIVEN: $ud net(s) without a driver - NOT GREEN, a generate block names a later declaration:"
+    grep "8-3848" "$log" | grep -o 'Net [^ ]*' | sort -u | head -20 | sed 's/^/    /'
+fi
 md=$(grep -c "Synth 8-6859" "$log" 2>/dev/null || true)
 if [ "${md:-0}" != "0" ]; then
     echo "MULTI-DRIVEN: $md driver conflicts - NOT GREEN, a register's logic was discarded by synthesis:"

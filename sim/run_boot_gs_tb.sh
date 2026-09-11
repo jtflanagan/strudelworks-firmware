@@ -45,7 +45,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/boot_work"
 mkdir -p "$work"
 
-instrs=20000 clks=400000000 mode=2 target=0 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0 keyhold=20000 mirror="" pagewatch=0
+instrs=20000 clks=400000000 mode=2 target=0 ddrlat=12 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0 keyhold=20000 mirror="" pagewatch=0
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport_gs.bin"
 hdv=""
@@ -56,6 +56,7 @@ for a in "$@"; do
         --clks=*) clks="${a#*=}" ;;
         --mode=*) mode="${a#*=}" ;;
         --target=*) target="${a#*=}" ;;
+        --ddrlat=*) ddrlat="${a#*=}" ;;
         --rom=*) rom="${a#*=}" ;;
         --hdv=*) hdv="${a#*=}" ;;
         --hdrom=*) hdrom="${a#*=}" ;;
@@ -137,6 +138,7 @@ xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
 srcs=(
     "$root/sim/boot_gs_tb.sv"
     "$root/rtl/cpu65816.sv" "$root/rtl/accel_seq.sv"
+    "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv"
     "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv"
     "$root/rtl/gs_io.sv" "$root/rtl/gs_adb.sv" "$root/rtl/gs_doc.sv" "$root/rtl/gs_clock.sv" "$root/rtl/gs_intc.sv" "$root/rtl/gs_iwm.sv"
     "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv"
@@ -157,6 +159,7 @@ if [ "$vl" = 1 ]; then
         -GROM_CHUNKS="$chunks" \
         -GMODE="$mode" \
         -GTARGET="$target" \
+        -GDDR_LAT="$ddrlat" \
         -GMAX_INSTRS="$instrs" \
         -GMAX_CLKS="$clks" \
         -GHDROMF="\"$work/hdrom.hex\"" \

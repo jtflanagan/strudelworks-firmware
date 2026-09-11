@@ -170,6 +170,10 @@ module page_cache #(
     output logic [31:0] mem_fills,
     output logic [31:0] mem_flushes,
     output logic [31:0] mem_declines,
+    // The debug pair's window (rtl/wb_regfile.sv DBG_SEL/DBG_VAL): the
+    // hierarchy-only books, readable on the hardware (docs/GS.md rung 6).
+    input  wire [3:0]  dbg_sel,
+    output logic [31:0] dbg_val,
 
     // ---- the engine's seam to rtl/page_client.sv ---------------------------
     output wire         pq_busy,
@@ -782,6 +786,27 @@ module page_cache #(
                 mem_fills <= 32'd0; mem_flushes <= 32'd0; mem_declines <= 32'd0;
             end
         end
+    end
+
+    // The debug pair's window.
+    always_comb begin
+        case (dbg_sel)
+            4'd0:  dbg_val = cnt_il_i;
+            4'd1:  dbg_val = cnt_il_d;
+            4'd2:  dbg_val = cnt_decline;
+            4'd3:  dbg_val = cnt_iv_block;
+            4'd4:  dbg_val = cnt_hit_uc;
+            4'd5:  dbg_val = cnt_land_clash;
+            4'd6:  dbg_val = cnt_ppn_clash;
+            4'd7:  dbg_val = {late_fills, fifo_drops, 1'b0, state, iv_run, il_busy, wl_v, eng_idle, 8'd0};
+            4'd8:  dbg_val = hits;
+            4'd9:  dbg_val = misses;
+            4'd10: dbg_val = mem_fills;
+            4'd11: dbg_val = mem_flushes;
+            4'd12: dbg_val = cnt_posted;
+            4'd13: dbg_val = cnt_posted_miss;
+            default: dbg_val = 32'hDEAD_0000;
+        endcase
     end
 
 endmodule

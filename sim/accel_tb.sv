@@ -221,7 +221,8 @@ module accel_tb #(parameter integer SWINT = 1,
     wire         dl_req_w;
     wire [15:0]  dl_ppn_w;
     wire [3:0]   dl_line_w;
-    wire [15:0] dq_addr_w, doff_w;
+    wire [23:0] dq_addr_w;
+    wire [15:0] doff_w;
     wire [1:0]  dcls_w;
     wire        daux_w;
     wire [15:0] tev_addr;
@@ -230,7 +231,8 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [1:0]  p_cls;
     wire        p_aux_w, map_changed;
     wire [31:0] accel_maps;   // ACCEL_MAPS: map changes, the revalidation's denominator
-    wire [15:0] p_addr_w, p_off_w;
+    wire [23:0] p_addr_w;
+    wire [15:0] p_off_w;
     wire         il_req, il_ack, il_done, il_ok;
     wire [15:0]  il_ppn_w;
     wire [3:0]   il_line_w;
@@ -344,12 +346,13 @@ module accel_tb #(parameter integer SWINT = 1,
         .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
         .fast_ops (fast_ops), .map_changed (map_changed), .map_settling (map_settling), .maps (accel_maps), .cen_v (cen_v), .cen_sel (cen_sel), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
         .cycles (cycles), .wait_clocks (wait_clocks),
-        .retries (retries)
+        .retries (retries),
+        .fronts_dis (1'b0)
     );
 
     iline u_iline (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
-        .pc_addr (cpu_pc_addr), .cpu_rw (cpu_rw), .cpu_sync (cpu_sync),
+        .pc_addr (cpu_pc_addr), .pc_bank (8'd0), .cpu_rw (cpu_rw), .cpu_sync (cpu_sync),
         .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
         .cyc_en (iline_cyc_en), .i_din (i_din_w),
         .accel_cyc_en (seq_cyc_en), .accel_din (cpu_din),
@@ -357,7 +360,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .turbo_commit (turbo_commit), .turbo_sync (turbo_sync),
         .tick_q (turbo_tick),
         .tev_valid (tev_valid), .tev_addr (tev_addr), .tev_data (tev_data),
-        .tev_sync (tev_sync), .ev_room (1'b1),
+        .tev_sync (tev_sync), .tev_bank (), .ev_room (1'b1),
         .p_addr (p_addr_w),
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
         .cl_ppn (cl_ppn_w), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
@@ -369,7 +372,8 @@ module accel_tb #(parameter integer SWINT = 1,
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
         .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
-        .serve (serve), .inval (inval)
+        .serve (serve), .inval (inval),
+        .dbg_sel (4'd0), .dbg_val ()
     );
 
     // The data front, chained after the instruction front exactly as in
@@ -378,13 +382,16 @@ module accel_tb #(parameter integer SWINT = 1,
     // clocks iline is not asking.
     dline u_dline (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
-        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
-        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
+        .d_pred ({8'd0, cpu_d_pred}), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
+        .d_pred_bcls (2'd0), .dbr (8'd0),
+        .cpu_addr (cpu_addr), .cpu_bank (8'd0), .cyc_int (1'b0),
+        .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (iline_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
         .cyc_en (cpu_cyc_en), .d_din (d_din_w),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok), .wr_en (turbo_wr),
         .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick), .pending (d_pending_w),
         .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data), .dev_rw (dev_rw),
+        .dev_bank (),
         .ev_room (1'b1), .ev_room_w (ev_room_w_tb),
         .altzp (sw_state[3]),
         .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_off (doff_w),
@@ -403,7 +410,8 @@ module accel_tb #(parameter integer SWINT = 1,
         .cnt_clr (cnt_clr),
         .cnt_serves (), .cnt_claims (), .cnt_splices (),
         .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits (),
-        .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves ()
+        .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
+        .dbg_sel (4'd0), .dbg_val ()
     );
 
     assign prog_wr    = (u_present && !u_rw) || (dev_valid && !dev_rw);
@@ -527,15 +535,16 @@ module accel_tb #(parameter integer SWINT = 1,
         .swi_pb_ok (game_pb_ok), .swi_pdl_ok (game_pdl_ok),
         .swi_hd_slot (3'd0), .swi_fd_slot (3'd0), .swi_mb_slot (3'd0), .swi_mouse_slot (3'd0), .swi_u2_slot (3'd0), .swi_prn_slot (3'd0), .q_nsc (), .q_slot (),
         .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_stat_byte (mmu_swi_stat),
-        .p_addr ({8'd0, p_addr_w}), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
-        .d_addr ({8'd0, dq_addr_w}), .d_rw (dq_rw_w),
+        .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
+        .d_addr (dq_addr_w), .d_rw (dq_rw_w),
         .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .map_changed (map_changed),
         // the physical space (docs/PAGE_CACHE.md); no consumer here yet
         .cl_ppn (cl_ppn_w), .pf_ppn (pf_ppn_w),
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
-        .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w)
+        .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
+        .core_dbr (8'd0), .core_pbr (8'd0)
     );
     rom_loader u_rom (
         .clk (clk), .rst (rst),
@@ -579,7 +588,8 @@ module accel_tb #(parameter integer SWINT = 1,
         .mem_fills (), .mem_flushes (), .mem_declines (),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
-        .pr_valid (pr_valid), .pr_data (pr_data)
+        .pr_valid (pr_valid), .pr_data (pr_data),
+        .dbg_sel (4'd0), .dbg_val ()
     );
 
     wire [1:0]   c_req, c_gnt, c_cyc, c_stb, c_we, c_stall, c_ack;

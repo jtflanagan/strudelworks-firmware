@@ -12,7 +12,7 @@ committed under.  This block is the hand-off for the next session.
 | 4 - first light on hardware | **DONE 2026-09-11, as far as this card can pass it.**  Control Panel NAVIGABLE from the Pi (Ctrl-Command-Esc is the ADB micro's Desk Manager interrupt; `adb 35 82` on the socket).  Self-test: tests 1-4 and 7-10 PASS; **5 (speed) fails BY DESIGN** (the beam runs in the core's time at GS = 1; the ROM's count also encodes the Mega II's 1 MHz I/O sync); 6 (serial) wants an SCC with a loopback (rung 8); 11 fixed (INTFLAG); 12 not reached.  **Do not spend time on the self-test again unless asked** (user, 2026-09-11) |
 | 4c - the memory corruption | **DONE ON HARDWARE 2026-09-10** |
 | 5 - GS/OS Finder (milestone 1) | **DONE 2026-09-11.**  Milestone 1 reached 01:15 (a window opens by mouse); the row's list closed in the afternoon: BRAM persistence (`gs_bram = FILE`, proven across a restart), `$C022` and the border painted, `tools/gs_test.sh` (its self-test step is opt-in, `GS_TEST_SELFTEST=1`).  The menu bar's coloured pixels were THE DMA WRAPPING AT A BANK EDGE - `hd_card` carries into the bank at GS = 1 now, proven on hardware |
-| 6 - speed: the split interface and the fronts | **NEXT.  NOT STARTED.**  Baseline on the Nox overworld map at an unlimited governor: **14.8x PLAIN, ~6.6 FPGA clocks per core cycle, `0 turbo + 0 dline`** - `master_top.sv` builds neither front at GS = 1 (`generate if (!GS) begin : g_fronts`), so every op walks the dispatcher.  Census on the map: I 66 %, RAM 11 %, WR 8 %, KBD 2.4 %.  The istream front alone takes two thirds of the ops to one clock (~34x); both fronts ~1.8 clk/op, the IIe's 50-70x.  The PLAIN ratio (core cycles over bus cycles) is THE displayed metric, HUD and report; the classified census is the breakdown and carries a ~6 % residual against PLAIN not yet explained (the census's `bus_ops` sees 6 k where PLAIN's bus term sees 21 M on the map) - chase it as part of this rung, not before |
+| 6 - speed: the split interface and the fronts | **ON HARDWARE 2026-09-11: THE NOX MAP AT 38.7x PLAIN (from 14.8x), GS/OS TO THE FINDER ON THE FRONTS.**  The 65816's split interface proven on 918,196 SingleStepTests under random cancels; both fronts widened for the bank (per-line virtual bank, DBR/PBR in the map word, the bank hold, IIgs reads at two clocks, writes posted in bank zero outside the shadowed regions); the KEGS boot at the floor with 489 k turbo / 25 k dline ops in 250 k instructions and the Nox image booting through the DMA in the bench.  The first hardware runs died with both fronts inert: **Vivado made seventeen undriven implicit nets in the `g_fronts` generate scope** for wires declared below it (Synth 8-3848; the IIe build had carried them since 2026-09-08) - found by inspection, fixed by hoisting the declarations, gated by `tools/check_generate_scope.py` and the verdict's UNDRIVEN line.  Build gs_r6fix (TIMING MET +0.024, 0 undriven nets) loaded: Nox boots straight to the map, 38.7x PLAIN in a window (15.3x with the fronts bypassed on the same bit); GS/OS boots to the Finder and the arrow follows the mouse.  Also on the card: the debug pair DBG_SEL/DBG_VAL (0x8000_0130/4) with `reg`/`regw` on the socket, and ACCEL_CTRL[29] `fronts_dis`.  Left in the rung: internal cycles at three clocks (S_NULL), the shadow-duplicate splice hole in dline, the DMA-during-fill write drop, the census of OTHER-class candidates |
 | 7 - sound (milestone 2) | **ENTERED OUT OF ORDER, NOT CLOSED.**  The DOC exists (GS/OS needed its interrupts serviced); the gate - a tracker player against a KEGS recording, interrupts timed - is untouched |
 | 8 | Later: 3.5" IWM, ROM 01, real serial (the SCC with a loopback, which self-test 6 wants), 3200-colour palettes, shadow-in-all-banks |
 
@@ -466,7 +466,7 @@ parity check on every rung that touches shared RTL.
 | 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | **PARTLY, 2026-09-09**: 4a and 4b below - the bitstream, first light, both keyboards, SHR, a boot from the slot-7 SmartPort.  The GATE ITSELF is not recorded as met: no self-test pass and no Control Panel walk is written up |
 | 4c | **The page cache holds no stale line.**  An audit that walks every resident line at end of run and compares it against the DDR3 for bytes the machine never wrote, with the page's fill history beside each disagreement; then the fix.  Not a GS item: `rtl/page_cache.sv` is master's, so the IIe build carries the same hazard, and the per-page dirty bit with a whole-page flush makes a stale line a WRITE-BACK over good memory rather than only a read disagreement | the audit reports zero disagreements on an IIe boot and on a GS/OS boot; the IIe battery and the KEGS floor unmoved | **DONE IN SIMULATION 2026-09-10**: audit 0/0 on both boots (and it was never the cache - see the section); the real faults were the 65816's interrupt entry, the override's bank, and the I/O-page refusal, all three fixed; gs 11/11 at the floor, battery 35/35.  HW gate open: no hardware this session |
 | 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | **OPEN - THIS IS THE CURRENT RUNG.**  The image boots and GS/OS loads off the slot-7 HDC (written up as rungs 7b and 7c, which belong here), but it does not reach the Finder |
-| 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | **NOT STARTED** |
+| 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | **ON HARDWARE 2026-09-11** - the map 38.7x PLAIN, GS/OS to the Finder (gs_r6fix); the rung's remaining list in its section |
 | 7 | Sound (milestone 2): the DOC on card + mixer channels; a SoundSmith/NinjaTracker player against a KEGS recording | audible, interrupts timed | **ENTERED OUT OF ORDER, NOT CLOSED**: the DOC is built because GS/OS needed its sound interrupts serviced (see rung 7 below); the gate - a player against a KEGS recording, interrupts timed - is untouched |
 | 8 | Later: 3.5" IWM, ROM 01, real serial, 3200-colour palettes, shadow-in-all-banks | | |
 
@@ -3361,9 +3361,303 @@ reads, `hd 43/43`, identical to a physical cold boot.  Do NOT look for the
 boot by $FFFC reads: on a IIgs, bank $FE code reads $00FFFC as ordinary data,
 so those are not resets.  Find it by SYNC at $Cn00.
 
+## Rung 6: the fronts on the IIgs (2026-09-11)
+
+The IIe's two fronts - `rtl/iline.sv`, two lines of the program stream ahead
+of the sequencer with the retention CAM and the branch scanner behind them,
+and `rtl/dline.sv`, the zero-page shadow, the 8 x 4 cache and the last byte,
+with writes spliced and posted - now build at `GS = 1` and serve the 65816.
+Everything below the split interface is the IIe's RTL with a bank beside it;
+nothing in the IIe's path changed (the battery's 98 checks pass at both phase
+widths, `GS = 0` folding every new term to a constant).
+
+### The split interface (stage 1, proven first)
+
+`rtl/cpu65816.sv` offers what `rtl/cpu65c02.sv` offers, widened:
+
+- **`i_din`/`d_din`**, muxed inside by the core's own `cyc_is_i`; the opcode
+  is taken from `i_din` directly (`fetch_op`), which keeps the data front's
+  served byte out of the decode ROM's address cone, as on the 65C02.
+- **`cyc_is_i` is VPA**, and `pc_addr` is `{pbr, pc}`, register-direct.  A
+  simulation assertion holds the microcode to "VPA only on a PC-sourced
+  cycle", and the harness checks `addr == pc_addr` on every such cycle.
+- **`d_pred[23:0]`, `d_pred_v`, `d_pred_rw`**: the next cycle's data address
+  from `urom` - the flop the block RAM lands the next microinstruction in -
+  through the same next-state arms the register file applies (adl/adh/bank
+  loads, the six stack steps, TXS/TCS taking the operand mux rather than
+  `alu_res` so `din` stays out of S's cone).  Valid exactly when the next
+  cycle is VDA-and-not-VPA.  Slot 0 is never a data cycle on any 65xx - the
+  cycle after an opcode fetch is at PC - so the fetch cycle needs no second
+  read of the decode ROM: `d_pred_v` is simply low there, and the harness
+  COUNTS the data cycles that went unpredicted.
+- **`d_pred_bcls`**, the predicted bank's CLASS, tracked in a two-bit
+  register beside `bank` and loaded by the same microcode field: ZERO (the
+  literal bank zero - direct page, stack, vectors, a long pointer's $00,
+  PBR-relative while PBR is zero), DBR (the data bank register as it
+  stands), OTHER (a bank read from memory, or an index carried across a
+  bank edge - `bk_moved`).  The data front keeps one valid bit per line per
+  class and never compares a bank byte in a serve cone (the design in "Fronts
+  with a bank byte" above).
+- **`p_flags`**, **`dbr_o`**, and **`bank_wr`** - one registered clock after
+  an edge that wrote DBR or PBR (PLB, JSL/JML/RTL/RTI, a block move, the
+  vector pull's PBR clear).
+
+**The contract, checked on SingleStepTests** (`sim/cpu816_trace_main.cpp`,
+the four properties of `sim/cpu_predict_main.cpp` folded into the trace
+harness): a quarter of all clocks cancelled in bursts with garbage on BOTH
+din ports (and on both ports on every internal cycle), the presented cycle
+held across every cancel, `cyc_is_i`/`pc_addr`/`p_flags` every cycle, and
+`d_pred` against the cycle the edge begins with its class against the bank
+byte.  **918,196 tests, 0 failed, 3,332,915 cancelled clocks, 1,416,204 data
+cycles, 1,416,204 predicted, 0 unpredicted** (`--limit 2000`; the suite's
+`--limit 400` point: 204,256 / 0 / 361,385 predicted / 0 unpredicted).  The
+IRQ bench passes unchanged.
+
+### The fronts widened (stage 2)
+
+- **The map carries the bank registers.**  `core_dbr`/`core_pbr` join
+  `apple_mmu`'s `map_now` (36 -> 52 bits; zero at `GS = 0`, so the IIe's word
+  is bit-for-bit what it was), so a JSL or a PLB is a map change and every
+  held line is REVALIDATED, not flushed.  `bank_wr` covers the one clock
+  `map_changed` cannot: OR'd into the settle as `front_settling` in
+  `master_top` (both fronts' `map_settling`, the dispatcher's `turbo_ok`).
+- **iline**: each slot and CAM entry stores the VIRTUAL bank it was fetched
+  in (`t_vbank`, `cam_vbank`); `p_addr` is 24 bits, `{pc_bank, line}`; the
+  revalidation demands `vbank == pc_bank` and, inside the four pair banks
+  only, the IIe's rule with the side the table names OR'd with the bank's
+  own low bit (an odd bank named directly IS the auxiliary memory,
+  `apple_mmu` xlate).  Outside the pairs nothing ever moves: ROM, RAM
+  $02-$7F and the void page are themselves under every map.  The I/O
+  window's exclusions - page $C3 under INTC8ROM, the $CFFx line, the branch
+  scanner's $C0xx refusal - apply in the pair banks alone (`pair_q`,
+  registered; its one-clock lag is under the bank hold).  The retire's
+  event carries `tev_bank`.
+- **dline**: the candidate is 24 bits with three registered class bits -
+  `dq_b0` (bank zero: literally, or the DBR while it is zero), `dq_d` (the
+  DBR's), `dq_wsh` (an address SHADOW could duplicate a write of: text 1/2,
+  hires 1/2, the SHR range).  Each cache line stores its virtual bank with
+  two precomputed bits, `cvz` (fixed at install) and `cvd` (recomputed with
+  every map change, the DBR being part of it); the serve reads
+  `dq_b0 ? cvz : (dq_d && cvd)` beside the valid bit - one registered
+  select on two flops.  The shadow and the last byte serve bank zero alone
+  (the last byte is 24 bits and is never captured on an internal cycle);
+  the live-address match includes the bank, so a vector pull predicted in
+  bank $00 and redirected to $FF by the board does not match and rides the
+  dispatcher.  **Writes retire here only in bank zero outside the shadowable
+  regions**: the posted path carries no shadow duplicate, so a write the
+  Mega II bank must also see rides the dispatcher, which makes one.  A
+  class-OTHER candidate serves nothing.
+- **`master_top`** builds both fronts on both machines (`g_fronts` keeps its
+  name for the depth census); the 65816's exports replace the tied
+  constants; the merge and the speaker take the fronts' banks.
+
+### What the KEGS oracle says
+
+`sim/boot_gs_tb.sv` gained both fronts, wired as `master_top` wires them
+(the fill port arbitrated iline-first, the posted seam shared with the ROM
+loader, `cpu_din` redefined as the byte the core CONSUMED so the bench's
+own ROM check and its trace read the front's byte).  At the suite's point
+(250,000 instructions, mode 2, unlimited):
+
+| | before (gs_dmabank) | with the fronts |
+|---|---|---|
+| clocks | 6,939,638 | **4,412,353** |
+| bus cycles | 70,812 | 45,024 |
+| dispatcher fast ops | 531,676 | **17,575** |
+| map changes | 512 | 553 |
+| KEGS divergence | event 67,398 | **event 67,398 (AT FLOOR)** |
+| ROM bytes read wrong | 0 | 0 |
+
+The same divergence at the same instruction, so nothing the fronts served
+was a byte the dispatcher would not have.  36 % fewer clocks on the ROM's
+own boot, which is native-mode code in banks $FF/$FE/$E1 with its writes
+into the shadowed text page - the least favourable mix.  Left on the table
+in this run: **144,185 internal cycles ride the dispatcher's S_NULL at three
+clocks each** (settle, decide, null - ~10 % of the run's clocks); a one-clock
+path for them is the obvious next cut, after the hardware number.
+
+Gates: lint clean at both GS values, `tools/check_ports.py` 0 unknown,
+`accel_vl` 98/0 at PHI0_HIGH 49 and 47, `boot_gs` at the floor.
+
+### The first build missed, and what it said (gs_r6fronts)
+
+TIMING MISS wns -1.626 / whs +0.047, 2394 of 81,021 endpoints, LUTs 34,496
+(54 %), block RAM 110 of 135 (81 %), the router reporting 14,500 overlapping
+nodes.  `build/paths_r6.tcl` (one full path per failing group, off the
+routed checkpoint - the census by source register, then the path) read:
+
+| start -> end | slack | logic / route | what it is |
+|---|---|---|---|
+| dline `dq_st` -> dline `dq_wsh` / core `bank_reg` | -1.9 / -1.6 | 4.5 / 7.3 | the served byte into the 65816's AGU: low add, high add with a LIVE carry, bank increment (six CARRY4s), then the 24-bit prediction's mux tail into the front's candidate registers.  The 65C02's high half is an incrementer; the 65816's is a chained adder (direct page adds D, (dp),Y adds the index into the pointer's high byte in one cycle).  The byte reaches din 5.6 ns in |
+| core `pc_reg` -> core `urom` address | -1.6 | 3.0 / 8.2 | the instruction front's live target-serve select (a 16-bit compare on the PC) in front of the 65816's slot-0 lookahead: decode-ROM read, condition, successor slot, block RAM address - the core's binding loop, which closed OOC only with the byte a flop |
+| ROM loader `seen[82]` -> page cache `tq` | -1.3 | 1.7 / 9.3 | `rom_ok` (the 512-wide "every chunk landed") read LIVE by the IIgs's per-slot ROM arm in `xlate`, where the region table reads it registered |
+| hd_card `pidx` -> iscan `ptr_hi` CE | -1.0 | 2.4 / 8.4 | `ovr_en` live into `turbo_ok` into the retire into the scanner - the IIe has it and closes; here the scanner was placed a die away |
+| floppy, Uthernet II internal | -0.6 / -0.8 | 2.6 / 7.5 | shallow paths, routing only |
+
+Route is 60-85 % of every one of them: the fronts beside the 65816 and the
+chipset spread the apple_clk domain across the 100T and the placer did not
+recover.  Three structural cuts, each also a shorter chain:
+
+1. **The data front reads at TWO clocks on the IIgs** (`dline.sv`, `GS`
+   only): the hit and the byte are registered at the end of a data cycle's
+   first clock and the read retires on its second, so the core's din is
+   register-direct and the whole serve cone stays inside the front.  Writes
+   keep one clock (their verdict was register-rooted already).  The IIe's
+   one-clock read is untouched.  Cost in the KEGS boot: 4,412,353 ->
+   4,426,930 clocks.
+2. **No target serve on the IIgs** (`iline.sv`): the I byte is `lhit_q ?
+   i_byte_q : accel_din`, one registered select.  A 65816's taken branch
+   spends its add cycle as an internal cycle on the dispatcher anyway, so
+   the zero-stall target serve bought it nothing; the target fetch re-aims
+   the predictor and serves a beat later.  Cost: 4,426,930 -> 4,520,152
+   clocks.
+3. **`rom_ok` one clock late in the query cones** (`apple_mmu.sv`
+   `rom_ok_q`, the `xlate` arm only): the table already stands a clock
+   behind, and the ROM lands long before any fetch depends on it.  Both map
+   sweeps unchanged.
+
+Second build: **gs_r6b - TIMING MET wns +0.088 / whs +0.070, 0 of 81,219**,
+LUTs 33,149 (52 %), block RAM 110 of 135; the deep tail (>= 14) is the DDR3
+controller's, the FT601's and the 65816's `ir` fanout, no front in it.
+
+### On hardware: the fronts serve nothing, and the machine dies (gs_r6b)
+
+Loaded 12:00, `gs_nox.conf`, `raw reset`.  Baseline read on the previous bit
+seconds before: **14.8x PLAIN** on the map (296,267,482 core over 20,009,209
+bus cycles), the number the sheet carries.  With gs_r6b:
+
+- **Mode 2**: ~423 dispatcher ops (1,410 on the first reset after the load),
+  20 data-front ops, then everything frozen with `await` still - the
+  dispatcher held by a claim, not waiting.  **Mode 1** (writes on the bus):
+  runs for minutes on the dispatcher alone and dies at the toolbox's "Fatal
+  system error 0911".  In both, **turbo 0 and I/D drops 0 across 7.9 M map
+  changes**: neither front ever held a valid line, let alone served one.  In
+  the bench the same RTL serves 488,825 turbo + 25,278 dline ops in the first
+  250,000 instructions.
+- **The sparse trace of a mode-2 hang** (`tools/pi.sh trace --now`, the
+  writes and I/O only): every write agrees with the reference through the
+  ROM's first 22 instructions - the JSR/JSL pushes at $01FB-$01F7, the long
+  stores to $01/0100 and $E1/019x, the RTL back to $00/FE3C.  The next push
+  (the JSR at $00/FE40) lands at **$0000 and $FFFF**: S is $0000 in NATIVE
+  mode where the reference has $01F9 in EMULATION mode after `SEC / XCE` at
+  FE3C-FE3D (the user's reading: the mode is the fault).  Every push after
+  carries wrong bytes, `$C035`/`$C036` are then addressed in banks $C0, $FB
+  and $FA, and the core halts on a garbage opcode.  Nothing in those four
+  instructions writes S but XCE, so the core consumed a wrong byte there -
+  through the fronts' passive muxes (`lhit_q ? i_byte_q : accel_din`,
+  `sv_hit_q ? sv_byte_q : accel_din`), since they retire nothing.
+- **What did NOT reproduce it**, all at the KEGS floor: the bench with
+  random merge back-pressure on both room ports; the DDR3 model at 40 and
+  100 clocks per beat (`--ddrlat`); the fill engine read against the code
+  (a victim's directory entry is zeroed at the engine's start and retagged
+  on the last beat, so a half-filled page cannot be read or requested).
+  Constraints carry only I/O false paths; no latches, no multi-driven.
+- **Two real holes found on the way, neither the killer**: (1) a DRIVER
+  write (the hard disk's DMA) that reaches the page cache's P2 while the
+  engine runs is counted in `late_fills` and dropped from the image - the
+  slow model showed the shape with reset-sequence READS, which survive
+  (the dispatcher decides again); a DMA in that window would lose bytes.
+  (2) dline skips the shadow DUPLICATE (`cl_posted`), so a cached $E0/$E1
+  line goes stale after a shadowed write from bank 0.
+- **The full-capture trace did not arm** under `gs_noxtrace.conf` (recorder
+  idle, 0 words, while the host received 443 events); the sparse one did.
+
+### THE FAULT, FOUND BY INSPECTION: A GENERATE SCOPE'S UNDRIVEN NETS (gs_r6fix)
+
+Neither timing nor a missing guard - the user's insistence on inspection
+over hardware paid.  `rtl/master_top.sv` instantiates both fronts inside
+`generate ... begin : g_fronts`, and seventeen of the wires that block names
+- `p_fs_w`, `p_ppn_w`, `p_reg_w`, `p_fold_w`, `d_ppn_w`, `d_reg_w`,
+`d_fold_w`, `rt_rd_flat`, `rwb_p1_w`, `cl_valid`, `cl_rw`, `cl_wr_image`,
+`cl_aux`, `cl_bank`, `cl_off`, `cl_ppn_w`, `il_src_q` - were DECLARED BELOW
+IT, in the memory-image section.  Verilator resolves the forward reference
+to the module-level wire and every bench passes.  **Vivado declares an
+IMPLICIT, UNDRIVEN net in the generate scope** and says so in one warning
+per net, `Synth 8-3848: Net g_fronts.p_fs_w in module/entity master_top
+does not have driver`, which nothing read.  On the card, therefore:
+
+- the instruction front's map query answered "never servable" for every
+  line (`p_fs` = 0): 46,350 wants, all dropped, no fill ever;
+- the data front's line-row completion `dl_done = il_done && il_src_q` could
+  never fire (`il_src_q` = 0): two grants, then C_W1 for ever;
+- **every posted write was stamped with physical page ZERO** (`spl_ppn <=
+  d_ppn`, undriven): the stack pushes landed in the zero page, and the
+  coherence snoops (`cl_*`) saw nothing.  The RTL's pulls read whatever the
+  stack held from the previous boot - the same return address, by luck -
+  and the zero-page variables the pushes clobbered took the machine down
+  three instructions later, S included.  Hence "a wrong byte with nothing
+  served", and hence mode 1 surviving longer (no posts).
+
+**And the IIe build has carried the same seventeen warnings since the
+generate wrapper of 2026-09-08** (`master_build_gs4a_iie.log`): the IIe's
+fronts would have been dead on hardware for every IIe bit built since.  No
+IIe bit was loaded in that window; the IIe needs a rebuild and a hardware
+check before "the IIe build untouched" is true again.  **Rebuilt the same
+afternoon (r6fix_iie): TIMING MET wns +0.000 / whs +0.052, 0 of 71,574, zero
+`8-3848` nets.**  Its depth census reads as the fronts coming back into
+existence - the deep tail 269 -> 128 endpoints, 67 "new" against a baseline
+taken while their cones were pruned - except eighteen chains from the
+65C02's microcode register into the register file's read mux, which were
+the debug pair's top word muxing the core's combinational prediction
+unregistered; `dbg_val` is registered now (a snapshot one clock old).  The
+IIe bit is built, not yet loaded: its hardware check (the IIe conf, the
+IIe machine) is the user's call.
+
+**The fix** (gs_r6fix): the declarations hoisted above the first generate
+block (`master_top.sv`, with the comment that says why), dline's `iw_v` /
+`iw_off8` / `iw_data` likewise (its `g_way` generate named them; Vivado
+happened to resolve those, the rule stands).  **Two gates, so it cannot
+recur:** `tools/check_generate_scope.py` (every generate block's body against
+the module-level declarations below it; in `build/run_build.sh`'s pre-flight,
+one second) and the build verdict's `UNDRIVEN` line on `Synth 8-3848`,
+beside `MULTI-DRIVEN`.  Sims after the hoist: battery 98/0, the KEGS boot at
+the floor with 488,825 turbo / 25,278 dline / 10,615 posts.  **Build gs_r6fix:
+TIMING MET wns +0.024 / whs +0.053, 0 of 86,641 endpoints, ZERO `8-3848`
+nets** (2,400 more endpoints than gs_r6dbg: the fronts' logic that hung off
+constants now exists).  **ON HARDWARE 2026-09-11 afternoon, gs_r6fix, `gs_nox.conf`, mode 2 unlimited:
+the machine boots straight through to the Nox overworld map, and the map runs
+at 38.7x PLAIN** (996,294,172 core over 25,724,828 bus cycles in a window;
+cumulative 31.4x from the reset, the boot's slow parts included) against
+15.3x with the fronts bypassed on the same bit and the sheet's 14.8x.  The
+census in the window: 1.42 G turbo, 222 M dline, 214 M fast, 3.3 M bus.  The
+fronts' books through the debug pair, cumulative on the map: iline 104 M
+grants / 79 M installs / 896 declines / 796 k restarts / 23.7 M wants dropped
+as unservable / 184 M clocks a held fetch waited on turbo_ok / 0 on the room;
+dline 217 M serves (107 M from the cache) / 35 M claims / 51 M splices /
+30.7 M posts / 1 room wait / 70 declines; the page cache 0 late fills.  The
+IIe does 50-70x here; the gap is the rung's remaining list (internal cycles
+at three clocks, the unservable wants, the turbo_ok waits).
+
+**GS/OS on the fronts, the same afternoon** (`gs_os.conf`, target 2.8 with the
+ROM's slow bit honoured): reset -> the Finder desktop in ~50 s, the menu bar,
+the icons, the desktop picture, and the arrow following an injected `mouse
+120 60`.  The census through the boot: 113 M turbo + 57 M dline against 23 M
+dispatcher ops and 1.5 M bus ops - the fronts carry native-mode code with
+its bank changes (15.4 M lines dropped and 4.5 M revived by the
+revalidation; D 29 k / 22 k).  PLAIN 1.94x under that governor, as configured.
+**At an unlimited target on the desktop (`accel all 0`): 31.8x PLAIN** in a
+window (1,136,649,085 core over 35,733,247 bus cycles; 933 M turbo + 475 M
+dline against 202 M fast).  The HUD shows the ratio since the last counter
+clear, so after a governed boot it climbs from 2.3x for a while; a W1 clear
+of ACCEL_CTRL (`regw 8000008C 80000002`) makes it the live rate.
+number on the map against 14.8x, then GS/OS.
+
+**THE DEBUG PAIR (gs_r6dbg).**  The card could not be read, so now it can:
+`DBG_SEL` (0x8000_0130) / `DBG_VAL` (0x8000_0134) select any of the fronts',
+the page cache's and the dispatcher's books and state snapshots, and the
+host's control socket gained `reg ADDR` / `regw ADDR VALUE` (issued by the
+ingest thread between its own conversations, like FB_PEEK).  New books:
+iline's grants, declines, installs, restarts, unservable wants, and the
+clocks a held fetch stood blocked by turbo_ok / the room / a kill; dline's
+shadow claims, declines, blocked clocks; the page cache's hierarchy-only
+counters.  And **ACCEL_CTRL[29] `fronts_dis`**, a diagnosis level: the core
+takes the dispatcher's byte on both streams and `turbo_en` stays low, so
+the fronts are out of the loop without a rebuild - the A/B the bench cannot
+give.  (`docs/PROTOCOL.md`.)
+
 ## Risks
 
-- Timing lives in rung 6 (the fronts), which milestone 1 does not depend on.
+- ~~Timing lives in rung 6 (the fronts), which milestone 1 does not depend on.~~  Rung 6 is built; its build verdict is in its section.
 - Block RAM: 49 RAMB36 free; the 65816 takes 8, the DOC 16, side copies a
   few; ~20 spare. The cache cannot grow; GS working sets will evict.
 - The shadow dup doubles seam traffic for shadowed writes; MEASURED at 2.0% of
