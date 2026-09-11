@@ -73,6 +73,13 @@
 module hd_card #(
     // Fabric cycles a command stays busy before the card gives up on the
     // host.  2 s at 100 MHz; a testbench shortens it.
+    // A IIgs's DMA address is 24 bits and CARRIES INTO THE BANK: a block
+    // landing at $7D/FE47 ends at $7E/0046.  A //e's wraps in its 64 KB, as
+    // AppleWin's memory copy does, so the carry is the IIgs build's alone
+    // (docs/GS.md "Rung 4's gate": the Finder's menu bar had coloured pixels
+    // because a font file's tail wrapped to $7D/0000 and the 640-mode strike
+    // read a string where its row should have been).
+    parameter GS = 0,
     parameter integer STALL_TIMEOUT = 200_000_000,
     parameter [7:0] T_HD_ROM   = 8'h18,
     parameter [7:0] T_HD_DONE  = 8'h19,
@@ -341,7 +348,9 @@ module hd_card #(
     // between the two.
     logic [9:0] pidx, cidx;
     logic       in_flight;
-    wire [15:0] dma_addr = dma_base + {6'd0, pidx};
+    // The full address, so the bank carries on a IIgs (see the parameter).
+    wire [23:0] dma_full = {dma_bank, dma_base} + {14'd0, pidx};
+    wire [15:0] dma_addr = dma_full[15:0];
 
     wire dma_w_active = (st == S_DMA_W) && (pidx != dma_count);
     wire dma_r_active = (st == S_DMA_R) && (pidx != dma_count);
@@ -350,7 +359,13 @@ module hd_card #(
     // the cycle after the last one is presented.
     assign ovr_en    = dma_w_active || dma_r_active;
     assign ovr_addr  = dma_addr;
-    assign ovr_bank  = dma_bank;
+    // (A generate rather than a ?: on the parameter: Verilator 5.020 takes
+    // an internal fault on the ternary form when GS is overridden to 1.)
+    generate if (GS != 0) begin : g_carry
+        assign ovr_bank = dma_full[23:16];
+    end else begin : g_wrap
+        assign ovr_bank = dma_bank;
+    end endgenerate
     assign ovr_rw    = !dma_w_active;
 
     // The byte for the write being offered, from the bank pidx selects.

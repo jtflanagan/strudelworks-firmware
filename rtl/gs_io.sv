@@ -35,9 +35,22 @@
 // prints (`the $C0xx census`) is the work list, in the ROM's own order.
 //
 // WHAT STAYS ON THE BUS BY POLICY, not by omission (docs/GS.md, "The real IIe
-// board in GS mode"): $C061-$C067 and $C070, the game port, which is REAL
+// board in GS mode"): $C063-$C067 and $C070, the game port, which is REAL
 // hardware this machine has; $C058-$C05F, the annunciators; and any $Cnxx
 // belonging to a physical card in a slot.  Those must never be claimed here.
+//
+// THE ONE EXCEPTION IS $C061 AND $C062, THE APPLE KEYS (docs/GS.md rung 4's
+// gate).  On a IIgs they are the ADB keyboard's Command and Option OR the
+// game port's buttons 0 and 1 - KEGS moremem.c:1311, `adb_is_cmd_key_down()
+// || g_paddle_buttons & 1` - and the ROM reads them after a reset to decide
+// on the self-test and the cold boot.  Left to the bus, only the IIe
+// keyboard's Apple keys ever reached them: the Pi keyboard's Command and
+// Option stopped at $C025, and the host's button override (rtl/pb_inject.sv,
+// stood down at GS = 1) reached nothing.  Answered here, bit 7 is the host's
+// override if it holds one, else the ADB micro's Command/Option level - which
+// already carries the IIe keyboard's real Apple keys, sampled by the walk
+// (rtl/gs_kbd_a2.sv's live_mods) - so a joystick's buttons 0 and 1 are the
+// walk's samples too, at its rate.  The low seven bits read zero, as IOR().
 //////////////////////////////////////////////////////////////////////////////////
 module gs_io #(
     // The ADB micro's keymap (tools/gen_adb_keymap.py), passed down so a
@@ -112,6 +125,9 @@ module gs_io #(
     input  wire        loc_up,
     input  wire [7:0]  loc_mods,
     input  wire [7:0]  live_mods,
+    // The host's BUTTONS overrides, two bits a button, PB0 in [1:0]: 00 the
+    // hardware's, 01 up, 10 down (rtl/pb_inject.sv holds the same word).
+    input  wire [5:0]  pb_sel,
 
     input  wire        msg_valid,
     input  wire [7:0]  msg_type,
@@ -156,6 +172,7 @@ module gs_io #(
             || (lo == 8'h29) || (lo == 8'h2A) || (lo == 8'h2B) || (lo == 8'h2C)  // the VGC
             || (lo[7:4] == 4'h1 && lo != 8'h10)                    // $C011-$C01F, the status page
             || (lo == 8'h2D)                                       // SLOTROMSEL
+            || (lo == 8'h2E) || (lo == 8'h2F)                      // VERTCNT, HORIZCNT
             // $C030 IS THE SPEAKER, AND IT MUST NOT REACH THE BACKPLANE.
             // A IIgs's speaker is the card's and the host's, but the machine
             // this card lives in decodes $C030-$C03F for ITS OWN speaker -
@@ -174,6 +191,7 @@ module gs_io #(
             || (lo[7:2] == 6'b001110)                              // $C038-$C03B, the SCC
             || (lo[7:2] == 6'b001111)                              // $C03C-$C03F, the sound GLU
             || (lo == 8'h41) || (lo == 8'h46) || (lo == 8'h47)     // the interrupt controller
+            || (lo == 8'h61) || (lo == 8'h62)                      // the Apple keys (see the header)
             || (lo == 8'h68) || (lo == 8'h69)                      // STATEREG, and a reserved zero
             || (lo[7:4] == 4'hE);                                   // $C0E0-$C0EF, the IWM
     endfunction
@@ -244,6 +262,16 @@ module gs_io #(
             8'h2B:   rd_byte = c02b_langsel;
             8'h2C:   rd_byte = 8'h00;   // the character-ROM test port, out of test mode
             8'h2D:   rd_byte = gs_sltrom;
+            // THE VIDEO COUNTERS (KEGS moremem.c read_vid_counters): the
+            // vertical counter is $100 + the display line, $FA-$FF for the
+            // last six lines of the frame; $C02E is its bits 8:1 and $C02F
+            // its bit 0 over the horizontal count, which is 0 at the start
+            // of a line and $40-$7F across it.  The ROM's self-test times
+            // its speed test between two changes of $C02E (docs/GS.md rung
+            // 4's gate); left to the bus these were the IIe's floating
+            // byte, and the count came out at one.
+            8'h2E:   rd_byte = vid_cnt[8:1];
+            8'h2F:   rd_byte = {vid_cnt[0], (scan_h == 7'd0) ? 7'd0 : ((scan_h + 7'h3F) & 7'h7F)};
             // Reading $C030 toggles the speaker and returns the floating
             // bus.  Zero, which is what the backplane returned for it before
             // it was claimed - so the bench's comparison against KEGS is
@@ -261,6 +289,11 @@ module gs_io #(
             8'h3A,
             8'h3B:   rd_byte = 8'h00;   // the SCC's data ports: nothing received
             8'h3C, 8'h3D, 8'h3E, 8'h3F: rd_byte = doc_rd;
+            // The Apple keys: the host's override, else Command/Option as
+            // the ADB micro shows them (the IIe keyboard's real keys merged
+            // in at that read).  IOR(): bit 7 alone.
+            8'h61:   rd_byte = {(pb_sel[1:0] == 2'b00) ? adb_c025[7] : pb_sel[1], 7'd0};
+            8'h62:   rd_byte = {(pb_sel[3:2] == 2'b00) ? adb_c025[6] : pb_sel[3], 7'd0};
             8'h68:   rd_byte = gs_state;
             8'h69:   rd_byte = 8'h00;   // reserved, reads zero (moremem.c:1328)
             8'hE0, 8'hE1, 8'hE2, 8'hE3, 8'hE4, 8'hE5, 8'hE6, 8'hE7,
@@ -269,6 +302,8 @@ module gs_io #(
             default: rd_byte = adb_rd;
         endcase
     end
+    wire [8:0] vid_cnt = (scan_v < 9'd256) ? {1'b1, scan_v[7:0]} : (9'h0FA + {6'd0, scan_v[2:0]});
+
     // ---- the VGC's latches, the SCC and IWM stubs, the sound GLU face -------
     // These are registers and nothing else: what the ROM writes it reads back,
     // and the HOST acts on the writes it sees in the stream (docs/GS.md: the

@@ -94,8 +94,9 @@ python3 - "$rom" "$work/gsrom_$tag.hex" <<'PY'
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 b = bytearray(open(src, 'rb').read())
-if len(b) == 262144:
-    b[0x357C9] = 0x00
+# AS SHIPPED: KEGS's $357C9 SmartPort patch is no longer copied (the ROM's
+# self-test checksums the ROM and failed on it - docs/GS.md rung 4's gate);
+# the host loads the same bytes (src/fd_service.cpp load_sys_rom).
 open(dst, 'w').write(''.join('%02x\n' % v for v in b))
 PY
 

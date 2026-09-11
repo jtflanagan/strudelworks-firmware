@@ -10,9 +10,9 @@ a mistake this document invites, and it has been made.
 | Rung | State |
 |---|---|
 | 0, 1, 1b, 2, 3a-3e | **DONE** |
-| 4 - first light on hardware | **PARTLY**: 4a built the bitstream and 4b brought first light, and hardware has run both keyboards, SHR and a boot.  The rung's own gate - self-test pass, Control Panel navigable - is not recorded as met |
+| 4 - first light on hardware | **GATE WALKED 2026-09-11** (see "Rung 4's gate").  Control Panel: **NAVIGABLE** from the Pi's socket (Ctrl-Command-Esc is the ADB micro's Desk Manager interrupt now, `adb 35 82`; the Apple keys read at `$C061/$C062`).  Self-test: **tests 1-4 and 7-10 PASS**; test 5 (speed) FAILS BY DESIGN - it counts a loop between two changes of VERTCNT and on this card the beam runs in the core's time; test 6 (serial) needs an SCC with a loopback (rung 8); test 11 (interrupts) failed on `$C041` clearing INTFLAG, FIXED, in the next build; test 12 not yet reached.  Found on the way: the ROM was patched (KEGS's SmartPort byte) and failed its own checksum - unpatched now; `$C02E/$C02F` were the floating bus - built; GS_TIME was decoded as `$2F` (ADB_KEY) so every key set the clock - fixed |
 | 4c - the memory corruption | **DONE, ON HARDWARE 2026-09-10 evening** (two more of the same family found there: the bus record's bank and the host's bank-blind switch decoders).  The page cache was NOT the hole (a bench mask that began at `boot_go`; the audit is a gate now, 0/0).  The corruption was the 65816 returning from EVERY hardware interrupt two bytes late (fixed, `cpu816_irq` in the suite), the DMA's bank dropped on the op that lands so bank-$7E reads wrote bank zero (fixed in `accel_seq`, master_top and the bench), and the host refusing `$7E/C000` as "the I/O page" (fixed).  GS/OS now runs 8M instructions into the toolbox instead of dying at 4M |
-| 5 - GS/OS Finder (milestone 1) | **MILESTONE 1 REACHED, 2026-09-11 01:15: A WINDOW OPENS BY MOUSE** (`shots/scanint_double_click.png` - GSHardDrive double-clicked, "ProDOS, 6 items, 31.9 MB used"), build gs_scanint (TIMING MET +0.041 / +0.053, 0 of 63,517).  The pointer needed two things: the ADB staging registers synthesis had zeroed (multi-driven, gs_mvfix) and the VGC scan-line interrupt QuickDraw II redraws the cursor from (gs_scanint: SCBs snooped at the page cache's write tap, `irq_scan` at the start of a marked line).  The desktop had been on HDMI since 2026-09-10 evening (`shots/gs4c2_hostgate.png`).  Still unchecked from the row's list: BRAM persistence, border, `$C022`; `tools/gs_test.sh` not written |
+| 5 - GS/OS Finder (milestone 1) | **MILESTONE 1 REACHED, 2026-09-11 01:15: A WINDOW OPENS BY MOUSE** (`shots/scanint_double_click.png` - GSHardDrive double-clicked, "ProDOS, 6 items, 31.9 MB used"), build gs_scanint (TIMING MET +0.041 / +0.053, 0 of 63,517).  The pointer needed two things: the ADB staging registers synthesis had zeroed (multi-driven, gs_mvfix) and the VGC scan-line interrupt QuickDraw II redraws the cursor from (gs_scanint: SCBs snooped at the page cache's write tap, `irq_scan` at the start of a marked line).  The desktop had been on HDMI since 2026-09-10 evening (`shots/gs4c2_hostgate.png`).  **2026-09-11: BRAM persistence BUILT AND PROVEN** (host `gs_bram = FILE`, the machine's writes followed from the stream; a Display setting changed in the Control Panel came back after a swhost restart), **border and `$C022` PAINTED** (the CDA menu is white on blue; the panel's clear is the border colour), **`tools/gs_test.sh` WRITTEN and run**.  **The user's eye found coloured pixels in the menu bar: THE DMA ADDRESS WRAPPED IN ITS BANK, fixed (`hd_card` carries at GS = 1), proven on hardware** (see "The menu bar's coloured pixels").  (The "down arrow does nothing" seen mid-day was misdiagnosed - the user watched both arrows move the highlight on the gate bitstream, and the capture shows the ROM taking $8A from $C000 - dropped.) |
 | 6 - speed: the split interface and the fronts | **NOT STARTED - and now MEASURED as the whole gap (2026-09-11).**  Nox on the overworld map at an unlimited governor: 6.6 FPGA clocks per core cycle, 14.8x (PLAIN), `0 turbo + 0 dline` - `master_top.sv` builds neither front at GS = 1 (`generate if (!GS) begin : g_fronts`), so every op walks the dispatcher's S_DECIDE -> S_FAST -> page-cache decided -> retire loop.  The census on the map: I 66 %, RAM 11 %, WR 8 %, KBD 2.4 %.  The istream front alone takes two thirds of the ops to one clock (~2.9 clk/op, ~34x); both fronts ~1.8 clk/op, the IIe's 50-70x.  Trimming the dispatcher path itself (the 3-clock serve, the DECIDE/FAST handshake) is worth 6.6 -> ~4 at most.  Do it in ladder order; the numbers above are the baseline to beat |
 | 7 - sound (milestone 2) | **ENTERED OUT OF ORDER, NOT CLOSED.**  The DOC was built because GS/OS needed its sound interrupts serviced to get past "Unclaimed Sound Interrupt" - that much works.  The gate, a tracker player against a KEGS recording with interrupts timed, is untouched |
 | 8 | Later |
@@ -2791,6 +2791,176 @@ RAM, not the card: the right predicate is "$E0/$E1, or $00/$01 while bit 6 is
 clear".  `apple_mmu` already knows (`gs_flat`); the others should ask it, on
 both sides at once so the mirror keeps agreeing with the card.  (3) The card
 answers no register after a swhost restart without a reload, as before.
+
+## Rung 4's gate, walked (2026-09-11)
+
+The user's instruction for the day: walk the ladder in order from rung 4's
+gate and check everything off; acceleration is rung 6 and is reached when
+it is reached.  Before starting, the user's note: the GS test confs must be
+SPARSE or the Pi's decoding core saturates under full acceleration.  Both
+`gs_os.conf` and `gs_nox.conf` were `sparse = off` - the setting the live
+full trace of rung 4b was taken with - and are `sparse = on` now.  The
+sparse keep rules are bank-blind and keep every write, every `$Cxxx` touch
+and every fast switch op, so the IIgs mirror wants nothing more: Nox boots
+and plays on sparse with the map screenshot byte-identical to the night's,
+and the map-only PLAIN ratio over a 27 M-cycle window is **14.81x**, the
+same figure as the night's full-capture measurement.  The capture mode was
+not what limited the card at that ratio; the 6.6 clocks per op are.
+
+### The gate could not be driven, so the doors were built first
+
+The gate is the self-test (Ctrl-Command-Option-Reset) and the Control Panel
+(Ctrl-Command-Esc), and neither chord could reach the machine from the Pi:
+
+- **`$C061/$C062` were the physical IIe's game port.**  The Pi keyboard's
+  Command and Option arrived as ADB events and stopped at `$C025`; the
+  host's button override (`rtl/pb_inject.sv`) stands down at GS = 1 and
+  reached nothing.  `gs_io` now claims the two - KEGS's own rule,
+  `adb_is_cmd_key_down() || g_paddle_buttons & 1` - answering bit 7 from
+  the host's override if it holds one, else the ADB micro's Command/Option
+  level, which already carries the IIe keyboard's real Apple keys from the
+  walk (`live_mods`).  Low seven bits zero, as `IOR()`.  `$C063-$C067` and
+  `$C070` stay the game port's, real.
+- **The Desk Manager chord was not in the micro.**  KEGS adb.c:1687: Esc
+  pressed with Control and Command down sets bit 5 of the interrupt byte and
+  raises the data interrupt.  `gs_adb` does that now, taking Control and
+  Command from the event's modifiers or the real Apple key.
+- **The modifiers now survive RES'** (KEGS's adb_reset leaves g_c025_val
+  alone): the ROM reads Command and Option AFTER the reset to choose the
+  self-test, and a `c025_val` cleared to `$20` on RES' forgot the fingers.
+- **The socket gained `adb CODE MODS [down|up]`**, a raw ADB event, because
+  the typist has no byte for a chord: `adb 35 82` is Ctrl-Command-Esc.
+  `sim/gs_adb_tb.sv` 63 checks; build `gs_applekeys` TIMING MET +0.197.
+
+### The self-test, three faults deep
+
+1. **`System Bad: 01339300` - the ROM failed its own checksum.**  KEGS's
+   one ROM 3 patch (`$357C9 <- $00`, its "SmartPort bug") was copied at load
+   on both the host and the bench, and KEGS passes the test only by patching
+   the checksum test out as well (config.c:1304).  The patched routine
+   stores the IWM status AND `$7F` into `$C036` inside its 3.5" wait loop and
+   restores the old `$C036` on exit either way; the card's map reads nothing
+   of CYAREG but bit 7 and `gs_iwm`'s status byte has bit 4 at zero
+   (`{wr_prot, 0, motor_on, mode}` with the mode's bit 4 clear), so the
+   bytes Apple shipped are the ones the card runs now.  KEGS floor unmoved
+   at 67,398.
+2. **`System Bad: 05010100` - the speed test counted ONE.**  Test 5
+   (`FF/6AC7`, read from the bytes) counts `INX / CMP $00C02E / BEQ` between
+   two changes of VERTCNT, wanting 25-26 with `$C036` fast and 12-13 slow.
+   `$C02E/$C02F` were not claimed: the IIe's floating bus, different every
+   read, so the loop exited at once.  Built in `gs_io` from KEGS's
+   `read_vid_counters`: the vertical counter is `$100` + the display line
+   (`$FA-$FF` for the last six), `$C02E` its bits 8:1, `$C02F` its bit 0 over
+   the horizontal count (`0` at the line's start, `$40-$7F` across it).
+3. **`System Bad: 05010F00` - fifteen, and that is the design.**  Fifteen is
+   the slow count, in fast mode.  `master_top` sets `virt = GS || ...`: on a
+   IIgs the beam runs in the CORE's time base, always, so VERTCNT changes
+   every 130 core cycles whatever the governor says, and the test cannot
+   tell fast from slow.  Even with a real-time beam the ROM's 25-26 encodes
+   the Mega II's 1 MHz synchronisation of every I/O access, which the
+   accelerated card deliberately does not model (the IIe's `$C000` polls in
+   the dummies are the whole point of the KBD front).  **Test 5 fails by
+   design and `tools/gs_test.sh` says so.**
+
+With KEGS's checksum skip and the ROM's own test mask (`FF/64A9`, one bit
+a test) the rest could be read: **test 6 (serial) fails** - the SCC is a
+stub with nothing received, and the test loops bytes back through it
+(rung 8's real serial); **tests 7, 8, 9 and 10 PASS** (clock, battery RAM,
+FPI/Mega II, sound); **test 11 (interrupts) failed subtest 2**: its
+handler at `FF/6BBD` does `STZ $C041 / LDA $C046` and wants INTFLAG's VBL
+bit still set - `gs_intc` cleared the bit when the enable went off, where
+KEGS only drops the request (`remove_irq`) and leaves `g_c046_val` for
+`$C047`.  Fixed; build `gs_intc`.
+
+### The Control Panel, and what it found
+
+Ctrl-Command-Esc opens the Desk Accessories menu (white on medium blue -
+which is `$C022` being painted, below), the Control Panel opens off it and
+its pages open and save.  **The clock read 12:02:44 AM 1/1/04** and moved
+only when a key was pressed: `gs_clock`'s `T_GS_TIME` defaulted to `$2F`,
+which is ADB_KEY, so every key event's word set the seconds and the real
+GS_TIME (`$30`) was never decoded.  Fixed, build `gs_gate`.  **A "down arrow does nothing" was chased for an hour and was a
+misdiagnosis**: the user watched both arrows move the highlight on the gate
+bitstream, and a capture of a press shows the ROM taking `$8A` from `$C000`.
+Dropped.
+
+### The menu bar's coloured pixels: the DMA wrapped at a bank edge
+
+The user's eye, at the desktop: a row of coloured pixels between File and
+Edit, overlapping Edit, and another after Colors; KEGS shows none.  The
+mirror's Super Hi-Res row 6 at Edit reads `F7 37 37 37 23 65` where a
+black-and-white row can only hold 00/11 pixel pairs.  A full capture across
+a Finder boot, walked backwards from the write of `$F7` into `$E1/23D2`:
+
+- **QuickDraw II is right.**  `FE/818D LDA [$98]` takes a 640-mode font
+  strike word through a 24-bit pointer, ORs the edge masks, ANDs it into the
+  screen word (which reads `$FFFF`, correct) and stores it.  The strike
+  pointer steps `$300` a row and at `FE/81D9` an `INC $9A` carries its bank
+  from `$7D` to `$7E`: the strike straddles `$7DFFFF`, legitimately, as
+  Memory Manager blocks may.
+- **The strike's row at `$7E/0147` was never written.**  The strike was laid
+  down at op 40.05 M by a write stream with NO fetches between the bytes -
+  the card's DMA, a SmartPort block landing - and at `$7D/FFFF` the next
+  byte went to **`$7D/0000`**, not `$7E/0000`.  `hd_card.sv`'s
+  `dma_addr = dma_base + pidx` was sixteen bits under a fixed `dma_bank`.
+  Every block that straddles a bank edge put its tail 64 KB too low and left
+  the true destination stale: `$7E/0147` still held the `w` of "Show disk
+  info", a Finder string that had landed there at 34.6 M.
+- **Fixed both sides.**  `hd_card` takes `parameter bit GS`; at 1 the
+  24-bit sum carries into `ovr_bank`, at 0 the //e wraps in its 64 KB as
+  AppleWin's copy does.  `hd_card_tb` case 11 runs the same bench at both:
+  512 bytes to `$7D/FFC0` carry into `$7E/0000` after 64 on a IIgs and wrap
+  to `$0000` on a //e.  The host had the same blind spot the other way:
+  `AppleMemory::read_block` took a 16-bit address, so a IIgs SmartPort WRITE
+  from a buffer outside bank 0 would have sent bank 0's bytes to the image -
+  now `read_block(bank, addr, ...)` walks the 24-bit address through
+  `classify_gs`.  Build `gs_dmabank`, TIMING MET +0.025, 0 of 63,753.
+  **PROVEN ON HARDWARE**: the Finder's menu bar is black on white, and row 6
+  at Edit reads `F0 F0 FF FF FF FF F0 0F`, every byte a 00/11 pair.
+
+### Speaker clicks at the desktop: what the capture rules out
+
+The boot capture has **93 reads of `$C030`, all in its first twelfth and
+all from `FF/9AE7`** - the ROM's boot beep - and none after.  GS/OS does
+not touch the speaker at the desktop, and the card's `speaker.sv` at GS = 1
+watches `$C030` alone, so the clicks the user hears are not that
+flip-flop.  The status line's `sndspk=32762` is the flip-flop parked high
+after the beep, which the mixer's Q8 DC blocker removes.  Next candidate is
+the Ensoniq's channel, which is signed and has no blocker: the status line
+now carries `snddoc`, the DOC's loudest sample of the second, so a click
+can be caught in the act (`status full=true` while listening).  Also seen:
+`sndsil=4608`, one run-dry of ~100 ms since start, and `sndtrim=0`.
+
+### A Verilator 5.020 fault, worked around
+
+`boot_gs_tb` cannot be built with `hd_card #(.GS (1))` in it: Verilator
+segfaults (`-j 1` too, the generate and the `?:` forms alike; `lint.sh`
+and Vivado take the same source without complaint).  The bench keeps
+`hd_card` at its //e default, where nothing in its boot crosses a bank
+edge, and the carry is proven by `hd_card_tb` under iverilog at both
+values.
+
+### Rung 5's list, closed
+
+- **BRAM persistence** (host): `gs_bram = gs_bram.bin` (default; empty =
+  none).  `GsBramFollower` runs the clock chip's `$C033/$C034` protocol
+  beside the card's, from the stream, on the ingest thread; the file is
+  written from the render thread once a second when dirty and at stop,
+  never from ingest; loaded at start under the host's slots (`build_bram`
+  over a base) when it is 256 bytes and sealed.  Proven: Display type set
+  to Monochrome in the Control Panel, swhost restarted, the Control Panel
+  shows Monochrome (and set back).  `gs_bram_test` 35 checks.
+- **`$C022` and the border** (host): the NTSC path's no-burst lines mix
+  the B&W level from background to foreground (`Ntsc::decode_lines`'s
+  `duo`), the cell types take `set_text_colours`, and the compositor's
+  clear is the border colour (`FrameInfo::border_rgb`), all from the lores
+  palette as KEGS.  A `$C022` of zero is the unwritten latch and reads as
+  white on black.  Seen: the CDA menu white on blue, the self-test's
+  purple and green borders on the panel.
+- **`tools/gs_test.sh`**: the banner, the self-test (05... expected), the
+  Finder by the mirror (SHR line 1 of bank `$E1` white, through the
+  socket's new 24-bit `peek BBAAAA`), the CDA menu and Control Panel, the
+  battery RAM's file, the ratio.
 
 ## What is NOT working, as of the end of rung 4b
 

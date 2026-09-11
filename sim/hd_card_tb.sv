@@ -36,7 +36,9 @@
 //     changes nothing.
 //////////////////////////////////////////////////////////////////////////////////
 
-module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
+module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
+                    // The card as a IIgs's (the DMA's bank carries) or a //e's (it wraps).
+                    parameter GS_DUT = 0);
 
     localparam integer T_PRESENT = 2;
     localparam integer T_EMIT    = 2;
@@ -114,6 +116,7 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     wire [7:0]  op_wdata;
     wire        ovr_en, ovr_rw;
     wire [15:0] ovr_addr;
+    wire [7:0]  ovr_bank;
     wire [7:0]  ovr_wdata;
     wire        rd_claim;
     wire [7:0]  rd_data;
@@ -184,12 +187,12 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     integer     claims_7e = 0;
     always @(posedge clk) if (tb_bank != 8'd0 && rd_claim) claims_7e = claims_7e + 1;
 
-    hd_card #(.STALL_TIMEOUT (STALL_TIMEOUT)) dut (
+    hd_card #(.STALL_TIMEOUT (STALL_TIMEOUT), .GS (GS_DUT)) dut (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .res_sync (res_n),
         .master_active (master_active), .slot_assign (3'd7),
         .op_addr (op_addr), .op_rw (op_rw), .op_present (op_present),
         .op_commit (op_commit), .op_ovr (op_ovr), .op_bank (tb_bank), .din (cpu_din),
-        .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw),
+        .ovr_en (ovr_en), .ovr_addr (ovr_addr), .ovr_bank (ovr_bank), .ovr_rw (ovr_rw),
         .ovr_wdata (ovr_wdata),
         .rd_claim (rd_claim), .rd_data (rd_data),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),
@@ -283,10 +286,12 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
     reg        log_ovr  [0:65535];
     reg        log_sync [0:65535];
     reg [7:0]  log_din  [0:65535];
+    reg [7:0]  log_bank [0:65535];   // the override's bank on a DMA op
     integer    nops = 0, ncommit = 0;
     always @(posedge clk) begin
         if (op_present) begin
             log_addr[nops] = op_addr;
+            log_bank[nops] = ovr_bank;
             log_rw[nops]   = op_rw;
             log_ovr[nops]  = op_ovr;
             log_sync[nops] = drv_sync;
@@ -684,6 +689,50 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex");
         else $display("  ok: $7E/C0F0 is RAM - no EXECUTE, no claim (%0d claims seen)", claims_7e);
         if (claims_7e != 0) fail("the card claimed a read in bank $7E");
         tb_bank = 8'd0;
+
+        // --- case 11 / a block that straddles a bank edge ------------------------
+        // A IIgs SmartPort buffer may sit anywhere, and GS/OS reads files into
+        // Memory Manager blocks that cross bank boundaries: a block landing at
+        // $7D/FFC0 ends at $7E/00BF.  The card's DMA address adder was 16
+        // bits, so the tail wrapped to $7D/0000 - and the Finder's menu bar
+        // showed a font strike's row read from where a string had landed
+        // (docs/GS.md).  On a IIgs (GS_DUT = 1) the bank carries; on a //e
+        // it wraps in the 64 KB, which is what AppleWin's copy does too.
+        for (i = 16'h0300; i < 16'h0310; i = i + 1) mem[i] = 8'hxx;
+        machine_reset(4);
+        wait (execs == 9);
+        cycles(2);
+        push_word(hdr(T_HD_DONE, 8'd0, 16'h0000));           // #1: no bytes
+        mark = nops;
+        push_word(hdr(T_HD_DONE, 8'd130, 16'h0000));         // #2: a block...
+        push_word({16'd512, 16'hFFC0});                        // ...to $FFC0
+        push_word({8'd0, 8'h7D, 16'h0200});                    // in bank $7D
+        for (i = 0; i < 128; i = i + 1)
+            push_word({pat_a(4*i+3), pat_a(4*i+2), pat_a(4*i+1), pat_a(4*i)});
+        wait_store(16'h0302, 900);
+        n_w = 0; k = 0;
+        for (i = mark; i < nops; i = i + 1) begin
+            if (log_ovr[i] && !log_rw[i]) begin
+                if (GS_DUT != 0) begin
+                    if (n_w < 64) begin
+                        if (log_addr[i] !== 16'hFFC0 + n_w[15:0] || log_bank[i] !== 8'h7D) k = k + 1;
+                    end else begin
+                        if (log_addr[i] !== n_w[15:0] - 16'd64 || log_bank[i] !== 8'h7E) k = k + 1;
+                    end
+                end else begin
+                    if (log_addr[i] !== 16'hFFC0 + n_w[15:0] || log_bank[i] !== 8'h7D) k = k + 1;
+                end
+                n_w = n_w + 1;
+            end
+        end
+        if (n_w != 512) begin
+            $display("FAIL: %0d DMA writes across the bank edge, expected 512", n_w); errors = errors + 1;
+        end else if (k != 0) begin
+            $display("FAIL: %0d of 512 DMA writes landed at the wrong bank:address (GS_DUT = %0d)", k, GS_DUT);
+            errors = errors + 1;
+        end else if (GS_DUT != 0) $display("  ok: a IIgs DMA from $7D/FFC0 carries into $7E/0000 after 64 bytes");
+        else                     $display("  ok: a //e DMA from $FFC0 wraps to $0000 within its bank");
+        mem[16'hFFFC] = 8'h00; mem[16'hFFFD] = 8'hF0;          // the vector the block overwrote
 
         $display("");
         if (errors == 0) $display("PASS");

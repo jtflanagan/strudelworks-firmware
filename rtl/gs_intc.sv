@@ -186,8 +186,14 @@ module gs_intc (
                 8'h41: if (wr) begin
                     c041 <= op_wdata & 8'h1F;
                     // Turning an enable off drops what it had pending.
-                    if ((op_wdata & C041_EN_VBL)   == 8'd0) begin p_vbl   <= 1'b0; c046[3] <= 1'b0; end
-                    if ((op_wdata & C041_EN_25SEC) == 8'd0) begin p_25sec <= 1'b0; c046[4] <= 1'b0; end
+                    // Disabling an interrupt drops its REQUEST (KEGS
+                    // remove_irq) and nothing else: INTFLAG's bit stays
+                    // until $C047.  The ROM's self-test (test 11) clears
+                    // $C041 inside its handler and then reads $C046 for
+                    // the bit - clearing it here failed that test on
+                    // hardware (docs/GS.md rung 4's gate, 2026-09-11).
+                    if ((op_wdata & C041_EN_VBL)   == 8'd0) p_vbl   <= 1'b0;
+                    if ((op_wdata & C041_EN_25SEC) == 8'd0) p_25sec <= 1'b0;
                 end
 
                 // $C046 ignores writes; a READ copies bit 7 down into bit 6

@@ -48,8 +48,13 @@
 // across the clocks the dispatcher takes to serve it.
 //////////////////////////////////////////////////////////////////////////////////
 module gs_clock #(
+    // The message types, as rtl/ft601_msg_rx.sv and docs/PROTOCOL.md number
+    // them.  GS_TIME IS $30: it was $2F here for two days, which is ADB_KEY,
+    // so every key the host sent set the clock to its own event word and
+    // the Pi's time never arrived - the Control Panel read 1/1/04 (docs/
+    // GS.md rung 4's gate, 2026-09-11).  gs_io does not override these.
     parameter [7:0] T_GS_BRAM = 8'h2E,
-    parameter [7:0] T_GS_TIME = 8'h2F
+    parameter [7:0] T_GS_TIME = 8'h30
 ) (
     input  wire        clk,
     input  wire        rst,

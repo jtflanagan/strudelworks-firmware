@@ -562,11 +562,24 @@ module gs_adb #(
             kbd_n <= 4'd0; reg0_n <= 4'd0;
             hard_key_down <= 1'b0; a2code_down <= 7'd0;
             key_down <= 1'b0; rpt_left <= 16'd0;
-            c025_val <= 8'h20;
+            // THE MODIFIER LEVELS SURVIVE RES' (KEGS adb_reset leaves
+            // g_c025_val alone): the fingers are still on the keys, and the
+            // ROM reads Command and Option through $C061/$C062 AFTER the
+            // reset to choose the self-test and the cold boot.  The card's
+            // own reset clears them, as adb_init does.
+            c025_val <= 8'h20 | (rst ? 8'h00 : (c025_val & 8'hC7));
             for (i = 0; i < KBD_N; i = i + 1) kbd_buf[i] <= 8'd0;
             for (i = 0; i < REG0_N; i = i + 1) reg0[i] <= 8'd0;
         end else if (ev_go) begin
             // ---- adb_key_event ------------------------------------------
+            // Ctrl-Command-Esc is the Desk Manager's interrupt (adb.c:1687):
+            // bit 5 of the interrupt byte, which makes the data VALID and,
+            // with $C027's enable, the ADB interrupt the ROM opens the
+            // Control Panel from.  Control and Command as the event carries
+            // them, or as the IIe keyboard's real Apple keys stand.
+            if (!ev_up && ev_code == 7'h35 &&
+                (ev_mods[1]) && ((ev_mods[7]) || live_mods[7]))
+                int_byte <= int_byte | 8'h20;
             // The raw event always goes to register 0, up or down; the ASCII
             // only on a press of a key that has one.
             if (reg0_n < REG0_N[3:0]) begin

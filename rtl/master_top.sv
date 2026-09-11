@@ -1667,6 +1667,9 @@ module master_top #(
         .loc_up     (gskbd_ev_up),
         .loc_mods   (gskbd_ev_mods),
         .live_mods  (gskbd_live_mods),
+        // The host's button overrides, for $C061/$C062 (pb_inject stands
+        // down at GS = 1; gs_io answers the Apple keys itself).
+        .pb_sel     (pb_override),
         // The frame origin, from the beam every consumer takes: the quarter-
         // second and one-second interrupts count frames off it.
         .frame_tick (beam_mark_bus || beam_mark_fast),
@@ -1918,7 +1921,7 @@ module master_top #(
     // ---- the hard disk ------------------------------------------------------
     // The slot ROM and the EXECUTE port; the images and the command decode
     // are on the host.  See rtl/hd_card.sv.
-    hd_card u_hd (
+    hd_card #(.GS (GS)) u_hd (
         .clk           (apple_clk),
         .rst           (apple_rst),
         .cpu_rst       (cpu_rst),

@@ -306,6 +306,74 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
         live_mods = 8'h00; @(negedge clk);
         chk(c025 & 8'hC0, 8'h00, "...and stops showing them at once");
 
+        // ---- the arrows: the down arrow's ASCII and raw event -------------
+        // The Control Panel moved on the up arrow and not on the down (hardware,
+        // 2026-09-11); both paths through the micro are checked here.
+        key(7'h3D, 1'b0, 8'h00);                       // down arrow
+        rd(8'h00, v); chk(v, 8'h8A, "the down arrow types $0A with the strobe");
+        rd(8'h10, v); key(7'h3D, 1'b1, 8'h00);
+        key(7'h3E, 1'b0, 8'h00);                       // up arrow
+        rd(8'h00, v); chk(v, 8'h8B, "the up arrow types $0B");
+        rd(8'h10, v); key(7'h3E, 1'b1, 8'h00);
+        drain();
+
+        // ---- the arrows: the down arrow's ASCII and raw event -------------
+        // The Control Panel moved on the up arrow and not on the down (hardware,
+        // 2026-09-11); both paths through the micro are checked here.
+        key(7'h3D, 1'b0, 8'h00);                       // down arrow
+        rd(8'h00, v); chk(v, 8'h8A, "the down arrow types $0A with the strobe");
+        rd(8'h10, v); key(7'h3D, 1'b1, 8'h00);
+        key(7'h3E, 1'b0, 8'h00);                       // up arrow
+        rd(8'h00, v); chk(v, 8'h8B, "the up arrow types $0B");
+        rd(8'h10, v); key(7'h3E, 1'b1, 8'h00);
+        // ...and the raw events behind a Talk register 0.  KEGS packs the two
+        // as (val0 << 8) + val1 and hands the LOW byte first, so the LATER
+        // event of a pair comes out first: the release, then the press.
+        wr(8'h26, 8'hC2); rd(8'h26, v); rd(8'h26, v);
+        chk(v, 8'hBD, "Talk reg 0 hands over the down arrow's release first (KEGS's byte order)");
+        rd(8'h26, v); chk(v, 8'h3D, "...then its press");
+        wr(8'h26, 8'hC2); rd(8'h26, v); rd(8'h26, v);
+        chk(v, 8'hBE, "...then the up arrow's release");
+        rd(8'h26, v); chk(v, 8'h3E, "...and its press");
+        drain();
+
+        // ---- Ctrl-Command-Esc: the Desk Manager's interrupt (adb.c:1687) --
+        // Bit 5 of the interrupt byte, read and cleared at $C026.  Esc with
+        // Control alone raises nothing; Command may be the event's (the
+        // host's, or the IIe keyboard's reverse map) or the real Apple key.
+        key(7'h35, 1'b0, 8'h02);                       // Ctrl-Esc
+        rd(8'h26, v); chk(v & 8'h20, 8'h00, "Ctrl-Esc alone is not the Desk Manager");
+        rd(8'h10, v); key(7'h35, 1'b1, 8'h02);
+        key(7'h35, 1'b0, 8'h82);                       // Ctrl-Cmd-Esc, from the host
+        rd(8'h26, v); chk(v & 8'h20, 8'h20, "Ctrl-Cmd-Esc sets bit 5 of the interrupt byte");
+        rd(8'h26, v); chk(v & 8'h20, 8'h00, "...and the read cleared it");
+        rd(8'h10, v); key(7'h35, 1'b1, 8'h82);
+        live_mods = 8'h80;                             // the real Open-Apple held
+        key(7'h35, 1'b0, 8'h02);                       // Ctrl-Esc at the IIe keyboard
+        rd(8'h26, v); chk(v & 8'h20, 8'h20, "...and the real Apple key counts as Command");
+        rd(8'h10, v); key(7'h35, 1'b1, 8'h02);
+        live_mods = 8'h00;
+        // The data interrupt follows, once $C027 enables it.
+        wr(8'h27, 8'h10);
+        key(7'h35, 1'b0, 8'h82);
+        @(negedge clk);
+        if (irq_data) ok("the Desk Manager raises the ADB data interrupt");
+        else fail("the Desk Manager raises the ADB data interrupt");
+        rd(8'h26, v); rd(8'h10, v); key(7'h35, 1'b1, 8'h82);
+        wr(8'h27, 8'h00);
+
+        // ---- the modifiers survive RES' (adb_reset leaves g_c025_val) ------
+        // The ROM reads Command and Option AFTER the reset to choose the
+        // self-test, so a Command held through it must still show.
+        key(7'h37, 1'b0, 8'h80);                       // the Command key itself
+        chk(c025 & 8'hC7, 8'h80, "$C025 carries Command");
+        res_sync = 1'b0; repeat (4) @(negedge clk); res_sync = 1'b1; @(negedge clk);
+        chk(c025 & 8'hC7, 8'h80, "...and it survives RES'");
+        chk(c025 & 8'h20, 8'h20, "...with no hard key down after the reset");
+        key(7'h37, 1'b1, 8'h00);
+        chk(c025 & 8'hC7, 8'h00, "...until it is let go");
+        drain();
+
         // ---- THE MOUSE ($C024) ----------------------------------------------
         // FIRST PUT THE CONFIG BACK.  The auto-repeat section above issues a
         // set-config whose first byte is $23, and adb_set_config reads the

@@ -412,6 +412,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [31:0] hd_tx_word;
     wire        hd_tx_valid;
     wire        hd_exec_q;
+    // hd_card at its //e default here, NOT #(.GS (1)): Verilator 5.020
+    // segfaults building this bench with the IIgs DMA carry in it (the
+    // generate and the ?: forms both), so the bank carry is proven by
+    // sim/hd_card_tb.sv under iverilog at both GS values instead.  Nothing
+    // in this bench's boot lands a block across a bank edge.
     hd_card u_hd (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .res_sync (res_sync),
         .master_active (master_active), .slot_assign (3'(HD_SLOT)),
@@ -530,7 +535,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // driver and no backplane.  sim/gs_kbd_a2_tb.sv drives it from a
         // model IOU instead.  Quiet here, so the reference trace is unmoved.
         .loc_valid (1'b0), .loc_code (7'd0), .loc_up (1'b0),
-        .loc_mods (8'd0), .live_mods (8'd0),
+        .loc_mods (8'd0), .live_mods (8'd0), .pb_sel (6'd0),
 
         .frame_tick (frame_tick),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
