@@ -514,6 +514,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .gs_shadow (gs_shadow_w), .gs_cyareg (gs_cyareg_w),
         .gs_sltrom (gs_sltrom_w), .gs_state (gs_state_w),
         .stat_byte (mmu_swi_stat), .vbl (vbl_active),
+        .scan_v (9'd0), .scan_h (7'd0),
+        .mw_stb (1'b0), .mw_bank (8'd0), .mw_addr (16'd0), .mw_byte (8'd0),
         // PINNED TO KEGS's OWN CLOCK.  tools/kegs/trace_rom.sh runs the
         // reference with -pintime 3871713600 (2026-09-08 12:00:00 since
         // 1904) so its trace is the same every run; the card must believe the
@@ -561,7 +563,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
-        .mw_stb (), .mw_addr (), .mw_byte (),
+        .mw_stb (), .mw_addr (), .mw_byte (), .mwx_stb (), .mw_bank (),
         .il_req (1'b0), .il_ppn (16'd0), .il_line (4'd0), .il_src (1'b0),
         .il_ack (), .il_done (), .il_ok (), .il_row (),
         .serve (serve), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),

@@ -12,7 +12,7 @@ a mistake this document invites, and it has been made.
 | 0, 1, 1b, 2, 3a-3e | **DONE** |
 | 4 - first light on hardware | **PARTLY**: 4a built the bitstream and 4b brought first light, and hardware has run both keyboards, SHR and a boot.  The rung's own gate - self-test pass, Control Panel navigable - is not recorded as met |
 | 4c - the memory corruption | **DONE, ON HARDWARE 2026-09-10 evening** (two more of the same family found there: the bus record's bank and the host's bank-blind switch decoders).  The page cache was NOT the hole (a bench mask that began at `boot_go`; the audit is a gate now, 0/0).  The corruption was the 65816 returning from EVERY hardware interrupt two bytes late (fixed, `cpu816_irq` in the suite), the DMA's bank dropped on the op that lands so bank-$7E reads wrote bank zero (fixed in `accel_seq`, master_top and the bench), and the host refusing `$7E/C000` as "the I/O page" (fixed).  GS/OS now runs 8M instructions into the toolbox instead of dying at 4M |
-| 5 - GS/OS Finder (milestone 1) | **THE FINDER IS ON HDMI, 2026-09-10 evening** (`shots/gs4c2_hostgate.png`), booted from the slot-7 HDC on build gs4c2 + the bank-gated host: menu bar, GSHardDrive, the 5.25 drives, Trash.  Of the row's list, BRAM persistence, border and `$C022` are unchecked and "a window opens by mouse" is untried; the speaker click on bank-$7E DMA is fixed in gs4c3 |
+| 5 - GS/OS Finder (milestone 1) | **MILESTONE 1 REACHED, 2026-09-11 01:15: A WINDOW OPENS BY MOUSE** (`shots/scanint_double_click.png` - GSHardDrive double-clicked, "ProDOS, 6 items, 31.9 MB used"), build gs_scanint (TIMING MET +0.041 / +0.053, 0 of 63,517).  The pointer needed two things: the ADB staging registers synthesis had zeroed (multi-driven, gs_mvfix) and the VGC scan-line interrupt QuickDraw II redraws the cursor from (gs_scanint: SCBs snooped at the page cache's write tap, `irq_scan` at the start of a marked line).  The desktop had been on HDMI since 2026-09-10 evening (`shots/gs4c2_hostgate.png`).  Still unchecked from the row's list: BRAM persistence, border, `$C022`; `tools/gs_test.sh` not written |
 | 6 - speed: the split interface and the fronts | **NOT STARTED.**  Mentioned only in the future tense everywhere it appears |
 | 7 - sound (milestone 2) | **ENTERED OUT OF ORDER, NOT CLOSED.**  The DOC was built because GS/OS needed its sound interrupts serviced to get past "Unclaimed Sound Interrupt" - that much works.  The gate, a tracker player against a KEGS recording with interrupts timed, is untouched |
 | 8 | Later |
@@ -66,16 +66,24 @@ Hardware only - no bench saw any of these, and two of them could not have.
    QuickDraw II redraws the cursor from the VGC scan-line interrupt: the
    trace shows `$C023 = $02` (enabled) and SCBs written with bit 6 on the
    cursor's lines, and `gs_io.sv` ties `irq_scan` to `1'b0`.  Rung-4b part 8
-   was right that this was not the boot hang; it is the pointer.  NEXT.
+   was right that this was not the boot hang; it is the pointer.  **BUILT
+   (gs_scanint, 01:07):** the page cache's write tap now carries the bank
+   (`mwx_stb`/`mw_bank`), `gs_io` keeps a 200-bit mask of SCB bit 6 as the
+   bytes land at `$E1/9D00` (direct or shadow-duplicated - both land through
+   the cache), and pulses `irq_scan` at the start of a marked line while
+   NEWVIDEO's SHR bit is on - KEGS's `g_last_vbl + 65*line`.  On hardware the
+   arrow appeared at once, followed a +120/+60 injected move exactly in
+   640-mode coordinates, and a double-click on GSHardDrive opened its window.
 
 Also that night: the programmatic Ctrl-Reset works on the IIgs build again
 (it had been a split message on a busy link), so the load -> start -> reset
 -> desktop cycle is self-serve.
 
-Status: **GS/OS 6.0.1 BOOTS TO THE FINDER ON HARDWARE AND THE MACHINE STAYS
-UP, 2026-09-11 00:27**, branch `gs_emulation`, build gs_mvfix (TIMING MET
-+0.026 / +0.055, 0 of 63,076, stamp 00:27:24; the verdict now also gates
-multi-driven registers, 0) with the one-write-per-message host.  The night's
+Status: **MILESTONE 1 - THE FINDER WORKS BY MOUSE ON HARDWARE, 2026-09-11
+01:15**, branch `gs_emulation`, build gs_scanint (TIMING MET +0.041 / +0.053,
+0 of 63,517, stamp 00:53:07; the verdict also gates multi-driven registers,
+0) with the one-write-per-message host: the arrow tracks the Pi's mouse and a
+double-click opens GSHardDrive's window.  The night's
 finds are in "The night of 2026-09-10/11" below: the link's split messages,
 the ingest thread stalled by a dump, the FT601 enable fanout, four registers
 synthesis had silently zeroed (the mouse), and the scan-line interrupt the

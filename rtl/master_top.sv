@@ -302,6 +302,8 @@ module master_top #(
     wire        fb_serve, fb_cnt_clr;
     wire [14:0] fb_peek_addr;
     wire        fb_mw_stb;          // the main bank's writes as they land, for the copy
+    wire        fb_mwx_stb;         // ...and ANY bank's, with the bank, for the IIgs's SCBs
+    wire [7:0]  fb_mw_bank;
     wire [15:0] fb_mw_addr;
     wire [7:0]  fb_mw_byte;
     wire [6:0]  fb_mode;
@@ -1636,6 +1638,9 @@ module master_top #(
         // beam's VBL level for $C019's top bit.
         .stat_byte  (mmu_swi_stat),
         .vbl        (vbl_level),
+        .scan_v     (scan_v), .scan_h (scan_h),
+        .mw_stb     (fb_mwx_stb), .mw_bank (fb_mw_bank),
+        .mw_addr    (fb_mw_addr), .mw_byte (fb_mw_byte),
         // THE CLOCK IS THE HOST'S FEED, as the No-Slot Clock's is: seconds
         // since 1904, sent as GS_TIME and re-sent every second, because the
         // card keeps no time of its own (docs/NSC.md, docs/GS.md).
@@ -1769,6 +1774,8 @@ module master_top #(
         .mw_stb      (fb_mw_stb),
         .mw_addr     (fb_mw_addr),
         .mw_byte     (fb_mw_byte),
+        .mwx_stb     (fb_mwx_stb),
+        .mw_bank     (fb_mw_bank),
         // The line-row port carries iline's request when it has one, else the
         // data front's - iline first, always: its fills serve the running
         // fetch stream, the shadow's claims can only be early.

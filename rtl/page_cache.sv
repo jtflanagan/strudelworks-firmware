@@ -133,6 +133,11 @@ module page_cache #(
     // whether from an op, a posted write or a write miss's patch.
     output wire        mw_stb,
     output wire [15:0] mw_addr,
+    // ...and the same landing for ANY bank: the strobe and the bank the
+    // address is in, for the IIgs's scan-line interrupt, which watches the
+    // SCBs land at $E1/9D00 (rtl/gs_io.sv).  mw_addr/mw_byte are shared.
+    output wire        mwx_stb,
+    output wire [7:0]  mw_bank,
     output wire [7:0]  mw_byte,
 
     // ---- the line port, both fronts through master_top's arbitration -------
@@ -309,6 +314,7 @@ module page_cache #(
     logic [15:0]     wl_be;
     logic [127:0]    wl_data;
     logic            wl_main;
+    logic [7:0]      wl_bank;
     logic [15:0]     wl_addr;
 
     logic [WAYS-1:0] e_way;          // the engine's way, one-hot
@@ -434,6 +440,7 @@ module page_cache #(
             wl_be   <= 16'd1 << cl_off[3:0];
             wl_data <= {16{cl_wdata}};
             wl_main <= (cl_ppn[15:8] == 8'd0);
+            wl_bank <= cl_ppn[15:8];
             wl_addr <= {cl_ppn[7:0], cl_off};
             dw_set  <= e1_set;
             dw_way  <= c_hit_w;
@@ -526,6 +533,8 @@ module page_cache #(
 
     // The write tap: main memory's bytes as they land, for rtl/fb_sim.sv.
     assign mw_stb  = (wl_v && wl_main) || ((state == E_PATCH) && e_main);
+    assign mwx_stb = wl_v || (state == E_PATCH);
+    assign mw_bank = wl_v ? wl_bank : e_ppn[15:8];
     assign mw_addr = wl_v ? wl_addr : e_addr;
     assign mw_byte = wl_v ? wl_data[7:0] : e_wbyte;
 

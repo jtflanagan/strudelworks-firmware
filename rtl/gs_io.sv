@@ -73,6 +73,20 @@ module gs_io #(
     // The video scanner is in vertical blanking.  On the card this is
     // rtl/vbeam.sv's; in the bench it is the frame counter's.
     input  wire        vbl,
+    // THE SCAN-LINE INTERRUPT (KEGS sim65816.c check_scan_line_int): the
+    // beam's line and column from rtl/vbeam.sv, and the page cache's write
+    // tap for any bank, watched for the SCBs at $E1/9D00-9DC7.  A line whose
+    // SCB has bit 6 set raises the VGC's scan-line interrupt at the START of
+    // that line (KEGS: g_last_vbl_dfcyc + 65*line) while Super Hi-Res is on.
+    // QuickDraw II redraws the cursor from this interrupt; without it the
+    // arrow sat at (0,0) while the ROM's position variables tracked the
+    // mouse exactly (docs/GS.md, the night of 2026-09-10/11).
+    input  wire [8:0]  scan_v,
+    input  wire [6:0]  scan_h,
+    input  wire        mw_stb,         // a byte landed in the image, any bank
+    input  wire [7:0]  mw_bank,
+    input  wire [15:0] mw_addr,
+    input  wire [7:0]  mw_byte,
 
     // Seconds since 1904-01-01, for the clock chip.  The host's, or the
     // bench's pinned value (rtl/gs_clock.sv).
@@ -327,13 +341,41 @@ module gs_io #(
         .cnt_ends (doc_cnt_ends), .cnt_irqs (doc_cnt_irqs)
     );
 
+    // ---- the scan-line interrupt's trigger ---------------------------------
+    // One bit per SCB: bit 6 of the byte as it lands at $E1/9D00 + line,
+    // from a direct bank-$E1 write or the map's shadow duplicate of a bank-
+    // $01 one - both land through the page cache, so one tap sees both.
+    logic [199:0] scb_int;
+    wire scb_hit = mw_stb && (mw_bank == 8'hE1) && (mw_addr[15:8] == 8'h9D) &&
+                   (mw_addr[7:0] < 8'd200);
+    // The start of a line: the column returning to zero.  scan_v/scan_h step
+    // once per core cycle and hold for many clocks, so the edge is detected.
+    logic [6:0] scan_h_q;
+    logic       line_start;
+    logic [7:0] line_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            scb_int <= 200'd0;
+            scan_h_q <= 7'd0; line_start <= 1'b0; line_q <= 8'd0;
+        end else begin
+            if (scb_hit) scb_int[mw_addr[7:0]] <= mw_byte[6];
+            scan_h_q   <= scan_h;
+            line_start <= (scan_h == 7'd0) && (scan_h_q != 7'd0) && (scan_v < 9'd200);
+            line_q     <= scan_v[7:0];
+        end
+    end
+    // A registered pulse, so the 200:1 select is not in gs_intc's cone.
+    logic irq_scan_q;
+    always_ff @(posedge clk)
+        irq_scan_q <= !rst && line_start && c029_newvideo[7] && scb_int[line_q];
+
     // ---- the interrupt controller -------------------------------------------
     wire [7:0] intc_rd;
     gs_intc u_intc (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
         .rd_byte (intc_rd), .frame_tick (frame_tick),
-        .irq_adb (adb_irq_data || adb_irq_mouse), .irq_scan (1'b0),
+        .irq_adb (adb_irq_data || adb_irq_mouse), .irq_scan (irq_scan_q),
         .irq_doc (doc_irq),
         .irq (irq)
     );
