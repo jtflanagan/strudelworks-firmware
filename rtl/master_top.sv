@@ -485,6 +485,7 @@ module master_top #(
         .mem_rom_busy   (rom_busy),
         .mem_rom_over   (rom_overruns), .mem_shd_drops (mem_shd_drops),
         .gs_adb_stat    (gsio_adb_stat),
+        .cnt_core_cyc   (cnt_core_cyc), .cnt_bus_cyc (cnt_bus_cyc),
         .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
         .mem_served (mem_served), .mem_last (mem_last), .mem_diverted (mem_diverted),
@@ -1003,7 +1004,12 @@ module master_top #(
         // and fast is whatever the host asked for in ACCEL_CTRL.  Running a
         // slow-mode program at the fast target is not "faster", it is wrong -
         // the ROM's self-test measures things.
-        .target        (GS && !gs_cyareg_w[7] ? 16'h0100 : accel_target),
+        // EXCEPT WHEN THE HOST SAYS UNLIMITED (target 0, `accel all 0`):
+        // then the slow bit yields too.  Nox on the IIgs sat at 1.1x with the
+        // governor "unlimited" because ProDOS 8 clears the bit (2026-09-11);
+        // unlimited is the user's explicit "as fast as it goes", and a
+        // finite target still honours the machine's own switch.
+        .target        (GS && !gs_cyareg_w[7] && (accel_target != 16'd0) ? 16'h0100 : accel_target),
         .cnt_clr       (accel_cnt_clr),
         .mem_serve     (mem_serve),
         .mem_image_ready (mem_image_ready),
@@ -1852,6 +1858,25 @@ module master_top #(
     // return, without the bus.  Compared with the real byte on every such
     // read; substituted for it when FB_CTRL says so.  See rtl/fb_sim.sv and
     // docs/FLOATING_BUS.md.
+    // THE PLAIN RATIO (user, 2026-09-11).  Two counters and nothing else:
+    // core cycles exactly as vbeam advances on them - a real bus cycle that
+    // is the core's (not a dummy, not DMA) or a fast op's retire, both in
+    // one clock counting two - over raw bus cycles.  The host divides.  The
+    // classified census (turbo + dline + fast + bus over cycles) stays as
+    // the breakdown, but a kind it does not count no longer bends the
+    // headline number.  Cleared with the rest by ACCEL_CTRL's cnt_clr.
+    logic [31:0] cnt_core_cyc = 32'd0, cnt_bus_cyc = 32'd0;
+    wire         core_tick_bus  = bus_tick && !op_dummy && !op_ovr;
+    wire         core_tick_fast = seq_fast_tick || turbo_tick || dline_tick;
+    always_ff @(posedge apple_clk) begin
+        if (apple_rst || accel_cnt_clr) begin
+            cnt_core_cyc <= 32'd0; cnt_bus_cyc <= 32'd0;
+        end else begin
+            cnt_core_cyc <= cnt_core_cyc + {31'd0, core_tick_bus} + {31'd0, core_tick_fast};
+            cnt_bus_cyc  <= cnt_bus_cyc + {31'd0, bus_tick};
+        end
+    end
+
     fb_sim u_fb (
         .clk           (apple_clk),
         .rst           (apple_rst),

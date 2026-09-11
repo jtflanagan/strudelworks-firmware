@@ -75,15 +75,32 @@ Hardware only - no bench saw any of these, and two of them could not have.
    arrow appeared at once, followed a +120/+60 injected move exactly in
    640-mode coordinates, and a double-click on GSHardDrive opened its window.
 
+**The morning after (2026-09-11 07:45, build gs_plain).**  Nox on the IIgs
+sat at 1.1x with the governor "unlimited" and "held by the governor": ProDOS 8
+clears CYAREG's speed bit and the card honoured it.  Now a target of 0
+(`accel all 0`) overrides the slow bit; a finite target still honours the
+machine's own switch (`master_top.sv`, the accel_seq target mux).  And the
+acceleration number is no longer a sum of classified op kinds over cycles -
+that census counted 47 M more "ops" than core cycles across a boot - but two
+plain counters beside vbeam: core cycles exactly as the beam advances on them
+and raw bus cycles, `PLAIN N core over M bus cycles = X.XXx` at the end of
+the accel report.  On the Nox overworld map both agree at 14.8x.
+
 Also that night: the programmatic Ctrl-Reset works on the IIgs build again
 (it had been a split message on a busy link), so the load -> start -> reset
 -> desktop cycle is self-serve.
 
 Status: **MILESTONE 1 - THE FINDER WORKS BY MOUSE ON HARDWARE, 2026-09-11
-01:15**, branch `gs_emulation`, build gs_scanint (TIMING MET +0.041 / +0.053,
-0 of 63,517, stamp 00:53:07; the verdict also gates multi-driven registers,
-0) with the one-write-per-message host: the arrow tracks the Pi's mouse and a
-double-click opens GSHardDrive's window.  The night's
+01:15**; morning build gs_plain (TIMING MET +0.341 / +0.042, 0 of 63,728,
+stamp 07:38:08): an unlimited target now overrides CYAREG's slow bit, and the
+acceleration headline is the PLAIN ratio - core cycles as vbeam counts them
+over raw bus cycles (ACCEL_CORE_CYC/ACCEL_BUS_CYC, 0x128/0x12C), no
+classification.  Nox Archaist on the IIgs at unlimited: 14.8x on the
+overworld map (the IIe build does 50-70x there - rung 6, the fronts, is where
+that goes).  Branch `gs_emulation`, build gs_scanint (TIMING MET +0.041 /
++0.053, 0 of 63,517, stamp 00:53:07; the verdict also gates multi-driven
+registers, 0) with the one-write-per-message host: the arrow tracks the Pi's
+mouse and a double-click opens GSHardDrive's window.  The night's
 finds are in "The night of 2026-09-10/11" below: the link's split messages,
 the ingest thread stalled by a dump, the FT601 enable fanout, four registers
 synthesis had silently zeroed (the mouse), and the scan-line interrupt the

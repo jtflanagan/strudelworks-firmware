@@ -260,6 +260,8 @@ module card_link #(
     input  wire        mem_rom_busy,
     input  wire [7:0]  mem_rom_over,
     input  wire [31:0] gs_adb_stat,     // GS_ADB_STAT (rtl/gs_adb.sv), zero on a IIe
+    input  wire [31:0] cnt_core_cyc,    // ACCEL_CORE_CYC: core cycles as vbeam counts them
+    input  wire [31:0] cnt_bus_cyc,     // ACCEL_BUS_CYC: raw bus cycles (master_top)
     input  wire [7:0]  mem_shd_drops,
     input  wire [7:0]  mem_fifo_drops,
     input  wire [31:0] mem_hits,
@@ -1061,6 +1063,7 @@ module card_link #(
         .mem_rom_busy      (mem_rom_busy),
         .mem_rom_over      (mem_rom_over),
         .gs_adb_stat       (gs_adb_stat),
+        .cnt_core_cyc      (cnt_core_cyc), .cnt_bus_cyc (cnt_bus_cyc),
         .mem_shd_drops     (mem_shd_drops),
         .mem_fifo_drops    (mem_fifo_drops),
         .mem_hits          (mem_hits),
