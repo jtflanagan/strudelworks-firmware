@@ -1,6 +1,26 @@
 # Apple IIgs on the card: the run sheet
 
-Status: **RUNG 7, THE ENSONIQ, 2026-09-09**: the DOC 5503 is built -
+## WHERE WE ARE ON THE LADDER
+
+**READ THE STATUS COLUMN OF THE LADDER TABLE, NOT THE HEADINGS.**  The rungs
+below were NOT climbed in order, and the paragraph that follows this one
+records THE LAST THING BUILT, not the rung reached.  Taking it for the rung is
+a mistake this document invites, and it has been made.
+
+| Rung | State |
+|---|---|
+| 0, 1, 1b, 2, 3a-3e | **DONE** |
+| 4 - first light on hardware | **PARTLY**: 4a built the bitstream and 4b brought first light, and hardware has run both keyboards, SHR and a boot.  The rung's own gate - self-test pass, Control Panel navigable - is not recorded as met |
+| 5 - GS/OS Finder (milestone 1) | **OPEN, and it is where the work actually is.**  The slot-7 HDC boots GS/OS (see rungs 7b and 7c, which are rung-5 work under the wrong name), but the gate is the FINDER DESKTOP and GS/OS does not reach it |
+| 6 - speed: the split interface and the fronts | **NOT STARTED.**  Mentioned only in the future tense everywhere it appears |
+| 7 - sound (milestone 2) | **ENTERED OUT OF ORDER, NOT CLOSED.**  The DOC was built because GS/OS needed its sound interrupts serviced to get past "Unclaimed Sound Interrupt" - that much works.  The gate, a tracker player against a KEGS recording with interrupts timed, is untouched |
+| 8 | Later |
+
+So: **milestone 1 has not been reached**, and nothing between rung 4 and rung
+7 is closed.  The sections named "rung 7b" and "rung 7c" are rung-5 work; the
+names are kept because commits and the memory file reference them.
+
+Last built: **THE ENSONIQ - rung 7, reached out of order, 2026-09-09**: the DOC 5503 is built -
 32 oscillators, 64 KB of wave RAM, the modes, and the arrival-ordered
 interrupt queue - and "Unclaimed Sound Interrupt" is gone.  WNS +0.022 / WHS
 +0.057, 0 of 62,799 failing endpoints; `sim/suite.sh gs` **10/10** (KEGS floor
@@ -303,10 +323,10 @@ parity check on every rung that touches shared RTL.
 | 3c | The rest of the chipset (VGC registers, `gs_intc`, IWM and SCC stubs, the sound GLU face) and the host side: the GS map in the mirror, `machine = iigs`, `gs_rom` | the ROM runs past the chipset with no spin; the host's map agrees with the card's | **DONE 2026-09-09** - see below |
 | 3d | `hd_card` in `boot_gs_tb` with the bench playing host, so the scan has something to find | the ROM finds slot 7, runs its firmware and reads blocks | **DONE 2026-09-09** - and the boot block runs; see below |
 | 3e | Why the third block read asks for $0203 instead of $0003; then ADB_KEY, `mock_card` speaking a GS stream, the battery RAM shipped down to `gs_clock`, and the mirror replayed against the bench image | the image boots | **DONE 2026-09-09.** The $0203 was an internal cycle (VDA and VPA both low) taken as an access - as a WRITE and as a STROBE - and the eviction pressure that uncovered turned up a real page-cache bug (the shadow duplicate had no P0). ProDOS 2.4.3 boots off the slot-7 SmartPort to its BYE selector and a Return launches a file. The battery RAM ships (GS_BRAM `$2E`) and the ROM believes it; ADB_KEY carries keycodes to a micro that holds the keymap, with auto-repeat; `mock_card` speaks a GS stream (`gs_source.hpp`); and the mirror replays a real boot - 1,817,727 ops, 481 pages, ZERO bytes different - which found three host bugs of its own |
-| 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | |
-| 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | |
-| 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | |
-| 7 | Sound (milestone 2): the DOC on card + mixer channels; a SoundSmith/NinjaTracker player against a KEGS recording | audible, interrupts timed | |
+| 4 | First light on hardware: `build.sh --gs`, load, "Check startup device" / Control Panel via the Pi keyboard and the real IIe keyboard, the text screen on HDMI from $E0, the self-test (Ctrl-Apple-Option-Reset) at the 2.8x governor | self-test pass; Control Panel navigable | **PARTLY, 2026-09-09**: 4a and 4b below - the bitstream, first light, both keyboards, SHR, a boot from the slot-7 SmartPort.  The GATE ITSELF is not recorded as met: no self-test pass and no Control Panel walk is written up |
+| 5 | GS/OS Finder (milestone 1): the GS/OS 6.0.1 image built; the slot-7 HDC boots it; SHR from $E1, border, $C022; ADB mouse; BRAM persistence; `tools/gs_test.sh` | Finder desktop on HDMI, a window opens by mouse, screenshot from the mirror | **OPEN - THIS IS THE CURRENT RUNG.**  The image boots and GS/OS loads off the slot-7 HDC (written up as rungs 7b and 7c, which belong here), but it does not reach the Finder |
+| 6 | Speed: the split interface + a predict contract bench; the fronts widened per the design (measured first at GS=1 on the IIe map with the accel battery, then on GS/OS); the `$C036` governor; a census of OTHER-class candidates, `bank_wr` settles, dup waits, fills/flushes | WNS gate; battery 98/0; the IIe build untouched | **NOT STARTED** |
+| 7 | Sound (milestone 2): the DOC on card + mixer channels; a SoundSmith/NinjaTracker player against a KEGS recording | audible, interrupts timed | **ENTERED OUT OF ORDER, NOT CLOSED**: the DOC is built because GS/OS needed its sound interrupts serviced (see rung 7 below); the gate - a player against a KEGS recording, interrupts timed - is untouched |
 | 8 | Later: 3.5" IWM, ROM 01, real serial, 3200-colour palettes, shadow-in-all-banks | | |
 
 ## Rung 3a, as built (2026-09-09)
@@ -2083,6 +2103,10 @@ value there.
 
 ## Rung 7b: the IIgs gets its own SmartPort (2026-09-09)
 
+*This is RUNG 5 work - "the slot-7 HDC boots it" is rung 5's own wording -
+reached out of order after rung 7 was entered for the sound interrupts.  The
+name is kept because commits reference it; see the ladder at the top.*
+
 The user's call, after the DIB subtype turned out to be one byte in a chain
 of them: **a different ROM entirely, not a patched one.**  The //e's slot ROM
 is AppleWin's, it is a plain ProDOS block device that happens to carry a
@@ -2153,6 +2177,225 @@ In simulation the machine boots block 0, the ProDOS loader chain runs, and
 blocks 0, 2, 3, 4, 5, 1242, 1243 come off the disk.  `sim/suite.sh gs` is
 10/10 with the KEGS divergence floor unmoved; host tests 40/40.  NOT YET
 tried on hardware at the time of writing.
+
+## Rung 7c: the entry normalises, and the slot is a constant (2026-09-10)
+
+*RUNG 5 work too, and the name is this document's own confusion inherited:
+"7c" was coined from 7b's heading rather than from the ladder.  See the top.*
+
+The user's question opened this rung: **do we need different driver code
+paths for emulated and native calls?**  The reasoning behind it was that the
+first fetches worked because they were made in emulation mode, and that
+things went wrong once the system converted to native.
+
+**The answer is no - one path, which NORMALISES what it is handed.**  KEGS's
+dispatcher permits a native `$C70D` call and halts on exactly one thing
+(`smartport.c:117`):
+
+    if((engine.psr & 0x100) == 0) {                 /* e = 0, native */
+            disk_printf("c70d %02x called in native mode!\n", arg0);
+            if((engine.psr & 0x30) != 0x30) {       /* m and x must BOTH be 8-bit */
+                    halt_printf("c70d called native, psr: %03x!\n", engine.psr);
+
+So the body may stay eight-bit throughout and there is nothing for a second
+code path to do.  What differs between the two modes is not the logic but the
+ADDRESSING ENVIRONMENT - DBR, the direct page, and where the stack lives -
+and duplicating the marshalling would leave both copies with the same three
+hazards.
+
+### The reference is blind here, and that is structural
+
+KEGS's handler is C running OUTSIDE the CPU.  It reads the parameter list at
+absolute 24-bit addresses, it forces its stack read into page one
+(`engine.stack = ((engine.stack + 1) & 0xff) + 0x100`, smartport.c:124), and
+it has no data bank at all.  It honours the direct page for exactly one
+thing, the ProDOS entry: `get_memory_c((engine.direct + 0x42) & 0xffff)`
+(smartport.c:464).
+
+Real 65816 code in a slot ROM has all three, and every absolute access in
+this ROM goes through DBR - the command FIFO above all.  With DBR at, say,
+$02 the FIFO writes land in plain RAM and the call quietly does nothing.
+**No amount of trace diffing against KEGS can show this**, because the
+oracle's own handler cannot experience it.  It is the mirror image of the
+lesson in rung 3: a model written from the reference finds RTL bugs, and a
+reference that cannot express a failure cannot report one either.
+
+### The census: every call measured is EMULATION mode
+
+The bench trace already carries DBR, D, S and P per instruction
+(`sim/boot_gs_tb.sv`, the twenty-byte record), so the question is a scan and
+not an argument.  Eight million instructions, the committed ROM,
+`system6.hdv` on slot 7:
+
+| PC | PBR | DBR | D | E | M | X | S | count |
+|---|---|---|---|---|---|---|---|---|
+| `$C700` | 00 | 00 | 0000 | 1 | 1 | 1 | 01xx | 1 |
+| `$C70A` | 00 | 00 | 0000 | 1 | 1 | 1 | 01xx | 42 |
+| `$C70D` | 00 | 00 | 0000 | 1 | 1 | 1 | 01xx | 1 |
+
+(A scan by PC alone also catches two hits at `$FE/C70A` and two at
+`$FF/C70A`: those are the IIgs ROM's OWN code at that address, not this card.
+Filter by PBR.)
+
+So the theory is **not confirmed by the calls themselves** - every one of them
+is emulation mode with DBR and D already zero.  That run could only see one
+SmartPort call, for the reason in the bench section below; **with the model
+synced it sees thirty-two, and the answer does not change**: 9 block calls
+and 32 at $C70D, every one of them `E=1 M=1 X=1 DBR=00 D=0000` with the stack
+in page one.  GS/OS's loader marshals its extended calls in EMULATION mode
+and goes native afterwards.
+
+### GS/OS DOES go native, at exactly the wall
+
+The one place the theory IS confirmed is where the machine stops asking for
+blocks.  At that instruction the loader is running in full native mode:
+
+     905830  00/2295 op=88 A=CD00 X=BCE8 Y=01F6 S=BCEA D=0000 B=00 P=00 E=0
+
+`E=0`, `P=$00` - so `m` and `x` both clear, sixteen-bit A AND index - and
+**`S=$BCEA`, a stack nowhere near page one**.  The old entry's
+`tsx / lda $0101,x` would have read `$01EB` there instead of `$BCEB`.  The
+transition the user suspected is real, and it happens precisely at the wall.
+
+### What the entry does now
+
+    Cn_Entry:  php          ; [P] - and C, which says which entry
+               sei          ; the whole call
+               sep #$30     ; eight-bit A, X, Y
+               phb / phd    ; [DBR] [D]
+               lda #$00 / pha / plb    ; DBR = 0
+               bcs Cn_BLK   ; nothing above touches C
+
+and out through `pld / plb / plp / cmp #$01 / rts`.  Four things are worth
+naming:
+
+- **`CMP #$01` remakes the error carry.**  PLP restores the widths and I -
+  and the caller's carry with them, over the top of the flag the call has to
+  return.  A is untouched by the pulls, and CMP #1 sets C exactly when A is
+  non-zero, which IS the error flag.
+- **The return address is reached STACK-RELATIVE** (`5,s` / `6,s`), which is
+  right wherever S lives.  It is also safe in emulation mode by arithmetic
+  and not by luck: the JSR leaves S at most $01FD, the preamble pushes five
+  more, so `6,s` reaches at most $01FF and can never cross the page-one
+  boundary where emulation wrap and native addition disagree.
+- **The direct page is saved but only the SmartPort path zeroes it.**  That
+  path must have a direct-page long pointer; the block path must not, because
+  ProDOS's six parameters are named RELATIVE TO D and KEGS reads them there.
+  The old code read them with `lda BLK_Cmd,y`, which is not an addressing
+  mode LDA has - ca65 promoted it to `B9 42 00`, absolute,Y, which ignored D
+  AND went through DBR.  Two ways to be wrong at once; `,x` is a real
+  direct-page mode and is what this wants.
+- **`sei` covers the whole call**, which the old comment claimed and the old
+  code did not do: its `plp` put the caller's I back before the body ran,
+  leaving the scratch unprotected.
+
+### The slot is a constant, and it pays for the preamble
+
+The ROM is assembled at `$C700`, so its own branches and JSRs already pin it
+to one slot: `Cn_FindSlot` was discovering at run time what the `.org` had
+already decided.  It is gone, and with it the $0000-planted-RTS trick - which
+is itself a thing a moved direct page breaks, `stx $00` writing D+$00 while
+`jsr $0000` jumps to PBR:$0000.  I/O is now the literals `$C0F0`, `$C0F9`,
+`$C0FA`, the unit byte is `#$70`, and the `$478` screen hole is gone with
+them.  Scratch moved from the screen holes to `$42`/`$43`: a byte cheaper per
+access, and out of text page 1, where 80STORE with PAGE2 puts a read in the
+AUX bank - a hazard this ROM had no reason to run.
+
+**35 bytes free where there were 9**, so the normalisation costs nothing that
+was not already being wasted.  The header's claim that the host refuses this
+ROM in any other slot was aspirational; `src/pipeline.cpp` now implements it.
+
+### The bug this found: every error code came back halved
+
+`Cn_Exec` had `lsr / bcc :+ / lsr / sec`.  The status byte is
+`(err << 1) | flag` (`src/hd_card.hpp` `status_byte`), so the FIRST `lsr`
+already drops the flag into C and leaves the code in A - which is what the
+//e's ROM does, in one shift.  The second shift **halved the error code on
+its way out**: $27 I/O ERROR returned as $13, $28 NO DRIVE as $14.  The `sec`
+after it only put back the carry its own `lsr` had just destroyed, so the
+whole tail was a corruption with nothing to justify it.
+
+### Where it stands, and what is NOT attributable
+
+`sim/suite.sh gs` is 10/10 with the KEGS floor unmoved at 67,398 events.  The
+host cross-builds; both ROMs match their sources and the //e's is byte-
+identical to the commit before this rung.
+
+On the same eight-million-instruction GS/OS boot, against the run before it:
+**46 blocks read where there were 43**, every one landed intact, and the
+machine walks on to directory blocks 3 and 4 and file block 43 where it used
+to stop.  The two runs also END differently.  Before: `$FF/C97D-C990`, the
+crash loop of the status block, native SIXTEEN-bit with the stack marching
+through page $10xx.  Now: the ROM's own VBL wait, `lda $C019 / bpl` at
+`$FF/A5F1`, native EIGHT-bit with the stack at `$017D`, cycling both halves
+of the wait.  A machine that is waiting, not one that has fallen over.
+
+**AND THE NORMALISATION IS NOT WHAT DID THAT.**  Said plainly because the
+temptation runs the other way: at DBR = 0 and D = 0 - which is every call in
+this run - the preamble is a no-op.  The three extra blocks came from the
+`Cn_Exec` error code, from the `sei`, or from the shifted interrupt timing of
+a shorter ROM, and this rung does not separate them.  The normalisation is
+insurance against the native call that has not arrived in simulation yet.
+
+### The bench could not reach it, and the sync that fixed that
+
+`sim/boot_gs_tb.sv` is a deliberate mirror of `src/hd_card.cpp`, and it had
+DRIFTED - by a whole rung.  Three things, and the first is the worst:
+
+- **It still had the bug the host was fixed for in rung 7b.**  `hm_gs_decode`
+  did `hm_cmd = hm_gs[0] | 8'h80`, leaving bit 6 IN the command, so an
+  extended read arrived at the executor as $C1, missed `CMD_SP_READ` ($81)
+  and fell through to `default`.  The host took bit 6 off into `gs_ext_` on
+  2026-09-09; the model did not follow.
+- **The DIB reported device subtype `$20`** where the host reports `$C0`, its
+  comment still saying `$C0` could not go there until the extended calls
+  existed - which they had, since 7b.  GS/OS's loader tests bit 7, saw no,
+  and walked away: **one DIB call and then silence**, where hardware showed
+  the DIB and 32 extended reads.  There was also no fourth size byte for an
+  extended DIB, so the list was 25 bytes where KEGS and the host return 26
+  and every field after it read one byte early.
+- **The block number was 24 bits and the buffer's BANK was decoded and then
+  thrown away.**  `hm_membank` was assigned in `gs_decode` and never read, so
+  every extended DMA landed in bank zero however the call was addressed -
+  and `push_done` pushed a hard zero into the very field `rtl/hd_card.sv`
+  reads the bank from (`pay_data[23:16]` of HD_DONE's size word, rung 7b).
+
+All three are fixed and the queue now carries `extended` and the bank
+alongside the command, as `HdCommand` does.  **The bench reproduces the
+hardware path now**: 9 block calls and **32 calls at $C70D** - the DIB and 31
+extended reads - against hardware's 10 and 32, with 40 of 41 blocks verified
+landed intact by the bench's own oracle.  It had managed ONE.
+
+**MIRRORED FAITHFULLY, INCLUDING A BUG.**  `membank` is never cleared on a
+ProDOS block call - not in `hd_card.cpp`'s `io_write` and so not here - so
+after an extended read into a non-zero bank, a following block call inherits
+that bank and would DMA into it.  Latent while GS/OS uses SmartPort calls
+once it is running.  The model was left agreeing with the host rather than
+quietly being more correct than it, because agreeing with the host is the
+whole reason the model exists; the fix belongs in both at once.
+
+### Where GS/OS dies now, which is not the disk
+
+With the loader fed, the machine gets a long way past everything above and
+then falls into zero page.  The chain is short and it is not ambiguous:
+
+    4159869  FF/A9C7 op=6B   RTL
+    4159870  00/F8B5 op=08   PHP        the ROM's back-to-emulation thunk
+    4159872  00/F8B7 op=FB   XCE        E = 1 from here
+    4159874  00/F8B9 op=60   RTS
+    4159875  00/FDED op=6C   JMP ($36)  <- COUT
+    4159876  00/0000 op=06              ...and $36/$37 is $0000
+
+**$36/$37 - CSWL/CSWH, the monitor's character-output vector - is zero.**
+Something wanted to print, COUT jumped through the hook, and the hook was
+never set up.  What it lands on at $0000 is `ASL dp / SED / JSR (abs,X)`,
+which loops between $0000 and $0003 pushing two bytes a pass, and that is the
+"stack marching down page one" signature this document has now seen twice.
+
+It is NOT the disk path: no DMA in the run goes anywhere near page zero (the
+reads land at $0800-$9A00), the block-landing oracle passes, and the 32
+SmartPort calls all completed.  Who owns $36/$37 at that moment - the ROM's
+init, ProDOS, or GS/OS's own loader - is the next rung.
 
 ## What is NOT working, as of the end of rung 4b
 

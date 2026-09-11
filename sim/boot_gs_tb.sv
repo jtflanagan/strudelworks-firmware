@@ -739,7 +739,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     reg [7:0]  hm_membank [0:8];
     reg        hm_armed;
     reg [15:0] hm_memblock [0:8];       // 8 = the controller's
-    reg [23:0] hm_diskblock [0:8];
+    // THIRTY-TWO BITS, as src/hd_card.cpp's is.  An extended call's block
+    // number is four bytes; keeping only three would read the wrong block
+    // SILENTLY where the host keeps the fourth and the executor refuses.
+    reg [31:0] hm_diskblock [0:8];
     reg [7:0]  hm_uerr [0:8];
     task hm_clear;
         integer k;
@@ -812,15 +815,15 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 8'h5: if (r >= 0) hm_memblock[r] = {d, hm_memblock[r][7:0]};
                 8'h6: begin
                     if (hm_cmd != CMD_SP_STATUS) begin
-                        if (r >= 0) hm_diskblock[r] = {hm_diskblock[r][23:8], d};
+                        if (r >= 0) hm_diskblock[r] = {hm_diskblock[r][31:8], d};
                     end else hm_sc = d;
                 end
-                8'h7: if (r >= 0) hm_diskblock[r] = {hm_diskblock[r][23:16], d, hm_diskblock[r][7:0]};
+                8'h7: if (r >= 0) hm_diskblock[r] = {hm_diskblock[r][31:16], d, hm_diskblock[r][7:0]};
                 8'h8: if ((hm_cmd & 8'h80) != 0 && r >= 0)
-                          hm_diskblock[r] = {d, hm_diskblock[r][15:0]};
+                          hm_diskblock[r] = {8'd0, d, hm_diskblock[r][15:0]};
                 default: ;
             endcase
-            if (r >= 0 && (hm_cmd & 8'h80) == 0) hm_diskblock[r] = hm_diskblock[r] & 24'h00FFFF;
+            if (r >= 0 && (hm_cmd & 8'h80) == 0) hm_diskblock[r] = hm_diskblock[r] & 32'h0000FFFF;
             end
             end
         end
@@ -834,7 +837,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         integer r;
         reg [7:0] pb;
         begin
-            hm_cmd      = hm_gs[0] | 8'h80;
+            // BIT 6 COMES OFF HERE, and is kept beside the command rather
+            // than in it - src/hd_card.cpp gs_decode(), the same words.  The
+            // executor dispatches on the command as a whole (CMD_SP_READ is
+            // $81, not $C1), so an extended call carrying its marker any
+            // further fell through to default and answered I/O ERROR.  This
+            // model had the bug the host was fixed for in rung 7b, which is
+            // why it never saw one.
+            hm_cmd      = (hm_gs[0] & 8'h3F) | 8'h80;
             hm_ext      = (hm_gs[0] & 8'h40) != 0;
             hm_unit_num = hm_gs[2];
             r = hm_resolve();
@@ -844,7 +854,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 hm_membank[r]  = hm_ext ? hm_gs[5] : 8'd0;
                 pb             = hm_ext ? 8'd7 : 8'd5;   // where the block starts
                 if ((hm_gs[0] & 8'h3F) == 8'h00) hm_sc = hm_gs[pb];
-                hm_diskblock[r] = {hm_gs[pb+2], hm_gs[pb+1], hm_gs[pb]};
+                hm_diskblock[r] = hm_ext
+                    ? {hm_gs[pb+3], hm_gs[pb+2], hm_gs[pb+1], hm_gs[pb]}
+                    : {8'd0, hm_gs[pb+2], hm_gs[pb+1], hm_gs[pb]};
             end
         end
     endtask
@@ -858,8 +870,13 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     reg [7:0]  q_unum [0:QN-1];
     integer    q_unit [0:QN-1];
     reg [7:0]  q_sc [0:QN-1];
+    // EXTENDED and the buffer's BANK travel with the command, as HdCommand's
+    // `extended` and `membank` do.  Neither can be read off the command byte
+    // any more: bit 6 comes off at decode, and a plain call has no bank.
+    reg        q_ext [0:QN-1];
+    reg [7:0]  q_bank [0:QN-1];
     reg [15:0] q_mem [0:QN-1];
-    reg [23:0] q_disk [0:QN-1];
+    reg [31:0] q_disk [0:QN-1];
     integer    q_at [0:QN-1];
     reg [7:0]  q_blk [0:QN-1][0:511];
     integer    qw = 0, qr = 0;
@@ -900,10 +917,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 $display("    disk: EXEC cmd $%02X unit $%02X -> resolved %0d at instruction %0d",
                          hm_cmd, hm_unit_num, u, trace_instrs);
                 q_cmd[qw % QN] = hm_cmd; q_unum[qw % QN] = hm_unit_num;
+                q_ext[qw % QN] = hm_ext;
                 q_unit[qw % QN] = u; q_sc[qw % QN] = hm_sc; q_at[qw % QN] = now;
                 if (u != UNIT_NONE) begin
                     r = (u == UNIT_CTL) ? 8 : u;
                     q_mem[qw % QN] = hm_memblock[r];
+                    q_bank[qw % QN] = hm_membank[r];
                     q_disk[qw % QN] = hm_diskblock[r];
                     // BLOCK WRITES ARE NOT MODELLED HERE.  boot_tb captures
                     // the block from its reference memory, which this bench
@@ -915,6 +934,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                         fail("a block WRITE was issued: this bench does not model one");
                     hm_cmd = (hm_cmd & 8'h80) ? CMD_SP_BUSY : CMD_BLK_STATUS;
                     hm_fifo = 0;
+                    hm_gsn = 0;
+                    hm_ext = 0;                 // ...as the host clears gs_ext_
                 end
                 qw = qw + 1;
             end
@@ -1337,6 +1358,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // so the reference follows them through the unified stream on its own.
     reg [7:0] ans [0:1023];              // data bytes of the completion
     integer   ans_n;
+    // WHICH BANK THE ANSWER LANDS IN.  rtl/hd_card.sv reads it from the
+    // spare byte of HD_DONE's size word (pay_data[23:16]) and drives it into
+    // the override's address, so an extended call's buffer in bank $02 got
+    // here and then landed in bank zero for as long as this was hard zero.
+    reg [7:0] ans_bank;
     task automatic push_done(input [7:0] status, input [15:0] addr, input [15:0] size16);
         integer k;
         reg [31:0] w;
@@ -1345,7 +1371,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             else begin
                 push_word(hdr(T_HD_DONE, 8'(2 + (ans_n + 3) / 4), {8'd0, status}));
                 push_word({16'(ans_n), addr});
-                push_word({16'd0, size16});
+                push_word({8'd0, ans_bank, size16});
                 for (k = 0; k < ans_n; k = k + 4) begin
                     w = 32'd0;
                     w[7:0]   = ans[k];
@@ -1377,13 +1403,16 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // exactly that reason (hd_service.cpp: an unspaced one would be dropped).
     task automatic host_serve_one;
         integer u, r, k, base;
-        reg [7:0] cmd, sc, err, unum;
+        reg [7:0] cmd, sc, err, unum, membank;
+        reg       ext;
         reg [15:0] memblock, size16;
-        reg [23:0] diskblock;
+        reg [31:0] diskblock;
         begin
             cmd = q_cmd[qr % QN]; unum = q_unum[qr % QN]; u = q_unit[qr % QN];
             sc = q_sc[qr % QN]; memblock = q_mem[qr % QN]; diskblock = q_disk[qr % QN];
+            ext = q_ext[qr % QN]; membank = q_bank[qr % QN];
             ans_n = 0;
+            ans_bank = membank;
             size16 = 16'd0;
             if (u >= 0 && u < NUM_DEVICES) size16 = 16'(HDV_BLOCKS);
             if (u == UNIT_NONE) begin
@@ -1432,19 +1461,36 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                                         ans[ans_n] = (u < NUM_DEVICES) ? 8'(HDV_BLOCKS & 255) : 8'd0; ans_n = ans_n + 1;
                                         ans[ans_n] = (u < NUM_DEVICES) ? 8'((HDV_BLOCKS >> 8) & 255) : 8'd0; ans_n = ans_n + 1;
                                         ans[ans_n] = 8'd0; ans_n = ans_n + 1;
+                                        // AN EXTENDED DIB CARRIES A FOURTH
+                                        // SIZE BYTE - 26 bytes where a plain
+                                        // one returns 25, which is what KEGS
+                                        // returns and what src/hd_card.cpp
+                                        // returns.  Without it the list is
+                                        // one byte short and every field
+                                        // after it reads one byte early.
+                                        if (ext) begin
+                                            ans[ans_n] = 8'd0; ans_n = ans_n + 1;
+                                        end
                                         if (sc == 8'h03) begin
                                             id_string($sformatf("STRUDELWORKS D#%0d", unum));
                                             ans[ans_n] = 8'h02; ans_n = ans_n + 1;
-                                            // The DEVICE SUBTYPE, and it is
-                                            // where the IIgs boot stops: see
-                                            // docs/GS.md.  $20 is "removable
-                                            // media", which a hard disk is
-                                            // not; KEGS reports $C0, "extended
-                                            // calls + disk-switched", and
-                                            // GS/OS's loader tests BIT 7.
-                                            // $C0 cannot go here until the
-                                            // extended calls behind it exist.
-                                            ans[ans_n] = 8'h20; ans_n = ans_n + 1;
+                                            // THE DEVICE SUBTYPE, and it is
+                                            // where a IIgs boot lives or dies:
+                                            // GS/OS's loader tests BIT 7,
+                                            // "extended calls supported".  It
+                                            // follows the ROM, exactly as the
+                                            // host's set_gs() follows
+                                            // machine = iigs: $C0 for the
+                                            // IIgs's SmartPort, $20 for the
+                                            // //e's, which does not claim it
+                                            // and could not keep it.  This
+                                            // model said $20 either way for a
+                                            // rung after the extended calls
+                                            // behind the bit were built, so
+                                            // GS/OS walked away here and the
+                                            // bench never saw an extended
+                                            // call at all (docs/GS.md 7c).
+                                            ans[ans_n] = GS_HD_ROM ? 8'hC0 : 8'h20; ans_n = ans_n + 1;
                                             ans[ans_n] = 8'h01; ans_n = ans_n + 1;
                                             ans[ans_n] = 8'h00; ans_n = ans_n + 1;
                                         end
