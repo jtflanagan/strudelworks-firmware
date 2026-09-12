@@ -1,5 +1,7 @@
 # strudelworks
 
+(This readme is sorely out of date, will update soon!)
+
 Apple II accelerator / peripheral built on the **Alchitry Pt V2** (Xilinx Artix-7
 XC7A100T; the **Au V2**, XC7A35T, remains a build target - see
 [docs/PT_PORT.md](docs/PT_PORT.md)) plus the **Alchitry Ft+** (FTDI FT601 USB 3.0),
