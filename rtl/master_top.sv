@@ -382,6 +382,7 @@ module master_top #(
     wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim, seq_fast_tick;
     // The data front, chained after the instruction front (rtl/dline.sv).
     wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
+    wire        il_fill_busy, dl_fill_busy;   // the fronts' fills in flight (the clock histogram)
     wire        d_pending_w, turbo_wr, dq_rw_w, ev_fast_room_w;
     wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w;
     wire [7:0]  pw_data_w, cl_wdata;
@@ -640,7 +641,7 @@ module master_top #(
     // rungs that follow - but they are wired so the ports are real.
     wire [15:0] cl_ppn_w, pf_ppn_w, p_ppn_w, d_ppn_w;
     wire [3:0]  p_reg_w, d_reg_w;
-    wire        p_fold_w, p_fs_w, d_fold_w, map_settling;
+    wire        p_fold_w, p_fs_w, d_fold_w, d_sh_w, map_settling;
     wire [103:0] rt_rd_flat;
     wire [7:0]  rwb_p1_w;
 
@@ -959,6 +960,14 @@ module master_top #(
     // claim.  Both are zero at GS = 0 and the OR folds away.
     wire        gsio_claim, gsio_u_claim;
     wire [7:0]  gsio_byte;
+    // The keyboard read at one clock on the data front (rtl/dline.sv
+    // kb_hit): the ADB micro's $C000 byte, registered once here on its way
+    // across the die, and the front's retire pulse back to the micro.
+    // Declared above every generate block (tools/check_generate_scope.py).
+    wire [7:0]  gs_c000_byte;
+    wire        dl_kbd_rd;
+    logic [7:0] kbd_byte_q;
+    always_ff @(posedge apple_clk) kbd_byte_q <= gs_c000_byte;
     // The Ensoniq's mix, out of gs_io and into the audio sampler; zero on the
     // IIe build, where the DOC is not instantiated (docs/GS.md rung 7).
     wire signed [20:0] doc_l, doc_r;
@@ -1267,7 +1276,8 @@ module master_top #(
         .serve         (mem_serve),
         .inval         (mem_inval),
         .dbg_sel       (dbg_sel[3:0]),
-        .dbg_val       (il_dbg)
+        .dbg_val       (il_dbg),
+        .fill_busy     (il_fill_busy)
     );
 
     // ---- the data front -----------------------------------------------------
@@ -1318,6 +1328,10 @@ module master_top #(
         .d_ppn         (d_ppn_w),
         .d_reg         (d_reg_w),
         .d_fold        (d_fold_w),
+        .d_sh          (d_sh_w),
+        .kbd_en        (GS && gs_kbd_en),
+        .kbd_byte      (kbd_byte_q),
+        .kbd_rd        (dl_kbd_rd),
         .rt_rd_flat    (rt_rd_flat),
         .rwb_p1        (rwb_p1_w),
         .map_settling  (front_settling),
@@ -1351,6 +1365,7 @@ module master_top #(
         .inval         (mem_inval),
         .dbg_sel       (dbg_sel[3:0]),
         .dbg_val       (dl_dbg),
+        .fill_busy     (dl_fill_busy),
         .cnt_clr       (accel_cnt_clr),
         .cnt_serves    (accel_dline),   // ACCEL_DLINE: every retire, reads and writes
         .cnt_claims    (),
@@ -1368,15 +1383,87 @@ module master_top #(
 
     // The debug pair's mux: [5:4] the module, [3:0] the item.  Item 3/0 is
     // the dispatcher's and the fronts' live state in one word.
-    wire [31:0] top_dbg = (dbg_sel[3:0] == 4'd0) ?
-                              {seq_state, turbo_en, turbo_ok, turbo_claim, d_claim_w, d_pending_w,
-                               cyc_internal, map_settling, cpu_bank_wr, ev_fast_room, ev_fast_room_w,
-                               mem_serve, mem_inval, mem_invalidating, cpu_cyc_is_i, cpu_rw, cpu_sync,
-                               front_bypass, accel_held, 2'd0, cpu_bank} :
-                          (dbg_sel[3:0] == 4'd1) ? {cpu_pc_bank, cpu_pc_addr, 8'd0} :
-                          (dbg_sel[3:0] == 4'd2) ? {cpu_bank, cpu_addr, cpu_dout} :
-                          (dbg_sel[3:0] == 4'd3) ? {cpu_dbr, cpu_d_pred} :
-                          (dbg_sel[3:0] == 4'd4) ? {cpu_d_pred_bcls, cpu_d_pred_v, cpu_d_pred_rw, 4'd0, cpu_p_flags, 8'd0, cpu_din} :
+    // ---- WHERE THE CLOCKS GO: a histogram of every clock by what the core
+    // was doing (docs/GS.md rung 6, "where the stalls are").  Each clock is
+    // charged to exactly one bucket, first match wins, and the sum of the
+    // buckets is the clock count itself (the last item), so the arithmetic
+    // closes on the card rather than on a page.  The inputs are registered
+    // once before the compare and the counters increment a clock later -
+    // two flops from any cone, so the census cannot tip a path
+    // (fast-op-census lesson, 2026-09-02).
+    //
+    //   0 RETIRE   a core cycle retired (cpu_cyc_en)
+    //   1 HELD     the governor holds the core (accel_held)
+    //   2 SETTLE   a map change is settling (front_settling)
+    //   3 IFILL    the instruction front has a line fill in flight
+    //   4 DFILL    the data front has a line fill in flight
+    //   5 SEQ_FAST the dispatcher is in S_FAST (a fast op deciding)
+    //   6 SEQ_BUS  ...in S_BUS or S_HELD (a bus cycle, or an override's)
+    //   7 SEQ_NULL ...in S_NULL (an internal cycle's clock)
+    //   8 DEC_I    ...in S_DECIDE with an instruction fetch up, unserved
+    //   9 DEC_D    ...in S_DECIDE with a data cycle up, unserved
+    //  10 OTHER    none of the above (S_RST, the core in reset)
+    //  11 CLOCKS   every clock
+    logic        h_ret, h_held, h_settle, h_ifill, h_dfill, h_isi;
+    logic [3:0]  h_seq;
+    always_ff @(posedge apple_clk) begin
+        h_ret    <= cpu_cyc_en;
+        h_held   <= accel_held;
+        h_settle <= front_settling;
+        h_ifill  <= il_fill_busy;
+        h_dfill  <= dl_fill_busy;
+        h_seq    <= seq_state;
+        h_isi    <= cpu_cyc_is_i;
+    end
+    // accel_seq's state_t: 0 S_RST, 1 S_DECIDE, 2 S_FAST, 3 S_BUS, 4 S_HELD, 5 S_NULL.
+    wire [11:0] h_sel_w;
+    assign h_sel_w[0]  = h_ret;
+    assign h_sel_w[1]  = !h_ret && h_held;
+    assign h_sel_w[2]  = !h_ret && !h_held && h_settle;
+    assign h_sel_w[3]  = !h_ret && !h_held && !h_settle && h_ifill;
+    assign h_sel_w[4]  = !h_ret && !h_held && !h_settle && !h_ifill && h_dfill;
+    assign h_sel_w[5]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd2);
+    assign h_sel_w[6]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd3 || h_seq == 4'd4);
+    assign h_sel_w[7]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd5);
+    assign h_sel_w[8]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd1) && h_isi;
+    assign h_sel_w[9]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd1) && !h_isi;
+    assign h_sel_w[10] = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && !(h_seq inside {4'd1, 4'd2, 4'd3, 4'd4, 4'd5});
+    assign h_sel_w[11] = 1'b1;
+    logic [11:0] h_sel_q;
+    logic [31:0] h_cnt [0:11];
+    always_ff @(posedge apple_clk) begin
+        h_sel_q <= h_sel_w;
+        for (int hi = 0; hi < 12; hi++) begin
+            if (apple_rst || accel_cnt_clr) h_cnt[hi] <= 32'd0;
+            else if (h_sel_q[hi])           h_cnt[hi] <= h_cnt[hi] + 32'd1;
+        end
+    end
+
+    // THE SNAPSHOT WORDS ARE REGISTERED BEFORE THE MUX.  Items 2-4 carry the
+    // core's live din and its combinational prediction; muxed live into
+    // dbg_val_q they were the design's deepest chains (23 levels, 9.9 ns,
+    // the WNS of gs_null at +0.171 - a debug read setting the clock).  Two
+    // clocks old is what a snapshot wants to be.
+    logic [31:0] top_w0_q, top_w1_q, top_w2_q, top_w3_q, top_w4_q;
+    always_ff @(posedge apple_clk) begin
+        top_w0_q <= {seq_state, turbo_en, turbo_ok, turbo_claim, d_claim_w, d_pending_w,
+                     cyc_internal, map_settling, cpu_bank_wr, ev_fast_room, ev_fast_room_w,
+                     mem_serve, mem_inval, mem_invalidating, cpu_cyc_is_i, cpu_rw, cpu_sync,
+                     front_bypass, accel_held, 2'd0, cpu_bank};
+        top_w1_q <= {cpu_pc_bank, cpu_pc_addr, 8'd0};
+        top_w2_q <= {cpu_bank, cpu_addr, cpu_dout};
+        top_w3_q <= {cpu_dbr, cpu_d_pred};
+        top_w4_q <= {cpu_d_pred_bcls, cpu_d_pred_v, cpu_d_pred_rw, 4'd0, cpu_p_flags, 8'd0, cpu_din};
+    end
+    wire [31:0] top_dbg = (dbg_sel[3:0] == 4'd0) ? top_w0_q :
+                          (dbg_sel[3:0] == 4'd1) ? top_w1_q :
+                          (dbg_sel[3:0] == 4'd2) ? top_w2_q :
+                          (dbg_sel[3:0] == 4'd3) ? top_w3_q :
+                          (dbg_sel[3:0] == 4'd4) ? top_w4_q :
+                          // 5..14: the clock histogram's buckets 0..9 (RETIRE first);
+                          // 15: CLOCKS.  OTHER (bucket 10) is CLOCKS less the rest.
+                          (dbg_sel[3:0] == 4'd15)  ? h_cnt[11] :
+                          (dbg_sel[3:0] >= 4'd5)   ? h_cnt[dbg_sel[3:0] - 4'd5] :
                                                    accel_maps;
     // REGISTERED: the top word muxes the core's combinational prediction and
     // din, and unregistered it was the IIe build's binding path into the
@@ -1636,6 +1723,7 @@ module master_top #(
         .d_ppn      (d_ppn_w),
         .d_reg      (d_reg_w),
         .d_fold     (d_fold_w),
+        .d_sh       (d_sh_w),
         .map_changed (map_changed),
         .map_settling (map_settling),
         .rt_rd_flat (rt_rd_flat),
@@ -1743,6 +1831,9 @@ module master_top #(
         .frame_tick (beam_mark_bus || beam_mark_fast),
         // ...and the ADB micro's own clock, wall time (the divider above).
         .wall_tick  (wall_tick),
+        // The keyboard read the data front serves at one clock.
+        .c000_ext   (dl_kbd_rd),
+        .c000_byte  (gs_c000_byte),
         .doc_l      (doc_l),
         .doc_r      (doc_r),
         .u_claim    (gsio_u_claim),
@@ -1752,6 +1843,7 @@ module master_top #(
     );
 
     end else begin : g_no_gsio
+    assign gs_c000_byte = 8'd0;
 
     assign gsio_claim   = 1'b0;
     assign gsio_u_claim = 1'b0;

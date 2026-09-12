@@ -868,6 +868,17 @@ Measurement discipline for whichever comes first: `swctl accel status`
 twice N seconds apart, deltas mod 2^32 (the turbo counter wraps every
 ~75 s at 60x), clocks = 98 x cycles; a sparse trace for the bus side.
 
+## The keyboard read at one clock: built on the IIgs first (2026-09-11)
+
+The step the census above asked for - the `$C000` read served by the data
+front - exists at `GS = 1`: rtl/dline.sv `kb_hit` (a $C000 read in bank
+zero, from the ADB micro's own byte, `gs_kbd_en` the lever) with the retire
+pulsed back to rtl/gs_adb.sv as `c000_ext` so the read-driven auto-repeat
+still counts it.  On the Nox map it was 10.4 M dispatcher ops in ten seconds
+(docs/GS.md "Where the stalls are").  The IIe path (kbd_inject's int_byte,
+int_rd from the retire) is the same shape and is tied off (`kbd_en = 0`)
+until it is measured there.
+
 ## Open questions for the next steps
 
 1. (Latch pages: DONE, step 1.)  Whether the dline's data-side $Cxxx

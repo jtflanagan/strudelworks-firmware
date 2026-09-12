@@ -201,6 +201,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [7:0]  pw_off_w, rwb_p1_w;
     wire [3:0]  d_reg_w, p_reg_w;
     wire        d_fold_w, p_fold_w, p_fs_w, map_settling;
+    wire        d_sh_w;
     wire [69:0] rt_rd_flat;
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
@@ -341,12 +342,13 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .serve (serve), .inval (inval),
-        .dbg_sel (4'd0), .dbg_val ()
+        .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
     );
 
     // The data front, chained after the instruction front exactly as in
     // master_top.
     dline u_dline (
+        .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
@@ -359,7 +361,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .altzp (sw_state[3]),
         .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_off (doff_w),
         .rw_bank (rw_bank), .map_changed (map_changed),
-        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
+        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
         .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w), .map_settling (map_settling),
         .dl_req (dl_req_w), .dl_ppn (dl_ppn_w), .dl_line (dl_line_w),
         .dl_ack (il_ack && !il_req), .dl_done (il_done && il_src_q),
@@ -374,7 +376,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cnt_serves (), .cnt_claims (), .cnt_splices (),
         .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits (),
         .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
-        .dbg_sel (4'd0), .dbg_val ()
+        .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
     );
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
@@ -459,7 +461,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         // the physical space (docs/PAGE_CACHE.md); no consumer here yet
         .cl_ppn (cl_ppn_w), .pf_ppn (pf_ppn_w),
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
-        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
+        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
         .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w)
     );
     rom_loader u_rom (

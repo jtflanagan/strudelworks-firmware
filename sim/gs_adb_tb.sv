@@ -27,6 +27,8 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
     reg [7:0]  op_lo = 8'd0, op_wdata = 8'd0;
     reg        op_rw = 1'b1, act = 1'b0;
     reg        frame_tick = 1'b0;
+    reg        c000_ext = 1'b0;      // a $C000 read the data front served (rtl/dline.sv kb_hit)
+    wire [7:0] c000_byte;
     reg        msg_valid = 1'b0, pay_valid = 1'b0;
     reg [7:0]  msg_type = 8'd0, msg_len = 8'd0;
     reg [15:0] msg_free = 16'd0;
@@ -40,7 +42,7 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
     gs_adb #(.KEYMAP (KEYMAP)) dut (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (op_lo), .op_rw (op_rw), .op_wdata (op_wdata), .act (act),
-        .rd_byte (rd_byte), .wall_tick (frame_tick),
+        .rd_byte (rd_byte), .wall_tick (frame_tick), .c000_ext (c000_ext), .c000_byte (c000_byte),
         // The IIe's own keyboard, driven here as a second source into the one
         // buffer; sim/gs_kbd_a2_tb.sv drives it through rtl/gs_kbd_a2.sv from
         // a model IOU, which is where the reverse keymap is proved.
@@ -258,6 +260,18 @@ module gs_adb_tb #(parameter KEYMAP = "adb_keymap.hex");
         end
         if (reps >= 5) ok($sformatf("it went on repeating at the rate: %0d of 6", reps));
         else fail($sformatf("only %0d of 6 repeats at the rate", reps));
+
+        // A $C000 read the DATA FRONT served (c000_ext) counts as a read here
+        // too: the repeat still fires, and the byte the front handed out is
+        // this module's own $C000 answer.
+        rd(8'h10, v);
+        frames(7);
+        chk(c000_byte, 8'h78, "c000_byte is the $C000 answer as it stands ('x', no strobe)");
+        @(negedge clk); c000_ext = 1'b1; @(negedge clk); c000_ext = 1'b0;
+        repeat (8) @(negedge clk);
+        chk(c000_byte, 8'hF8, "a front-served read fired the repeat: c000_byte carries the strobe");
+        rd(8'h00, v); chk(v, 8'hF8, "...and so does a read through the port");
+        rd(8'h10, v);
 
         key(7'h07, 1'b1, 8'h00);
         rd(8'h10, v);

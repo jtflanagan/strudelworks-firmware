@@ -87,6 +87,13 @@ module gs_adb #(
     // rtl/master_top.sv's divider off the 100 MHz clock.
     input  wire        wall_tick,
 
+    // A $C000 READ SERVED ELSEWHERE.  The data front answers the keyboard
+    // read at one clock from c000_byte (rtl/dline.sv kb_hit) and pulses
+    // this the clock after; KEGS's auto-repeat fires inside adb_read_c000,
+    // so a read that never reaches `act` still has to count as one here.
+    input  wire        c000_ext,
+    output wire [7:0]  c000_byte,
+
     // THE APPLE IIe's OWN KEYBOARD, beside the host's (rtl/gs_kbd_a2.sv).
     // The same event shape as ADB_KEY, made on the card by running the IOU's
     // ASCII backwards through this module's keymap; both sources land in the
@@ -221,7 +228,7 @@ module gs_adb #(
     // key still held, and the count run out.  It is taken as an EVENT, so
     // the whole of adb_key_event applies to it, which is what KEGS's calling
     // itself amounts to.
-    wire c000_rd_act = act && op_rw && (op_lo == 8'h00);
+    wire c000_rd_act = (act && op_rw && (op_lo == 8'h00)) || c000_ext;
     wire rpt_fire = c000_rd_act && key_down && !kbd_buf[0][7] &&
                     (rpt_left == 16'd0) && !ev_v;
 
@@ -322,6 +329,7 @@ module gs_adb #(
                        : {mouse_coord ? ~mouse_btn : 1'b1, mv_take[6:0]};
 
     wire [7:0] c000_rd = kbd_buf[0];
+    assign c000_byte = c000_rd;
     wire [7:0] c010_rd = {hard_key_down, kbd_buf[0][6:0]};
 
     always_comb begin

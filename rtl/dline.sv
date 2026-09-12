@@ -113,7 +113,11 @@
 // as before - correct, only slower.
 //////////////////////////////////////////////////////////////////////////////////
 module dline #(
-    parameter integer PW_DEPTH = 4,      // posted writes in flight
+    // Posted writes in flight.  The IIgs needs room for the SHADOW DUPLICATE
+    // a posted write may push behind itself (below): a write retires only
+    // when the FIFO can take it, its duplicate, the entry still in the splice
+    // register and the retire the room sample could not see.
+    parameter integer PW_DEPTH = GS ? 8 : 4,
     // 1 = the Apple IIgs build (docs/GS.md rung 6): the candidate carries a
     // bank and a bank CLASS, every cache line the virtual bank it was
     // filled in with two precomputed valid bits (bank zero / the DBR), the
@@ -198,6 +202,21 @@ module dline #(
     input  wire [15:0] d_ppn,
     input  wire [3:0]  d_reg,
     input  wire        d_fold,
+    // ...and the write query's SHADOW answer for the same address (IIgs):
+    // the write lands a second time in $E0/$E1, and the front posts that
+    // landing itself - see "the shadow duplicate" at the splice register.
+    input  wire        d_sh,
+
+    // THE KEYBOARD READ AT ONE CLOCK (the user's design, docs/CXXX.md): a
+    // read of $C000 is served here from the byte the chipset would answer
+    // with, and the retire tells the chipset a read happened (its
+    // auto-repeat counts them).  kbd_en is the lever; on the IIgs it is the
+    // ADB micro's kbd_buf head (rtl/gs_adb.sv c000_rd), registered once at
+    // the top.  On the Nox map the poll was 10 M dispatcher ops in ten
+    // seconds at eight clocks each, a quarter of every dispatcher op.
+    input  wire        kbd_en,
+    input  wire [7:0]  kbd_byte,
+    output logic       kbd_rd,
     input  wire [103:0] rt_rd_flat,
     input  wire [7:0]  rwb_p1,
     input  wire        map_settling,
@@ -243,9 +262,14 @@ module dline #(
     input  wire [3:0]  dbg_sel,
     output logic [31:0] dbg_val,
 
+    // A line fill is in flight (C_REQ through C_W2): the clock histogram in
+    // rtl/master_top.sv charges the core's stalled clocks to it.
+    output wire        fill_busy,
+
     // Counters.
     input  wire        cnt_clr,
-    output logic [31:0] cnt_serves,      // every retire, reads and writes
+    output logic [31:0] cnt_serves,      // every retire, reads and writes (not internal cycles)
+    output logic [31:0] cnt_nulls,       // internal cycles retired here (IIgs)
     output logic [31:0] cnt_claims,
     output logic [31:0] cnt_splices,
     output logic [31:0] cnt_cam_serves,
@@ -327,6 +351,7 @@ module dline #(
     // the Super Hi-Res range).  Six address bits and a class code, into
     // registers, like the address itself; no bank byte is compared live.
     logic        dq_b0, dq_d, dq_wsh;
+    logic        dq_kbd;      // the candidate is a read of $C000 in the pair (the keyboard)
     // Fanout copies of the byte index (2026-09-06): dq_addr[3:0] drove 165
     // loads - every row mux of the shadow and the four CAM ways, plus the
     // compares - and its first hop alone was 1.27 ns on the worst path.
@@ -363,6 +388,7 @@ module dline #(
             dq_wsh    <= GS && ((d_pred[15:10] == 6'b000001) || (d_pred[15:10] == 6'b000010) ||
                                 (d_pred[15:13] == 3'b001) || (d_pred[15:13] == 3'b010) ||
                                 (d_pred[15:13] == 3'b011) || (d_pred[15:13] == 3'b100));
+            dq_kbd    <= GS && (d_pred[15:0] == 16'hC000);
             dq_ix_sh     <= d_pred[3:0];
             dq_ix_cam[0] <= d_pred[3:0];
             dq_ix_cam[1] <= d_pred[3:0];
@@ -660,6 +686,28 @@ module dline #(
     logic [15:0] spl_addr;
     logic [15:0] spl_ppn;
     logic [7:0]  spl_off8;
+    // THE SHADOW DUPLICATE (IIgs, 2026-09-11).  A write into a shadowed
+    // region of the fast pair lands twice on a real IIgs: at its own page
+    // and at the same page of $E0/$E1 (docs/GS.md, "SHADOW = a second posted
+    // write").  Until now that was the map's business alone, one deep off
+    // the dispatcher's classified write, and so a write with a shadow could
+    // not be posted at all - on the Nox map 40 M of 45 M dispatcher ops in a
+    // window were exactly those writes, at ten clocks each against one.
+    // Now the front posts the duplicate ITSELF, as a second posted write:
+    // the clock after the primary's, the splice register is reloaded with
+    // the same byte at {$E0 | side, page} and everything the register
+    // feeds - the splice into the shadow and the CAM, the claim abort, the
+    // instruction front's snoop, the FIFO push, the read fence - treats it
+    // as the write it is.  So a cached $E1 line is patched by the very
+    // mechanism that patches the $01 one, which closes the duplicate-splice
+    // hole rung 6 left open for posted writes.  spl_sh is the map's answer
+    // (d_sh, the write query's shadow bit) sampled with the stamp; a
+    // duplicate never has one.  A retire on the duplicate's clock would
+    // want the register: w_retire is held for that one clock (dup_go), so a
+    // sixteen-bit store into the screen pays one clock on its second byte.
+    logic        spl_sh;      // the entry in the register owes a duplicate
+    logic        spl_dup;     // the entry in the register IS a duplicate
+    wire         dup_go = GS && spl_v && spl_sh;
 
     // ---- the retire ---------------------------------------------------------
     // The candidate against the live cycle, gated by the leash.  The settle
@@ -680,12 +728,17 @@ module dline #(
     // for a slot - a few clocks at most, the FIFO draining and the merge
     // popping on their own - and the write never pays the dispatcher's
     // price.
-    wire serve_hit  = sh_hit || cam_hit || lb_hit;
+    // The keyboard: a $C000 read in bank zero (or the DBR at zero; the Mega
+    // II banks name the same register but ride the dispatcher), while the
+    // lever is up.  Register-rooted throughout, like the last byte.
+    wire kb_hit = dq_v && dq_kbd && dq_b0 && kbd_en;
+    wire serve_hit  = sh_hit || cam_hit || lb_hit || kb_hit;
     // One-hot AND-OR, not a priority chain: the shadow and the cache never
     // hold the same line (claims exclude the estate), and the last byte,
     // when it also hits, IS that line's byte (any write clears it).
     wire [7:0] serve_byte = ({8{sh_hit}} & dq_byte) | ({8{cam_hit}} & cam_byte) |
-                            ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte);
+                            ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte) |
+                            ({8{kb_hit}} & kbd_byte);
 
     // THE IIgs READS AT TWO CLOCKS, REGISTERED (docs/GS.md rung 6).  On the
     // IIe the served byte goes to the core live, and the 65C02's AGU - an
@@ -708,8 +761,21 @@ module dline #(
         sv_byte_q <= serve_byte;
     end
 
-    wire d_cycle = !cyc_is_i &&  cpu_rw;
+    wire d_cycle = !cyc_is_i &&  cpu_rw && !cyc_int;
     wire w_cycle = !cyc_is_i && !cpu_rw;
+    // THE INTERNAL CYCLE RETIRES HERE, AT ONE CLOCK (IIgs, 2026-09-11).  A
+    // 65816 cycle with VDA and VPA both low touches nothing - no address,
+    // no byte, no bus - and on Nox's map it is one core cycle in five.  It
+    // used to ride the dispatcher's S_NULL: a settle clock, the wait for
+    // every posted write to drain (d_pending, which it has no reason to
+    // respect), a clock in S_NULL - two to three clocks, more behind a
+    // burst of posts, for a cycle that needs nothing.  So it is retired
+    // like a served read: the cycle enable and the credit (d_commit), the
+    // registered claim holding the dispatcher exactly as for a data op,
+    // and NO stream event - it never had one.  It counts as a core cycle
+    // (tick_q), which PLAIN's core counter had been missing: S_NULL never
+    // ticked, so the ratio undercounted the core's own cycles by that fifth.
+    wire n_cycle = GS && cyc_int;
     wire pf_near_full;
     logic w_room;
     always_ff @(posedge clk) begin
@@ -720,8 +786,11 @@ module dline #(
     // stack, and DBR-relative while the DBR is zero) and never a region
     // SHADOW can duplicate into the Mega II bank - the posted path carries
     // no duplicate, so those writes ride the dispatcher, which does.
+    // On the IIgs: bank zero (or the DBR at zero).  A shadowed region is no
+    // longer excluded - the front posts the duplicate itself (the splice
+    // register, above).
     wire w_serv  = wr_en && dq_wv && (dq_addr[15:14] != 2'b11) && !rwb_nz_q &&
-                   (!GS || (dq_b0 && !dq_wsh));
+                   (!GS || dq_b0);
 
     logic fc_q, claim_q;
     always_ff @(posedge clk) begin
@@ -729,7 +798,8 @@ module dline #(
             fc_q <= 1'b0; claim_q <= 1'b0;
         end else begin
             fc_q    <= cyc_en;
-            claim_q <= (turbo_en && serve_hit && d_cycle) || (w_serv && w_cycle);
+            claim_q <= (turbo_en && serve_hit && d_cycle) || (w_serv && w_cycle) ||
+                       (turbo_en && n_cycle);
         end
     end
     wire addr_match = (cpu_addr == dq_addr[15:0]) && (!GS || (cpu_bank == dq_addr[23:16])) &&
@@ -741,8 +811,9 @@ module dline #(
     // candidate there - it was cleared by that clock's cyc_en).
     wire r_hit    = GS ? (sv_hit_q && !fc_q) : serve_hit;
     wire r_retire = !cpu_rst && turbo_en && turbo_ok && r_hit && d_cycle && addr_match && ev_room;
-    wire w_retire = !cpu_rst && turbo_ok && w_serv && w_room && w_cycle && addr_match;
-    wire retire   = r_retire || w_retire;
+    wire w_retire = !cpu_rst && turbo_ok && w_serv && w_room && w_cycle && addr_match && !dup_go;
+    wire n_retire = !cpu_rst && turbo_en && turbo_ok && n_cycle && (fc_q || claim_q);
+    wire retire   = r_retire || w_retire || n_retire;
 
     assign d_commit = retire;
     assign cyc_en   = il_cyc_en || retire;
@@ -782,13 +853,23 @@ module dline #(
     // $C000 (the LC fold never applies there) and want_bank is 0 under the
     // bank gate; both are carried whole so the port stays general.
     always_ff @(posedge clk) begin
-        if (rst || inval) spl_v <= 1'b0;
-        else              spl_v <= w_retire;
+        if (rst || inval) begin
+            spl_v <= 1'b0; spl_sh <= 1'b0; spl_dup <= 1'b0;
+        end else begin
+            spl_v   <= w_retire || dup_go;
+            spl_sh  <= w_retire && GS && d_sh;
+            spl_dup <= dup_go;
+        end
         if (w_retire) begin
             spl_addr <= dq_addr[15:0];
             spl_data <= cpu_dout;
             spl_ppn  <= d_ppn;
             spl_off8 <= dq_addr[7:0];   // the fold never touches a[11:4]
+        end else if (dup_go) begin
+            // The same byte, the same offset, the Mega II bank's page by
+            // the side the primary landed on: physical bank 0 is main and
+            // 1 is auxiliary, and $E0/$E1 follow it (apple_mmu's shd_ppn).
+            spl_ppn  <= {7'h70, spl_ppn[8], spl_ppn[7:0]};
         end
     end
     assign ws_valid = spl_v;
@@ -808,7 +889,11 @@ module dline #(
     logic [PW_AW-1:0] pf_wp, pf_rp;
     logic [PW_AW:0]   pf_cnt;
     wire pf_empty = (pf_cnt == '0);
-    assign pf_near_full = (pf_cnt + (PW_AW+1)'(spl_v)) >= (PW_AW+1)'(PW_DEPTH - 1);
+    // On the IIgs the sample keeps room for a duplicate too: the retire it
+    // could not see may owe one, and so may the one after (never both -
+    // dup_go holds the second retire while the first's duplicate is in the
+    // register), so three entries beyond the count and the register.
+    assign pf_near_full = (pf_cnt + (PW_AW+1)'(spl_v)) >= (PW_AW+1)'(PW_DEPTH - (GS ? 2 : 1));
     always_ff @(posedge clk) begin
         if (rst || inval) begin
             pf_wp <= '0; pf_rp <= '0; pf_cnt <= '0;
@@ -828,7 +913,7 @@ module dline #(
     // The ISA argument, checked: no data read of an address is served the
     // clock after a write to it retired (the splice lands on that edge).
     always @(posedge clk)
-        if (r_retire && spl_v && spl_addr == dq_addr[15:0])
+        if (r_retire && spl_v && !spl_dup && spl_addr == dq_addr[15:0])
             $error("dline: a read of $%04x served on the splice clock of a write to it", dq_addr[15:0]);
     // ...and the FIFO never overflows: a push into a full FIFO is a lost write.
     always @(posedge clk)
@@ -857,6 +942,7 @@ module dline #(
     // it captures describes the very address being claimed.  Writes never
     // claim: a line that is only ever written is not worth holding.
     localparam [1:0] C_IDLE = 2'd0, C_REQ = 2'd1, C_W1 = 2'd2, C_W2 = 2'd3;
+    assign fill_busy = (cst != C_IDLE);
     logic [1:0] cst;
     logic [4:0] c_line;
     logic       miss_q, cmiss_q;
@@ -952,8 +1038,9 @@ module dline #(
 
     always_ff @(posedge clk) begin
         tick_q    <= retire;
-        dev_valid <= retire;
-        if (retire) begin
+        dev_valid <= retire && !n_retire;   // an internal cycle is not an access: no event
+        kbd_rd    <= r_retire && dq_kbd && !rst;
+        if (retire && !n_retire) begin
             dev_addr <= dq_addr[15:0];
             dev_data <= cpu_rw ? (GS ? sv_byte_q : serve_byte) : cpu_dout;
             dev_rw   <= cpu_rw;
@@ -984,6 +1071,7 @@ module dline #(
             if (rst) begin
                 cnt_serves <= 32'd0; cnt_claims <= 32'd0; cnt_splices <= 32'd0;
                 cnt_cam_serves <= 32'd0; cnt_lb_serves <= 32'd0;
+                cnt_nulls <= 32'd0;
                 cnt_posts <= 32'd0; cnt_post_waits <= 32'd0;
                 cnt_reval_drop <= 32'd0; cnt_reval_revive <= 32'd0;
                 cnt_rev_serves <= 32'd0;
@@ -992,7 +1080,8 @@ module dline #(
                 dev_addr <= 16'd0; dev_data <= 8'd0; dev_rw <= 1'b1;
             end
         end else begin
-            if (retire) cnt_serves <= cnt_serves + 32'd1;
+            if (retire && !n_retire) cnt_serves <= cnt_serves + 32'd1;
+            if (n_retire)            cnt_nulls  <= cnt_nulls  + 32'd1;
             // The hardware's books (docs/GS.md rung 6).
             if ((cst == C_W2) && !t_cam && !sp_hit) cnt_shclaims <= cnt_shclaims + 32'd1;
             if ((cst == C_W1) && dl_done && !dl_ok) cnt_decl <= cnt_decl + 32'd1;
@@ -1137,6 +1226,7 @@ module dline #(
             if (cnt_clr) begin
                 cnt_serves <= 32'd0; cnt_claims <= 32'd0; cnt_splices <= 32'd0;
                 cnt_cam_serves <= 32'd0; cnt_lb_serves <= 32'd0;
+                cnt_nulls <= 32'd0;
                 cnt_posts <= 32'd0; cnt_post_waits <= 32'd0;
                 cnt_reval_drop <= 32'd0; cnt_reval_revive <= 32'd0;
                 cnt_rev_serves <= 32'd0;
@@ -1151,7 +1241,7 @@ module dline #(
             4'd1:  dbg_val = cnt_claims;
             4'd2:  dbg_val = cnt_splices;
             4'd3:  dbg_val = cnt_cam_serves;
-            4'd4:  dbg_val = cnt_lb_serves;
+            4'd4:  dbg_val = cnt_nulls;       // internal cycles retired here (was lb_serves, always ~0)
             4'd5:  dbg_val = cnt_posts;
             4'd6:  dbg_val = cnt_post_waits;
             4'd7:  dbg_val = cnt_rev_serves;

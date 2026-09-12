@@ -147,6 +147,9 @@ module gs_io #(
     // under acceleration - rtl/gs_adb.sv says why the micro must not follow
     // the beam.
     input  wire        wall_tick,
+    // The keyboard read the data front serves itself (rtl/gs_adb.sv).
+    input  wire        c000_ext,
+    output wire [7:0]  c000_byte,
 
     // The Ensoniq's mix, signed, for rtl/audio_sampler.sv to box-average the
     // way it already does the AYs.
@@ -224,6 +227,7 @@ module gs_io #(
         // own keyboard; the micro holds the keymap and $C025's modifiers, as
         // a real one does.
         .wall_tick (wall_tick),
+        .c000_ext (c000_ext), .c000_byte (c000_byte),
         .loc_valid (loc_valid), .loc_code (loc_code),
         .loc_up (loc_up), .loc_mods (loc_mods), .live_mods (live_mods),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (msg_free),

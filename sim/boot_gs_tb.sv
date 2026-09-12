@@ -418,11 +418,13 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .serve (serve), .inval (1'b0),
-        .dbg_sel (4'd0), .dbg_val ()
+        .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
     );
 
     // The data front, chained after it: its cyc_en is the core's.
     dline #(.GS (1'b1)) u_dline (
+        // The keyboard read at one clock, from the ADB micro's own byte.
+        .kbd_en (1'b1), .kbd_byte (gs_c000_byte), .kbd_rd (dl_kbd_rd),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .d_pred_bcls (cpu_d_pred_bcls), .dbr (cpu_dbr),
@@ -438,7 +440,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .altzp (sw_state[3]),
         .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_off (doff_w),
         .rw_bank (rw_bank), .map_changed (map_changed),
-        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
+        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
         .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w), .map_settling (front_settling),
         .dl_req (dl_req_w), .dl_ppn (dl_ppn_w), .dl_line (dl_line_w),
         .dl_ack (il_ack && !il_req), .dl_done (il_done && il_src_q),
@@ -453,7 +455,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .cnt_serves (dl_serves), .cnt_claims (), .cnt_splices (),
         .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (dl_posts), .cnt_post_waits (),
         .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
-        .dbg_sel (4'd0), .dbg_val ()
+        .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
     );
     wire [31:0] dl_serves, dl_posts;
 
@@ -580,6 +582,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [15:0] p_ppn_w, d_ppn_w;
     wire [3:0]  p_reg_w, d_reg_w;
     wire        p_fold_w, p_fs_w, d_fold_w;
+    wire        d_sh_w;
+    wire [7:0]  gs_c000_byte;
+    wire        dl_kbd_rd;
     wire [1:0]  p_cls;
     wire        p_aux_w;
     wire [15:0] p_off_w;
@@ -625,7 +630,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .map_changed (map_changed),
         .cl_ppn (cl_ppn_w), .pf_ppn (pf_ppn_w),
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
-        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
+        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
         .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
         .core_dbr (cpu_dbr), .core_pbr (cpu_pc24[23:16])
     );
@@ -663,6 +668,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // The bench's frame is counted in BUS cycles, which is wall time
         // here, so the micro's wall tick is the same pulse.
         .frame_tick (frame_tick), .wall_tick (frame_tick),
+        .c000_ext (dl_kbd_rd), .c000_byte (gs_c000_byte),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
 
@@ -2312,6 +2318,37 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             if (c_bad != 0 || d_bad != 0)
                 fail($sformatf("the cache or the DDR3 holds %0d/%0d bytes in RAM the machine never wrote", c_bad, d_bad));
             else ok("every never-written byte of the machine's RAM is zero, in the cache and in the DDR3");
+        end
+
+        // THE SHADOW'S SECOND LANDING, now that the data front posts it
+        // itself (rtl/dline.sv, "the shadow duplicate"): every byte the
+        // machine wrote into text page 1 of main memory ($0400-$07FF, physical
+        // pages $0004-$0007) has its copy in $E0 (pages $E004-$E007) - unless
+        // SHADOW[0] inhibits it, which the ROM does not.  Written bytes only:
+        // wr_ever is the classified stream, posted writes and duplicates
+        // included.
+        begin : shadow_dup
+            integer pg, off, n_cmp, n_bad;
+            logic [7:0] b0, be;
+            n_cmp = 0; n_bad = 0;
+            if (!gs_shadow_w[0]) begin
+                for (pg = 4; pg < 8; pg = pg + 1)
+                    for (off = 0; off < 256; off = off + 1)
+                        if (wr_ever[16'(pg)][off[7:0]]) begin
+                            b0 = card_byte(16'(pg), 8'(off));
+                            be = card_byte(16'hE000 | 16'(pg), 8'(off));
+                            n_cmp = n_cmp + 1;
+                            if (b0 !== be) begin
+                                n_bad = n_bad + 1;
+                                if (n_bad <= 4)
+                                    $display("      shadow: $00/%02X%02X = $%02X but $E0/%02X%02X = $%02X",
+                                             pg[7:0], off[7:0], b0, pg[7:0], off[7:0], be);
+                            end
+                        end
+                if (n_cmp == 0)      fail("the boot wrote nothing into text page 1, so the shadow duplicate was never exercised");
+                else if (n_bad != 0) fail($sformatf("%0d of %0d written text-page bytes have no matching copy in $E0", n_bad, n_cmp));
+                else ok($sformatf("every written text-page byte (%0d) has its copy in $E0: the shadow's second landing", n_cmp));
+            end else fail("SHADOW[0] is set at the end of the boot; the text-page duplicate check needs it clear");
         end
 
         // ...and the ROM as it now sits in the machine's memory, page by

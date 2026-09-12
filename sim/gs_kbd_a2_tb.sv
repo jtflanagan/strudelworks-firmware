@@ -67,7 +67,7 @@ module gs_kbd_a2_tb #(parameter KEYMAP = "adb_keymap.hex",
     gs_adb #(.KEYMAP (KEYMAP)) u_adb (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (op_lo), .op_rw (adb_rw), .op_wdata (op_wdata), .act (act),
-        .rd_byte (rd_byte), .wall_tick (frame_tick),
+        .rd_byte (rd_byte), .wall_tick (frame_tick), .c000_ext (1'b0), .c000_byte (),
         // THE POINT OF THE BENCH: the micro's keys come from the card here,
         // not from a host message, and the message ports are held quiet.
         .loc_valid (ev_valid), .loc_code (ev_code), .loc_up (ev_up),

@@ -1,5 +1,16 @@
 # The dline: 1-clock data
 
+> **2026-09-11 evening (docs/GS.md "Where the stalls are"):** on the IIgs the
+> front now posts writes into the SHADOWED regions too and makes the $E0/$E1
+> duplicate ITSELF - a second posted write through the splice register the
+> clock after the primary, so every coherence rule applies to it unchanged
+> (`d_sh` from the map's write query, `dup_go`, PW_DEPTH 8) - and serves the
+> $C000 keyboard read at one clock from the ADB micro's byte (`kb_hit`,
+> `kbd_en`, the retire pulsed back as `c000_ext`), and retires the core's
+> INTERNAL cycles itself (`n_cycle`: no address, no event, the credit and
+> the claim; `cnt_nulls`) instead of the dispatcher's S_NULL.  Benches:
+> boot_gs 9 checks (the text page's $E0 copy), gs_adb 66.
+
 > **ON THE IIgs TOO, 2026-09-11 (docs/GS.md rung 6):** the front builds at
 > `GS = 1` with a 24-bit candidate and its bank CLASS (zero / DBR / other);
 > each cache line keeps its virtual bank as two precomputed valid bits, the

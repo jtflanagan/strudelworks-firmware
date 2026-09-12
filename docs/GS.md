@@ -3738,6 +3738,126 @@ host renders at 60 fps in the bus's base, PLAIN 26.2x on the desktop; and
 **the user confirms double-click works** under acceleration.  Before the
 change, on the same desktop, two clicks 150 ms apart only selected the icon.
 
+## Where the stalls are (2026-09-11 evening): the clock histogram
+
+**THE INSTRUMENT.**  Every clock on the card is charged to exactly one
+bucket by what the core was doing, first match wins, and the buckets sum to
+the clock count so the arithmetic closes on the card (rtl/master_top.sv,
+"WHERE THE CLOCKS GO"; the debug pair's module 3, items 5-14 the buckets and
+15 the clocks; `budget.py` in the session's scratchpad reads two snapshots
+apart and prints the table).  RETIRE is a clock on which a core cycle
+retired - the useful half - and everything else is a stall with a name:
+HELD (the governor), SETTLE (a map change), IFILL / DFILL (a front's line
+fill in flight), SEQ_FAST / SEQ_BUS / SEQ_NULL (the dispatcher mid-op),
+DEC_I / DEC_D (an op up in S_DECIDE that nobody has taken - the front's
+miss-detect and promote clocks, the dispatcher waiting for the page cache
+or for posted writes to drain, and the first clock of every 2-clock IIgs
+read).  The inputs are registered once and the counters count a clock
+later, two flops from any cone (fast-op-census lesson).
+
+**THE NOX MAP, gs_hist, 10 s at the unlimited target, 33.9x PLAIN:**
+
+| bucket | clocks | share |
+|---|---|---|
+| RETIRE | 476.9 M | 47.6% |
+| DEC_D | 236.8 M | 23.6% |
+| SEQ_FAST | 113.0 M | 11.3% |
+| DEC_I | 74.7 M | 7.4% |
+| IFILL | 67.4 M | 6.7% |
+| DFILL | 27.1 M | 2.7% |
+| SETTLE | 5.5 M | 0.6% |
+| SEQ_BUS | 1.1 M | 0.1% |
+| HELD, SEQ_NULL, OTHER | ~0 | |
+
+The same window's census: 297.8 M turbo + 44.3 M dline + 45.3 M dispatcher
+ops (2.5 M I, 6.9 M RAM, **20.0 M WR**, **10.4 M KBD**) + 7 k bus ops.  The
+dispatcher's 45 M ops own SEQ_FAST and most of DEC_D: about 350 M clocks,
+**7.7 a piece - the same per-op price the IIe pays**.  The IIe does 60x on
+this map because it sends FEWER ops there: it posts the screen writes at one
+clock, where the IIgs front refused any write into a shadowed region.  Two
+steps follow directly:
+
+1. **Post shadowed writes, the duplicate from the front** (rtl/dline.sv,
+   "the shadow duplicate").  The map already answers the write query's
+   shadow bit (`d_sh`, rung 6's foresight, now wired); the front samples it
+   with the stamp and, the clock after the primary's, reloads the splice
+   register with the same byte at `{$E0 | side, page}`.  Everything the
+   register feeds - the splice into the shadow and the CAM, the claim
+   abort, the instruction front's snoop, the FIFO push, the read fence -
+   treats the duplicate as the write it is, which closes the
+   duplicate-splice hole for posted writes by construction.  A retire on
+   the duplicate's clock is held one clock (`dup_go`); the FIFO is eight
+   deep on the IIgs with the room sample three entries short.  `w_serv`
+   drops `!dq_wsh`.  Bench: boot_gs checks that every written text-page
+   byte has its copy in $E0 (9 checks), and the map's own duplicate count
+   goes to zero, as it should - the front made them all.
+2. **The keyboard read at one clock on the data front** (the user's design
+   in docs/CXXX.md, built on the IIgs first): `kb_hit` serves a $C000 read
+   in bank zero from the ADB micro's own `c000_byte` (registered once at the
+   top), the retire pulses `c000_ext` back so KEGS's read-driven auto-repeat
+   still counts it, and `gs_kbd_en` is the lever.  Bench: gs_adb 66 checks,
+   the front-served read fires the repeat.
+
+**gs_post ON THE MAP (step 1 alone, MET +0.025): 38.3x - no change.**  The
+writes moved (posts 4.9 M -> 16.6 M, the dispatcher's WR 20.0 M -> 9.7 M),
+and DEC_D grew from 237 M to 292 M clocks to eat the gain: the dispatcher's
+first gate in S_DECIDE is `d_pending`, nothing leaves while a posted write
+is short of the banks, so more posts meant more waiting for whatever still
+rides the dispatcher.  A sampling profile through the debug pair (the top
+word's state nibble, 1,500 samples) said who: S_DECIDE 78%, S_FAST 14%,
+**S_NULL 7.7%** - the core's INTERNAL cycle, VDA and VPA both low, one cycle
+in five on this loop (the hot code is $D4FA-$D57F, language-card RAM, with
+the $C000 poll).  Each one rode the dispatcher: settle, the drain wait it had
+no reason to respect, a clock in S_NULL.  And S_NULL never ticked PLAIN's
+core counter, so the ratio was undercounting the core's own cycles by that
+fifth.
+
+3. **Internal cycles retire on the data front at one clock** (rtl/dline.sv
+   `n_cycle` / `n_retire`): the cycle enable and the credit through
+   d_commit, the registered claim holding the dispatcher as for a data op,
+   no stream event, counted in `tick_q` (so in PLAIN and the dline census)
+   and separately in `cnt_nulls` (debug item 4 of the data front).
+
+Steps 2 and 3 are one build (gs_null).  After them the list is the leftover
+dispatcher writes (9.7 M - most likely the loop's variables in the language
+card, which the front's write verdict stops short of at $C000; a full
+capture will say), the instruction side (DEC_I + IFILL = 13%: 22.9 M fills
+and 45 M promotes in ten seconds - the pair rotating under a loop bigger than
+two lines) and the IIgs read's second clock.
+
+**GS/OS's desktop is a different animal**: idle at the unlimited target it
+refills 33.7 M instruction lines and 15.7 M data lines in ten seconds with
+2.5 M bank changes - 6.4 M lines dropped by revalidation, 0.44 M revived - a
+toolbox working set that does not fit a ten-line front.  Its histogram is
+next; capacity is its likely answer.
+
+## The retained set and the DDR3 (2026-09-11 night)
+
+The instruction front's retained set became an indexed line cache
+(docs/ISTREAM.md, "THE RETAINED SET, INDEXED"): GS/OS's desktop refilled 40.6 M
+instruction lines in ten seconds, IFILL 14% of clocks, 21.9 M lines dropped by
+bank changes against 2.7 M revived.  The first cut, 16 sets x 4 ways:
+
+**gs_icache: TIMING MET, +0.003, 0 of 95,783 endpoints; LUTs 55 -> 62%; and
+on the card the DDR3 NEVER CALIBRATED.**  The UART's own report (rtl/card_link.sv
+`rpt_cal` = `calib_complete`) read D=0 on two separate loads of the bit; gs_null
+loaded between them read D=1 within seconds on the same board, so it is the
+bitstream and not the board.  check_timing is clean in both (0 unconstrained
+internal endpoints, 0 no_clock), the logs' clock and placement messages are
+identical, the DDR3 rate, PHY and constraints unchanged.  DERISK.md's lesson
+stands - static timing is necessary and not sufficient for the DDR3 interface -
+but the mechanism by which THIS placement spoils training is NOT KNOWN.  Kept for
+the hunt: `build/gs_icache_run.out`, the routed checkpoint's forty worst paths
+(`build/paths_hunt.tcl`, the session's paths_hunt_icache.rpt).  (The GS.md note
+of 2026-09-09, "ddr=0 is a consequence of the link's silence and not a
+calibration failure", was about the HOST's status line; the UART's D is the
+card's own `calib_complete` and means what it says.)
+
+The census named the pressure and the fix: 8 x 4 with the kill registered
+(docs/ISTREAM.md).  A mid-build edit to master_top.sv (the debug snapshot
+words registered ahead of the mux, 19:15) did NOT reach gs_icache - elaboration
+had finished at 18:52 - and the rule from it: no RTL edits while a build runs.
+
 ## Risks
 
 - ~~Timing lives in rung 6 (the fronts), which milestone 1 does not depend on.~~  Rung 6 is built; its build verdict is in its section.

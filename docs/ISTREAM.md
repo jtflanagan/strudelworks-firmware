@@ -12,6 +12,75 @@
 > `docs/MEMORY_REFACTOR.md`; this file was not rewritten (a decision, not an
 > oversight - the user's, 2026-09-08).
 
+> **THE RETAINED SET, INDEXED (2026-09-11 night; docs/GS.md "Where the
+> stalls are"):** the eight-entry fully-associative CAM becomes a SIXTEEN-SET
+> BY FOUR-WAY line cache, 64 lines, the data front's shape (rtl/dline.sv's
+> 8x4 cache, the one that worked).  Motivation: GS/OS's desktop at the
+> unlimited target refilled 40.6 M instruction lines in ten seconds - one
+> every six fetches - with 21.9 M lines dropped by bank changes and 2.7 M
+> revived; IFILL alone was 14% of all clocks and the fetches that fell to
+> the dispatcher more.  Toolbox code does not fit ten lines.
+>
+> **The set is the line-in-page.**  A line's virtual tag is addr[15:4]; its
+> low four bits, addr[7:4], are the set index (`ICS = 16`) and the high eight,
+> the page, the stored tag.  That choice is the whole design: addr[7:4] is the
+> same in the virtual and the physical space (a page is 256 bytes), so the
+> write snoop and the install's dedupe index by the write's line-in-page and
+> compare only `ICW = 4` physical page numbers, and the candidates index by
+> their own line-in-page and compare four eight-bit tags.  Nothing compares
+> across the whole set any more: the eight 12-bit compares per candidate
+> become four 8-bit ones behind a 16:1 select, and the snoop's eight
+> 20-bit compares per source become four 16-bit ones.
+>
+> **What each line carries** is exactly what a CAM entry carried: valid,
+> retained, the tag, the physical page, the region, the fold and the virtual
+> bank, all in flip-flops (a map change reads them all at once), and the 128
+> bits of data in ONE 64-deep LUTRAM per read port, addressed by {way, set} -
+> the way from the compare, so a candidate's byte is compare -> read -> the
+> 16:1 byte select, inside the full clock the lookups already have into
+> their registers (i_byte_q, tgt_byte_q).  Six read ports: the five
+> candidates and the promote's copy; one write port, the install at F_W2.
+>
+> **The serve path does not change.**  The two slots, the +1 predictor, the
+> registered candidates, the early branch resolution, the scanner and the
+> pinned pair are untouched.  Two cones move to registers and get shallower:
+> the retire's `ihit` takes the cache's term at exp_q's set (retire already
+> demands exp_q == pc_addr, and the target path's at tgt_q's), and
+> `kill_now`'s cancel is the write's set against the serving set.
+>
+> **Install, dedupe, promote, snoop, revalidation** are the CAM's rules per
+> set: a committed line goes to the retained way of its set that already
+> holds the same physical page (the dedupe - one live copy per identity) or
+> to the set's round-robin victim; a promote finds the valid way with the
+> picked tag and copies its row a beat later (F_CAM, as before); a write
+> kills every retained way of its set whose page matches, from both sources;
+> a map change recomputes every line's valid bit from its stored identity in
+> the two register-rooted stages the slots and the data front use, and the
+> books count drops and revivals from registered copies.
+>
+> **Cost**: ~3,000 flip-flops of identity, 48 Kbit of LUTRAM (~800 LUTs) for
+> the six replicas, and the revalidation's breadth (64 lines a clock, off
+> every serve cone).  BRAM is not involved.  `ICS`/`ICW` are parameters; the
+> IIe build takes the same shape and the battery's bptest - the four-line
+> loop only the retained set can hold, the promotes and scan fills it
+> asserts - is the gate there.
+>
+> **16x4 BUILT AND WITHDRAWN (gs_icache, the same night):** TIMING MET at
+> +0.003 with 0 of 95,783 failing, LUTs 55 -> 62%, and the bitstream NEVER
+> CALIBRATED THE DDR3 on the card (UART D=0 on two loads; the previous bit
+> calibrates at once on the same board) - docs/GS.md "The retained set and
+> the DDR3".  The census named the pressure: the candidate lookup into
+> i_byte_q at 9.89 ns, and the snoop's live 16:1 page select and compare
+> running through kill_now, the retire and every core enable (13-16 levels,
+> 0.005-0.09 ns).  **So the set is 8 x 4, the data front's size** - the set
+> addr[6:4], the tag addr[15:7], the physical identity the page AND addr[7]
+> (`ic_a7`, the data front's PTW) - **and the kill lands a clock later** from
+> a registered compare (`kq_*`); what stays live in kill_now is a 3-bit set
+> match (`ic_cancel`, plus its registered copy for the clock the kill takes
+> to land), and the promote's copy checks the pending kill (`ic_pro_dying`).
+> A write anywhere in the fetch's set costs one clock; nothing serves a dead
+> line.
+>
 > **ON THE IIgs TOO, 2026-09-11 (docs/GS.md rung 6):** the front builds at
 > `GS = 1` and serves the 65816's program stream at `{pc_bank, pc_addr}`.
 > Each line stores the virtual bank it was fetched in; the bank registers are
