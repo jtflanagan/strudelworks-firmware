@@ -125,6 +125,14 @@ module page_cache #(
 
     output logic       sub_en,
     output logic [7:0] sub_data,
+    // THE OP'S WHOLE ROW, beside its byte (2026-09-11, docs/DLINE.md "the
+    // miss's read fills the line"): valid with sub_en when the read was
+    // served from a resident page - never from a fill's critical beat,
+    // whose row is not yet whole - with the page it came from.  The data
+    // front installs it, so a miss is one page-cache access and not two.
+    output logic         op_row_v,
+    output logic [127:0] op_row,
+    output logic [15:0]  op_row_ppn,
     output logic       decided,
     output wire        busy,
 
@@ -633,6 +641,7 @@ module page_cache #(
 
         if (rst) begin
             sub_en <= 1'b0; sub_data <= 8'd0;
+            op_row_v <= 1'b0; op_row <= 128'd0; op_row_ppn <= 16'd0;
             decided <= 1'b0;
             cmp_valid <= 1'b0; cmp_byte <= 8'd0;
             state <= E_IDLE;
@@ -650,6 +659,7 @@ module page_cache #(
             // transaction in flight still completes, for the page's sake.
             if (op_present) begin
                 sub_en    <= 1'b0;
+                op_row_v  <= 1'b0;
                 cmp_valid <= 1'b0;
                 e_serve   <= 1'b0;
                 e_cmp     <= 1'b0;
@@ -665,6 +675,9 @@ module page_cache #(
                 if (serve_this) begin
                     sub_en   <= 1'b1;
                     sub_data <= rbyte;
+                    op_row_v   <= 1'b1;
+                    op_row     <= mux_row;
+                    op_row_ppn <= s_ppn;
                     served   <= served + 32'd1;
                 end
                 cmp_valid <= 1'b1;

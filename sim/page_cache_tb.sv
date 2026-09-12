@@ -108,7 +108,7 @@ module page_cache_tb;
         .shd_take (1'b0), .shd_ppn (16'd0), .shd_off (8'd0),
         .op_addr (op_addr), .op_present (op_present), .op_commit (op_commit),
         .op_divert (op_divert), .data_sync (data_sync),
-        .sub_en (sub_en), .sub_data (sub_data), .decided (decided), .busy (busy),
+        .sub_en (sub_en), .sub_data (sub_data), .op_row_v (), .op_row (), .op_row_ppn (), .decided (decided), .busy (busy),
         .mw_stb (mw_stb),
         .mwx_stb (), .mw_bank (), .mw_addr (mw_addr), .mw_byte (mw_byte),
         .il_req (il_req), .il_ppn (il_ppn), .il_line (il_line), .il_src (il_src),

@@ -217,6 +217,10 @@ module accel_seq #(
     // virtual beam (rtl/vbeam.sv) keep the core's time by.  fev_valid is
     // the WORD, which a quiet internalized read does not put on the stream.
     output logic       fast_tick,
+    // A data READ served by the page cache retiring on this clock - the
+    // strobe rtl/dline.sv's C_OPW and last row take their row on.  Live
+    // (fast_hit's cone, one more load); never a bus op's or a switch's.
+    output wire        mem_served,
     output logic       fev_quiet,       // with fev_valid: a quiet internalized read
 
     // A card whose data is not ready - the floppy with a track fill pending
@@ -483,6 +487,7 @@ module accel_seq #(
     always_ff @(posedge clk) swi_byte_q <= swi_byte;
     wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en || swi_q);
     wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en && !swi_q;
+    assign mem_served = (st == S_FAST) && decided && fast_rw && mem_sub_en && !swi_q;
 
     // ---- the census, one clock behind the retirement -------------------------
     // The bucket is decided on the retire clock into four flops; the

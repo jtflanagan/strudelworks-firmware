@@ -380,9 +380,15 @@ module master_top #(
     wire [1:0]  q_cls;
     // The instruction front (rtl/iline.sv) and its seams.
     wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim, seq_fast_tick;
+    wire        seq_mem_served;   // the dispatcher's read served by the page cache, this clock
     // The data front, chained after the instruction front (rtl/dline.sv).
     wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
     wire        il_fill_busy, dl_fill_busy;   // the fronts' fills in flight (the clock histogram)
+    // The dispatcher's read, whole, from the page cache to the data front
+    // (docs/DLINE.md "the miss's read fills the line").
+    wire         mem_op_row_v;
+    wire [127:0] mem_op_row;
+    wire [15:0]  mem_op_row_ppn;
     wire        d_pending_w, turbo_wr, dq_rw_w, ev_fast_room_w;
     wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w;
     wire [7:0]  pw_data_w, cl_wdata;
@@ -1108,6 +1114,7 @@ module master_top #(
         .slot_q_o      (seq_slot_q),
         .sl_win        (sl_win),
         .fast_tick     (seq_fast_tick),
+        .mem_served    (seq_mem_served),
         .fev_quiet     (fev_quiet),
         // THE IIgs's OWN SPEED SWITCH (docs/GS.md; KEGS moremem.c CYAREG).
         // $C036 bit 7 is the machine's high-speed bit and the ROM, the
@@ -1329,6 +1336,10 @@ module master_top #(
         .d_reg         (d_reg_w),
         .d_fold        (d_fold_w),
         .d_sh          (d_sh_w),
+        .op_take       (seq_mem_served),
+        .op_row_v      (mem_op_row_v),
+        .op_row        (mem_op_row),
+        .op_row_ppn    (mem_op_row_ppn),
         .kbd_en        (GS && gs_kbd_en),
         .kbd_byte      (kbd_byte_q),
         .kbd_rd        (dl_kbd_rd),
@@ -1938,6 +1949,7 @@ module master_top #(
         .op_divert   (u_divert),
         .data_sync   (apple_data_sync),
         .sub_en      (mem_sub_en),
+        .op_row_v    (mem_op_row_v), .op_row (mem_op_row), .op_row_ppn (mem_op_row_ppn),
         .sub_data    (mem_sub_data),
         .decided     (mem_decided),
         .busy        (mem_busy),

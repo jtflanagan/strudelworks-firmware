@@ -216,6 +216,10 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [3:0]  d_reg_w, p_reg_w;
     wire        d_fold_w, p_fold_w, p_fs_w, map_settling;
     wire        d_sh_w;
+    wire         op_row_v_w;
+    wire         seq_mem_served_w;
+    wire [127:0] op_row_w;
+    wire [15:0]  op_row_ppn_w;
     wire [69:0] rt_rd_flat;
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
@@ -320,7 +324,7 @@ module accel_tb #(parameter integer SWINT = 1,
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
-        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (seq_fast_tick), .fev_quiet (),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (seq_fast_tick), .mem_served (seq_mem_served_w), .fev_quiet (),
         .q_slot (1'b0), .slot_q_o (), .sl_win (),
         .stall (1'b0),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
@@ -383,6 +387,7 @@ module accel_tb #(parameter integer SWINT = 1,
     // clocks iline is not asking.
     dline u_dline (
         .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (),
+        .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred ({8'd0, cpu_d_pred}), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .d_pred_bcls (2'd0), .dbr (8'd0),
@@ -579,6 +584,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
+        .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .mw_stb (), .mw_addr (), .mw_byte (), .mwx_stb (), .mw_bank (),
         .il_req (il_req | dl_req_w), .il_ppn (il_req ? il_ppn_w : dl_ppn_w),
         .il_line (il_req ? il_line_w : dl_line_w), .il_src (!il_req),
@@ -1108,6 +1114,9 @@ module accel_tb #(parameter integer SWINT = 1,
             if (dev_data !== exp_read(dev_addr)) begin
                 dline_bad = dline_bad + 1; reads_bad = reads_bad + 1;
                 if (reads_bad <= 5) $display("    dline read $%04X: core got %02x, the reference says %02x", dev_addr, dev_data, exp_read(dev_addr));
+                if (reads_bad <= 5) $display("      (served by: sh %0d cam %0d lb %0d lr %0d kb %0d; lr_v %0d lr_addr %05X lr_ppn %04X; cst %0d)",
+                                             u_dline.sh_hit_q_dbg, u_dline.cam_hit_q_dbg, u_dline.lb_hit_q_dbg, u_dline.lr_hit_q_dbg, u_dline.kb_hit_q_dbg,
+                                             u_dline.lr_v, u_dline.lr_addr, u_dline.lr_ppn, u_dline.cst);
             end
         end else dline_writes = dline_writes + 1;
         if (dev_addr[15:12] == 4'hC) dline_bad = dline_bad + 1;

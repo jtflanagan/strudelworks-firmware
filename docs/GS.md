@@ -3854,7 +3854,16 @@ calibration failure", was about the HOST's status line; the UART's D is the
 card's own `calib_complete` and means what it says.)
 
 The census named the pressure and the fix: 8 x 4 with the kill registered
-(docs/ISTREAM.md).  A mid-build edit to master_top.sv (the debug snapshot
+(docs/ISTREAM.md).  **gs_ic8 (8 x 4, MET +0.011, 56% LUTs) calibrates.  Then
+gs_oprow2 (the miss's read fills the line + the last row, docs/DLINE.md; MET
++0.004, 58% LUTs) DID NOT - D=0 twice, 20 s waited - while gs_hist (+0.000,
+55%) and gs_ic8 both do.  Not WNS, then; the two larger designs fail.  The
+DDR3 controller and PHY sit in clock region X0Y2 beside IO bank 15 (all 48
+pins) in the failing bit, check_timing is clean, and the 48 DQ/DQS pins carry
+no input-delay constraint by design (the PHY centres its read window with
+IDELAY taps) - so static timing cannot see it.  The UART line now carries
+`K=xx`, UberDDR3's `state_calibrate`, so a bit that never reaches D=1 says
+which training step it is stuck in.**  A mid-build edit to master_top.sv (the debug snapshot
 words registered ahead of the mux, 19:15) did NOT reach gs_icache - elaboration
 had finished at 18:52 - and the rule from it: no RTL edits while a build runs.
 

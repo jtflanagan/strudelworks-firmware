@@ -367,7 +367,7 @@ built into `au_top`.
 - Until `calib_complete`, the writer accepts nothing and every source sees
   `full`. At power-up the host is not attached yet, so nothing waits on it.
   A calibration that never completes is a dead link, and the UART status
-  line — now `C=… E=x O=x P=x D=x T=x` — says so with `D=0`, as does
+  line — now `C=… E=x O=x P=x D=x T=x … K=xx` — says so with `D=0` and, since 2026-09-11, where the controller's calibration state machine stands in `K` (UberDDR3's `state_calibrate`; `17` is DONE) — as does
   RING_STATUS bit 25 for a host that can still ask. `T` is the torn-message
   flag.
 - **Timing.** `master_top` closes at +0.21 ns and `snoop_top` at +0.15, and

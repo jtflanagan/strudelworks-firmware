@@ -361,7 +361,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (1'b0),
         .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte),
-        .swi_commit (swi_commit), .fast_tick (), .fev_quiet (),
+        .swi_commit (swi_commit), .fast_tick (), .mem_served (seq_mem_served_w), .fev_quiet (),
         .q_slot (q_slot), .slot_q_o (seq_slot_q), .sl_win (sl_win),
         .stall (1'b0),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
@@ -425,6 +425,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     dline #(.GS (1'b1)) u_dline (
         // The keyboard read at one clock, from the ADB micro's own byte.
         .kbd_en (1'b1), .kbd_byte (gs_c000_byte), .kbd_rd (dl_kbd_rd),
+        .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .d_pred_bcls (cpu_d_pred_bcls), .dbr (cpu_dbr),
@@ -583,6 +584,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [3:0]  p_reg_w, d_reg_w;
     wire        p_fold_w, p_fs_w, d_fold_w;
     wire        d_sh_w;
+    wire         op_row_v_w;
+    wire         seq_mem_served_w;
+    wire [127:0] op_row_w;
+    wire [15:0]  op_row_ppn_w;
     wire [7:0]  gs_c000_byte;
     wire        dl_kbd_rd;
     wire [1:0]  p_cls;
@@ -699,6 +704,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
+        .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .mw_stb (), .mw_addr (), .mw_byte (), .mwx_stb (), .mw_bank (),
         .il_req (il_req | dl_req_w), .il_ppn (il_req ? il_ppn_w : dl_ppn_w),
         .il_line (il_req ? il_line_w : dl_line_w), .il_src (!il_req),

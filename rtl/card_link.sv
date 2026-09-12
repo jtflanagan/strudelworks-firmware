@@ -576,7 +576,7 @@ module card_link #(
         .wb_rdata    (wb_rdata),
         .wb_rdata_aux(wb_rdata_aux),
         .calib_complete (calib_complete),
-        .ddr3_debug     (),
+        .ddr3_debug     (ddr3_debug_w),
         // The memory client says when a bus cycle has room for a refresh:
         // the gate only ever pulls one EARLIER, so this is safe whatever it
         // does (docs/DERISK.md, milestone 2).
@@ -1441,18 +1441,26 @@ module card_link #(
     // happens have to be seen to be fixed.  The UART is the only way to see
     // the card's own view when the FT601 link is the thing under suspicion.
     // L and S are the link's last reset: its cause and the chip-side snapshot
-    // taken as it fired (see link_cause above).
+    // taken as it fired (see link_cause above).  K is the DDR3 controller's
+    // calibration state (two hex digits; 17 = $17 = DONE_CALIBRATE when D=1).
     localparam [7:0] CH_C = 8'h43, CH_E = 8'h45, CH_O = 8'h4F, CH_EQ = 8'h3D;
     localparam [7:0] CH_P = 8'h50, CH_D = 8'h44, CH_T = 8'h54;
     localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
-    localparam [7:0] CH_R = 8'h52, CH_L = 8'h4C, CH_S = 8'h53;
+    localparam [7:0] CH_R = 8'h52, CH_L = 8'h4C, CH_S = 8'h53, CH_K = 8'h4B;
 
-    localparam [5:0] RPT_LAST = 6'd51;
-    localparam [5:0] RPT_IDLE = 6'd52;
+    localparam [5:0] RPT_LAST = 6'd56;
+    localparam [5:0] RPT_IDLE = 6'd57;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
+    // The DDR3 controller's calibration state (UberDDR3 o_debug1[4:0]:
+    // 0 IDLE, 1-6 the DQS bitslip training, 9-11 the write/read issue, 13
+    // ANALYZE_DATA, 14 CHECK_STARTING_DATA, 15 BITSLIP_DQS_TRAIN_3, 22
+    // FINISH_READ, 23 DONE_CALIBRATE), reported as K so a bitstream whose
+    // DDR3 never calibrates says WHERE it sticks (docs/GS.md "The retained
+    // set and the DDR3": two builds that met timing and never got to D=1).
+    wire [31:0] ddr3_debug_w;
 
     reg [21:0] rpt_div  = 22'd0;
     reg [5:0]  rpt_idx  = RPT_IDLE;
@@ -1461,6 +1469,7 @@ module card_link #(
     reg        rpt_ovf  = 1'b0;
     reg        rpt_phi  = 1'b0;
     reg        rpt_cal  = 1'b0;
+    reg [4:0]  rpt_kal  = 5'd0;
     reg        rpt_torn = 1'b0;
     reg [23:0] rpt_ring = 24'd0;
     reg [2:0]  rpt_cause = 3'd0;
@@ -1478,6 +1487,7 @@ module card_link #(
                 rpt_ovf <= overflow;
                 rpt_phi <= phi0_live;
                 rpt_cal <= calib_complete;
+                rpt_kal <= ddr3_debug_w[4:0];
                 rpt_torn <= ring_status[26];
                 rpt_ring <= {2'd0, ring_status[21:0]};
                 rpt_cause <= link_cause;
@@ -1517,6 +1527,8 @@ module card_link #(
             6'd47: nib = rpt_snap[11:8];
             6'd48: nib = rpt_snap[7:4];
             6'd49: nib = rpt_snap[3:0];
+            6'd53: nib = {3'b000, rpt_kal[4]};
+            6'd54: nib = rpt_kal[3:0];
             default: nib = 4'd0;
         endcase
     end
@@ -1553,8 +1565,11 @@ module card_link #(
             6'd43: ch = CH_SP;
             6'd44: ch = CH_S;
             6'd45: ch = CH_EQ;
-            6'd50: ch = CH_CR;
-            6'd51: ch = CH_LF;
+            6'd50: ch = CH_SP;
+            6'd51: ch = CH_K;
+            6'd52: ch = CH_EQ;
+            6'd55: ch = CH_CR;
+            6'd56: ch = CH_LF;
             default: ch = hex;
         endcase
     end

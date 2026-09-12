@@ -229,6 +229,16 @@ module dline #(
     input  wire         dl_done,      // the answer, exactly three clocks later
     input  wire         dl_ok,
     input  wire [127:0] dl_row,
+    // THE DISPATCHER'S READ, WHOLE (rtl/page_cache.sv op_row): the row the
+    // byte the core is being served came from, valid on the retire clock
+    // of a read served from a resident page.  Two things take it - the
+    // claim engine (C_OPW: the miss's own read fills the line, no second
+    // access) and the LAST ROW (below: the second byte of any 16-bit read,
+    // whatever its bank class, served from the row of the first).
+    input  wire         op_take,     // rtl/accel_seq.sv mem_served: this clock's retire is such a read
+    input  wire         op_row_v,
+    input  wire [127:0] op_row,
+    input  wire [15:0]  op_row_ppn,
 
     // The splice: the classified stream's writes that reach the image
     // (bus ops, the dispatcher's, DMA).  A posted write comes back round
@@ -488,7 +498,12 @@ module dline #(
     logic [3:0]      m_reg_q_t;
     logic            m_fold_q_t;
     logic [7:0]      m_vbank_q_t;
-    wire  [127:0]    dl_row_w = dl_row;
+    // C_W2O's row is the op's, caught in C_OPW.  The SOURCE IS THE STATE,
+    // not a flag beside it: a flag set on the clock an abort overrode the
+    // transition would have fed a later claim's install a dead row.
+    logic [127:0]    orow_q;
+    logic [15:0]     orow_ppn;          // ...and the page it came from (a sim check)
+    wire  [127:0]    dl_row_w = (cst == C_W2O) ? orow_q : dl_row;
     genvar gw;
     generate for (gw = 0; gw < NWAY; gw = gw + 1) begin : g_way
         // FOUR 32-BIT SLICES, not one 128-bit array: the bits are the same
@@ -672,6 +687,23 @@ module dline #(
     logic [7:0]  lb_byte;
     wire lb_hit = dq_v && lb_v && (dq_addr == lb_addr) && (dq_addr[15:12] != 4'hC);
 
+    // ---- the last row ----------------------------------------------------
+    // The last byte's big brother (2026-09-11, the user's design): the whole
+    // row the dispatcher's last data read was served from, with its 24-bit
+    // LINE address and its physical identity.  A candidate anywhere in that
+    // line hits by the full address compare - no bank class involved, so
+    // the OTHER class the ways refuse is served here - which is the second
+    // byte of every 16-bit read that follows a miss, unless the first was
+    // the line's last.  Kept coherent like a way: a write to its identity
+    // is spliced in, not a kill; a map change, inval, reset and serving
+    // off drop it.
+    logic         lr_v;
+    logic [19:0]  lr_addr;      // {bank, addr[15:4]}
+    logic [15:0]  lr_ppn;
+    logic [127:0] lr_row;
+    wire lr_hit = dq_v && lr_v && (dq_addr[23:4] == lr_addr) && (dq_addr[15:12] != 4'hC);
+    wire [7:0] lr_byte = lr_row[8 * dq_addr[3:0] +: 8];
+
     // ---- the splice register: a write's stamp, one clock after retire -----
     // Everything rung 3 does with a write after its retire is rooted here:
     // the splice into the shadow and the CAM, the claim abort, the
@@ -732,12 +764,13 @@ module dline #(
     // II banks name the same register but ride the dispatcher), while the
     // lever is up.  Register-rooted throughout, like the last byte.
     wire kb_hit = dq_v && dq_kbd && dq_b0 && kbd_en;
-    wire serve_hit  = sh_hit || cam_hit || lb_hit || kb_hit;
+    wire serve_hit  = sh_hit || cam_hit || lb_hit || kb_hit || lr_hit;
     // One-hot AND-OR, not a priority chain: the shadow and the cache never
     // hold the same line (claims exclude the estate), and the last byte,
     // when it also hits, IS that line's byte (any write clears it).
     wire [7:0] serve_byte = ({8{sh_hit}} & dq_byte) | ({8{cam_hit}} & cam_byte) |
                             ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte) |
+                            ({8{lr_hit && !sh_hit && !cam_hit && !lb_hit}} & lr_byte) |
                             ({8{kb_hit}} & kbd_byte);
 
     // THE IIgs READS AT TWO CLOCKS, REGISTERED (docs/GS.md rung 6).  On the
@@ -824,6 +857,7 @@ module dline #(
     assign d_din    = GS ? (sv_hit_q ? sv_byte_q : accel_din)
                          : (({8{sh_hit}} & dq_byte) | wbyte[0] | wbyte[1] | wbyte[2] | wbyte[3] |
                             ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte) |
+                            ({8{lr_hit && !sh_hit && !cam_hit && !lb_hit}} & lr_byte) |
                             ({8{!serve_hit}} & accel_din));
     assign claim    = claim_q;
 
@@ -926,6 +960,7 @@ module dline #(
     // (P3); a bank read presented on the clock after THAT sees it.  So
     // pending covers three clocks past the take.
     logic [31:0] cnt_shclaims, cnt_decl, cnt_blk_ok, cnt_blk_room, cnt_wblk_room;
+    logic [31:0] cnt_lr_serves, cnt_oprow;   // last-row serves; claims filled from the op's row
     logic [2:0] drain_sr;
     always_ff @(posedge clk) begin
         if (rst) drain_sr <= 3'd0;
@@ -941,9 +976,19 @@ module dline #(
     // live).  A CAM miss requires dq_addr == cpu_addr so the physical stamp
     // it captures describes the very address being claimed.  Writes never
     // claim: a line that is only ever written is not worth holding.
-    localparam [1:0] C_IDLE = 2'd0, C_REQ = 2'd1, C_W1 = 2'd2, C_W2 = 2'd3;
+    // C_OPW: THE MISS'S OWN READ FILLS THE LINE (2026-09-11).  A cache miss
+    // used to launch a line request of its own while the read rode the
+    // dispatcher - the same row fetched twice, the second touch hitting
+    // only after the request's three clocks and the port's arbitration.
+    // Now the engine stamps the identity as before and WAITS for the
+    // dispatcher's read to retire: the page cache hands over the whole row
+    // beside the byte (op_row), and C_W2 installs it on the next clock.  A
+    // read served from somewhere without a whole row - a fill's critical
+    // beat, the bus - falls back to the request.
+    localparam [2:0] C_IDLE = 3'd0, C_REQ = 3'd1, C_W1 = 3'd2, C_W2 = 3'd3, C_OPW = 3'd4,
+                     C_W2O = 3'd5;   // the install, from the op's row
     assign fill_busy = (cst != C_IDLE);
-    logic [1:0] cst;
+    logic [2:0] cst;
     logic [4:0] c_line;
     logic       miss_q, cmiss_q;
     logic [4:0] miss_line_q;
@@ -1012,6 +1057,41 @@ module dline #(
     // its line within that page.
     wire spc_flight = iw_v && (m_ppn_q_t == iw_ppn) && (m_vt_q_t[3:0] == iw_off8[7:4]);
 
+    // The last row's keeper: caught from the dispatcher's read on its
+    // retire clock, spliced by a write to its identity, dropped by
+    // everything a map concern drops.  The splice runs first so a same-edge
+    // capture wins: that read is ordered after the write.
+    wire lr_take = op_take && d_cycle && op_row_v && turbo_en;
+`ifndef SYNTHESIS
+    // The row the engine installs from the op must be the page the stamp
+    // names, or the way holds another line's bytes under this tag.
+    always @(posedge clk)
+        if (cst == C_W2O && (inst_w != '0) && (orow_ppn != m_ppn_q_t))
+            $display("dline: C_OPW install page mismatch at %0t: stamp ppn %04X line %0X (vt %03X), row from ppn %04X; cpu_addr %04X dq %06X",
+                     $time, m_ppn_q_t, m_vt_q_t[3:0], m_vt_q_t, orow_ppn, cpu_addr, dq_addr);
+    // The bench's view of which source served the retiring read (one clock
+    // behind the retire, like dev_*).
+    logic sh_hit_q_dbg, cam_hit_q_dbg, lb_hit_q_dbg, lr_hit_q_dbg, kb_hit_q_dbg;
+    always_ff @(posedge clk) begin
+        sh_hit_q_dbg <= sh_hit; cam_hit_q_dbg <= cam_hit; lb_hit_q_dbg <= lb_hit;
+        lr_hit_q_dbg <= lr_hit; kb_hit_q_dbg <= kb_hit;
+    end
+`endif
+    always_ff @(posedge clk) begin
+        if (rst || cpu_rst || inval || map_changed) begin
+            lr_v <= 1'b0;
+        end else begin
+            if (iw_v && lr_v && (iw_ppn == lr_ppn) && (iw_off8[7:4] == lr_addr[3:0]))
+                lr_row[8 * iw_off8[3:0] +: 8] <= iw_data;
+            if (lr_take) begin
+                lr_v    <= 1'b1;
+                lr_addr <= {GS ? cpu_bank : 8'd0, cpu_addr[15:4]};
+                lr_ppn  <= op_row_ppn;
+                lr_row  <= op_row;
+            end
+        end
+    end
+
     // The shadow write port's one mux: a splice (the row it read, one byte
     // replaced) beats an install, which drops and reclaims - see C_W2 below.
     wire sp_write = sp_hit && shv[sp_line] && !inval;
@@ -1029,7 +1109,7 @@ module dline #(
     // The install, per way: the claim's target way, on the row's clock,
     // unless a splice owns that way's port this clock (then it drops and
     // reclaims) or the claim was aborted.
-    wire inst_ok = (cst == C_W2) && t_cam && !spc_flight && !rst && !inval && !map_changed;
+    wire inst_ok = (cst == C_W2 || cst == C_W2O) && t_cam && !spc_flight && !rst && !inval && !map_changed;
     integer wj;
     always_comb begin
         for (wj = 0; wj < NWAY; wj = wj + 1)
@@ -1049,7 +1129,11 @@ module dline #(
 
         miss_q      <= live_miss && (cst == C_IDLE);
         miss_line_q <= cpu_addr[8:4];
-        cmiss_q     <= live_cmiss && (cst == C_IDLE);
+        // ...and not for a cycle that retires on the trigger clock itself:
+        // the registered trigger would stamp a candidate already gone, and
+        // C_OPW would then take the NEXT cycle's row for it (the battery's
+        // finding, 2026-09-11).
+        cmiss_q     <= live_cmiss && (cst == C_IDLE) && !cyc_en;
         m_off_q     <= p_off_q2;
         m_vt_q      <= dq_addr[15:4];
         m_vbank_q   <= GS ? dq_addr[23:16] : 8'd0;
@@ -1077,6 +1161,7 @@ module dline #(
                 cnt_rev_serves <= 32'd0;
                 cnt_shclaims <= 32'd0; cnt_decl <= 32'd0; cnt_blk_ok <= 32'd0;
                 cnt_blk_room <= 32'd0; cnt_wblk_room <= 32'd0;
+                cnt_lr_serves <= 32'd0; cnt_oprow <= 32'd0;
                 dev_addr <= 16'd0; dev_data <= 8'd0; dev_rw <= 1'b1;
             end
         end else begin
@@ -1090,7 +1175,8 @@ module dline #(
             if (w_serv && w_cycle && turbo_ok && !w_room) cnt_wblk_room <= cnt_wblk_room + 32'd1;
             if (r_retire) begin
                 if (!sh_hit && cam_hit) cnt_cam_serves <= cnt_cam_serves + 32'd1;
-                if (!sh_hit && !cam_hit) cnt_lb_serves <= cnt_lb_serves + 32'd1;
+                if (!sh_hit && !cam_hit && lb_hit) cnt_lb_serves <= cnt_lb_serves + 32'd1;
+                if (!sh_hit && !cam_hit && !lb_hit && lr_hit) cnt_lr_serves <= cnt_lr_serves + 32'd1;
             end
             if (w_retire) cnt_posts <= cnt_posts + 32'd1;
             // Room-waits only: a write held by the governor or a hold is
@@ -1132,8 +1218,35 @@ module dline #(
                     m_vbank_q_t <= m_vbank_q;
                     dl_ppn    <= m_ppn_q;
                     dl_line   <= m_off_q[3:0];
-                    dl_req    <= 1'b1;
-                    cst       <= C_REQ;
+                    cst       <= C_OPW;
+                end
+                C_OPW: if (cyc_en && d_cycle) begin
+                    // This cycle's read retired - by ANY hand.  Only the
+                    // dispatcher's read served whole by the page cache
+                    // (op_take, op_row_v) brings its row; anything else -
+                    // a fill's critical beat, the bus, or THIS FRONT serving
+                    // the read from the last row or the last byte after the
+                    // claim had already fired - claims the line the old way.
+                    // The battery found both: the first cut installed the
+                    // PREVIOUS op's row under a bus-served read's identity,
+                    // and then, waiting on il_cyc_en alone, sat through its
+                    // own retire and installed the NEXT read's row under a
+                    // stale stamp (a governed run, where the trigger beats
+                    // the serve).
+                    // ...and the read retiring is the line the stamp names
+                    // (the address, and the page the row came from): a
+                    // stamp for a cycle that slipped past requests the line
+                    // instead of taking a stranger's row.
+                    if (op_take && op_row_v && (cpu_addr[15:4] == m_vt_q_t) &&
+                        (!GS || (cpu_bank == m_vbank_q_t)) && (op_row_ppn == m_ppn_q_t)) begin
+                        orow_q <= op_row;
+                        orow_ppn <= op_row_ppn;
+                        cst    <= C_W2O;
+                        cnt_oprow <= cnt_oprow + 32'd1;
+                    end else begin
+                        dl_req <= 1'b1;
+                        cst    <= C_REQ;
+                    end
                 end
                 C_REQ: if (dl_ack) begin
                     dl_req <= 1'b0;
@@ -1146,7 +1259,7 @@ module dline #(
                 // and there is nothing to install - the op rides the
                 // sequencer, and the miss it takes fills the page.
                 C_W1: if (dl_done) cst <= dl_ok ? C_W2 : C_IDLE;
-                C_W2: begin
+                C_W2, C_W2O: begin
                     // The row arrives, on the write ports above - unless a
                     // splice interferes.  For the shadow: ANY splice this
                     // clock (a splice to this line means the row is stale;
@@ -1245,13 +1358,13 @@ module dline #(
             4'd5:  dbg_val = cnt_posts;
             4'd6:  dbg_val = cnt_post_waits;
             4'd7:  dbg_val = cnt_rev_serves;
-            4'd8:  dbg_val = cnt_shclaims;
+            4'd8:  dbg_val = cnt_oprow;        // claims filled from the op's row (was shclaims, ~0)
             4'd9:  dbg_val = cnt_decl;
             4'd10: dbg_val = cnt_blk_ok;
             4'd11: dbg_val = cnt_blk_room;
-            4'd12: dbg_val = cnt_wblk_room;
+            4'd12: dbg_val = cnt_lr_serves;    // last-row serves (was wblk_room, ~0)
             4'd13: dbg_val = {cst, pending, dq_v, dq_wv, dq_b0, dq_d, zs_main_q, turbo_en, wr_en,
-                              sv_hit_q, claim_q, fc_q, 3'd0, shv[15:0]};
+                              sv_hit_q, claim_q, fc_q, 2'd0, shv[15:0]};
             4'd14: dbg_val = cnt_reval_drop;
             default: dbg_val = cnt_reval_revive;
         endcase

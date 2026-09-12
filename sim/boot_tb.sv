@@ -202,6 +202,10 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [3:0]  d_reg_w, p_reg_w;
     wire        d_fold_w, p_fold_w, p_fs_w, map_settling;
     wire        d_sh_w;
+    wire         op_row_v_w;
+    wire         seq_mem_served_w;
+    wire [127:0] op_row_w;
+    wire [15:0]  op_row_ppn_w;
     wire [69:0] rt_rd_flat;
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
@@ -288,7 +292,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     accel_seq u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (cnt_clr),
-        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (seq_fast_tick_w), .fev_quiet (),
+        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte), .swi_commit (swi_commit), .fast_tick (seq_fast_tick_w), .mem_served (seq_mem_served_w), .fev_quiet (),
         .q_slot (q_slot), .slot_q_o (seq_slot_q), .sl_win (sl_win),
         .stall (1'b0),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
@@ -349,6 +353,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // master_top.
     dline u_dline (
         .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (),
+        .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
@@ -495,6 +500,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
+        .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .mw_stb (),
         .mwx_stb (), .mw_bank (), .mw_addr (), .mw_byte (),
         .il_req (il_req | dl_req_w), .il_ppn (il_req ? il_ppn_w : dl_ppn_w),

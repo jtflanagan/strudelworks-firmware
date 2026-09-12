@@ -1,5 +1,52 @@
 # The dline: 1-clock data
 
+> **2026-09-11 night, the miss (docs/GS.md "Where the stalls are"):** the
+> desktop's data front read-hit rate is 72.9% with the OTHER bank class
+> counted as misses, and a miss cost the dispatcher's six clocks (settle,
+> decide, present, the page cache's three) PLUS a line claim of its own:
+> the same row fetched twice through the line port, the second touch
+> hitting only after the claim's arbitration and three clocks.  Two changes,
+> the user's design:
+>
+> * **THE MISS'S READ FILLS THE LINE.**  rtl/page_cache.sv hands over the
+>   op's whole row beside its byte (`op_row`, `op_row_v`, `op_row_ppn`,
+>   valid on the retire clock of a read served from a resident page - never
+>   a fill's critical beat).  The claim engine stamps the identity as before
+>   and, instead of requesting the line, WAITS (`C_OPW`) for the dispatcher's
+>   read to retire and installs the row it came with on the next clock
+>   (`orow_q` feeds `dl_row_w`); a read served without a whole row falls back
+>   to the request.  One page-cache access per miss, the line port left to
+>   the instruction front, the second touch hitting one clock after the miss.
+>   Counted in `cnt_oprow` (debug item 8).
+> * **THE LAST ROW** (`lr_*`): the last byte's big brother - the whole row the
+>   dispatcher's last data read was served from, with its 24-bit LINE address
+>   and its physical identity.  A candidate anywhere in that line hits by the
+>   full address compare, NO BANK CLASS INVOLVED, so the OTHER class the ways
+>   refuse is served here: the second byte of every 16-bit read that follows
+>   a miss, unless the first byte was the line's last.  A write to its
+>   identity is spliced in; a map change, inval and reset drop it.  Counted in
+>   `cnt_lr_serves` (debug item 12).
+>
+> Unchanged: the ways' rule (ZERO and DBR classes by precomputed valid bits),
+> the 2-clock IIgs read, the lazy claim's identity stamp.
+>
+> **What the battery caught in the first cut, all three in the governed
+> passes** (a wrong byte in a way, "core got 07, the reference says 70"):
+> (1) C_OPW took ANY dispatcher retire as its read, and a read that went to
+> the bus never enters the page cache, so `op_row` still described the
+> previous op - now `op_take` (accel_seq's `mem_served`) qualifies the row;
+> (2) the row's source was a flag beside the state, and an abort overriding
+> the transition left it set for a later claim - now the source IS the
+> state (`C_W2O`); (3) the claim trigger is registered a clock behind the
+> live miss, and when the cycle retired on the trigger clock the engine
+> stamped a candidate already gone and took the NEXT cycle's row for it
+> (traced: enter with stamp $648 while the core stood at $6C00) - now a
+> trigger on a retire clock is dropped, and the take insists the retiring
+> address and the row's page are the stamp's, else it requests the line.
+> The old request path made every one of these harmless because the request
+> carried its own identity; the wait path does not, and a sim check on the
+> install (`orow_ppn` against `m_ppn_q_t`) now stands in rtl/dline.sv.
+
 > **2026-09-11 evening (docs/GS.md "Where the stalls are"):** on the IIgs the
 > front now posts writes into the SHADOWED regions too and makes the $E0/$E1
 > duplicate ITSELF - a second posted write through the splice register the
