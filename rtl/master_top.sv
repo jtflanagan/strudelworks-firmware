@@ -354,7 +354,7 @@ module master_top #(
     wire        accel_swint_dis, accel_game_dis, accel_fronts_dis;
     // The debug pair (rtl/wb_regfile.sv DBG_SEL/DBG_VAL, docs/GS.md rung 6).
     wire [7:0]  dbg_sel;
-    wire [31:0] dbg_val, il_dbg, dl_dbg, pc_dbg;
+    wire [31:0] dbg_val, il_dbg, dl_dbg, dl_dbg2, pc_dbg;
     // The game port in the dummies (rtl/game_port.sv).
     wire [15:0] game_park_addr;
     wire        game_pb_ok, game_pdl_ok;
@@ -1390,6 +1390,7 @@ module master_top #(
         .inval         (mem_inval),
         .dbg_sel       (dbg_sel[3:0]),
         .dbg_val       (dl_dbg),
+        .dbg_val2      (dl_dbg2),
         .fill_busy     (dl_fill_busy),
         .cnt_clr       (accel_cnt_clr),
         .cnt_serves    (accel_dline),   // ACCEL_DLINE: every retire, reads and writes
@@ -1407,7 +1408,8 @@ module master_top #(
     end endgenerate
 
     // The debug pair's mux: [5:4] the module, [3:0] the item; [7:6] = 1 is
-    // the bank census (below the snapshot words).  Item 3/0 is
+    // the bank census (below the snapshot words), [7:6] = 2 the data front's
+    // bank table (rtl/dline.sv dbg_val2).  Item 3/0 is
     // the dispatcher's and the fronts' live state in one word.
     // ---- WHERE THE CLOCKS GO: a histogram of every clock by what the core
     // was doing (docs/GS.md rung 6, "where the stalls are").  Each clock is
@@ -1526,6 +1528,7 @@ module master_top #(
     logic [31:0] dbg_val_q;
     always_ff @(posedge apple_clk)
         dbg_val_q <= (dbg_sel[7:6] == 2'd1) ? bc_dbg :
+                     (dbg_sel[7:6] == 2'd2) ? dl_dbg2 :
                      (dbg_sel[5:4] == 2'd0) ? il_dbg :
                      (dbg_sel[5:4] == 2'd1) ? dl_dbg :
                      (dbg_sel[5:4] == 2'd2) ? pc_dbg : top_dbg;

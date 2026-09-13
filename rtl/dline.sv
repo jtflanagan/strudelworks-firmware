@@ -271,6 +271,9 @@ module dline #(
     // The debug pair's window (rtl/wb_regfile.sv DBG_SEL/DBG_VAL).
     input  wire [3:0]  dbg_sel,
     output logic [31:0] dbg_val,
+    // ...and its second page (IIgs): the bank table's books
+    // (docs/LONG_DATA.md rung 1), DBG_SEL[7:6] = 2 at the top.
+    output logic [31:0] dbg_val2,
 
     // A line fill is in flight (C_REQ through C_W2): the clock histogram in
     // rtl/master_top.sv charges the core's stalled clocks to it.
@@ -412,6 +415,10 @@ module dline #(
         end
     end
     assign dq_rw = !dq_wv;
+    // THE OTHER CLASS (docs/LONG_DATA.md): neither bank zero nor the DBR's.
+    // The core's class code takes three values, so this is the two bits
+    // above - no third load on d_pred_bcls's late cone.
+    wire dq_o = GS && !dq_b0 && !dq_d;
     wire [7:0] dq_byte = shrow[dq_addr[8:4]][dq_ix_sh*8 +: 8];
     wire       sh_hit  = dq_v && (dq_addr[15:9] == 7'd0) &&
                          shv[dq_addr[8:4]] && zs_main_q && dq_b0;
@@ -504,6 +511,34 @@ module dline #(
     logic [127:0]    orow_q;
     logic [15:0]     orow_ppn;          // ...and the page it came from (a sim check)
     wire  [127:0]    dl_row_w = (cst == C_W2O) ? orow_q : dl_row;
+
+    // ---- the bank table (IIgs, docs/LONG_DATA.md rung 1) --------------------
+    // The OTHER class - a bank loaded from din, an index carried over a bank
+    // edge, PBR data under a non-zero PBR - has no per-line bit the way zero
+    // and the DBR do, so the ways refused it.  The census on the card says
+    // its banks repeat: two entries catch 96% of the Finder opening folders.
+    // So the table holds the last two DISTINCT OTHER banks, and every line
+    // carries one precomputed bit per entry, cvo[e] = (cvbank == ob[e]):
+    //
+    //   * at the install, against the entry as it stands;
+    //   * for every line, on the clock after entry e is replaced - while
+    //     that clock runs the entry is out of service (ob_ok), a miss and
+    //     never a stall;
+    //   * never at a revalidation: a map change moves cv, not a line's
+    //     virtual bank.
+    //
+    // The serve compares the candidate's bank with each entry - two 8-bit
+    // compares of registers - and ANDs the answer with the entry's bit, so
+    // the exact bank still decides and a stale prediction can only miss.
+    // Declared here, above the generate that reads them
+    // (tools/check_generate_scope.py); the update is below the retire.
+    localparam integer BT_K = 2;
+    logic [7:0]      ob     [0:BT_K-1];
+    logic [BT_K-1:0] ob_v, ob_ok, ob_set;
+    logic            ob_lru;                    // the entry a new bank replaces
+    logic [NSET-1:0] cvo    [0:BT_K-1][0:NWAY-1];
+    wire  [BT_K-1:0] om = {dq_o && ob_ok[1] && (dq_addr[23:16] == ob[1]),
+                           dq_o && ob_ok[0] && (dq_addr[23:16] == ob[0])};
     genvar gw;
     generate for (gw = 0; gw < NWAY; gw = gw + 1) begin : g_way
         // FOUR 32-BIT SLICES, not one 128-bit array: the bits are the same
@@ -515,7 +550,10 @@ module dline #(
         wire [127:0] srow = {rows[3][dq_sx[4*gw+3]], rows[2][dq_sx[4*gw+2]],
                              rows[1][dq_sx[4*gw+1]], rows[0][dq_sx[4*gw+0]]};
         assign hitv[gw]  = cv[gw][dq_st[gw]] && (vt[dq_st[gw]] == stag) &&
-                           (!GS || (dq_b0 ? cvz[gw][dq_st[gw]] : (dq_d && cvd[gw][dq_st[gw]])));
+                           (!GS || (dq_b0 ? cvz[gw][dq_st[gw]] :
+                                    dq_d  ? cvd[gw][dq_st[gw]] :
+                                            ((om[0] && cvo[0][gw][dq_st[gw]]) ||
+                                             (om[1] && cvo[1][gw][dq_st[gw]]))));
         assign wbyte[gw] = {8{hitv[gw]}} & srow[dq_ix_cam[gw]*8 +: 8];
         // The splice's cut: the write's set, its physical identity - against
         // every RETAINED line, valid or not, so a line written while it is
@@ -848,6 +886,75 @@ module dline #(
     wire n_retire = !cpu_rst && turbo_en && turbo_ok && n_cycle && (fc_q || claim_q);
     wire retire   = r_retire || w_retire || n_retire;
 
+    // ---- the bank table's update (declared above the ways) ---------------------
+    // On the clock after the core moved (fc_q): dq_* names the cycle about
+    // to run, so the update is rooted in registers and nowhere near cyc_en.
+    // Every OTHER-memory data cycle, read or write, takes part - the census
+    // that sized the table counted both - except I/O (a pair bank's $Cxxx,
+    // which no line serves) and ROM 3's banks $FC-$FF (never held here, so an
+    // entry spent on them could serve nothing).  A bank in the table refreshes
+    // its recency; a new one replaces an empty entry, else the least recent.
+    wire [7:0]      ob_bk   = dq_addr[23:16];
+    wire            ob_pair = (ob_bk[7:1] == 7'd0) || (ob_bk[7:1] == 7'h70);
+    wire            ob_elig = dq_o && !(ob_pair && (dq_addr[15:12] == 4'hC)) && (ob_bk[7:2] != 6'h3F);
+    wire            ob_take = GS && fc_q && (dq_v || dq_wv) && ob_elig;
+    wire [BT_K-1:0] ob_m    = {ob_v[1] && (ob_bk == ob[1]), ob_v[0] && (ob_bk == ob[0])};
+    wire            ob_rep  = !ob_v[0] ? 1'b0 : !ob_v[1] ? 1'b1 : ob_lru;
+    // The books: OTHER-memory read candidates; of them, the bank settled in
+    // the table on the candidate's first clock; reads the ways served through
+    // an entry; reads anything here served (the last row and byte included);
+    // entries replaced.
+    logic [31:0] cnt_ob_cand, cnt_ob_known, cnt_ob_serves, cnt_ob_any, cnt_ob_loads;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            ob_v <= '0; ob_ok <= '0; ob_set <= '0; ob_lru <= 1'b0;
+            ob[0] <= 8'd0; ob[1] <= 8'd0;
+            cnt_ob_cand <= 32'd0; cnt_ob_known <= 32'd0; cnt_ob_serves <= 32'd0;
+            cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0;
+        end else begin
+            // Every line's bit for a replaced entry is rewritten on this edge
+            // (the claim engine's block): in service from the next clock.
+            for (int e = 0; e < BT_K; e = e + 1)
+                if (ob_set[e]) begin
+                    ob_set[e] <= 1'b0;
+                    ob_ok[e]  <= 1'b1;
+                end
+            // ...and a replacement on the same edge takes the entry out again.
+            if (ob_take) begin
+                if (ob_m != '0) begin
+                    ob_lru <= !ob_m[1];
+                end else begin
+                    ob[ob_rep]     <= ob_bk;
+                    ob_v[ob_rep]   <= 1'b1;
+                    ob_ok[ob_rep]  <= 1'b0;
+                    ob_set[ob_rep] <= 1'b1;
+                    ob_lru         <= !ob_rep;
+                end
+            end
+            if (cnt_clr) begin
+                cnt_ob_cand <= 32'd0; cnt_ob_known <= 32'd0; cnt_ob_serves <= 32'd0;
+                cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0;
+            end else begin
+                if (ob_take && dq_v)                cnt_ob_cand   <= cnt_ob_cand   + 32'd1;
+                if (ob_take && dq_v && om != '0)    cnt_ob_known  <= cnt_ob_known  + 32'd1;
+                if (ob_take && ob_m == '0)          cnt_ob_loads  <= cnt_ob_loads  + 32'd1;
+                if (r_retire && ob_elig && cam_hit) cnt_ob_serves <= cnt_ob_serves + 32'd1;
+                if (r_retire && ob_elig)            cnt_ob_any    <= cnt_ob_any    + 32'd1;
+            end
+        end
+    end
+    always_comb begin
+        case (dbg_sel)
+            4'd0:    dbg_val2 = cnt_ob_cand;
+            4'd1:    dbg_val2 = cnt_ob_known;
+            4'd2:    dbg_val2 = cnt_ob_serves;
+            4'd3:    dbg_val2 = cnt_ob_any;
+            4'd4:    dbg_val2 = cnt_ob_loads;
+            4'd5:    dbg_val2 = {ob[0], ob[1], 11'd0, ob_lru, ob_v, ob_ok};
+            default: dbg_val2 = 32'd0;
+        endcase
+    end
+
     assign d_commit = retire;
     assign cyc_en   = il_cyc_en || retire;
     // The core's byte is one flat one-hot OR - the shadow's, each way's
@@ -1145,6 +1252,7 @@ module dline #(
             shv <= 32'd0;
             for (k = 0; k < NWAY; k = k + 1) begin
                 cv[k] <= '0; cr[k] <= '0; crev[k] <= '0; cvz[k] <= '0; cvd[k] <= '0;
+                for (int e = 0; e < BT_K; e = e + 1) cvo[e][k] <= '0;
             end
             for (k = 0; k < NSET; k = k + 1) rrp[k] <= '0;
             cst <= C_IDLE; dl_req <= 1'b0; dl_line <= 4'd0; c_line <= 5'd0;
@@ -1187,6 +1295,18 @@ module dline #(
             // The splices themselves ride the write ports above; only the
             // books live here.
             if (sp_write || spc_hit != '0) cnt_splices <= cnt_splices + 32'd1;
+
+            // THE BANK TABLE'S BITS (docs/LONG_DATA.md rung 1): every line's
+            // bit for an entry replaced on the last edge, against the entry's
+            // new bank - 32 eight-bit compares of registers.  A line installed
+            // on the edge the entry moved reads its new cvbank here; one
+            // installed on THIS edge is written again by the install below,
+            // which comes later and wins.
+            for (int e = 0; e < BT_K; e = e + 1)
+                if (ob_set[e])
+                    for (k = 0; k < NWAY; k = k + 1)
+                        for (int s = 0; s < NSET; s = s + 1)
+                            cvo[e][k][s] <= (cvbank[k][s] == ob[e]);
 
             case (cst)
                 C_IDLE: if (miss_q) begin
@@ -1286,6 +1406,8 @@ module dline #(
                             cvbank[t_way][t_set] <= m_vbank_q_t;
                             cvz[t_way][t_set]   <= (m_vbank_q_t == 8'd0);
                             cvd[t_way][t_set]   <= !GS || (m_vbank_q_t == dbr);
+                            for (int e = 0; e < BT_K; e = e + 1)
+                                cvo[e][t_way][t_set] <= GS && (m_vbank_q_t == ob[e]);
                             rrp[t_set]       <= t_way + 1'b1;
                             cnt_claims       <= cnt_claims + 32'd1;
                         end

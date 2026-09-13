@@ -381,7 +381,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .cnt_serves (), .cnt_claims (), .cnt_splices (),
         .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits (),
         .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
-        .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
+        .fill_busy (), .dbg_sel (4'd0), .dbg_val (), .dbg_val2 ()
     );
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (

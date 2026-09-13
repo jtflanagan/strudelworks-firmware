@@ -491,7 +491,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .cnt_serves (dl_serves), .cnt_claims (), .cnt_splices (),
         .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (dl_posts), .cnt_post_waits (),
         .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
-        .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
+        .fill_busy (), .dbg_sel (4'd0), .dbg_val (), .dbg_val2 ()
     );
     wire [31:0] dl_serves, dl_posts;
 
@@ -2766,6 +2766,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                  now, bus_cycles, trace_instrs);
         $display("    counters: fast_ops %0d bus_ops %0d cycles %0d maps %0d retries %0d turbo %0d dline %0d posts %0d",
                  fast_ops, bus_ops, cycles, accel_maps, retries, turbo_ops, dl_serves, dl_posts);
+        // The bank table (docs/LONG_DATA.md rung 1): OTHER-memory read
+        // candidates, how many found their bank settled in the table, how
+        // many the ways served through it, how many anything here served.
+        $display("    bank table: OTHER-memory reads %0d, bank in the table %0d, served by the ways %0d (%s%%), by the front at all %0d (%s%%), loads %0d, table $%02X $%02X",
+                 u_dline.cnt_ob_cand, u_dline.cnt_ob_known,
+                 u_dline.cnt_ob_serves, bc_pct(longint'(u_dline.cnt_ob_serves), longint'(u_dline.cnt_ob_cand)),
+                 u_dline.cnt_ob_any, bc_pct(longint'(u_dline.cnt_ob_any), longint'(u_dline.cnt_ob_cand)),
+                 u_dline.cnt_ob_loads, u_dline.ob[0], u_dline.ob[1]);
         $display("    cache: hits %0d misses %0d fills %0d flushes %0d declines %0d late %0d drops %0d",
                  hits, misses, mem_fills, mem_flushes, mem_declines, late_fills, fifo_drops);
         $display("    last PC $%02X/%04X", last_sync[23:16], last_sync[15:0]);
