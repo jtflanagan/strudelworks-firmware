@@ -137,6 +137,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // A key, pressed at an instruction number (docs/GS.md,
                     // ADB_KEY): the ADB keycode, the modifier byte in
                     // $C025's own order, and when.  0 = type nothing.
+                    // THE MOUSE BUTTON (2026-09-13).  The XMAS demo's
+                    // "CLICK MOUSE" prompt does NOT take a key: one
+                    // pressed at it left the machine in the same loop
+                    // twenty million instructions later, which is how
+                    // this was found.  It polls $C061, so the button is
+                    // what advances it - pb_sel's PB0 field, forced down.
+                    parameter integer BTN_AT   = 0,
+                    parameter integer BTN_HOLD = 2000000,
                     parameter integer KEY_AT   = 0,
                     parameter integer KEY_CODE = 0,
                     parameter integer KEY_MODS = 0,
@@ -216,6 +224,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [7:0]  data_pin = data_oe ? data_drive : FLOAT_BYTE;
 
     wire [15:0] op_addr, nxt_addr;
+    // The forced mouse button (BTN_AT below).  Declared up here, above the
+    // gs_io instance that uses it: a name used before its declaration is
+    // the undriven-net trap of 2026-09-11.
+    logic [5:0] pb_force = 6'd0;
+
     wire        op_rw, op_present, op_commit, op_ovr, op_divert, op_dummy, op_inflight, q_divert;
     wire [7:0]  op_wdata;
     wire        drv_cyc_done;
@@ -697,7 +710,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // driver and no backplane.  sim/gs_kbd_a2_tb.sv drives it from a
         // model IOU instead.  Quiet here, so the reference trace is unmoved.
         .loc_valid (1'b0), .loc_code (7'd0), .loc_up (1'b0),
-        .loc_mods (8'd0), .live_mods (8'd0), .pb_sel (6'd0),
+        .loc_mods (8'd0), .live_mods (8'd0), .pb_sel (pb_force),
 
         // The bench's frame is counted in BUS cycles, which is wall time
         // here, so the micro's wall tick is the same pulse.
@@ -1474,6 +1487,60 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                      last_rise, last_fall, c047_n, last_c047);
         end
     endtask
+    // THE STACK RUNAWAY WATCHDOG (2026-09-13).  On hardware the demo's second
+    // page - the menu after the mouse click - ends with the machine writing
+    // page one 25,416 times and READING IT NOT ONCE, the stack marching down
+    // and rolling over twenty-three times, while the Ensoniq still plays and
+    // only a handful of code addresses ever execute.  Pushes with no pulls.
+    // The question is what keeps re-entering, and the answer is two numbers
+    // that only exist in here: which interrupt source is pending, and how deep
+    // the Ensoniq's interrupt queue is.  `irq_doc` is a LEVEL with no enable
+    // and no INTFLAG bit - faithful to KEGS, which has neither - asserted
+    // while that queue is not empty and cleared only by a read of DOC register
+    // $E0, so ONE unserviced sound interrupt holds the line high for ever.
+    //
+    // Firing here rather than at the end of the run is the point: the state
+    // wanted is the state AT the failure, and a run long enough to reach it is
+    // an hour of simulation that must not also be spent guessing where to look.
+    // THE TRIGGER IS THE STACK POINTER WRAPPING, not a count of writes: the
+    // ROM's own memory clear writes page one thousands of times and reads it
+    // never, and a count caught that at instruction 0 the first time this was
+    // tried.  A stack that UNDERFLOWS - pushed past $0100 and round to $01FF -
+    // three times over is a runaway and nothing else; on hardware it went
+    // round twenty-three times.
+    // ...and it must be a wrap caused by PUSHING - the stack stepping down off
+    // $0100 and round to $01FF - not the stack pointer being LOADED.  At reset
+    // the core sets S to $01FF, and a low-to-high test called that a wrap and
+    // fired at instruction 0 the second time this was tried.  Requiring the
+    // old and new values to sit within a push's width of the two ends makes it
+    // a decrement and nothing else.  Armed only once the demo is past the
+    // click, because the ROM's startup moves the stack about freely.
+    logic [15:0] s_prev = 16'h01FF;
+    integer s_wraps = 0;
+    integer runaway = 0;
+    wire armed = (trace_instrs > 6000000);
+    always @(posedge clk) begin
+        if (armed && (s_prev[15:8] == 8'h01) && (u_cpu.s[15:8] == 8'h01) &&
+            (s_prev[7:0] <= 8'h03) && (u_cpu.s[7:0] >= 8'hFC))
+            s_wraps = s_wraps + 1;
+        s_prev <= u_cpu.s;
+        if (!runaway && (s_wraps >= 3)) begin
+            runaway = 1;
+            $display("");
+            $display("== STACK RUNAWAY at instruction %0d: the stack has wrapped %0d times",
+                     trace_instrs, s_wraps);
+            $display("    the CPU: PC $%02x/%04x  S $%04x  P $%02x  E %0d",
+                     u_cpu.pbr, u_cpu.pc, u_cpu.s,
+                     {u_cpu.f_n, u_cpu.f_v, u_cpu.f_m, u_cpu.f_x,
+                      u_cpu.f_d, u_cpu.f_i, u_cpu.f_z, u_cpu.f_c}, u_cpu.f_e);
+            dump_intc();
+            dump_doc();
+            $display("== end of the runaway report");
+            $display("");
+            $finish;
+        end
+    end
+
     task dump_clash;
         begin
             $display("    the cache's clash counters: ppn_clash %0d, land_clash %0d, posted %0d, posted_miss %0d",
@@ -2201,6 +2268,17 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     integer keys_sent = 0;
     integer adb_repeats = 0;
     always @(posedge clk) if (u_gsio.u_adb.rpt_fire) adb_repeats = adb_repeats + 1;
+    // PB0 held down for a while at BTN_AT: 2'b10 is "down", 2'b00 "the
+    // hardware's" (rtl/pb_inject.sv holds the same word).
+    initial if (BTN_AT != 0) begin : clicker
+        wait (trace_instrs >= BTN_AT);
+        $display("== the mouse button goes DOWN at instruction %0d", trace_instrs);
+        pb_force = 6'b000010;
+        repeat (BTN_HOLD) @(posedge clk);
+        pb_force = 6'd0;
+        $display("== the mouse button is released at instruction %0d", trace_instrs);
+    end
+
     initial if (KEY_AT != 0) begin : typist
         wait (trace_instrs >= KEY_AT);
         wait (!msg_lock); msg_lock = 1'b1;

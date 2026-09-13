@@ -41,6 +41,9 @@
 #                      mirror to be replayed against (tests/gs_replay_test)
 #     --hold=N         hold the key N clocks (default 20000); tens of frames
 #                      and the ADB micro's auto-repeat should fire
+#     --button=AT[:HOLD]  hold the MOUSE BUTTON (PB0) down at instruction AT
+#                      for HOLD clocks.  The XMAS demo's "CLICK MOUSE" prompt
+#                      does NOT take a key - it polls $C061 for the button.
 #     --key=CODE:AT[:MODS]  press an ADB keycode at instruction AT, with the
 #                      modifier byte MODS in $C025's order (1 shift, 2 ctrl,
 #                      4 caps, $40 option, $80 command)
@@ -55,7 +58,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/boot_work"
 mkdir -p "$work"
 
-instrs=20000 clks=400000000 mode=2 target=0 ddrlat=12 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0 keyhold=20000 mirror="" pagewatch=0
+instrs=20000 clks=400000000 mode=2 target=0 ddrlat=12 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0 keyhold=20000 btnat=0 btnhold=2000000 mirror="" pagewatch=0
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport_gs.bin"
 hdv=""
@@ -83,6 +86,7 @@ for a in "$@"; do
         --engtrace) engtrace=1 ;;
         --bram=*) bram="${a#*=}" ;;
         --key=*) IFS=: read -r keycode keyat keymods <<< "${a#*=}"; keymods="${keymods:-0}" ;;
+        --button=*) IFS=: read -r btnat btnhold <<< "${a#*=}"; btnhold="${btnhold:-2000000}" ;;
         --hold=*) keyhold="${a#*=}" ;;
         --mirror=*) mirror="${a#*=}" ;;
         --page-watch=*) pagewatch="${a#*=}" ;;
@@ -195,6 +199,7 @@ if [ "$vl" = 1 ]; then
         -GWATCH_FROM="$wfrom" -GWATCH_TO="$wto" \
         -GENG_TRACE="$engtrace" \
         -GKEY_AT="$keyat" -GKEY_CODE="$keycode" -GKEY_MODS="$keymods" \
+        -GBTN_AT="$btnat" -GBTN_HOLD="$btnhold" \
         -GKEY_HOLD="$keyhold" -GPAGE_WATCH="${pagewatch:-0}" \
         -GOPSF="\"${mirror:+$mirror/ops.bin}\"" -GPAGESF="\"${mirror:+$mirror/pages.bin}\"" \
         -GADB_KEYMAP="\"$root/rtl/adb_keymap.hex\"" \

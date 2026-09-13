@@ -147,6 +147,20 @@ Ensoniq's data arriving intact while the peak beside them read zero.
 
 ## Not right yet
 
+- **The Ensoniq is about 33 dB down, and SHELVED (the user, 2026-09-13).**
+  Measured with the XMAS demo's music playing: the pair peaks at ~1,100 of
+  32,767 before the host's level and ~670 after it, against a speaker at
+  32,762.  Quiet passages therefore sit near the 2-LSB HDMI keep-alive and
+  disappear into it, which is what "it sounds squelched when it goes quiet"
+  is.  The keep-alive itself is NOT the gap - `mix_one` adds its zero-mean
+  draw to the FINAL sum, after the Ensoniq, on every frame including the
+  run-dry silence, so the pair is already dithered.  The cause is that
+  `K_DOC` maps the chip's whole 21-bit accumulator - 32 oscillators at full
+  volume - onto full scale, and real music uses a small part of that range.
+  Note the two below move TOGETHER: applying the master volume correctly at
+  the demo's setting of 5 of 15 makes the Ensoniq 3.2x QUIETER, so the gain
+  has to be raised in the same change.  Not done: the music has not been
+  compared against KEGS yet, and it may simply sound like that.
 - **The master volume is ignored.**  `$C03C[3:0]` is the DOC's own volume and
   KEGS scales every sample by it (`doc_write_c03c`, `g_doc_vol`); `rtl/gs_doc.sv`
   stores it, reads it back, and never applies it.  The demo runs at 5 of 15, so
