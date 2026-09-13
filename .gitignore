@@ -10,6 +10,12 @@
 /build/work/
 /build/vivado.log
 /build/vivado.jou
+
+# Build and bench transcripts (build/gs_build_*.out, chains_*.out, ...): the
+# run log of one build on one machine, never a source.  Named here because
+# tools/commit_both.sh --all stages everything, and 84 of these once went
+# into a commit (2026-09-13).
+/build/*.out
 *.jou
 *.log
 *.str
