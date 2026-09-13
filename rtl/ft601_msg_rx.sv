@@ -82,6 +82,8 @@ module ft601_msg_rx (
     localparam [7:0] T_GS_BRAM   = 8'h2E;   // rtl/gs_clock.sv
     localparam [7:0] T_ADB_KEY   = 8'h2F;   // rtl/gs_adb.sv
     localparam [7:0] T_GS_TIME   = 8'h30;   // rtl/gs_clock.sv
+    localparam [7:0] T_FD35_TRACK = 8'h31;  // rtl/gs_iwm.sv (the same lie, 2026-09-12: the
+                                            // first IWM bit reported every track it took)
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -107,7 +109,7 @@ module ft601_msg_rx (
                      (hdr_type == T_U2_RX)      || (hdr_type == T_U2_STAT)   ||
                      (hdr_type == T_PRINTER_ROM) ||
                      (hdr_type == T_GS_BRAM)    || (hdr_type == T_ADB_KEY)   ||
-                     (hdr_type == T_GS_TIME);
+                     (hdr_type == T_GS_TIME)    || (hdr_type == T_FD35_TRACK);
 
     always_ff @(posedge clk) begin
         if (rst) begin

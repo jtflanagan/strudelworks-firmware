@@ -125,6 +125,23 @@ module wb_regfile #(
     output logic           fd_late_clr,     // pulses
     output logic           fd_fill_clr,
 
+    // The 3.5" drive on the IWM (rtl/gs_iwm.sv, docs/IWM35.md): what is in
+    // it is live, as the Disk II's drives are; the rest is its readback.  A
+    // watching top ties the inputs to 0 and leaves the outputs unconnected.
+    output logic           fd35_inserted,
+    output logic           fd35_wp,
+    input  wire            fd35_stale,
+    input  wire [6:0]      fd35_track,
+    input  wire            fd35_side,
+    input  wire            fd35_motor35,
+    input  wire            fd35_motor,
+    input  wire [7:0]      fd35_ctl,        // {phases, q7, q6, drive_sel, apple35_sel}
+    input  wire [7:0]      fd35_seeks,
+    input  wire [7:0]      fd35_late,
+    input  wire [15:0]     fd35_fill_max,
+    output logic           fd35_late_clr,   // pulses
+    output logic           fd35_fill_clr,
+
     // The VidHD (rtl/vidhd_card.sv, docs/VIDHD.md): its slot latched like
     // the floppy's, and whether its ROM has landed, for the readback.  A
     // watching top ties the input to 0 and leaves the output unconnected.
@@ -423,6 +440,8 @@ module wb_regfile #(
     localparam [13:0] R_ACCEL_BUS_CYC   = 'd75; // 0x8000_012C, RO raw bus cycles
     localparam [13:0] R_DBG_SEL         = 'd76; // 0x8000_0130, RW the debug pair's select
     localparam [13:0] R_DBG_VAL         = 'd77; // 0x8000_0134, RO ...and its value
+    localparam [13:0] R_FD35_DRIVE      = 'd78; // 0x8000_0138, RW bits 1:0: the 3.5" drive
+    localparam [13:0] R_FD35_STAT       = 'd79; // 0x8000_013C, W1 bits 1:0
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -959,6 +978,43 @@ module wb_regfile #(
         end
     end
 
+    // ---- FD35_DRIVE / FD35_STAT ---------------------------------------------
+    //
+    // FD35_DRIVE, the 3.5" drive on the IWM, live like FD_DRIVE1:
+    //   [0]      inserted  RW   a disk is in the drive (its 0 -> 1 edge is the
+    //                           insertion; eject first to change a disk)
+    //   [1]      wp        RW   ...and it is write-protected
+    //   [8]      stale     RO   the buffer is not the track under the head yet
+    //   [15:9]   track     RO   the head's track, 0-79
+    //   [16]     side      RO   ...and side
+    //   [17]     motor35   RO   the drive's motor
+    //   [18]     motor     RO   the IWM's ENABLE
+    //   [31:24]  seeks     RO   head movements the card asked to have filled
+    // FD35_STAT:
+    //   [7:0]    late      RO   fills that landed after the machine had read;
+    //                           W1 bit 0 clears
+    //   [15:8]   ctl       RO   {phases, q7, q6, drive_sel, apple35_sel}
+    //   [31:16]  fill_max  RO   the longest fill, seek to last chunk, in
+    //                           MICROSECONDS; W1 bit 1 clears
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            fd35_inserted <= 1'b0;
+            fd35_wp       <= 1'b0;
+            fd35_late_clr <= 1'b0;
+            fd35_fill_clr <= 1'b0;
+        end else begin
+            if (wr_fd35_drive) begin
+                fd35_inserted <= wb_dat_w[0];
+                fd35_wp       <= wb_dat_w[1];
+            end
+            fd35_late_clr <= wr_fd35_stat && wb_dat_w[0];
+            fd35_fill_clr <= wr_fd35_stat && wb_dat_w[1];
+        end
+    end
+    wire [31:0] fd35_drive_rd = {fd35_seeks, 5'd0, fd35_motor, fd35_motor35, fd35_side,
+                                 fd35_track, fd35_stale, 6'd0, fd35_wp, fd35_inserted};
+    wire [31:0] fd35_stat_rd  = {fd35_fill_max, fd35_ctl, fd35_late};
+
     wire [31:0] fd_stat_rd = {fd_fill_max, fd_late, 4'd0, fd_ctl};
 
     // ---- MEM_CTRL -----------------------------------------------------------
@@ -1377,6 +1433,8 @@ module wb_regfile #(
                         R_ACCEL_BUS_CYC:  wb_dat_r <= cnt_bus_cyc;
                         R_DBG_SEL:        wb_dat_r <= {24'd0, dbg_sel};
                         R_DBG_VAL:        wb_dat_r <= dbg_val;
+                        R_FD35_DRIVE:     wb_dat_r <= fd35_drive_rd;
+                        R_FD35_STAT:      wb_dat_r <= fd35_stat_rd;
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
                         R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
                         R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;
@@ -1429,6 +1487,10 @@ module wb_regfile #(
                          (word == R_FD_DRIVE2);
     wire wr_fd_stat    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FD_STAT);
+    wire wr_fd35_drive = access && !wb_ack && in_region && wb_we &&
+                         (word == R_FD35_DRIVE);
+    wire wr_fd35_stat  = access && !wb_ack && in_region && wb_we &&
+                         (word == R_FD35_STAT);
     wire wr_mem_ctrl   = access && !wb_ack && in_region && wb_we &&
                          (word == R_MEM_CTRL);
     wire wr_vidhd_slot = access && !wb_ack && in_region && wb_we &&

@@ -68,7 +68,13 @@ module ddr3_wrapper #(
     // not upstream UberDDR3.  It only ever moves a refresh EARLIER, so refresh
     // can never be starved and retention is safe even if refresh_ok never
     // asserts.  See docs/DERISK.md.
-    parameter REFRESH_GATE = 1,
+    //
+    // OFF (the user's, 2026-09-12): the controller refreshes on its own tREFI
+    // timer, as upstream does.  Removed as a candidate cause of the IIgs
+    // bitstreams that met timing and never calibrated (docs/IWM35.md "On
+    // hardware"); refresh_ok is still wired and ignored.  The three benches
+    // that set the gate to 1 explicitly still test the patch.
+    parameter REFRESH_GATE = 0,
 
     parameter AUX_WIDTH = 4
 ) (

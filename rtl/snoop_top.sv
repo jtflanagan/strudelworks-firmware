@@ -106,6 +106,9 @@ module snoop_top #(
         .fd_inserted (), .fd_wp (), .fd_nibbles (), .fd_tracks (), .fd_flush (),
         .fd_stale (2'd0), .fd_dirty (2'd0), .fd_phase (14'd0), .fd_ctl (4'd0),
         .fd_late (8'd0), .fd_fill_max (16'd0), .fd_late_clr (), .fd_fill_clr (),
+        .fd35_inserted (), .fd35_wp (), .fd35_stale (1'b0), .fd35_track (7'd0), .fd35_side (1'b0),
+        .fd35_motor35 (1'b0), .fd35_motor (1'b0), .fd35_ctl (8'd0), .fd35_seeks (8'd0),
+        .fd35_late (8'd0), .fd35_fill_max (16'd0), .fd35_late_clr (), .fd35_fill_clr (),
         .vidhd_slot_active (), .vidhd_rom_loaded (1'b0),   // nor for a VidHD
         .u2_slot_active (), .u2_sock_open (4'd0), .u2_cmd_dropped (1'b0),   // nor an Uthernet II
         .u2_cmds (8'd0), .u2_rx_chunks (8'd0), .u2_s0_rsr (16'd0), .u2_s0_fsr (16'd0),
@@ -141,6 +144,7 @@ module snoop_top #(
         .app_msg_len (), .app_pay_data (), .app_pay_valid (),
         .aux_word (32'd0), .aux_valid (1'b0), .aux_take (),
         .fd_word (32'd0), .fd_valid (1'b0), .fd_take (),
+        .fd35_word (32'd0), .fd35_valid (1'b0), .fd35_take (),
         .u2_word (32'd0), .u2_valid (1'b0), .u2_take (),
         .au_word (32'd0), .au_valid (1'b0), .au_take (),
         .audio_on (), .audio_realtime (), .audio_rate (), .audio_stat (32'd0),

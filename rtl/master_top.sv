@@ -197,6 +197,14 @@ module master_top #(
     wire        fd_motor, fd_drive_sel, fd_q6, fd_q7;
     wire [31:0] fd_word;
     wire        fd_valid, fd_take;
+    // The 3.5" drive on the IWM (rtl/gs_iwm.sv, docs/IWM35.md).
+    wire [31:0] fd35_word;
+    wire        fd35_valid, fd35_take;
+    wire        fd35_inserted, fd35_wp, fd35_stale, fd35_side, fd35_motor35, fd35_motor;
+    wire        fd35_late_clr, fd35_fill_clr, fd35_stall;
+    wire [6:0]  fd35_track;
+    wire [7:0]  fd35_ctl, fd35_seeks, fd35_late;
+    wire [15:0] fd35_fill_max;
     wire [2:0]  vidhd_slot_active;
     wire        vidhd_rom_loaded;
     wire [2:0]  mouse_slot_active;
@@ -493,6 +501,11 @@ module master_top #(
         .fd_ctl ({fd_q7, fd_q6, fd_drive_sel, fd_motor}),
         .fd_late (fd_late), .fd_fill_max (fd_fill_max),
         .fd_late_clr (fd_late_clr), .fd_fill_clr (fd_fill_clr),
+        .fd35_inserted (fd35_inserted), .fd35_wp (fd35_wp),
+        .fd35_stale (fd35_stale), .fd35_track (fd35_track), .fd35_side (fd35_side),
+        .fd35_motor35 (fd35_motor35), .fd35_motor (fd35_motor), .fd35_ctl (fd35_ctl),
+        .fd35_seeks (fd35_seeks), .fd35_late (fd35_late), .fd35_fill_max (fd35_fill_max),
+        .fd35_late_clr (fd35_late_clr), .fd35_fill_clr (fd35_fill_clr),
         .vidhd_slot_active (vidhd_slot_active),
         .vidhd_rom_loaded (vidhd_rom_loaded),
         .mouse_slot_active (mouse_slot_active),
@@ -570,6 +583,7 @@ module master_top #(
         .app_pay_data (app_pay_data), .app_pay_valid (app_pay_valid),
         .aux_word (aux_word), .aux_valid (aux_valid), .aux_take (aux_take),
         .fd_word (fd_word), .fd_valid (fd_valid), .fd_take (fd_take),
+        .fd35_word (fd35_word), .fd35_valid (fd35_valid), .fd35_take (fd35_take),
         .u2_word (u2_word), .u2_valid (u2_valid), .u2_take (u2_take),
         .au_word (au_word), .au_valid (au_valid), .au_take (au_take),
         .audio_on (audio_on), .audio_realtime (audio_realtime),
@@ -1156,7 +1170,7 @@ module master_top #(
         .turbo_claim   (turbo_claim | d_claim_w),
         .turbo_wr      (turbo_wr),
         .d_pending     (d_pending_w),
-        .stall         (fd_stall || u2_stall),
+        .stall         (fd_stall || u2_stall || fd35_stall),
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
@@ -1463,7 +1477,12 @@ module master_top #(
                      front_bypass, accel_held, 2'd0, cpu_bank};
         top_w1_q <= {cpu_pc_bank, cpu_pc_addr, 8'd0};
         top_w2_q <= {cpu_bank, cpu_addr, cpu_dout};
-        top_w3_q <= {cpu_dbr, cpu_d_pred};
+        // The prediction as the data front REGISTERED it, one clock behind
+        // the core's live cone: the raw d_pred net carried nineteen loads
+        // for this debug word alone, on the design's deepest path
+        // (docs/IWM35.md's census, family 2).  A snapshot a clock late is
+        // the same snapshot.
+        top_w3_q <= {cpu_dbr, dq_addr_w};
         top_w4_q <= {cpu_d_pred_bcls, cpu_d_pred_v, cpu_d_pred_rw, 4'd0, cpu_p_flags, 8'd0, cpu_din};
     end
     wire [31:0] top_dbg = (dbg_sel[3:0] == 4'd0) ? top_w0_q :
@@ -1847,6 +1866,17 @@ module master_top #(
         .c000_byte  (gs_c000_byte),
         .doc_l      (doc_l),
         .doc_r      (doc_r),
+        // The 3.5" drive: the platter turns with the core's ops, the same
+        // tick the game port's timers and the Disk II count; its seek
+        // notices go to the link; what is in it comes from FD35_DRIVE.
+        .core_tick  (seq_fast_tick || turbo_tick || dline_tick || (bus_tick && !op_dummy && !op_ovr)),
+        .fd35_word  (fd35_word), .fd35_valid (fd35_valid), .fd35_take (fd35_take),
+        .fd35_inserted (fd35_inserted), .fd35_wp (fd35_wp),
+        .fd35_late_clr (fd35_late_clr), .fd35_fill_clr (fd35_fill_clr),
+        .fd35_stale (fd35_stale), .fd35_track (fd35_track), .fd35_side (fd35_side),
+        .fd35_motor35 (fd35_motor35), .fd35_motor (fd35_motor), .fd35_ctl (fd35_ctl),
+        .fd35_seeks (fd35_seeks), .fd35_late (fd35_late), .fd35_fill_max (fd35_fill_max),
+        .fd35_stall (fd35_stall),
         .u_claim    (gsio_u_claim),
         .rd_byte    (gsio_byte),
         .irq        (gsio_irq),
@@ -1868,6 +1898,20 @@ module master_top #(
     // two multipliers fold away.
     assign doc_l        = 21'sd0;
     assign doc_r        = 21'sd0;
+    // No IWM on a IIe: the 3.5" drive's source is silent and its readback
+    // reads empty.
+    assign fd35_word    = 32'd0;
+    assign fd35_valid   = 1'b0;
+    assign fd35_stale   = 1'b0;
+    assign fd35_track   = 7'd0;
+    assign fd35_side    = 1'b0;
+    assign fd35_motor35 = 1'b0;
+    assign fd35_motor   = 1'b0;
+    assign fd35_ctl     = 8'd0;
+    assign fd35_seeks   = 8'd0;
+    assign fd35_late    = 8'd0;
+    assign fd35_fill_max = 16'd0;
+    assign fd35_stall   = 1'b0;
 
     end endgenerate
 

@@ -404,8 +404,26 @@ module cpu65816 #(
     wire hi_dec   = (f_hi_d == UC_HI_D_ONE)   ? 1'b1   :
                     (f_hi_d == UC_HI_D_SIGN)  ? adl[7] : 1'b0;
 
-    wire [8:0] agu_hsum = {1'b0, hi_a} + {1'b0, hi_b} + {8'd0, hi_carry}
-                                       - {8'd0, hi_dec};
+    // THE HIGH HALF'S SUM BEFORE ITS CARRY (2026-09-12).  Written as one
+    // three-operand add, the low byte's carry-out entered the high adder
+    // through three LUT levels of operand select, and the bank's plus-or-
+    // minus-one rippled after the high carry-out: the core's deepest chain
+    // ran twenty levels from the instruction register to the data front's
+    // predicted address (docs/IWM35.md's census, family 2).  The operands
+    // and the decrement are all known before the low carry is, so their
+    // sum is formed first, alongside the low adder, and the carry chooses
+    // between that sum and its increment: one level after the carry, not
+    // three LUTs and a chain.  Modulo 512 the two are the same number,
+    // ninth bit included - it is the borrow when the decrement wrapped the
+    // byte below zero and the carry when it overflowed, exactly as before.
+    // Synthesis undid the first cut: written bare, "carry ? sum+1 : sum"
+    // was recognised as sum + carry and put the carry straight back at
+    // the head of the high chain (the 09-12 build: LUT6, LUT4, three
+    // CARRY4 after the low carry-out, unchanged).  The two candidates are
+    // KEPT as nets, so the carry can only choose between them.
+    (* keep = "true" *) wire [8:0] hi_ab9   = {1'b0, hi_a} + {1'b0, hi_b} - {8'd0, hi_dec};
+    (* keep = "true" *) wire [8:0] hi_ab9p  = hi_ab9 + 9'd1;
+    wire [8:0] agu_hsum = hi_carry ? hi_ab9p : hi_ab9;
     wire [7:0] agu_hi  = agu_hsum[7:0];
     wire       agu_hco = agu_hsum[8];
 
@@ -415,10 +433,23 @@ module cpu65816 #(
     // ninth bit is set exactly when the high byte wrapped below zero, so
     // BORROW is bank - agu_hco.
     wire [7:0] bk_a = (f_bk_a == UC_BK_A_DIN) ? din : bank;
-    wire bk_carry = (f_bk_c == UC_BK_C_LIVE)  ? agu_hco :
-                    (f_bk_c == UC_BK_C_SAVED) ? agu_hc  : 1'b0;
-    wire [7:0] agu_bk = (f_bk_c == UC_BK_C_BORROW) ? (bk_a - {7'd0, agu_hco})
-                                                   : (bk_a + {7'd0, bk_carry});
+    // The same for the bank: its two neighbours are formed from the
+    // register before the high carry exists, and the carry picks.  The
+    // bank moves (up, or down for a BORROW word) exactly when the high
+    // half carried; that verdict is itself a choice the low carry makes
+    // between the two candidate sums' ninth bits, so it is formed the same
+    // way - bk_mv_nc/bk_mv_c are known early, hi_carry picks - and the
+    // bank's next value is then ONE choice after the low carry-out, not a
+    // ripple through the carry, the move verdict and the load mux (the
+    // 09-12 build had four LUT levels there).
+    (* keep = "true" *) wire [7:0] bk_a_p1 = bk_a + 8'd1;
+    (* keep = "true" *) wire [7:0] bk_a_m1 = bk_a - 8'd1;
+    wire [7:0] bk_a_mv = (f_bk_c == UC_BK_C_BORROW) ? bk_a_m1 : bk_a_p1;
+    wire bk_c_hi   = (f_bk_c == UC_BK_C_BORROW) || (f_bk_c == UC_BK_C_LIVE);
+    wire bk_mv_nc  = bk_c_hi ? hi_ab9[8]  : (f_bk_c == UC_BK_C_SAVED) ? agu_hc : 1'b0;
+    wire bk_mv_c   = bk_c_hi ? hi_ab9p[8] : (f_bk_c == UC_BK_C_SAVED) ? agu_hc : 1'b0;
+    // The AGU's bank arm moved the bank exactly when it carried or borrowed.
+    wire bk_moved  = hi_carry ? bk_mv_c : bk_mv_nc;
 
     // ---- PC incrementer -----------------------------------------------------
     // Its own unit, so the AGU stays free to compute an effective address in
@@ -803,13 +834,28 @@ module cpu65816 #(
     wire       n_rw   = urom[UCP_RW];
     wire [1:0] n_bus  = urom[UCP_BUS +: 2];
 
-    logic [7:0]  adl_n, adh_n, bank_n;
-    logic [15:0] s_n;
+    logic [7:0]  adl_n, adh_n, adh_nx, bank_n;
+    logic [15:0] s_n, s_nx;
+    // s_n's high byte is the AGU's exactly when the S_AGU arm was taken and
+    // neither whole-word override (TXS/TCS's S16, XCE's page one) replaced it.
+    wire s_hi_agu = (f_ld_s == UC_LD_S_AGU) && (f_wb != UC_WB_S16) && !(f_alu_op == UC_OP_XCE && f_c);
     logic [1:0]  bcls_n;
-    // The AGU's bank arm moved the bank exactly when it carried or borrowed.
-    wire bk_moved = (f_bk_c == UC_BK_C_BORROW) ? agu_hco : bk_carry;
+    // The bank's load mux, once per candidate (the AGU arm is the only one
+    // the carry touches); bank_n is the late choice between them.
+    (* keep = "true" *) logic [7:0] bank_nc, bank_c;
     always_comb begin
-        adl_n = adl; adh_n = adh; bank_n = bank; s_n = s; bcls_n = bank_cls;
+        bank_nc = bank; bank_c = bank;
+        case (f_ld_bk)
+            UC_LD_BK_AGU:  begin bank_nc = bk_a;  bank_c = bk_a_mv; end
+            UC_LD_BK_DIN:  begin bank_nc = din;   bank_c = din;     end
+            UC_LD_BK_DBR:  begin bank_nc = dbr;   bank_c = dbr;     end
+            UC_LD_BK_PBR:  begin bank_nc = pbr;   bank_c = pbr;     end
+            UC_LD_BK_ZERO: begin bank_nc = 8'h00; bank_c = 8'h00;   end
+            default: ;
+        endcase
+    end
+    always_comb begin
+        adl_n = adl; adh_n = adh; bank_n = bk_moved ? bank_c : bank_nc; s_nx = s; bcls_n = bank_cls;
         case (f_ld_adl)
             UC_LD_ADL_AGU: adl_n = agu_lo;
             UC_LD_ADL_DIN: adl_n = din;
@@ -822,32 +868,44 @@ module cpu65816 #(
             UC_LD_ADH_MDH: adh_n = md[15:8];
             default: ;
         endcase
+        // The same mux with the AGU arm left out (holding adh there): what
+        // pred_hi below substitutes its own high byte into.  Written as a
+        // separate mux so the carry is structurally absent from it - the
+        // 09-12 build routed the carry through the full adh_n/s_n arms
+        // inside the "early" candidates, whatever the select said.
+        adh_nx = adh;
+        case (f_ld_adh)
+            UC_LD_ADH_DIN: adh_nx = din;
+            UC_LD_ADH_MDH: adh_nx = md[15:8];
+            default: ;
+        endcase
         case (f_ld_bk)
-            UC_LD_BK_AGU: begin
-                bank_n = agu_bk;
-                bcls_n = ((f_bk_a == UC_BK_A_DIN) || bk_moved) ? BCLS_OTHER : bank_cls;
-            end
-            UC_LD_BK_DIN:  begin bank_n = din;   bcls_n = BCLS_OTHER; end
-            UC_LD_BK_DBR:  begin bank_n = dbr;   bcls_n = BCLS_DBR;   end
-            UC_LD_BK_PBR:  begin bank_n = pbr;   bcls_n = (pbr == 8'h00) ? BCLS_ZERO : BCLS_OTHER; end
-            UC_LD_BK_ZERO: begin bank_n = 8'h00; bcls_n = BCLS_ZERO;  end
+            UC_LD_BK_AGU:  bcls_n = ((f_bk_a == UC_BK_A_DIN) || bk_moved) ? BCLS_OTHER : bank_cls;
+            UC_LD_BK_DIN:  bcls_n = BCLS_OTHER;
+            UC_LD_BK_DBR:  bcls_n = BCLS_DBR;
+            UC_LD_BK_PBR:  bcls_n = (pbr == 8'h00) ? BCLS_ZERO : BCLS_OTHER;
+            UC_LD_BK_ZERO: bcls_n = BCLS_ZERO;
             default: ;
         endcase
         case (f_ld_s)
-            UC_LD_S_INC:  s_n = f_e ? {8'h01, s[7:0] + 8'd1} : s + 16'd1;
-            UC_LD_S_DEC:  s_n = f_e ? {8'h01, s[7:0] - 8'd1} : s - 16'd1;
-            UC_LD_S_INCN: s_n = s + 16'd1;
-            UC_LD_S_DECN: s_n = s - 16'd1;
-            UC_LD_S_NORM: if (f_e) s_n = {8'h01, s[7:0]};
-            UC_LD_S_AGU:  s_n = {agu_hi, agu_lo};
+            UC_LD_S_INC:  s_nx = f_e ? {8'h01, s[7:0] + 8'd1} : s + 16'd1;
+            UC_LD_S_DEC:  s_nx = f_e ? {8'h01, s[7:0] - 8'd1} : s - 16'd1;
+            UC_LD_S_INCN: s_nx = s + 16'd1;
+            UC_LD_S_DECN: s_nx = s - 16'd1;
+            UC_LD_S_NORM: if (f_e) s_nx = {8'h01, s[7:0]};
+            UC_LD_S_AGU:  s_nx = {s[15:8], agu_lo};   // the high byte joins below
             default: ;
         endcase
         // TXS/TCS: the only words that write S whole, and both move a
         // register (alu_res = alu_m16 for MOV and TCS), so S takes the
         // operand mux directly - not alu_res, whose cone holds din.  The
         // simulation assertion below holds the microcode to that.
-        if (f_wb == UC_WB_S16) s_n = f_e ? {8'h01, alu_m16[7:0]} : alu_m16;
-        if (f_alu_op == UC_OP_XCE && f_c) s_n[15:8] = 8'h01;
+        if (f_wb == UC_WB_S16) s_nx = f_e ? {8'h01, alu_m16[7:0]} : alu_m16;
+        if (f_alu_op == UC_OP_XCE && f_c) s_nx[15:8] = 8'h01;
+        // s_nx is s_n with the AGU's high byte left out (s's own byte stands
+        // in), so the AGU carry is structurally absent from it; the byte
+        // joins here, and pred_hi substitutes its own into s_nx directly.
+        s_n = s_hi_agu ? {agu_hi, s_nx[7:0]} : s_nx;
     end
 
     // Reset holds rw high next cycle as this one; the vector fetch's PC load
@@ -865,7 +923,48 @@ module cpu65816 #(
             default:      begin d_pred_mux = {pbr, pc};                     d_bcls_mux = BCLS_OTHER; end
         endcase
     end
-    assign d_pred      = d_pred_mux;
+    // THE PREDICTED ADDRESS'S UPPER BYTES, CHOSEN LATE (2026-09-12).  The
+    // data front takes d_pred in this same cycle and compares it (its line
+    // tags, the keyboard's page), and the mux above put the AGU's carry at
+    // the head of that: the high byte's carry choice, the address-source
+    // select and the load mux, six LUT levels between the low carry-out
+    // and d_pred[15:8].  Here the byte is formed twice from what is known
+    // early - once as if the high half carried, once as if it did not -
+    // and hi_carry picks one: a single level after the carry.  The bank
+    // byte the same way on bk_moved.  The low byte is the low adder's own.
+    function automatic [7:0] pred_hi(input [7:0] hi);
+        logic [7:0] ah, sh;
+        ah = (f_ld_adh == UC_LD_ADH_AGU) ? hi : adh_nx;
+        sh = s_hi_agu ? hi : s_nx[15:8];
+        case (n_asel)
+            UC_ADDR_AD:   pred_hi = ah;
+            UC_ADDR_SP:   pred_hi = sh;
+            UC_ADDR_VEC:  pred_hi = 8'hFF;
+            UC_ADDR_VEC1: pred_hi = 8'hFF;
+            default:      pred_hi = pc[15:8];
+        endcase
+    endfunction
+    function automatic [7:0] pred_bk(input [7:0] bk);
+        case (n_asel)
+            UC_ADDR_AD:   pred_bk = bk;
+            UC_ADDR_SP:   pred_bk = 8'h00;
+            UC_ADDR_VEC:  pred_bk = 8'h00;
+            UC_ADDR_VEC1: pred_bk = 8'h00;
+            default:      pred_bk = pbr;
+        endcase
+    endfunction
+    (* keep = "true" *) wire [7:0] pred_hi_c  = pred_hi(hi_ab9p[7:0]);
+    (* keep = "true" *) wire [7:0] pred_hi_nc = pred_hi(hi_ab9[7:0]);
+    (* keep = "true" *) wire [7:0] pred_bk_c  = pred_bk(bank_c);
+    (* keep = "true" *) wire [7:0] pred_bk_nc = pred_bk(bank_nc);
+    assign d_pred = {bk_moved ? pred_bk_c : pred_bk_nc,
+                     hi_carry ? pred_hi_c : pred_hi_nc,
+                     d_pred_mux[7:0]};
+`ifndef SYNTHESIS
+    always_ff @(posedge clk)
+        if (!rst && !$isunknown(d_pred_mux) && d_pred != d_pred_mux)
+            $error("cpu65816: the late-chosen predicted address %06x differs from the mux's %06x", d_pred, d_pred_mux);
+`endif
     assign d_pred_bcls = d_bcls_mux;
     // A data access next cycle: VDA without VPA (UC_BUS_D), and not slot 0.
     assign d_pred_v    = !f_sync && (n_bus == UC_BUS_D) && (n_asel != UC_ADDR_PC);

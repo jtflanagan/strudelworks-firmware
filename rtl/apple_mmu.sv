@@ -1281,7 +1281,83 @@ module apple_mmu #(
     wire       n_sh       = xl_sh(n_x);
     wire       n_wr_image = xl_wr(n_x);
     wire       n_aux      = in_hi ? altzp : aux_sel;
-    assign     pf_ppn     = xl_ppn(n_x);
+    wire [15:0] n_ppn     = xl_ppn(n_x);
+
+    // THE PREVIEW'S PAGE BYTE FROM A SHALLOW CONE (2026-09-12).  The page
+    // cache indexes its ways from pf_ppn the clock the op is presented, and
+    // its set index is a hash of the PAGE byte alone (rtl/page_cache.sv
+    // set_of: ppn[3:0] ^ ppn[7:4]).  Synthesis derived that byte at the end
+    // of xlate()'s nine-LUT cone - region decode, the 13:1 table mux, the
+    // bank classes - and then routed it to 64 block RAMs: the way address
+    // was the design's tightest path at twelve levels and 7.7 ns of route
+    // (docs/IWM35.md's census; build/chains_detail.tcl).  But the page byte
+    // after the fold is a THREE-LEVEL function of the address and two
+    // registered table bits: the fold applies only in $Dxxx of a pair bank
+    // when the language card's entry says so, and the IIgs's I/O-inhibit
+    // swaps $Cxxx and $Dxxx in a fast-pair bank.  Every other arm of xlate()
+    // leaves the page as the address named it.  So pf_ppn's low byte comes
+    // from here, its high byte from xlate() as before, and the simulation
+    // assertion below holds the two equal on every op of every bench - the
+    // map sweeps (sim/mmu_xlate_tb.sv, sim/mmu_xlate_gs_tb.sv) drive this
+    // port through every switch state there is.
+    wire pf_pairish = GS ? gs_pair(op_bank) : (op_bank == 8'd0);
+    wire pf_flat    = GS && gs_shadow[6] && pf_pairish && !op_bank[7];
+    wire pf_fold_q  = op_rw ? rt_r_q[R_LCD][1] : rt_w_q[R_LCD][1];
+    wire [3:0] pf_hi = pf_flat ? ((op_addr[15:12] == 4'hC) ? 4'hD :
+                                  (op_addr[15:12] == 4'hD) ? 4'hC : op_addr[15:12])
+                     : (pf_pairish && in_d && pf_fold_q) ? 4'hC : op_addr[15:12];
+    wire [7:0] pf_pg = {pf_hi, op_addr[11:8]};
+
+    // ...AND THE BANK BYTE, the same way, because the set index hashes seven
+    // bits and six of them are the bank's (SETS = 128).  Every arm of
+    // xlate() gives the bank as one of four things - the address's own,
+    // the RamWorks register (IIe auxiliary), $FF (the ROM's, which the
+    // table's BS_ROM entries name for every $C1xx-$CFxx read and every
+    // language-card access the ROM answers), or the void's - chosen by
+    // flags the map already holds shallowly: n_aux (the side, one mux on
+    // registered switches), the language card's read/write enables, and the
+    // pair/ROM/void bank classes.
+    //   $C1-$CF read      : $FF, internal ROM or not (the table's bsel)
+    //   $C0xx, $C1-$CF wr : bank 0 / the pair's own even bank on the GS
+    //   $Dx-$Fx           : RAM-class (lc_ramrd / lc_wren) -> the side's bank,
+    //                       else $FF
+    //   below $C0         : the side's bank
+    //   GS I/O-inhibit    : {va[23:17], va[16]} for $Cxxx, va[16] | altzp above
+    //   GS non-pair       : the address's bank, or the void's
+    // The side's bank is rwb_p1_q on the IIe and {va[23:17], va[16] | side}
+    // on the GS.  The assertion below holds the whole shallow ppn to
+    // xlate()'s.
+    wire       pf_in_cx   = (op_addr[15:12] == 4'hC);
+    wire       pf_c0      = pf_in_cx && (op_addr[11:8] == 4'd0);
+    wire       pf_lc_ram  = op_rw ? lc_ramrd : lc_wren;
+    wire       pf_rom_cx  = pf_in_cx && !pf_c0 && op_rw;               // BS_ROM by the table
+    wire       pf_rom_c07 = GS && pf_c0 && op_rw && (op_addr[7:4] == 4'h7); // the $C07x read arm
+    wire       pf_rom_lc  = in_hi && !pf_lc_ram;
+    wire       pf_rom     = pf_rom_cx || pf_rom_c07 || pf_rom_lc;
+    wire       pf_side    = pf_in_cx ? 1'b0 : n_aux;                    // aux only where RAM is
+    logic [7:0] pf_bank;
+    always_comb begin
+        if (!GS) begin
+            if (op_bank != 8'd0)      pf_bank = op_bank;
+            else if (pf_rom)          pf_bank = 8'hFF;
+            else if (pf_side)         pf_bank = rwb_p1_q;
+            else                      pf_bank = 8'd0;
+        end else if (gs_pair(op_bank)) begin
+            if (pf_flat)              pf_bank = {op_bank[7:1], op_bank[0] | (in_hi && altzp)};
+            else if (pf_rom)          pf_bank = 8'hFF;
+            else if (pf_in_cx)        pf_bank = 8'd0;                  // $C0xx and $Cxxx writes: BUS, bank 0
+            else                      pf_bank = {op_bank[7:1], op_bank[0] | pf_side};
+        end else if (gs_void(op_bank)) pf_bank = GS_VOID_BANK;
+        else                          pf_bank = op_bank;
+    end
+    assign     pf_ppn     = {pf_bank, pf_pg};
+`ifndef SYNTHESIS
+    always_ff @(posedge clk) begin
+        if (!rst && op_present && {pf_bank, pf_pg} !== n_ppn)
+            $error("apple_mmu: the shallow ppn $%04X differs from xlate's $%04X at %02X/%04X rw=%0d",
+                   {pf_bank, pf_pg}, n_ppn, op_bank, op_addr, op_rw);
+    end
+`endif
 
     // A posted write takes the classified stage only when no op is being
     // presented: the op's is the older claim on the pipeline.

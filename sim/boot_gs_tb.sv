@@ -118,6 +118,19 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // wrote it - the fastest way from "these bytes are not in
                     // the stream" to "this is what put them there".
                     parameter integer PAGE_WATCH = 0,
+                    // THE 3.5" DRIVE (rtl/gs_iwm.sv, docs/IWM35.md): the
+                    // image's 160 tracks nibblized by tools/nib35.py at a
+                    // fixed stride, their nibble counts, and the clocks the
+                    // modelled host takes to answer a seek.  The FTA demos
+                    // boot from here and nowhere else.
+                    parameter FD35F = "fd35.hex",
+                    parameter FD35_COUNTSF = "fd35.counts",
+                    parameter integer FD35_STRIDE = 10240,
+                    parameter integer HAS_FD35 = 0,
+                    parameter integer FD35_DELAY = 50000,
+                    // Name every IWM access with the byte it took and the
+                    // drive's state after it, for the first N accesses.
+                    parameter integer FD35_TRACE = 0,
                     parameter OPSF  = "",
                     parameter PAGESF = "",
                     parameter ADB_KEYMAP = "adb_keymap.hex",
@@ -176,6 +189,13 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // ...and the blanking interval itself, the last 4550 cycles of the frame,
     // for $C019.  On the card this is rtl/vbeam.sv's own.
     wire vbl_active = (bus_cycles % 17030) >= 12480;
+    // THE BEAM'S LINE AND COLUMN, for $C02E/$C02F: 65 cycles a line, 262
+    // lines a frame, the same frame the VBL above is cut from.  A boot
+    // block that waits for the vertical count to reach the blanking (the
+    // XMAS demo's does, `LDA $C02E / CMP #$F8 / BCC`) waited for ever on a
+    // beam tied to zero.
+    wire [8:0] tb_scan_v = 9'((bus_cycles % 17030) / 65);
+    wire [6:0] tb_scan_h = 7'(bus_cycles % 65);
 
     // ---- the backplane, the reader and the driver --------------------------------
     reg  res_n = 1'b1;
@@ -324,7 +344,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // and byte pass through iline then dline to the core; the books ride
     // turbo_commit/d_commit; the bank-write hold joins the settle.
     wire        seq_cyc_en, iline_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync;
-    wire        turbo_claim, turbo_wr, turbo_tick, dline_tick;
+    wire        turbo_claim, turbo_wr, turbo_tick, dline_tick, seq_fast_tick;
     wire        d_commit_w, d_claim_w, d_pending_w;
     wire        front_settling = map_settling || cpu_bank_wr;
     wire        tev_valid, tev_sync, dev_valid, dev_rw;
@@ -361,9 +381,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (1'b0),
         .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte),
-        .swi_commit (swi_commit), .fast_tick (), .mem_served (seq_mem_served_w), .fev_quiet (),
+        .swi_commit (swi_commit), .fast_tick (seq_fast_tick), .mem_served (seq_mem_served_w), .fev_quiet (),
         .q_slot (q_slot), .slot_q_o (seq_slot_q), .sl_win (sl_win),
-        .stall (1'b0),
+        // The 3.5" drive holds the core while its track is on the way, as
+        // the card does (rtl/master_top.sv: fd_stall || u2_stall || fd35_stall).
+        .stall (fd35_stall),
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr_eff), .cpu_bank (cpu_bank_eff), .cpu_rw (cpu_rw_eff), .cpu_dout (cpu_dout),
@@ -567,6 +589,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        cl_valid, cl_rw, cl_wr_image, cl_aux, cl_posted, cl_sh, intc8rom;
     wire [1:0]  cl_cls;
     wire [7:0]  cl_bank, cl_wdata, shd_drops;
+    wire        tb_mwx_stb;
+    wire [7:0]  tb_mw_bank, tb_mw_byte;
+    wire [15:0] tb_mw_addr;
     wire [15:0] cl_off, pf_off, cl_ppn_w, pf_ppn_w;
     wire [11:0] sw_state;
     wire [7:0]  rw_bank, rwb_p1_w;
@@ -652,8 +677,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .gs_shadow (gs_shadow_w), .gs_cyareg (gs_cyareg_w),
         .gs_sltrom (gs_sltrom_w), .gs_state (gs_state_w),
         .stat_byte (mmu_swi_stat), .vbl (vbl_active),
-        .scan_v (9'd0), .scan_h (7'd0),
-        .mw_stb (1'b0), .mw_bank (8'd0), .mw_addr (16'd0), .mw_byte (8'd0),
+        .scan_v (tb_scan_v), .scan_h (tb_scan_h),
+        // The image's write tap, ANY bank, for the SCBs at $E1/9D00: the
+        // scan-line interrupt is what launches the XMAS demo (its handler on
+        // the $E1/0028 hook JSLs to bank $0E), and with the tap tied off the
+        // bench loaded the whole demo and never saw it start (docs/IWM35.md).
+        .mw_stb (tb_mwx_stb), .mw_bank (tb_mw_bank), .mw_addr (tb_mw_addr), .mw_byte (tb_mw_byte),
         // PINNED TO KEGS's OWN CLOCK.  tools/kegs/trace_rom.sh runs the
         // reference with -pintime 3871713600 (2026-09-08 12:00:00 since
         // 1904) so its trace is the same every run; the card must believe the
@@ -674,8 +703,144 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // here, so the micro's wall tick is the same pulse.
         .frame_tick (frame_tick), .wall_tick (frame_tick),
         .c000_ext (dl_kbd_rd), .c000_byte (gs_c000_byte),
+        // The 3.5" drive: the platter turns with the core's ops, its seek
+        // notices come out here and the modelled host below answers them.
+        .core_tick (seq_fast_tick || turbo_tick || dline_tick || (op_commit && !op_dummy && !op_ovr)),
+        .fd35_word (fd35_word), .fd35_valid (fd35_valid), .fd35_take (fd35_take),
+        .fd35_inserted (fd35_inserted), .fd35_wp (1'b1),
+        .fd35_late_clr (1'b0), .fd35_fill_clr (1'b0),
+        .fd35_stale (), .fd35_track (), .fd35_side (), .fd35_motor35 (), .fd35_motor (),
+        .fd35_ctl (), .fd35_seeks (), .fd35_late (), .fd35_fill_max (), .fd35_stall (fd35_stall),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
+
+    // ---- the 3.5" drive's host (docs/IWM35.md) ------------------------------
+    // The image's tracks as tools/nib35.py wrote them, at FD35_STRIDE a track;
+    // a seek {seq, 0, qtr, 0} is answered FD35_DELAY clocks later with the
+    // track's chunks - {seq, chunk, qtr, 0}, {chunks, 0, nibbles}, then up to
+    // 252 words - through the same message pins the ROM loader used.
+    wire [31:0] fd35_word;
+    wire        fd35_valid, fd35_stall;
+    wire        fd35_take = 1'b1;
+    reg         fd35_inserted = 1'b0;
+    reg [7:0]   fd35_img [0:160*FD35_STRIDE-1];
+    integer     fd35_counts [0:159];
+    reg         fd35_hdr_seen = 1'b0;
+    reg [7:0]   fd35_req_seq = 8'd0, fd35_req_qtr = 8'd0;
+    integer     fd35_pending = 0;
+    integer     fd35_seeks = 0, fd35_fills = 0;
+    reg         msg_lock = 1'b0;
+    initial if (HAS_FD35) begin
+        integer fc, k;
+        $readmemh(FD35F, fd35_img);
+        fc = $fopen(FD35_COUNTSF, "r");
+        for (k = 0; k < 160; k = k + 1) if ($fscanf(fc, "%d\n", fd35_counts[k]) != 1) fd35_counts[k] = 0;
+        $fclose(fc);
+    end
+    always @(posedge clk) if (fd35_valid && fd35_take) begin
+        if (!fd35_hdr_seen) begin
+            if (fd35_word[15:8] == 8'h32) fd35_hdr_seen = 1'b1;
+        end else begin
+            fd35_hdr_seen = 1'b0;
+            fd35_req_seq  = fd35_word[31:24];
+            fd35_req_qtr  = fd35_word[15:8];
+            fd35_pending  = fd35_pending + 1;
+            fd35_seeks    = fd35_seeks + 1;
+        end
+    end
+    task send_fd35_track(input [7:0] sq, input [7:0] qtr);
+        integer nib, words, chunks, c, n, k, base;
+        begin
+            nib    = fd35_counts[qtr];
+            words  = (nib + 3) / 4;
+            chunks = (words + 251) / 252;
+            for (c = 0; c < chunks; c = c + 1) begin
+                n = (words - c * 252 > 252) ? 252 : words - c * 252;
+                @(negedge clk);
+                msg_valid <= 1'b1; msg_type <= 8'h31; msg_len <= 8'(n + 2);
+                @(negedge clk);
+                msg_valid <= 1'b0; pay_valid <= 1'b1;
+                pay_data <= {sq, c[7:0], qtr, 8'd0};
+                @(negedge clk);
+                pay_data <= {chunks[7:0], 8'd0, nib[15:0]};
+                @(negedge clk);
+                base = qtr * FD35_STRIDE + c * 1008;
+                for (k = 0; k < n; k = k + 1) begin
+                    pay_data <= {fd35_img[base + 4*k + 3], fd35_img[base + 4*k + 2],
+                                 fd35_img[base + 4*k + 1], fd35_img[base + 4*k]};
+                    @(negedge clk);
+                end
+                pay_valid <= 1'b0;
+                @(negedge clk);
+            end
+            fd35_fills = fd35_fills + 1;
+        end
+    endtask
+    initial if (HAS_FD35) begin : fd35_host
+        // The message pins are shared with the ROM download and the battery
+        // RAM: the disk goes in only once the machine is released to boot,
+        // when nothing else is being sent.
+        wait (boot_go);
+        repeat (100) @(negedge clk);
+        fd35_inserted = 1'b1;           // the disk goes in: the card fetches track 0
+        forever begin
+            wait (fd35_pending > 0);
+            repeat (FD35_DELAY) @(negedge clk);
+            wait (!msg_lock);
+            msg_lock = 1'b1;
+            send_fd35_track(fd35_req_seq, fd35_req_qtr);
+            msg_lock = 1'b0;
+            fd35_pending = fd35_pending - 1;
+        end
+    end
+    // The IWM trace: each access to $C0Ex as it retires, with the byte a
+    // read took, and the chip and drive as the access leaves them.
+    integer fd35_traced = 0;
+    always @(posedge clk) if (FD35_TRACE != 0 && u_gsio.u_iwm.iwm_act && fd35_traced < FD35_TRACE) begin
+        fd35_traced = fd35_traced + 1;
+        $display("    IWM %8d %s $C0%02X %s%02X  ph=%b mot=%0d q7q6=%0d%0d sel35=%0d ctl=%0d stat35=$%X trk=%0d side=%0d m35=%0d stale=%0d pos=%0d latch=%02X v=%0d mode=$%02X fast=%0d acc=%0d",
+                 trace_instrs, u_gsio.u_iwm.op_rw ? "rd" : "WR", u_gsio.u_iwm.op_lo,
+                 u_gsio.u_iwm.op_rw ? "-> " : "<- ",
+                 u_gsio.u_iwm.op_rw ? u_gsio.u_iwm.rd_byte : u_gsio.u_iwm.op_wdata,
+                 u_gsio.u_iwm.phases, u_gsio.u_iwm.motor_on, u_gsio.u_iwm.q7, u_gsio.u_iwm.q6,
+                 u_gsio.u_iwm.apple35_sel, u_gsio.u_iwm.c031_ctrl, u_gsio.u_iwm.stat35,
+                 u_gsio.u_iwm.track35, u_gsio.u_iwm.side35, u_gsio.u_iwm.motor35, u_gsio.u_iwm.stale,
+                 u_gsio.u_iwm.pos, u_gsio.u_iwm.latch, u_gsio.u_iwm.latch_valid, u_gsio.u_iwm.mode,
+                 u_gsio.u_iwm.fast_cpu, u_gsio.u_iwm.nib_acc);
+    end
+
+    // THE SCAN-LINE INTERRUPT'S INGREDIENTS, named as they happen: every SCB
+    // write the chipset's tap sees, every write to NEWVIDEO and the VGC
+    // interrupt register, and the interrupt itself.  The XMAS demo launches
+    // from this interrupt (docs/IWM35.md), so a run that loads it and never
+    // starts it is missing one of these.
+    integer scb_writes = 0, scan_irqs = 0;
+    reg scan_q_prev = 1'b0;
+    always @(posedge clk) begin
+        scan_q_prev <= u_gsio.irq_scan_q;
+        if (u_gsio.scb_hit) begin
+            scb_writes = scb_writes + 1;
+            if (scb_writes <= 8 || u_gsio.mw_byte[6])
+                $display("    SCB write #%0d at instruction %0d: $E1/%04X <- $%02X", scb_writes, trace_instrs, u_gsio.mw_addr, u_gsio.mw_byte);
+        end
+        if (u_gsio.act && !u_gsio.u_rw && (u_gsio.u_addr[7:0] == 8'h29 || u_gsio.u_addr[7:0] == 8'h23))
+            $display("    VGC write at instruction %0d: $%02X/C0%02X <- $%02X", trace_instrs, u_gsio.u_bank, u_gsio.u_addr[7:0], u_gsio.u_wdata);
+        if (u_gsio.irq_scan_q && !scan_q_prev) begin
+            scan_irqs = scan_irqs + 1;
+            if (scan_irqs <= 5) $display("    scan-line interrupt #%0d at instruction %0d, line %0d", scan_irqs, trace_instrs, u_gsio.scan_v);
+        end
+    end
+
+    // The demo launched: the first instruction fetched from bank $0E, which
+    // is where the FTA loader puts the demo proper (the KEGS trace of the
+    // XMAS demo enters it at instruction 1,499,453 - KEGS's disk gives a
+    // nibble per read and its slot-7 firmware jumps straight to slot 5; here
+    // the scan times out on slot 6 first and the platter turns at its real
+    // rate, so the same point is millions of instructions later).
+    integer demo_launched_at = 0;
+    always @(posedge clk) if (cpu_cyc_en && cpu_sync && demo_launched_at == 0 &&
+                              cpu_a24[23:16] == 8'h0E && trace_instrs > 0)
+        demo_launched_at = trace_instrs;
 
     // ROM 3 is 512 chunks of 512 bytes landing at physical bank $FC page $00.
     wire        rl_pw_valid;
@@ -705,7 +870,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
-        .mw_stb (), .mw_addr (), .mw_byte (), .mwx_stb (), .mw_bank (),
+        .mw_stb (), .mw_addr (tb_mw_addr), .mw_byte (tb_mw_byte), .mwx_stb (tb_mwx_stb), .mw_bank (tb_mw_bank),
         .il_req (il_req | dl_req_w), .il_ppn (il_req ? il_ppn_w : dl_ppn_w),
         .il_line (il_req ? il_line_w : dl_line_w), .il_src (!il_req),
         .il_ack (il_ack), .il_done (il_done), .il_ok (il_ok), .il_row (il_row),
@@ -1988,7 +2153,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     always @(posedge clk) if (u_gsio.u_adb.rpt_fire) adb_repeats = adb_repeats + 1;
     initial if (KEY_AT != 0) begin : typist
         wait (trace_instrs >= KEY_AT);
+        wait (!msg_lock); msg_lock = 1'b1;
         send_key(7'(KEY_CODE), 1'b0, 8'(KEY_MODS));
+        msg_lock = 1'b0;
         keys_sent = keys_sent + 1;
         if (u_gsio.u_adb.kbd_buf[0][7] !== 1'b1)
             fail("the key went down and $C000's strobe did not set");
@@ -1996,7 +2163,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             ok($sformatf("keycode $%02X reached the keyboard: $C000 reads $%02X, $C025 $%02X",
                          KEY_CODE, u_gsio.u_adb.kbd_buf[0], u_gsio.u_adb.c025_val));
         repeat (KEY_HOLD) @(negedge clk);
+        wait (!msg_lock); msg_lock = 1'b1;
         send_key(7'(KEY_CODE), 1'b1, 8'(KEY_MODS));
+        msg_lock = 1'b0;
         if (KEY_HOLD >= 4000000) begin
             // Held for tens of frames with the machine polling $C000: the
             // micro should have re-fired the key on its own.
@@ -2175,15 +2344,25 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // The slot ROM the card answers $C700-$C7FF from, as the host sends
         // it.  The GS ROM has no slot-7 firmware of its own - bank $FF's
         // $C700 is 256 zero bytes - so this IS what the scan finds.
-        push_word(hdr(T_HD_ROM, 8'd64, 16'd0));
-        for (c = 0; c < 64; c = c + 1)
-            push_word({hd_rom[4*c+3], hd_rom[4*c+2], hd_rom[4*c+1], hd_rom[4*c]});
-        c = 0;
-        while (!hd_rom_loaded && c < 2000) begin @(posedge clk); c = c + 1; end
-        if (!hd_rom_loaded) begin
-            fail("the slot ROM did not load");
-            $display("    rx_wr %0d rx_rd %0d unknowns %0d", rx_wr, rx_rd, unknowns);
-        end else ok("the slot-7 SmartPort ROM loaded");
+        // With a 3.5" disk and NO slot-7 image the ROM is not sent at all,
+        // as the host sends none with hd1 empty: a SmartPort ROM with no
+        // unit behind it still answered the scan's boot read, and the ROM
+        // jumped into an empty block and crashed before it ever reached
+        // slot 5 (docs/IWM35.md).  The plain boot keeps the ROM, so its
+        // floor against the reference is unmoved.
+        if (HAS_HDV != 0 || HAS_FD35 == 0) begin
+            push_word(hdr(T_HD_ROM, 8'd64, 16'd0));
+            for (c = 0; c < 64; c = c + 1)
+                push_word({hd_rom[4*c+3], hd_rom[4*c+2], hd_rom[4*c+1], hd_rom[4*c]});
+            c = 0;
+            while (!hd_rom_loaded && c < 2000) begin @(posedge clk); c = c + 1; end
+            if (!hd_rom_loaded) begin
+                fail("the slot ROM did not load");
+                $display("    rx_wr %0d rx_rd %0d unknowns %0d", rx_wr, rx_rd, unknowns);
+            end else ok("the slot-7 SmartPort ROM loaded");
+        end else begin
+            $display("    (no slot-7 image with a 3.5\" disk: the SmartPort ROM is not sent, as the host sends none)");
+        end
 
         serve <= 1'b1;
         mode <= 2'(MODE);
@@ -2254,6 +2433,25 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         end
         $display("    parked %0d internal cycles: %0d would have written, %0d would have hit $C0xx",
                  internal_cycles, internal_writes, internal_io);
+
+        // THE 3.5" MILESTONE, when there is a disk in the drive: the ROM's
+        // scan found it, read from it, and the demo's own loader took it
+        // the rest of the way into bank $0E.
+        if (HAS_FD35 != 0) begin
+            $display("    the 3.5\" drive: %0d seeks, %0d fills, head at track %0d side %0d, %0d late, fill max %0d us, IWM mode $%02X",
+                     fd35_seeks, fd35_fills, u_gsio.u_iwm.track35, u_gsio.u_iwm.side35,
+                     u_gsio.u_iwm.late, u_gsio.u_iwm.fill_max, u_gsio.u_iwm.mode);
+            if (fd35_seeks == 0)
+                fail("no track was ever asked for: the machine never moved the 3.5\" head");
+            else
+                ok($sformatf("%0d tracks fetched for the 3.5\" drive", fd35_fills));
+            if (demo_launched_at != 0)
+                ok($sformatf("the demo launched: bank $0E at instruction %0d", demo_launched_at));
+            else if (MAX_INSTRS >= 12000000)
+                fail("the demo never launched: no instruction from bank $0E");
+            else
+                $display("    (run too short to see the demo launch: the slot-6 timeout costs a million instructions and the loader turns the disk at its real rate; 12M instructions does)");
+        end
 
         // The machine itself, not the ROM's opinion of it.
         if (trace_instrs == 0) fail("the core executed nothing");

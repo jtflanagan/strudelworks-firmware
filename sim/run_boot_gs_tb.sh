@@ -19,6 +19,16 @@
 #     --trace=FILE     trace output (default sim/boot_work/boot_gs_<tag>.trc)
 #     --tag=NAME       names the log and the trace
 #     --hdv=FILE       the SmartPort image to boot from (slot 7)
+#     --fd35=FILE      an 800K .po in the 3.5" drive on the IWM (tools/nib35.py
+#                      nibblizes it; docs/IWM35.md).  The FTA demos boot from
+#                      here: --fd35=XMAS_DEMO.po --instrs=16000000
+#                      --clks=1200000000 sees the demo launch - the ROM's
+#                      scan times out on slot 6 first, then the loader turns
+#                      the disk at its real rate (the KEGS reference of that
+#                      boot is sim/boot_work/xmas/xmas.kegs.trc; the diff is
+#                      blind past the slot scan, as always)
+#     --fd35-delay=N   clocks the modelled host takes to answer a seek (50000)
+#     --fd35-trace=N   name the first N IWM accesses with the byte and the drive's state
 #     --hdrom=FILE     its slot ROM (default the IIgs's,
 #                      ../strudelworks-host/assets/hdc_smartport_gs.bin; the //e's
 #                      is a different firmware and speaks a different FIFO)
@@ -49,6 +59,7 @@ instrs=20000 clks=400000000 mode=2 target=0 ddrlat=12 tag=gs vl=1 ref="" floor="
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport_gs.bin"
 hdv=""
+fd35="" fd35delay=50000 fd35trace=0
 trace=""
 for a in "$@"; do
     case "$a" in
@@ -59,6 +70,9 @@ for a in "$@"; do
         --ddrlat=*) ddrlat="${a#*=}" ;;
         --rom=*) rom="${a#*=}" ;;
         --hdv=*) hdv="${a#*=}" ;;
+        --fd35=*) fd35="${a#*=}" ;;
+        --fd35-delay=*) fd35delay="${a#*=}" ;;
+        --fd35-trace=*) fd35trace="${a#*=}" ;;
         --hdrom=*) hdrom="${a#*=}" ;;
         --ref=*) ref="${a#*=}" ;;
         --floor=*) floor="${a#*=}" ;;
@@ -116,6 +130,15 @@ if [ -n "$hdv" ]; then
 else
     : > "$work/hdv_$tag.hex"
 fi
+# The 3.5" image, nibblized track by track as the host will do it.
+has_fd35=0
+if [ -n "$fd35" ]; then
+    has_fd35=1
+    [ -f "$fd35" ] || { echo "no image at $fd35" >&2; exit 2; }
+    python3 "$root/tools/nib35.py" "$fd35" --hex "$work/fd35_$tag.hex" --counts "$work/fd35_$tag.counts" > /dev/null
+else
+    : > "$work/fd35_$tag.hex"; : > "$work/fd35_$tag.counts"
+fi
 [ -z "$mirror" ] || mkdir -p "$mirror"
 has_bram=0
 if [ -n "$bram" ] && [ "$bram" != none ]; then
@@ -143,7 +166,7 @@ srcs=(
     "$root/rtl/gs_io.sv" "$root/rtl/gs_adb.sv" "$root/rtl/gs_doc.sv" "$root/rtl/gs_clock.sv" "$root/rtl/gs_intc.sv" "$root/rtl/gs_iwm.sv"
     "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv"
     "$root/rtl/way_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv"
-    "$root/rtl/hd_card.sv" "$root/rtl/ft601_msg_rx.sv"
+    "$root/rtl/hd_card.sv" "$root/rtl/ft601_msg_rx.sv" "$root/rtl/fd_bank.sv"
 )
 echo "== boot_gs_tb: rom=$(basename "$rom") ($chunks chunks) mode=$mode target=$target instrs=$instrs"
 
@@ -176,6 +199,8 @@ if [ "$vl" = 1 ]; then
         -GOPSF="\"${mirror:+$mirror/ops.bin}\"" -GPAGESF="\"${mirror:+$mirror/pages.bin}\"" \
         -GADB_KEYMAP="\"$root/rtl/adb_keymap.hex\"" \
         -GBRAMF="\"$work/gsbram_$tag.hex\"" -GHAS_BRAM="$has_bram" \
+        -GFD35F="\"$work/fd35_$tag.hex\"" -GFD35_COUNTSF="\"$work/fd35_$tag.counts\"" \
+        -GHAS_FD35="$has_fd35" -GFD35_DELAY="$fd35delay" -GFD35_TRACE="$fd35trace" \
         -Mdir "$obj" "${srcs[@]}" \
         -o boot_gs_tb > "$work/verilator_gs_$tag.log" 2>&1 || {
             echo "verilator build failed:" >&2; tail -40 "$work/verilator_gs_$tag.log" >&2; exit 1; }

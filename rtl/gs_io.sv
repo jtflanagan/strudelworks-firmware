@@ -159,7 +159,29 @@ module gs_io #(
     // The one interrupt line into the core.
     output wire        irq,
     // GS_ADB_STAT for the host (rtl/gs_adb.sv).
-    output wire [31:0] adb_stat
+    output wire [31:0] adb_stat,
+
+    // THE 3.5" DRIVE ON THE IWM (rtl/gs_iwm.sv, docs/IWM35.md): the core's
+    // tick for its platter, its FD35_SEEK out to the link, what the host
+    // says is in it, and its readback for FD35_DRIVE / FD35_STAT.
+    input  wire        core_tick,
+    output wire [31:0] fd35_word,
+    output wire        fd35_valid,
+    input  wire        fd35_take,
+    input  wire        fd35_inserted,
+    input  wire        fd35_wp,
+    input  wire        fd35_late_clr,
+    input  wire        fd35_fill_clr,
+    output wire        fd35_stale,
+    output wire [6:0]  fd35_track,
+    output wire        fd35_side,
+    output wire        fd35_motor35,
+    output wire        fd35_motor,
+    output wire [7:0]  fd35_ctl,
+    output wire [7:0]  fd35_seeks,
+    output wire [7:0]  fd35_late,
+    output wire [15:0] fd35_fill_max,
+    output wire        fd35_stall
 );
 
     // A IIgs sees I/O at $C0xx in a PAIR bank only - $00/$01 and the Mega
@@ -362,6 +384,18 @@ module gs_io #(
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
         .rd_byte (iwm_rd), .apple35_sel (c031_diskreg[6]), .c031_ctrl (c031_diskreg[7]),
+        // The platter turns in the core's time, a nibble every 16 ticks at
+        // 1 MHz and every 44.8 with $C036's speed bit set.
+        .tick (core_tick), .fast_cpu (gs_cyareg[7]),
+        .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
+        .pay_data (pay_data), .pay_valid (pay_valid),
+        .tx_word (fd35_word), .tx_valid (fd35_valid), .tx_take (fd35_take),
+        .drv_inserted (fd35_inserted), .drv_wp (fd35_wp),
+        .late_clr (fd35_late_clr), .fill_clr (fd35_fill_clr),
+        .stale_o (fd35_stale), .track_o (fd35_track), .side_o (fd35_side),
+        .motor35_o (fd35_motor35), .motor_o (fd35_motor), .ctl_o (fd35_ctl),
+        .seeks (fd35_seeks), .late (fd35_late), .fill_max (fd35_fill_max),
+        .stall_o (fd35_stall),
         .cnt_mode_wr (iwm_cnt_mode_wr)
     );
 

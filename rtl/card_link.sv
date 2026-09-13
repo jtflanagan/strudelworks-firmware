@@ -158,6 +158,20 @@ module card_link #(
     input  wire [15:0] fd_fill_max,
     output wire        fd_late_clr,
     output wire        fd_fill_clr,
+    // ...and the 3.5" drive's (rtl/gs_iwm.sv, docs/IWM35.md), the same way.
+    output wire        fd35_inserted,
+    output wire        fd35_wp,
+    input  wire        fd35_stale,
+    input  wire [6:0]  fd35_track,
+    input  wire        fd35_side,
+    input  wire        fd35_motor35,
+    input  wire        fd35_motor,
+    input  wire [7:0]  fd35_ctl,
+    input  wire [7:0]  fd35_seeks,
+    input  wire [7:0]  fd35_late,
+    input  wire [15:0] fd35_fill_max,
+    output wire        fd35_late_clr,
+    output wire        fd35_fill_clr,
 
     // The VidHD (rtl/vidhd_card.sv): its slot latched like the floppy's,
     // and its ROM's arrival back for the readback.  A watching top ties the
@@ -361,6 +375,13 @@ module card_link #(
     input  wire [31:0] fd_word,
     input  wire        fd_valid,
     output wire        fd_take,
+
+    // ...and the 3.5" drive's (FD35_SEEK), below the floppy's: one word a
+    // head movement, rate-bounded by the machine's own stepping.  A watching
+    // top ties fd35_valid low.
+    input  wire [31:0] fd35_word,
+    input  wire        fd35_valid,
+    output wire        fd35_take,
 
     // ...and a third, the Uthernet II's (U2_CMD, U2_TX), below the floppy's
     // and above the capture.  A watching top ties u2_valid low.
@@ -1017,6 +1038,19 @@ module card_link #(
         .fd_fill_max       (fd_fill_max),
         .fd_late_clr       (fd_late_clr),
         .fd_fill_clr       (fd_fill_clr),
+        .fd35_inserted     (fd35_inserted),
+        .fd35_wp           (fd35_wp),
+        .fd35_stale        (fd35_stale),
+        .fd35_track        (fd35_track),
+        .fd35_side         (fd35_side),
+        .fd35_motor35      (fd35_motor35),
+        .fd35_motor        (fd35_motor),
+        .fd35_ctl          (fd35_ctl),
+        .fd35_seeks        (fd35_seeks),
+        .fd35_late         (fd35_late),
+        .fd35_fill_max     (fd35_fill_max),
+        .fd35_late_clr     (fd35_late_clr),
+        .fd35_fill_clr     (fd35_fill_clr),
         .vidhd_slot_active (vidhd_slot_active),
         .vidhd_rom_loaded  (vidhd_rom_loaded),
         .mouse_slot_active (mouse_slot_active),
@@ -1221,10 +1255,10 @@ module card_link #(
     );
 
     // ---- the message bus ---------------------------------------------------
-    // A 32-bit Wishbone with seven masters, in priority order: a register
+    // A 32-bit Wishbone with ten masters, in priority order: a register
     // reply, the CPU_HOLD notice, the KBD_EVENT notice, the UNKNOWN_TYPE
     // notice, the top's application message (the disk's), the floppy's, the
-    // capture.  Each
+    // 3.5" drive's, the Uthernet II's, the sound's, the capture.  Each
     // source is a stream, and msg_master makes it a master that holds CYC
     // across its message; msg_arb grants per CYC; tx_ring is the one slave.
     // Everything above the capture is rate-bounded by the host or the bus -
@@ -1232,7 +1266,7 @@ module card_link #(
     // sound's by the wall clock (docs/AUDIO.md); the capture is the one
     // unbounded source and goes last.  See msg_arb for
     // why that order is load-bearing.
-    localparam integer N_SRC = 9;
+    localparam integer N_SRC = 10;
 
     wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
     wire [N_SRC*32-1:0] mb_adr, mb_dat;
@@ -1287,17 +1321,21 @@ module card_link #(
     assign ms_valid[5]         = fd_valid;
     assign fd_take             = ms_take[5];
 
-    assign ms_word[6*32 +: 32] = u2_word;
-    assign ms_valid[6]         = u2_valid;
-    assign u2_take             = ms_take[6];
+    assign ms_word[6*32 +: 32] = fd35_word;
+    assign ms_valid[6]         = fd35_valid;
+    assign fd35_take           = ms_take[6];
 
-    assign ms_word[7*32 +: 32] = au_word;
-    assign ms_valid[7]         = au_valid;
-    assign au_take             = ms_take[7];
+    assign ms_word[7*32 +: 32] = u2_word;
+    assign ms_valid[7]         = u2_valid;
+    assign u2_take             = ms_take[7];
 
-    assign ms_word[8*32 +: 32] = cap_word;
-    assign ms_valid[8]         = cap_valid;
-    assign cap_take            = ms_take[8];
+    assign ms_word[8*32 +: 32] = au_word;
+    assign ms_valid[8]         = au_valid;
+    assign au_take             = ms_take[8];
+
+    assign ms_word[9*32 +: 32] = cap_word;
+    assign ms_valid[9]         = cap_valid;
+    assign cap_take            = ms_take[9];
 
     genvar gm;
     generate

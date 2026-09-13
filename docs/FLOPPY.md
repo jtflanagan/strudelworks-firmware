@@ -243,6 +243,11 @@ receiver and arbiter, the tb playing the host; every property in this
 document is a check there. `sim/run_reg_map_tb.sh` case 12b for the
 registers. And the hardware above.
 
+## The 3.5" drive
+
+The IIgs's IWM has a 3.5" drive of its own now, the same design on a bigger
+track: `rtl/gs_iwm.sv`, `docs/IWM35.md`.
+
 ## Not here
 
 - **WOZ.** Bit-level tracks, quarter tracks, the jitter. The buffer would
