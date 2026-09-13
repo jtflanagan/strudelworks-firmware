@@ -386,7 +386,7 @@ module accel_tb #(parameter integer SWINT = 1,
     // the sequencer's d_commit, and its row claims take the line port only on
     // clocks iline is not asking.
     dline u_dline (
-        .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (),
+        .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (), .io_flat (1'b0), .io_vec (248'd0), .swi_busy (1'b0),
         .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred ({8'd0, cpu_d_pred}), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),

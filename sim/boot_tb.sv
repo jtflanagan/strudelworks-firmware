@@ -352,7 +352,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     // The data front, chained after the instruction front exactly as in
     // master_top.
     dline u_dline (
-        .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (),
+        .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (), .io_flat (1'b0), .io_vec (248'd0), .swi_busy (1'b0),
         .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),

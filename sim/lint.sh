@@ -87,7 +87,7 @@ run accel_seq     rtl/accel_seq.sv
 run fast_census   rtl/fast_census.sv
 run bank_census   rtl/bank_census.sv
 run iline         rtl/iline.sv rtl/iscan.sv
-run dline         rtl/dline.sv
+run dline         -Irtl rtl/dline.sv
 run iscan         rtl/iscan.sv
 run boot_hold     rtl/boot_hold.sv
 run kbd_inject    rtl/kbd_inject.sv

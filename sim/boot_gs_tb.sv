@@ -457,9 +457,16 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     );
 
     // The data front, chained after it: its cyc_en is the core's.
+    // The chipset's fast reads, as master_top feeds them (docs/LONG_DATA.md
+    // rung 3): gs_io's fr_vec registered once, and the status page's switches.
+    wire [15:0]  mmu_stat_bits;
+    wire [247:0] gsio_fr_vec;
+    reg  [247:0] io_vec_q = 248'd0;
+    always @(posedge clk) io_vec_q <= gsio_fr_vec;
     dline #(.GS (1'b1)) u_dline (
         // The keyboard read at one clock, from the ADB micro's own byte.
         .kbd_en (1'b1), .kbd_byte (gs_c000_byte), .kbd_rd (dl_kbd_rd),
+        .io_flat (gs_shadow_w[6]), .io_vec (io_vec_q), .swi_busy (swi_commit),
         .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
@@ -667,7 +674,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .swi_hd_slot (3'd0), .swi_fd_slot (3'd0), .swi_mb_slot (3'd0),
         .swi_mouse_slot (3'd0), .swi_u2_slot (3'd0), .swi_prn_slot (3'd0),
         .q_nsc (), .q_slot (q_slot), .q_swi (q_swi_mmu), .q_swi_quiet (q_swi_quiet),
-        .swi_stat_byte (mmu_swi_stat),
+        .swi_stat_byte (mmu_swi_stat), .swi_stat_bits (mmu_stat_bits),
         .p_addr (p_addr_w), .p_cls (p_cls), .p_aux (p_aux_w), .p_off (p_off_w),
         .d_addr (dq_addr_w), .d_rw (dq_rw_w), .d_cls (dcls_w), .d_aux (daux_w), .d_off (doff_w),
         .map_changed (map_changed),
@@ -689,7 +696,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .u_commit (swi_commit),
         .gs_shadow (gs_shadow_w), .gs_cyareg (gs_cyareg_w),
         .gs_sltrom (gs_sltrom_w), .gs_state (gs_state_w),
-        .stat_byte (mmu_swi_stat), .vbl (vbl_active),
+        .stat_byte (mmu_swi_stat), .stat_bits (mmu_stat_bits), .kbd_low (7'd0), .vbl (vbl_active),
+        .fr_vec (gsio_fr_vec),
         .scan_v (tb_scan_v), .scan_h (tb_scan_h),
         // The image's write tap, ANY bank, for the SCBs at $E1/9D00: the
         // scan-line interrupt is what launches the XMAS demo (its handler on
@@ -2769,11 +2777,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // The bank table (docs/LONG_DATA.md rung 1): OTHER-memory read
         // candidates, how many found their bank settled in the table, how
         // many the ways served through it, how many anything here served.
-        $display("    bank table: OTHER-memory reads %0d, bank in the table %0d, served by the ways %0d (%s%%), by the front at all %0d (%s%%), loads %0d, table $%02X $%02X; writes posted into $02-$7F %0d",
+        $display("    bank table: OTHER-memory reads %0d, bank in the table %0d, served by the ways %0d (%s%%), by the front at all %0d (%s%%), loads %0d, table $%02X $%02X; writes posted into $02-$7F %0d; chipset fast reads %0d",
                  u_dline.cnt_ob_cand, u_dline.cnt_ob_known,
                  u_dline.cnt_ob_serves, bc_pct(longint'(u_dline.cnt_ob_serves), longint'(u_dline.cnt_ob_cand)),
                  u_dline.cnt_ob_any, bc_pct(longint'(u_dline.cnt_ob_any), longint'(u_dline.cnt_ob_cand)),
-                 u_dline.cnt_ob_loads, u_dline.ob[0], u_dline.ob[1], u_dline.cnt_post_hi);
+                 u_dline.cnt_ob_loads, u_dline.ob[0], u_dline.ob[1], u_dline.cnt_post_hi, u_dline.cnt_io_serves);
         $display("    cache: hits %0d misses %0d fills %0d flushes %0d declines %0d late %0d drops %0d",
                  hits, misses, mem_fills, mem_flushes, mem_declines, late_fills, fifo_drops);
         $display("    last PC $%02X/%04X", last_sync[23:16], last_sync[15:0]);

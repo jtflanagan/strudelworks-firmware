@@ -83,6 +83,10 @@ module gs_io #(
     // apple_mmu's status-page byte for the REGISTERED op: the switch this
     // $C01x address reports, in bit 7, over the keyboard latch's low bits.
     input  wire [7:0]  stat_byte,
+    // ...and the switches it is made of, bit n for $C01n, with the keyboard
+    // latch's low bits: the status page for ANY address, for fr_vec below.
+    input  wire [15:0] stat_bits,
+    input  wire [6:0]  kbd_low,
     // The video scanner is in vertical blanking.  On the card this is
     // rtl/vbeam.sv's; in the bench it is the frame counter's.
     input  wire        vbl,
@@ -113,6 +117,11 @@ module gs_io #(
     // does (rtl/master_top.sv, "swi_byte").
     output wire        u_claim,
     output logic [7:0] rd_byte,
+    // THE FAST READS (docs/LONG_DATA.md rung 3): every register in
+    // gs_iopage.vh's set, as its read would compose it now, eight bits each in
+    // gs_fr_sel's order.  The data front serves a read of one of them itself,
+    // from a copy master_top registers once.
+    output wire [247:0] fr_vec,
 
     // Host -> card messages as ft601_msg_rx decodes them, for the battery
     // RAM the host ships down to gs_clock (docs/GS.md, "The battery RAM the
@@ -191,6 +200,14 @@ module gs_io #(
     function automatic pair_bank(input [7:0] bk);
         pair_bank = (bk == 8'h00) || (bk == 8'h01) || (bk == 8'hE0) || (bk == 8'hE1);
     endfunction
+    // ...BUT IN $00/$01 ONLY WHILE SHADOW BIT 6 IS CLEAR (docs/LONG_DATA.md
+    // rung 3).  With it set the fast pair's $C0xx is RAM - apple_mmu classifies
+    // it so - and this module claimed it anyway: the dispatcher took this
+    // module's byte over the RAM's, and a write ran the register's side effect
+    // (a $00/C047 write cleared the timer interrupts).  The rule now lives in
+    // one place, shared with the data front and checked against the map's
+    // oracle in sim/mmu_xlate_gs_tb.sv.
+    `include "gs_iopage.vh"
 
     // ---- what this module answers -------------------------------------------
     // One function, asked of the live address for the claim and of the
@@ -226,17 +243,17 @@ module gs_io #(
             || (lo[7:4] == 4'hE);                                   // $C0E0-$C0EF, the IWM
     endfunction
 
-    wire q_io = pair_bank(q_addr[23:16]) && (q_addr[15:8] == 8'hC0);
+    wire q_io = gs_is_io(q_addr[23:16], gs_shadow[6]) && (q_addr[15:8] == 8'hC0);
     assign claim = q_io && mine(q_addr[7:0]);
 
-    wire u_io = pair_bank(u_bank) && (u_addr[15:8] == 8'hC0);
+    wire u_io = gs_is_io(u_bank, gs_shadow[6]) && (u_addr[15:8] == 8'hC0);
     wire u_mine = u_io && mine(u_addr[7:0]);
     assign u_claim = u_mine;
     // The op retired AND it was ours.  u_commit fires for every internalized
     // op, so the decode is repeated here rather than trusted.
     wire act = u_commit && u_mine;
 
-    wire [7:0] adb_c025;
+    wire [7:0] adb_c025, adb_c027;
     wire [7:0] adb_rd;
     wire       adb_irq_data, adb_irq_mouse;
     wire [7:0] adb_cnt_cmds, adb_cnt_unknown;
@@ -256,6 +273,7 @@ module gs_io #(
         .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
         .c025_rd (adb_c025),
+        .c027_o (adb_c027),
         .irq_data (adb_irq_data), .irq_mouse (adb_irq_mouse),
         .cnt_cmds (adb_cnt_cmds), .cnt_unknown (adb_cnt_unknown),
         .dbg_stat (adb_stat)
@@ -448,15 +466,51 @@ module gs_io #(
         irq_scan_q <= !rst && line_start && c029_newvideo[7] && scb_int[line_q];
 
     // ---- the interrupt controller -------------------------------------------
-    wire [7:0] intc_rd;
+    wire [7:0] intc_rd, intc_c023, intc_c041;
     gs_intc u_intc (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
         .rd_byte (intc_rd), .frame_tick (frame_tick),
         .irq_adb (adb_irq_data || adb_irq_mouse), .irq_scan (irq_scan_q),
         .irq_doc (doc_irq),
-        .irq (irq)
+        .irq (irq),
+        .c023_o (intc_c023), .c041_o (intc_c041)
     );
+
+    // ---- the fast reads (docs/LONG_DATA.md rung 3) ----------------------------
+    // The same composition rd_byte makes above, for every address in the set
+    // at once - checked against rd_byte on every internalized read below, so
+    // the two cannot drift.
+    logic [247:0] fr_vec_w;
+    always_comb begin
+        fr_vec_w = '0;
+        for (int n = 1; n < 16; n = n + 1)
+            fr_vec_w[8*(n-1) +: 8] = {(n == 9) ? vbl : stat_bits[n], kbd_low};
+        fr_vec_w[8*15 +: 8] = {c021_mono, 7'd0};
+        fr_vec_w[8*16 +: 8] = c022_color;
+        fr_vec_w[8*17 +: 8] = intc_c023;
+        fr_vec_w[8*18 +: 8] = adb_c025;
+        fr_vec_w[8*19 +: 8] = adb_c027;
+        fr_vec_w[8*20 +: 8] = c029_newvideo;
+        fr_vec_w[8*21 +: 8] = c02b_langsel;
+        fr_vec_w[8*22 +: 8] = gs_sltrom;
+        fr_vec_w[8*23 +: 8] = vid_cnt[8:1];
+        fr_vec_w[8*24 +: 8] = {vid_cnt[0], (scan_h == 7'd0) ? 7'd0 : ((scan_h + 7'h3F) & 7'h7F)};
+        fr_vec_w[8*25 +: 8] = gs_shadow;
+        fr_vec_w[8*26 +: 8] = gs_cyareg;
+        fr_vec_w[8*27 +: 8] = intc_c041;
+        fr_vec_w[8*28 +: 8] = {(pb_sel[1:0] == 2'b00) ? adb_c025[7] : pb_sel[1], 7'd0};
+        fr_vec_w[8*29 +: 8] = {(pb_sel[3:2] == 2'b00) ? adb_c025[6] : pb_sel[3], 7'd0};
+        fr_vec_w[8*30 +: 8] = gs_state;
+    end
+    assign fr_vec = fr_vec_w;
+`ifndef SYNTHESIS
+    wire [5:0] u_fr = gs_fr_sel(u_addr[7:0]);
+    always @(posedge clk)
+        if (!rst && act && u_rw && u_fr[5] && fr_vec_w[8*u_fr[4:0] +: 8] !== rd_byte)
+            $error("gs_io: fast-read byte for $%02x/%04x is %02x, the read mux says %02x",
+                   u_bank, u_addr, fr_vec_w[8*u_fr[4:0] +: 8], rd_byte);
+`endif
 
     // ---- the latches above, written on the op's commit -----------------------
     // The DOC's data port is the one with behaviour: a read returns the

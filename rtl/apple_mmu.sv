@@ -374,6 +374,9 @@ module apple_mmu #(
     output wire        q_swi_quiet,
     output wire        q_slot,
     output wire [7:0]  swi_stat_byte,
+    // ...and every switch the status page reports, bit n for $C01n (bit 0
+    // unused), for the IIgs data front's fast reads (rtl/gs_io.sv fr_vec).
+    output wire [15:0] swi_stat_bits,
     // ...and the No-Slot Clock's (rtl/no_slot_clock.sv): is q_addr in a
     // page the clock listens at - the internal ROM's $C3 while that page is
     // the internal ROM's, or its $C8 while the internal ROM is there.  Every
@@ -1165,6 +1168,8 @@ module apple_mmu #(
         endcase
     end
     assign swi_stat_byte = {swi_stat_bit, swi_kbd_low};
+    assign swi_stat_bits = {col80, altchar, hires, page2, mixed, text, swi_vbl_bar, store80,
+                            slotc3rom, altzp, intcxrom, ramwrt, ramrd, lc_ramrd, lc_bank2, 1'b0};
 
     // ---- the IIgs's registers, read back (docs/GS.md rung 3b) ---------------
     // SHADOW is seven bits in the register and eight on the bus; bit 7 reads

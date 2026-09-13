@@ -1,7 +1,15 @@
 # Long data: the data front serves the OTHER bank class
 
-Status: 2026-09-13, branch `long_data`. RUNG 2 (WRITES INTO $02-$7F POSTED)
-ON HARDWARE, UNCOMMITTED ("Rung 2, as built"): GS/OS 12/0 with its disk
+Status: 2026-09-13, branch `long_data`. RUNG 3 (THE CHIPSET'S FAST READS, ANY
+PAIR BANK, AND THE SHADOW[6] CLAIM FIX) ON HARDWARE, UNCOMMITTED ("Rung 3, as
+built"): Arkanoid's attract loop 77x with the serve against 52-56x without,
+alternating windows on one bit (gs_lr3 MET +0.003); mirror mismatches 0;
+XMAS 11/0 with dispatcher fast ops -75%; GS/OS 12/0; floor, battery 35/35,
+the new gs_io claim bench and the map-oracle sweep green.  Rungs 1-2 are
+fw 06fc761 / 472aafd.
+
+RUNG 2 (WRITES INTO $02-$7F POSTED)
+ON HARDWARE ("Rung 2, as built"): GS/OS 12/0 with its disk
 unchanged, 1.42 M writes posted into $02-$7F, dispatcher fast ops -38%, clocks
 -2.9%; XMAS 11/0; boot_gs at the KEGS floor; IIe battery 35/35 with accel_vl
 unchanged (280,000,000 clocks).  Build `gs_lr2` TIMING MET wns +0.027 whs
@@ -10,7 +18,7 @@ idle Finder: 17.6 M writes posted into $02-$7F in 50.7 s, mirror mismatches 0,
 PLAIN 62.71x (rung 1's window: 61.57x; not an A/B).
 
 RUNG 1 (READS) ON HARDWARE,
-UNCOMMITTED: the two-entry bank table, `cvo` and the OTHER serve arm in
+fw 06fc761: the two-entry bank table, `cvo` and the OTHER serve arm in
 `rtl/dline.sv` ("Rung 1, as built").  Sims: boot_gs at the KEGS floor (10
 checks), GS/OS 12/0 and XMAS 11/0 at 20 M instructions (the ways serve 85.2%
 and 92.8% of their OTHER-memory reads), the IIe battery 35/35 with accel_vl's
@@ -184,7 +192,7 @@ read by source register, then hardware. Explain before every run.
 | 0 | **The healthy gate workload, and the census on the card.** Fix the GS/OS bench landing failure. Commit the bench census. Card counters for OTHER-memory data cycles and table hits at 1 and 2 entries (a debug item), read on the Finder and one ORCA/C desktop app | bench GS/OS boot clean past 20 M instructions; HW numbers in this doc - **DONE: the bench (a8d2d76), `bank_census` MET and cross-checked, the Finder measured on hardware at the unlimited target ("On hardware"); a desktop application still unmeasured.** Read it: clear with a W1 of ACCEL_CTRL[31] (read ACCEL_CTRL first and write it back with bit 31 set - the register also holds the mode, target and `fronts_dis`), then `regw 80000130 4N` / `reg 80000134` for item N: 0 data, 1 OTHER-memory reads, 2 writes, 3 I/O, 4 last, 5 second, 6 third-or-fourth, 7 miss, 8 the table |
 | 1 | **Reads.** The table (K = 2), `cvo`, `dq_o`, the serve arm; installs allowed for OTHER-class misses (check `live_cmiss`/C_OPW for class gates); `cnt_ob_serves` counted | OTHER-memory reads served / predicted, from the bench and the card; KEGS floor and battery unchanged; timing MET, no new deep tail on the tag leg (else the 3-clock fallback) - **GREEN IN SIMULATION 2026-09-13 ("Rung 1, as built"): GS/OS 85.2% served, XMAS 92.8%, floor and battery unchanged; build and card pending.** Read it: `regw 80000130 8N` / `reg 80000134`, N as listed there |
 | 2 | **Writes into $02-$7F posted**, every class | GS/OS bench clean; mirror mismatches unchanged on HW; the desktop ratio - **GS BENCHES GREEN 2026-09-13 ("Rung 2, as built"): GS/OS 12/0, disk unchanged, 1.42 M posts into $02-$7F, dispatcher fast ops -38%; XMAS 11/0; floor unchanged; IIe battery 35/35, accel_vl 280,000,000 clocks; `gs_lr2` MET +0.027; ON THE CARD: 17.6 M posts into $02-$7F in 50.7 s on the Finder, mirror mismatches 0, PLAIN 62.71x.** Read it: `regw 80000130 86` / `reg 80000134` |
-| 3 | **Optional.** The `$E1C019`/`$E1C02E` poll served like `$C000` (K stays 2: decided) | the demo's PLAIN ratio |
+| 3 | **Optional.** The `$E1C019`/`$E1C02E` poll served like `$C000` (K stays 2: decided) | the demo's PLAIN ratio - **DONE ON HARDWARE 2026-09-13, widened (the user's rule) to every side-effect-free chipset register in any bank the I/O page is in, with the SHADOW bit 6 claim bug fixed: Arkanoid 77x on / 52-56x off on one bit, XMAS dispatcher fast ops -75% ("Rung 3, as built").** Read it: `regw 80000130 87` / `reg 80000134`; the A/B lever is swint, ACCEL_CTRL[28] |
 
 ## Rung 1, as built (2026-09-13)
 
@@ -383,6 +391,120 @@ rung 1's runs `lr1_*`):
   bench's direction (-2.9% of clocks on GS/OS's boot).
 - **Rungs 1 and 2 together on GS/OS's boot:** dispatcher fast ops 4.46 M ->
   2.33 M, clocks 410.3 M -> 394.0 M for the same 20 M instructions.
+
+## Rung 3, as built (2026-09-13)
+
+The chipset's side-effect-free registers served by the data front, in any bank
+the I/O page is in and of any bank class - the user's rule: `$00`, `$01`,
+`$E0` and `$E1` name one register - and the claim bug that rule exposed.
+
+- **One definition of the I/O page, `rtl/gs_iopage.vh`.**  `gs_is_io(bank,
+  flat)`: `$E0/$E1` always, `$00/$01` only while SHADOW (`$C035`) bit 6 is
+  clear (KEGS `fixup_shadow_iolc`; with it set the fast pair's `$C000-$FFFF` is
+  RAM).  Included by `rtl/gs_io.sv` (its claim) and `rtl/dline.sv` (its serve),
+  and checked against the KEGS-derived oracle in `sim/mmu_xlate_gs_tb.sv` at
+  every `$C0xx` point of every map it sweeps.
+- **THE BUG IT FIXED.**  `gs_io` claimed `$C0xx` in any pair bank with no
+  SHADOW term (`pair_bank(bank)`), and `master_top` ORs that claim into the
+  dispatcher's internalized-op flag, whose byte beats memory's
+  (`swi_q ? swi_byte_q : mem_sub_data`).  Under the inhibit a `$00/C019` read
+  took the chipset's byte over the RAM's, and a `$00/C047` access - a RAM
+  write - ran the register's side effect and cleared the timer interrupts.
+  Found by reading; no software measured here sets the bit.  (The IIe
+  build's own internalized reads and slots, `apple_mmu` `q_swi`/`q_slot`, are
+  off at GS - `sw_int = !GS && ...` - so this was the only claim with the hole;
+  the host mirror's classify already had `in_io && !flat`.)
+- **The fast-read set** (`gs_fr_sel`): `$C011-$C01F` (the status page, `$C019`
+  with the VBL bit), `$C021`, `$C022`, `$C023`, `$C025`, `$C027`, `$C029`,
+  `$C02B`, `$C02D`, `$C02E`, `$C02F`, `$C035`, `$C036`, `$C041`, `$C061`,
+  `$C062`, `$C068` - every register whose read changes nothing.  Out, because the
+  read does something: `$C010`, `$C024`, `$C026`, `$C030`, `$C033/$C034`,
+  `$C038/$C039`, `$C03C-$C03F`, `$C046`, `$C047`, `$C0Ex`; `$C000` keeps its
+  own serve with the `kbd_rd` pulse its auto-repeat counts.
+- **The bytes, `gs_io` `fr_vec`:** 31 x 8 bits composed as the read mux
+  composes them (the switches from new `apple_mmu` `swi_stat_bits`, `$C023` and
+  `$C041` from new `gs_intc` outputs, `$C027` from a new `gs_adb` output),
+  registered once in `master_top` like `kbd_byte_q`.  A simulation assertion
+  in `gs_io` compares the vector's byte with `rd_byte` on every internalized
+  read the dispatcher retires, in every bench.
+- **The serve, `dline` `io_hit`:** from the registered candidate in the serve
+  cycle - `gs_is_io` on `dq_addr`'s bank with a registered SHADOW bit, `$C0` in
+  the high byte, `gs_fr_sel` on the low - and nothing on `d_pred`'s cone; one
+  more arm of the one-hot byte OR, two clocks like every IIgs read.  `$C000`'s
+  `kb_hit` moved onto the same bank rule (it was bank-class zero only).  Both
+  ride the swint lever (`gs_kbd_en`, ACCEL_CTRL[28]), which is the A/B.
+- **The staleness guard.**  An internalized write (`$C029`, `$C035`, a
+  `$C00x` switch) lands on the edge after the dispatcher's `swi_commit` and
+  reaches `io_vec` a clock later, so a fast read serves only while `swi_commit`
+  has been low this clock and the one before (`io_quiet`, on `kb_hit` too).
+- **Books:** `cnt_io_serves`, DBG_SEL item `0x87`; the GS bench prints it.
+
+**The two new checks, green:** `sim/gs_io_claim_tb.sv` (in `suite.sh gs`),
+written from the KEGS rule and not from `gs_io`'s register list - 18,439
+checks, 0 errors: the claim is zero in `$00/$01` under the inhibit and outside
+`$C0xx` everywhere, the four banks claim exactly what `$E1` claims (70
+addresses) at SHADOW `$00/$40/$3F/$7F`, and a pending VBL interrupt survives a
+`$00/C047` read and a `$01/C047` write under the inhibit while `$E1/C047`
+(inhibit on) and `$00/C047` (inhibit off) clear it.  `mmu_xlate_gs_tb` full
+sweep: 3584 maps, 67,135,501 checks (+43,008, the I/O page), 0 mismatches.
+
+**In simulation** (Verilator, mode 2, unlimited, against rung 2's runs):
+
+| run | result | chipset fast reads | dispatcher fast ops | data-front ops | clocks |
+|---|---|---:|---|---|---|
+| suite point (250 k) | PASS at the KEGS floor 67,398, 10 checks 0 errors, the trace parting at the same event | 222 | 16,479 -> 16,258 | 25,561 -> 25,783 | - |
+| XMAS demo (20 M instr) | PASS, 11 checks 0 errors, no assertion (the fast-read vector agreed with the read mux on every internalized read), clashes 0 | **5,522,148** | **6.24 M -> 1.58 M (-75%)** | 5.72 M -> 9.39 M | 229.2 M -> 191.5 M (-16.4%) |
+| GS/OS (20 M instr) | PASS, 12 checks 0 errors, disk 1858 / 3 / 451 / 2312 as before, clashes 0, no assertion | 13,251 | 2,326,445 -> 2,313,897 | 24.64 M -> 24.64 M | 394.0 M -> 393.8 M |
+
+The IIe battery 35/35, accel_vl 98 checks on 280,000,000 clocks as before
+(every rung-3 term is `GS`-gated).
+
+**The build, `gs_lr3`: TIMING MET** wns +0.003 whs +0.047, 0 of 96,774
+failing; synthesis 0 undriven nets, 0 multi-driven registers.  The worst path
+is the instruction front's (`u_iline` `want_tag -> f_ppn`, 14 levels).  The
+rung's own cones are shallow: `sv_hit_q` 11 levels (slack 1.908), `claim_q` 10
+(1.739), `cmiss_q` 12 (1.094), `kbd_rd` 11 (2.117), `cnt_io_serves` 11 (1.040,
+the front counters' usual shape); `sv_byte_q`, `io_flat_q`, `swi_busy_q` not in
+the >= 10 list; nothing of `gs_io`'s claim as a deep chain into the dispatcher.
+Max depth 22 (gs_lr2 18): all 41 paths at >= 18 are the DDR3 controller's
+calibration compare, `index_wb_data -> correct_read_data / wrong_read_data`,
+carry-dominated with ~2 ns of slack - the family that sat at 18 in gs_lr1, in
+files this rung does not touch.  The >= 14 tail, 327, is gs_lr2's families
+(the event filter, the dispatcher into the microcode ROM, DDR3, audio).
+
+The demo's clock figure is not a pure speed measure: its VBL wait runs
+against a beam counted in bus cycles, so a faster machine spends more of the
+same 20 M instructions waiting (its OTHER-memory reads fell 402 k -> 249 k over
+the run).  The dispatcher's ops moving onto the front is the direct evidence.
+
+**On hardware: the A/B on one bit.**  `gs_lr3` loaded; swhost fresh on
+`gs_os.conf` (Arkanoid on the slot-7 SmartPort, the unlimited target); the
+mirror at 0 mismatches after the boot.  The lever is swint (ACCEL_CTRL[28],
+`gs_kbd_en`), which gates the fast reads and the `$C000` serve together.  A
+script on the Pi alternated four 20.0 s windows - write ACCEL_CTRL with the
+lever and the counter clear in one word, wait, read, screenshot - so no tool
+latency sits between them:
+
+| window | swint | PLAIN | chipset fast reads (`0x87`) | OTHER-class I/O (census) | dispatcher fast ops (KBD) | posts into $02-$7F | the scene at its end |
+|---|---|---:|---:|---:|---:|---:|---|
+| 0 | on  | **76.60x** | 195,977,649 | 195,979,706 | 432 k (12 k) | 497 k | the attract-mode game |
+| 1 | off | **55.65x** | 0 | 130,690,295 | 129.6 M (91.7 M) | 288 k | the attract-mode game |
+| 2 | on  | **77.11x** | 195,953,303 | 195,980,612 | 2.0 M (16 k) | 284 k | the attract-mode game |
+| 3 | off | **51.78x** | 0 | 131,272,650 | 124.2 M (111.7 M) | 408 k | the high-score table |
+
+- **About 77x with the serve, 52-56x without, on the same bit, twice over,
+  across the attract loop's scenes** (a first 40 s pair, 77.52x / 53.80x, had
+  the scene change inside it and is superseded by this interleaved run).  With
+  the lever on the front serves all but ~2,000 of ~196 M long-addressed I/O
+  cycles per 20 s, and the dispatcher's KBD ops fall from ~100 M to ~15 k.
+  Rung 2's bit measured the title screen at 52.10x.
+- **Correct on the card:** `mmismatch=0` after every window; dropped, torn,
+  lost, unknown, verr, refused, link resets, overflows, retries all zero.
+- **The floating-bus compare, explained in passing:** `fbmismatch` stays near
+  7,600 while the serve is on and climbs by tens of millions in each lever-off
+  window (335 M after the four) - the IIe floating-bus simulator comparing
+  against every `$E1C019` the dispatcher answers.  Not a memory mismatch; still
+  not chased.
 
 ## Arkanoid on hardware (2026-09-13, the rung 2 bit)
 

@@ -126,6 +126,9 @@ module gs_adb #(
     // with the real Apple keys merged in - not the latch alone.  Nothing but
     // a bench consumes it, and a bench wants the answer the machine gets.
     output wire  [7:0] c025_rd,
+    // $C027 as a read composes it, for the data front's fast reads (rtl/gs_io.sv
+    // fr_vec): the read steps nothing.
+    output wire  [7:0] c027_o,
 
     // Interrupt requests into gs_intc, each gated by its own $C027 enable.
     output wire        irq_data,
@@ -285,6 +288,7 @@ module gs_adb #(
                          (mouse_valid ? C027_MOUSE_DATA  : 8'd0) |
                          (data_valid  ? C027_DATA_VALID  : 8'd0) |
                          (mouse_coord ? C027_MOUSE_COORD : 8'd0);
+    assign c027_o = c027_rd;
 
     // ---- $C026, without its side effects (adb_read_c026) --------------------
     wire [7:0] c026_rd = (st == S_IDLE)   ? int_byte

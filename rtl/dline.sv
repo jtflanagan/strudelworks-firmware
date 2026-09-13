@@ -219,6 +219,16 @@ module dline #(
     // seconds at eight clocks each, a quarter of every dispatcher op.
     input  wire        kbd_en,
     input  wire [7:0]  kbd_byte,
+    // ...and THE CHIPSET'S FAST READS (IIgs, docs/LONG_DATA.md rung 3): the
+    // side-effect-free registers of rtl/gs_iopage.vh, in any bank the I/O page
+    // is in (SHADOW bit 6, io_flat, takes it out of $00/$01) and of any bank
+    // class, from rtl/gs_io.sv's fr_vec registered once in the top.  swi_busy
+    // is the dispatcher's synthetic commit: an internalized write lands on
+    // that clock's edge and reaches io_vec one clock later, so no fast read
+    // serves across it.
+    input  wire        io_flat,
+    input  wire [247:0] io_vec,
+    input  wire        swi_busy,
     output logic       kbd_rd,
     input  wire [103:0] rt_rd_flat,
     input  wire [7:0]  rwb_p1,
@@ -306,6 +316,7 @@ module dline #(
     localparam [1:0] CLS_ROM = 2'd3;
     localparam integer PW_AW = $clog2(PW_DEPTH);
     localparam [1:0] BCLS_ZERO = 2'd0, BCLS_DBR = 2'd1;
+    `include "gs_iopage.vh"
 
     // ---- the shadow ---------------------------------------------------------
     // Rows, not bytes: a claim installs il_row whole in one clock, a splice
@@ -804,15 +815,33 @@ module dline #(
     // The keyboard: a $C000 read in bank zero (or the DBR at zero; the Mega
     // II banks name the same register but ride the dispatcher), while the
     // lever is up.  Register-rooted throughout, like the last byte.
-    wire kb_hit = dq_v && dq_kbd && dq_b0 && kbd_en;
-    wire serve_hit  = sh_hit || cam_hit || lb_hit || kb_hit || lr_hit;
+    //
+    // RUNG 3 (docs/LONG_DATA.md): the keyboard in ANY bank the I/O page is in,
+    // whatever the bank class - $E1C000 through a long address is the same
+    // register as $C000 - and beside it the chipset's side-effect-free
+    // registers, the same way.  All of it from the registered candidate in the
+    // serve cycle: the bank rule on dq_addr's bank and a registered SHADOW
+    // bit, the page, the low byte's slot in io_vec.  Nothing on d_pred's cone.
+    logic io_flat_q, swi_busy_q;
+    always_ff @(posedge clk) begin
+        io_flat_q  <= GS && io_flat;
+        swi_busy_q <= swi_busy && !rst;
+    end
+    wire       io_bank  = GS && gs_is_io(dq_addr[23:16], io_flat_q);
+    wire       io_quiet = !swi_busy && !swi_busy_q;
+    wire [5:0] io_sel   = gs_fr_sel(dq_addr[7:0]);
+    wire       io_hit   = dq_v && io_bank && (dq_addr[15:8] == 8'hC0) && io_sel[5] && kbd_en && io_quiet;
+    wire [7:0] io_byte  = io_vec[8*io_sel[4:0] +: 8];
+    wire kb_hit = dq_v && dq_kbd && io_bank && kbd_en && io_quiet;
+    wire serve_hit  = sh_hit || cam_hit || lb_hit || kb_hit || lr_hit || io_hit;
     // One-hot AND-OR, not a priority chain: the shadow and the cache never
     // hold the same line (claims exclude the estate), and the last byte,
     // when it also hits, IS that line's byte (any write clears it).
     wire [7:0] serve_byte = ({8{sh_hit}} & dq_byte) | ({8{cam_hit}} & cam_byte) |
                             ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte) |
                             ({8{lr_hit && !sh_hit && !cam_hit && !lb_hit}} & lr_byte) |
-                            ({8{kb_hit}} & kbd_byte);
+                            ({8{kb_hit}} & kbd_byte) |
+                            ({8{io_hit}} & io_byte);
 
     // THE IIgs READS AT TWO CLOCKS, REGISTERED (docs/GS.md rung 6).  On the
     // IIe the served byte goes to the core live, and the 65C02's AGU - an
@@ -916,12 +945,13 @@ module dline #(
     // entries replaced.
     logic [31:0] cnt_ob_cand, cnt_ob_known, cnt_ob_serves, cnt_ob_any, cnt_ob_loads;
     logic [31:0] cnt_post_hi;   // rung 2: writes retired into banks $02-$7F
+    logic [31:0] cnt_io_serves; // rung 3: the chipset's fast reads retired here
     always_ff @(posedge clk) begin
         if (rst) begin
             ob_v <= '0; ob_ok <= '0; ob_set <= '0; ob_lru <= 1'b0;
             ob[0] <= 8'd0; ob[1] <= 8'd0;
             cnt_ob_cand <= 32'd0; cnt_ob_known <= 32'd0; cnt_ob_serves <= 32'd0;
-            cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0; cnt_post_hi <= 32'd0;
+            cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0; cnt_post_hi <= 32'd0; cnt_io_serves <= 32'd0;
         end else begin
             // Every line's bit for a replaced entry is rewritten on this edge
             // (the claim engine's block): in service from the next clock.
@@ -944,7 +974,7 @@ module dline #(
             end
             if (cnt_clr) begin
                 cnt_ob_cand <= 32'd0; cnt_ob_known <= 32'd0; cnt_ob_serves <= 32'd0;
-                cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0; cnt_post_hi <= 32'd0;
+                cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0; cnt_post_hi <= 32'd0; cnt_io_serves <= 32'd0;
             end else begin
                 if (ob_take && dq_v)                cnt_ob_cand   <= cnt_ob_cand   + 32'd1;
                 if (ob_take && dq_v && om != '0)    cnt_ob_known  <= cnt_ob_known  + 32'd1;
@@ -952,6 +982,7 @@ module dline #(
                 if (r_retire && ob_elig && cam_hit) cnt_ob_serves <= cnt_ob_serves + 32'd1;
                 if (r_retire && ob_elig)            cnt_ob_any    <= cnt_ob_any    + 32'd1;
                 if (w_retire && w_hi)               cnt_post_hi   <= cnt_post_hi   + 32'd1;
+                if (r_retire && io_hit)             cnt_io_serves <= cnt_io_serves + 32'd1;
             end
         end
     end
@@ -964,6 +995,7 @@ module dline #(
             4'd4:    dbg_val2 = cnt_ob_loads;
             4'd5:    dbg_val2 = {ob[0], ob[1], 11'd0, ob_lru, ob_v, ob_ok};
             4'd6:    dbg_val2 = cnt_post_hi;
+            4'd7:    dbg_val2 = cnt_io_serves;
             default: dbg_val2 = 32'd0;
         endcase
     end

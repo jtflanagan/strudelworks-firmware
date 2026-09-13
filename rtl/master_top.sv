@@ -988,6 +988,13 @@ module master_top #(
     wire        dl_kbd_rd;
     logic [7:0] kbd_byte_q;
     always_ff @(posedge apple_clk) kbd_byte_q <= gs_c000_byte;
+    // ...and the chipset's fast reads the same way (docs/LONG_DATA.md rung 3):
+    // rtl/gs_io.sv's fr_vec, registered once on its way to the data front,
+    // and the status page's switches it is composed from.
+    wire [15:0]  mmu_stat_bits;
+    wire [247:0] gsio_fr_vec;
+    logic [247:0] io_vec_q;
+    always_ff @(posedge apple_clk) io_vec_q <= gsio_fr_vec;
     // The Ensoniq's mix, out of gs_io and into the audio sampler; zero on the
     // IIe build, where the DOC is not instantiated (docs/GS.md rung 7).
     wire signed [20:0] doc_l, doc_r;
@@ -1357,6 +1364,9 @@ module master_top #(
         .kbd_en        (GS && gs_kbd_en),
         .kbd_byte      (kbd_byte_q),
         .kbd_rd        (dl_kbd_rd),
+        .io_flat       (gs_shadow_w[6]),
+        .io_vec        (io_vec_q),
+        .swi_busy      (swi_commit),
         .rt_rd_flat    (rt_rd_flat),
         .rwb_p1        (rwb_p1_w),
         .map_settling  (front_settling),
@@ -1765,6 +1775,7 @@ module master_top #(
         .q_swi      (q_swi_mmu),
         .q_swi_quiet (q_swi_quiet),
         .swi_stat_byte (mmu_swi_stat),
+        .swi_stat_bits (mmu_stat_bits),
         .p_addr     (p_addr_w),
         .p_cls      (p_cls),
         .p_aux      (p_aux_w),
@@ -1857,6 +1868,8 @@ module master_top #(
         // The status page's byte, from the map's switch shadow, and the
         // beam's VBL level for $C019's top bit.
         .stat_byte  (mmu_swi_stat),
+        .stat_bits  (mmu_stat_bits),
+        .kbd_low    (kbd_int_low),
         .vbl        (vbl_level),
         .scan_v     (scan_v), .scan_h (scan_h),
         .mw_stb     (fb_mwx_stb), .mw_bank (fb_mw_bank),
@@ -1907,6 +1920,7 @@ module master_top #(
         .fd35_stall (fd35_stall),
         .u_claim    (gsio_u_claim),
         .rd_byte    (gsio_byte),
+        .fr_vec     (gsio_fr_vec),
         .irq        (gsio_irq),
         .adb_stat   (gsio_adb_stat)
     );
@@ -1917,6 +1931,7 @@ module master_top #(
     assign gsio_claim   = 1'b0;
     assign gsio_u_claim = 1'b0;
     assign gsio_byte    = 8'd0;
+    assign gsio_fr_vec  = '0;
     assign gsio_irq     = 1'b0;
     assign gsio_adb_stat = 32'd0;
     assign gs_border    = 4'd0;

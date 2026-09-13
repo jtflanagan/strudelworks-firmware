@@ -101,6 +101,9 @@ module mmu_xlate_gs_tb;
     );
 
     localparam [1:0] CLS_BUS = 2'd0, CLS_RAM = 2'd1, CLS_LC = 2'd2, CLS_ROM = 2'd3;
+    // The I/O page rule the chipset's claim and the data front share
+    // (docs/LONG_DATA.md rung 3), checked below against this oracle.
+    `include "gs_iopage.vh"
 
     // ---- the switches, read back from the DUT so a mistyped strobe cannot
     // ---- make the model agree with the RTL by accident ------------------------
@@ -351,6 +354,17 @@ module mmu_xlate_gs_tb;
                 errs = errs + 1;
                 if (errs < 25) $display("  WR SH   %02x/%04x sw=%03x sh=%02x: got %b want %b",
                                         bk, a, sw_state, shadow, d_sh, mx_sh(mw));
+            end
+            // THE I/O PAGE (rtl/gs_iopage.vh): $C0xx is the chipset's exactly
+            // where the oracle says a read of it is the I/O region's - every
+            // bank, every SHADOW state, $C071-$C07F's ROM reads aside.
+            if (a[15:8] == 8'hC0 && a[15:4] != 12'hC07) begin
+                checks = checks + 1;
+                if (gs_is_io(bk, shadow[6]) !== (mx_cls(mr) == CLS_BUS)) begin
+                    errs = errs + 1;
+                    if (errs < 25) $display("  IO PAGE %02x/%04x sh=%02x: gs_is_io %b, oracle class %0d",
+                                            bk, a, shadow, gs_is_io(bk, shadow[6]), mx_cls(mr));
+                end
             end
         end
     endtask

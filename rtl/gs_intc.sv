@@ -69,7 +69,12 @@ module gs_intc (
     input  wire        irq_doc,
 
     // The one line into the core.
-    output wire        irq
+    output wire        irq,
+    // $C023 and $C041 as a read would compose them, for the data front's fast
+    // reads (rtl/gs_io.sv fr_vec, docs/LONG_DATA.md rung 3): neither read has a
+    // side effect - $C046's and $C047's do, and they are not exported.
+    output wire [7:0]  c023_o,
+    output wire [7:0]  c041_o
 );
 
     // $C041's enables (defc.h:262-266).
@@ -97,6 +102,8 @@ module gs_intc (
     // commit below, from the same expression.
     wire [7:0] c046_rd = c046;
     wire [7:0] c023_rd = c023 | ((p_1sec || p_scan) ? 8'h80 : 8'h00);
+    assign c023_o = c023_rd;
+    assign c041_o = c041;
 
     always_comb begin
         case (op_lo)
