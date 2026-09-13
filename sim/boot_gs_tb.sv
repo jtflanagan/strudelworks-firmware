@@ -1042,6 +1042,170 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         have_prev <= 1'b1;
     end
 
+    // ---- the bank census: what an OTHER-class data cycle is ------------------------
+    // docs/GS.md rung 6's open item, and the question behind a data-front arm
+    // for long addressing.  rtl/dline.sv serves the ZERO and DBR classes from
+    // precomputed per-line bits, and a class-OTHER candidate serves nothing.
+    // An arm that PREDICTED the bank - the last few OTHER banks seen, each
+    // with one precomputed bit per line - serves a candidate whose bank is in
+    // that table.  So the number that sizes it is how often the bank is among
+    // the last 1, 2 or 4 DISTINCT OTHER banks: a k-entry table with
+    // least-recently-used replacement.  ZERO and DBR cycles in between touch
+    // no entry, exactly as they would not in the table.
+    //
+    // I/O IS COUNTED APART.  An OTHER cycle into $C000-$CFFF of a pair bank
+    // ($00/$01/$E0/$E1) is the I/O page or slot ROM, which no line serves
+    // whatever its bank - and a VBL wait polling through a long address
+    // (the XMAS demo's LDA $E1Cxxx / BPL) is most of that demo's OTHER
+    // cycles.  Those stay OUT of the table, the regions, the opcodes and the
+    // banks, so everything below "memory" describes what the arm could serve.
+    //
+    // Counted at the edge the candidate registers (dline's dq_addr <= d_pred):
+    // the core moves, d_pred_v, and d_pred names the cycle about to run.  The
+    // instruction's opcode is pv_op, latched at its fetch.  An interval line
+    // every BC_EVERY instructions keeps the boot's phases apart.
+    localparam integer BC_EVERY = 1000000;
+    localparam integer BC_K     = 4;
+    wire bc_move = boot_go && !cpu_rst && cpu_cyc_en;
+    wire bc_edge = bc_move && cpu_d_pred_v;
+    longint bc_cls  [0:2][0:1];         // [class ZERO/DBR/OTHER][read, write]
+    longint bc_io   [0:1];              // OTHER into a pair bank's $Cxxx, [read, write]
+    longint bc_reg  [0:3];              // OTHER memory by bank region
+    longint bc_eq0, bc_eqd, bc_eqp;     // OTHER memory whose bank is zero / the DBR / the PBR anyway
+    longint bc_mru  [0:BC_K][0:1];      // position in the table (BC_K = not in it), [read, write]
+    longint bc_op   [0:255];            // OTHER memory by opcode
+    longint bc_bank [0:255];            // OTHER memory by bank
+    longint bc_cycles;                  // every cycle the core moved
+    reg [7:0] bc_list [0:BC_K-1];
+    integer   bc_len;
+    // The interval's baseline.
+    longint bi_data, bi_oth, bi_io, bi_w, bi_m1, bi_m2, bi_m4;
+    integer   bi_from;
+    initial begin : bc_init
+        integer k, j;
+        for (k = 0; k < 3; k = k + 1) for (j = 0; j < 2; j = j + 1) bc_cls[k][j] = 0;
+        for (k = 0; k < 4; k = k + 1) bc_reg[k] = 0;
+        for (k = 0; k <= BC_K; k = k + 1) for (j = 0; j < 2; j = j + 1) bc_mru[k][j] = 0;
+        for (k = 0; k < 256; k = k + 1) begin bc_op[k] = 0; bc_bank[k] = 0; end
+        for (k = 0; k < BC_K; k = k + 1) bc_list[k] = 8'd0;
+        bc_io[0] = 0; bc_io[1] = 0;
+        bc_eq0 = 0; bc_eqd = 0; bc_eqp = 0; bc_cycles = 0; bc_len = 0;
+        bi_data = 0; bi_oth = 0; bi_io = 0; bi_w = 0; bi_m1 = 0; bi_m2 = 0; bi_m4 = 0; bi_from = 0;
+    end
+
+    always @(posedge clk) begin : bc_count
+        integer pos, sh, k;
+        reg [7:0] b;
+        reg       pair;
+        integer w;
+        if (bc_move) bc_cycles = bc_cycles + 1;
+        if (bc_edge && cpu_d_pred_bcls != 2'd3) begin
+            b = cpu_d_pred[23:16];
+            w = cpu_d_pred_rw ? 0 : 1;
+            pair = (b == 8'h00 || b == 8'h01 || b == 8'hE0 || b == 8'hE1);
+            bc_cls[cpu_d_pred_bcls][w] = bc_cls[cpu_d_pred_bcls][w] + 1;
+            if (cpu_d_pred_bcls == 2'd2 && pair && cpu_d_pred[15:12] == 4'hC) begin
+                bc_io[w] = bc_io[w] + 1;
+            end else if (cpu_d_pred_bcls == 2'd2) begin
+                if (pair)                            bc_reg[0] = bc_reg[0] + 1;
+                else if (b >= 8'h02 && b <= 8'h7F)   bc_reg[1] = bc_reg[1] + 1;
+                else if (b >= 8'hFC)                 bc_reg[2] = bc_reg[2] + 1;
+                else                                 bc_reg[3] = bc_reg[3] + 1;
+                if (b == 8'h00)             bc_eq0 = bc_eq0 + 1;
+                if (b == cpu_dbr)           bc_eqd = bc_eqd + 1;
+                if (b == cpu_pc24[23:16])   bc_eqp = bc_eqp + 1;
+                bc_op[pv_op] = bc_op[pv_op] + 1;
+                bc_bank[b]   = bc_bank[b] + 1;
+                // Where it stands in the table, then to the front of it.
+                pos = BC_K;
+                for (k = bc_len - 1; k >= 0; k = k - 1) if (bc_list[k] == b) pos = k;
+                bc_mru[pos][w] = bc_mru[pos][w] + 1;
+                if (pos < BC_K)          sh = pos;
+                else if (bc_len < BC_K)  begin sh = bc_len; bc_len = bc_len + 1; end
+                else                     sh = BC_K - 1;
+                for (k = sh; k > 0; k = k - 1) bc_list[k] = bc_list[k-1];
+                bc_list[0] = b;
+            end
+        end
+    end
+
+    function automatic string bc_pct(input longint n, input longint d);
+        bc_pct = (d == 0) ? "  -  " : $sformatf("%5.1f", 100.0 * real'(n) / real'(d));
+    endfunction
+
+    always @(posedge clk) if (fetch_now && have_prev && trace_instrs > 0 &&
+                              (trace_instrs % BC_EVERY) == 0) begin : bc_interval
+        longint data, oth, io, mem, wr, m1, m2, m4;
+        data = bc_cls[0][0] + bc_cls[0][1] + bc_cls[1][0] + bc_cls[1][1] + bc_cls[2][0] + bc_cls[2][1];
+        oth  = bc_cls[2][0] + bc_cls[2][1];
+        io   = bc_io[0] + bc_io[1];
+        mem  = oth - io;
+        wr   = bc_cls[2][1] - bc_io[1];
+        m1   = bc_mru[0][0] + bc_mru[0][1];
+        m2   = m1 + bc_mru[1][0] + bc_mru[1][1];
+        m4   = m2 + bc_mru[2][0] + bc_mru[2][1] + bc_mru[3][0] + bc_mru[3][1];
+        $display("    bank census %0d-%0d: %0d data, OTHER I/O %0d (%s%%), OTHER memory %0d (%s%%, %0d writes), in last 1/2/4: %s / %s / %s %%",
+                 bi_from, trace_instrs, data - bi_data,
+                 io - bi_io, bc_pct(io - bi_io, data - bi_data),
+                 mem - (bi_oth - bi_io), bc_pct(mem - (bi_oth - bi_io), data - bi_data), wr - bi_w,
+                 bc_pct(m1 - bi_m1, mem - (bi_oth - bi_io)), bc_pct(m2 - bi_m2, mem - (bi_oth - bi_io)),
+                 bc_pct(m4 - bi_m4, mem - (bi_oth - bi_io)));
+        bi_data = data; bi_oth = oth; bi_io = io; bi_w = wr; bi_m1 = m1; bi_m2 = m2; bi_m4 = m4;
+        bi_from = trace_instrs;
+    end
+
+    task dump_bank_census;
+        longint data, oth, mr, mw, mem, r1, r2, r4, w1, w2, w4, best;
+        integer k, n, pick;
+        bit taken [0:255];
+        begin
+            data = bc_cls[0][0] + bc_cls[0][1] + bc_cls[1][0] + bc_cls[1][1] + bc_cls[2][0] + bc_cls[2][1];
+            oth  = bc_cls[2][0] + bc_cls[2][1];
+            mr   = bc_cls[2][0] - bc_io[0];
+            mw   = bc_cls[2][1] - bc_io[1];
+            mem  = mr + mw;
+            $display("    ---- the bank census: %0d data cycles predicted, of %0d cycles the core moved ----",
+                     data, bc_cycles);
+            $display("      ZERO   reads %0d writes %0d (%s%% of data cycles)", bc_cls[0][0], bc_cls[0][1],
+                     bc_pct(bc_cls[0][0] + bc_cls[0][1], data));
+            $display("      DBR    reads %0d writes %0d (%s%%)", bc_cls[1][0], bc_cls[1][1],
+                     bc_pct(bc_cls[1][0] + bc_cls[1][1], data));
+            $display("      OTHER  reads %0d writes %0d (%s%%)", bc_cls[2][0], bc_cls[2][1], bc_pct(oth, data));
+            $display("        I/O, a pair bank's $Cxxx: reads %0d writes %0d (%s%%)", bc_io[0], bc_io[1],
+                     bc_pct(bc_io[0] + bc_io[1], data));
+            $display("        memory:                    reads %0d writes %0d (%s%%)", mr, mw, bc_pct(mem, data));
+            if (mem > 0) begin
+                $display("      OTHER memory by region: pair $00/$01/$E0/$E1 %0d, RAM $02-$7F %0d, ROM $FC-$FF %0d, elsewhere %0d",
+                         bc_reg[0], bc_reg[1], bc_reg[2], bc_reg[3]);
+                $display("      OTHER memory whose bank is anyway: zero %0d, the DBR %0d, the PBR %0d",
+                         bc_eq0, bc_eqd, bc_eqp);
+                r1 = bc_mru[0][0]; r2 = r1 + bc_mru[1][0]; r4 = r2 + bc_mru[2][0] + bc_mru[3][0];
+                w1 = bc_mru[0][1]; w2 = w1 + bc_mru[1][1]; w4 = w2 + bc_mru[2][1] + bc_mru[3][1];
+                $display("      OTHER memory bank in the last 1 / 2 / 4 distinct OTHER memory banks:");
+                $display("        reads  %s / %s / %s %%", bc_pct(r1, mr), bc_pct(r2, mr), bc_pct(r4, mr));
+                $display("        writes %s / %s / %s %%", bc_pct(w1, mw), bc_pct(w2, mw), bc_pct(w4, mw));
+                $display("        all    %s / %s / %s %%", bc_pct(r1 + w1, mem), bc_pct(r2 + w2, mem),
+                         bc_pct(r4 + w4, mem));
+                for (k = 0; k < 256; k = k + 1) taken[k] = 0;
+                $write("      OTHER memory by opcode:");
+                for (n = 0; n < 12; n = n + 1) begin
+                    best = 0; pick = -1;
+                    for (k = 0; k < 256; k = k + 1) if (!taken[k] && bc_op[k] > best) begin best = bc_op[k]; pick = k; end
+                    if (pick >= 0) begin taken[pick] = 1; $write(" $%02X:%s%%", pick[7:0], bc_pct(best, mem)); end
+                end
+                $display("");
+                for (k = 0; k < 256; k = k + 1) taken[k] = 0;
+                $write("      OTHER memory by bank:  ");
+                for (n = 0; n < 12; n = n + 1) begin
+                    best = 0; pick = -1;
+                    for (k = 0; k < 256; k = k + 1) if (!taken[k] && bc_bank[k] > best) begin best = bc_bank[k]; pick = k; end
+                    if (pick >= 0) begin taken[pick] = 1; $write(" $%02X:%s%%", pick[7:0], bc_pct(best, mem)); end
+                end
+                $display("");
+            end
+        end
+    endtask
+
     // ---- the host, mirrored off the driver's op stream ------------------------------
     // strudelworks-host src/hd_card.cpp, register for register.
     localparam [7:0] CMD_BLK_STATUS = 8'h00, CMD_BLK_READ = 8'h01, CMD_BLK_WRITE = 8'h02,
@@ -1228,6 +1392,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // evidence about the DMA either way, so it is skipped and counted.
     reg        pend_dirty = 1'b0;
     integer    blocks_touched = 0;
+    // ...and a write the DATA FRONT retired into it (rtl/dline.sv's posted
+    // path, rung 6): it never reaches the dispatcher, so the u_* watch below
+    // cannot see it.  Before the fronts, every write was a dispatcher op.
+    reg        pend_dirty_dl = 1'b0;
+    integer    blocks_touched_dl = 0;
     integer    pend_blk = 0, blocks_verified = 0;
 
     task automatic hm_io_read0;
@@ -1253,14 +1422,25 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     q_mem[qw % QN] = hm_memblock[r];
                     q_bank[qw % QN] = hm_membank[r];
                     q_disk[qw % QN] = hm_diskblock[r];
-                    // BLOCK WRITES ARE NOT MODELLED HERE.  boot_tb captures
-                    // the block from its reference memory, which this bench
-                    // does not keep - the ROM's boot only reads, so rather
-                    // than write zeros over the image and call it a pass,
-                    // this fails loudly and rung 3e can model it when GS/OS
-                    // needs it.
-                    if (hm_cmd == CMD_BLK_WRITE || hm_cmd == CMD_SP_WRITE)
-                        fail("a block WRITE was issued: this bench does not model one");
+                    // A BLOCK WRITE takes its block HERE, at the EXECUTE, from
+                    // the card's own memory where the machine left it - the
+                    // way the host takes it from its mirror - through the
+                    // same translation the landing check reads with.  The
+                    // queue's write arm puts it into the image when the host
+                    // gets to it.  Until 2026-09-13 this only failed loudly:
+                    // q_blk was never filled, so a GS/OS write put a block of
+                    // nothing into the image and every run past ~9.9 M
+                    // instructions read it back.  A write captured while the
+                    // data front still has posted writes in flight is named,
+                    // because those bytes may not be in the card's memory yet.
+                    if (hm_cmd == CMD_BLK_WRITE || hm_cmd == CMD_SP_WRITE) begin
+                        for (k = 0; k < 512; k = k + 1)
+                            q_blk[qw % QN][k] = blk_card_byte(hm_membank[r], hm_memblock[r], k,
+                                                              sw_state[8], sw_state[3]);
+                        if (u_dline.pending)
+                            $display("    disk: WRITE of block %0d captured with posted writes in flight at instruction %0d",
+                                     hm_diskblock[r], trace_instrs);
+                    end
                     hm_cmd = (hm_cmd & 8'h80) ? CMD_SP_BUSY : CMD_BLK_STATUS;
                     hm_fifo = 0;
                     hm_gsn = 0;
@@ -2038,6 +2218,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                                 pend_addr = memblock; pend_bank = membank; pend_blk = diskblock;
                                 pend_b2 = sw_state[8]; pend_azp = sw_state[3];
                                 pend_dirty = 1'b0;
+                                pend_dirty_dl = 1'b0;
                                 pend_valid = 1'b1;
                             end
                             hm_uerr[r] = err;
@@ -2394,40 +2575,71 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     function automatic [15:0] land_ppn_b(input [15:0] va, input [7:0] bank, input b2, input azp);
         land_ppn_b = (bank == 8'd0) ? land_ppn(va, b2, azp) : {bank, va[15:8]};
     endfunction
+    // Byte k of a block DMA'd to {bank, addr}, as the card lands it: at
+    // GS = 1 the 24-bit sum CARRIES into the next bank (rtl/hd_card.sv,
+    // docs/GS.md "the DMA wrapped at a bank edge").  Every place this bench
+    // follows a block through memory - the landing check, the machine's
+    // writes into it, a write's capture - goes through here; until
+    // 2026-09-13 they wrapped in sixteen bits, and every block straddling a
+    // bank edge "did not land" from exactly the edge on.
+    function automatic [23:0] blk_a24(input [7:0] bank, input [15:0] addr, input integer k);
+        blk_a24 = {bank, addr} + 24'(k);
+    endfunction
+    function automatic [7:0] blk_card_byte(input [7:0] bank, input [15:0] addr, input integer k,
+                                           input b2, input azp);
+        reg [23:0] a;
+        begin
+            a = blk_a24(bank, addr, k);
+            blk_card_byte = card_byte(land_ppn_b(a[15:0], a[23:16], b2, azp), a[7:0]);
+        end
+    endfunction
     task verify_landed(input [15:0] addr, input integer blk);
         integer k, bad, first;
         reg [7:0] got;
         begin
             bad = 0; first = -1;
             for (k = 0; k < 512; k = k + 1) begin
-                got = card_byte(land_ppn_b(16'(addr + k), pend_bank, pend_b2, pend_azp),
-                                8'(16'(addr + k)));
+                got = blk_card_byte(pend_bank, addr, k, pend_b2, pend_azp);
                 if (got !== himg[blk * 512 + k]) begin
                     bad = bad + 1;
                     if (first < 0) first = k;
                 end
             end
             if (bad != 0)
-                fail($sformatf("block %0d did not land at $%04X: %0d of 512 bytes wrong, first at +%0d (got $%02X, want $%02X)",
-                               blk, addr, bad, first,
-                               card_byte(land_ppn_b(16'(addr + first), pend_bank, pend_b2, pend_azp),
-                                         8'(16'(addr + first))),
+                fail($sformatf("block %0d did not land at $%02X/%04X: %0d of 512 bytes wrong, first at +%0d (got $%02X, want $%02X)",
+                               blk, pend_bank, addr, bad, first,
+                               blk_card_byte(pend_bank, addr, first, pend_b2, pend_azp),
                                himg[blk * 512 + first]));
             else
                 blocks_verified = blocks_verified + 1;
         end
     endtask
-    // The machine writing into the block it was just given.
-    always @(posedge clk)
+    // The machine writing into the block it was just given: through the
+    // dispatcher (u_*), or posted by the data front (dev_*), which since
+    // fw e3720fd includes bank zero's shadowable $2000-$9FFF - GS/OS's
+    // buffer at $9A00.  Without the second watch every block GS/OS wrote
+    // through the front was checked as if untouched and "did not land".
+    always @(posedge clk) begin
         if (boot_go && pend_valid && u_present && !u_rw && !u_ovr &&
-            u_bank == pend_bank &&
-            u_addr >= pend_addr && u_addr <= (pend_addr + 16'd511))
+            {u_bank, u_addr} >= {pend_bank, pend_addr} &&
+            {u_bank, u_addr} <= blk_a24(pend_bank, pend_addr, 511))
             pend_dirty <= 1'b1;
+        if (boot_go && pend_valid && dev_valid && !dev_rw &&
+            {dev_bank, dev_addr} >= {pend_bank, pend_addr} &&
+            {dev_bank, dev_addr} <= blk_a24(pend_bank, pend_addr, 511)) begin
+            pend_dirty    <= 1'b1;
+            pend_dirty_dl <= 1'b1;
+        end
+    end
 
     always @(posedge clk) if (chk_go) begin
         chk_go = 1'b0;
-        if (pend_dirty) blocks_touched = blocks_touched + 1;
-        else            verify_landed(pend_addr, pend_blk);
+        if (pend_dirty) begin
+            blocks_touched = blocks_touched + 1;
+            if (pend_dirty_dl) blocks_touched_dl = blocks_touched_dl + 1;
+        end else begin
+            verify_landed(pend_addr, pend_blk);
+        end
         pend_valid = 1'b0;
     end
 
@@ -2519,6 +2731,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         dump_clash();
         dump_iwm();
         dump_doc();
+        dump_bank_census();
         dump_intc();
         // A shipped image the ROM ACCEPTS is one it does not rewrite: it
         // checksums the battery RAM at startup and writes its own defaults
@@ -2556,8 +2769,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             if (blocks_verified == 0 && hd_blocks_read > 1)
                 fail("no block was ever checked where the machine would look for it");
             else
-                ok($sformatf("%0d blocks landed intact where the machine looks for them (%0d the machine had already written to)",
-                             blocks_verified, blocks_touched));
+                ok($sformatf("%0d blocks landed intact where the machine looks for them (%0d the machine had already written to, %0d of those through the data front)",
+                             blocks_verified, blocks_touched, blocks_touched_dl));
         end
         $display("    parked %0d internal cycles: %0d would have written, %0d would have hit $C0xx",
                  internal_cycles, internal_writes, internal_io);

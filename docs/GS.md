@@ -3867,6 +3867,39 @@ which training step it is stuck in.**  A mid-build edit to master_top.sv (the de
 words registered ahead of the mux, 19:15) did NOT reach gs_icache - elaboration
 had finished at 18:52 - and the rule from it: no RTL edits while a build runs.
 
+## The GS/OS bench's disk failures were the bench's (2026-09-13)
+
+`sim/run_boot_gs_tb.sh --hdv=system6.hdv --instrs=20000000` had been red on
+master: 17 errors - fourteen "block N did not land" from ~3.04 M
+instructions, three "a block WRITE was issued".  Found while taking the bank
+census for docs/LONG_DATA.md.  **The machine was right every time**: with the
+bench fixed the run is 11 checks, 0 errors, 1858 blocks read, 1844 intact,
+14 written into by the machine before the check (9 of them through the data
+front), 3 written - and it ends on 410,347,930 clocks, the very count the
+failing run ended on.  Three bench faults:
+
+- **The check could not see the data front's writes.**  A block the machine
+  writes into before asking for the next is skipped; the watch looked only at
+  dispatcher ops (`u_*`).  fw e3720fd let the front post bank-zero writes
+  into the shadowable `$2000-$9FFF` - GS/OS's buffer at `$9A00` - so from then
+  on those blocks were checked as if untouched.  Bisected on the bench:
+  `29b0373` clean, `e3720fd` the first to fail block 49, `HEAD` with
+  `fronts_dis` clean.  The watch now also takes `dev_valid && !dev_rw`.
+- **Block addresses wrapped in sixteen bits.**  The check, the watch and the
+  landing translation computed `addr + k` within the bank; the card's DMA
+  carries into the next bank at GS = 1 ("The menu bar's coloured pixels"
+  above).  All six remaining failures began exactly at `$10000` (`$FE99`
+  +359, `$FFD5` +43, ...).  `blk_a24`/`blk_card_byte` carry now.
+- **Writes were never modelled.**  The host model's write arm stored `q_blk`
+  into the image, but nothing ever filled `q_blk`: GS/OS's three writes (from
+  ~9.9 M) put empty blocks on the disk.  The block is now captured at the
+  EXECUTE from the card's memory through the same translation, and a capture
+  taken while posted writes are still in flight is named.
+
+The suite point is unchanged (9 checks, 0 errors, 4,982,302 clocks).  Still
+unexplained, and not a failure: from ~13 M instructions to the end the run
+is one flat loop, identical per million instructions.
+
 ## Risks
 
 - ~~Timing lives in rung 6 (the fronts), which milestone 1 does not depend on.~~  Rung 6 is built; its build verdict is in its section.
