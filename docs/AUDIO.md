@@ -1,6 +1,19 @@
 # Sound on the card: the AYs and the speaker as gateware, samples to the host
 
-Status: **ON HARDWARE 2026-09-06**, COMMITTED (fw 96d227b / host b082bb6,
+Status: **THE ENSONIQ IS AUDIBLE ON HARDWARE, 2026-09-13** - the FTA XMAS
+demo's music plays from the 3.5" drive on the IWM, confirmed by the user.
+What silenced it was in the HOST, not the card: the oversampling low-pass
+carried five channels and the Ensoniq's two were not among them, so with
+oversampling on - the default - `fir_out` returned them as zero on every
+frame (see "The Ensoniq's road out").  `card_audio_test` 48 checks, 0 failed,
+and 2 of them fail on the unfixed host.  Card bitstream `gs_build_docdbg`:
+TIMING MET wns=+0.002 whs=+0.041, 0 of 95,021, 0 undriven, 0 multi-driven,
+generate scopes clean.  That build ALSO carried a debug instrument on
+`DBG_SEL[7]`; the instrument has since been taken back out of the RTL and the
+next bitstream will not have it (see "The instrument that ended it").
+Still wrong: the master volume and the wall-time scan, both below.
+
+Before it: **ON HARDWARE 2026-09-06**, COMMITTED (fw 96d227b / host b082bb6,
 SRAM).  Bit at WNS +0.008 / WHS +0.062 (2026-09-06 12:46, SRAM), the
 first DSP48 in the design, LUTs 43 %.  `sim/run_audio_vl.sh` PASS (the NCO,
 the speaker's box average, a 996 Hz tone at 50 periods in core time / 199
@@ -65,6 +78,86 @@ would alias it.  The mix comes down 5 bits on the way into the accumulator so
 
 The wire format grew from three words a sample to four.  At 44.1 kHz that is
 706 kB/s where it was 529, against a link that runs at 335 MB/s.
+
+## The Ensoniq's road out, and where it was cut (2026-09-13)
+
+**The card played the demo and no sound came out, and everything passed.**
+The chip was right, the sampler was right, the framing was right, and the
+Ensoniq still reached the speakers as silence for four days.  The cut was in
+the host, in the low-pass the oversampling added on 2026-09-07 - two days
+before the Ensoniq existed.  `fir_push`/`fir_out` carried FIVE channels, the
+speaker and the four AYs; `fir_out` value-initialises the `Sample` it returns,
+so the two channels it did not know about came out as ZERO on every frame.
+With oversampling on - the DEFAULT - that is every frame there is.  The card
+was sending real samples the whole time.
+
+**Why nothing caught it.**  `card_audio_test`'s Ensoniq test runs at
+`oversample = 1`, where the filter is bypassed entirely, so it exercised the
+one path the bug was not on.  The status line's `snddoc` is measured in
+`mix_one`, which runs AFTER the filter, so the instrument agreed with the
+bug - and that number is what sent the hunt into the card for hours.  A peak
+taken after a stage cannot tell you the stage ate it.
+`tests/card_audio_test.cpp`'s `test_doc_oversampled` is the gate now: it feeds
+the pair at `oversample = 4` and fails on the unfixed host (2 of 48).
+
+**What proved the card innocent**, in order, and the order matters - each one
+moved the boundary rather than confirming a guess:
+
+- `sim/gs_doc_replay_tb.sv`: the chip fed the REGISTER STREAM A REAL MACHINE
+  SENT IT - every `$C03C-$C03F` access of a real boot, with its data byte, out
+  of a live `tools/swtrace` capture.  Nine to eleven oscillators run and the
+  mix peaks past 52,000, at a back-to-back replay and at a realistic 300-clock
+  gap alike.  The chip plays.
+- `sim/audio_doc_tb.sv`: the sampler's DOC box, which NOTHING had ever driven -
+  `sim/audio_tb.sv` names the Ensoniq only in a comment.  A DC level in, the
+  box average out, positive, negative and at the full-scale corner.
+- `sim/boot_gs_tb.sv`'s "the Ensoniq OUT" line: the whole chipset booting the
+  demo, the mix swinging -21,228 to +15,138.  The first run of this said ZERO
+  and looked like the bug reproduced; it was not.  The demo does not start an
+  oscillator until DOC op 131,624 and that run reached 65,781.  **A bench that
+  has not got to the music is not evidence about the music.**
+- and the thing that ended it: `DBG_SEL[7]` below, which asked the chip IN THE
+  MACHINE and got 8 oscillators running and a peak of 68,928 back.
+
+## The instrument that ended it, and why it is not here (2026-09-13)
+
+For one bitstream the card carried the Ensoniq's own numbers on the debug
+pair - `DBG_SEL` bit 7 selecting an audio group, `DBG_VAL` reading it back:
+a PEAK HOLD of the chip's `snd_l`/`snd_r` and another of the sampler's
+`smp_doc_l`/`smp_doc_r`, with `{cnt_irqs, cnt_ends, sound_ctl, osc_en}` and
+the `running` mask beside them.  The two peaks were the point: they sit
+either side of `audio_sampler` and say WHICH of the two goes quiet, and that
+is the one split that cannot be made from outside the card.  Asked of the
+machine they answered 8 oscillators running and a chip peak of 68,928 - which
+is what turned the hunt round and sent it back to the host.
+
+**It has been taken back out** (the user's call, 2026-09-13): peak holds and a
+fifth leg on `dbg_val_q`'s mux are logic on a path that was already at
++0.002.  It is written down here rather than kept, because the NEXT time the
+Ensoniq goes quiet this is the instrument to build again, and it is twenty
+minutes of work: two peak-hold registers per stage in `master_top.sv`, two
+debug words out of `gs_doc.sv` through `gs_io.sv`, and a `dbg_sel[7]` arm on
+the mux.  What it must keep is the pair of peaks, one each side of the
+sampler; a single number anywhere in the chain cannot localise anything.
+
+The host's `sndw2=`/`sndw3=` on the status line are the cheap half of the
+same idea and they STAY: the last sample's raw words 2 and 3 exactly as they
+arrived, which cost nothing on the card and are what finally showed the
+Ensoniq's data arriving intact while the peak beside them read zero.
+
+## Not right yet
+
+- **The master volume is ignored.**  `$C03C[3:0]` is the DOC's own volume and
+  KEGS scales every sample by it (`doc_write_c03c`, `g_doc_vol`); `rtl/gs_doc.sv`
+  stores it, reads it back, and never applies it.  The demo runs at 5 of 15, so
+  the card is about three times louder than the machine asked for.
+- **The scan is the last wall-time device.**  `SCAN_INC` is a fixed
+  894,886 Hz, while the 3.5" drive's platter was deliberately made
+  program-relative (docs/IWM35.md) and the beam and timers follow the bus.
+  Under acceleration the Ensoniq is therefore the one part that does not
+  follow the program, and a tune plays at the wrong tempo.  It was NOT the
+  cause of the silence - the card was throttled to 1x and stayed silent, and
+  the bench that plays runs with acceleration unlimited - but it is wrong.
 
 ## The chips
 

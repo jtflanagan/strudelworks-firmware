@@ -1379,8 +1379,58 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             last_c047 = trace_instrs;
         end
     end
+    // WHAT THE CHIP ACTUALLY PUTS OUT.  Every check the DOC's own bench makes
+    // reads a register back, so the output pair was never watched by anything
+    // - and the card played silence on hardware for a boot in which twelve
+    // oscillators were running (docs/GS.md rung 7, 2026-09-13).  A peak either
+    // side of zero, and a count of the clocks the mix was not zero, says
+    // whether the engine is producing a waveform at all.
+    integer doc_pk_l = 0, doc_pk_r = 0, doc_mn_l = 0, doc_mn_r = 0;
+    integer doc_nz = 0;
+    always @(posedge clk) begin
+        if (u_gsio.u_doc.snd_l > doc_pk_l) doc_pk_l = u_gsio.u_doc.snd_l;
+        if (u_gsio.u_doc.snd_r > doc_pk_r) doc_pk_r = u_gsio.u_doc.snd_r;
+        if (u_gsio.u_doc.snd_l < doc_mn_l) doc_mn_l = u_gsio.u_doc.snd_l;
+        if (u_gsio.u_doc.snd_r < doc_mn_r) doc_mn_r = u_gsio.u_doc.snd_r;
+        if ((u_gsio.u_doc.snd_l != 0) || (u_gsio.u_doc.snd_r != 0))
+            doc_nz = doc_nz + 1;
+    end
+
+    // EVERY $C03C-$C03F OP THE MACHINE RETIRED, AGAINST EVERY ONE THE CHIP WAS
+    // HANDED.  gs_io's `act` is `swi_commit && mine`, and swi_commit fires only
+    // for the soft-switch internalization path - so an op served by some other
+    // fast path is a write the Ensoniq never sees.  The two counts differing is
+    // the whole question; the control-register writes are logged because a
+    // register write that does not start an oscillator is the symptom.
+    integer doc_ops_u = 0, doc_ops_act = 0, doc_ctlw = 0, doc_starts = 0;
+    wire doc_pair_b = (u_bank == 8'h00) || (u_bank == 8'h01) ||
+                      (u_bank == 8'hE0) || (u_bank == 8'hE1);
+    wire doc_addr_b = (u_addr[15:8] == 8'hC0) && (u_addr[7:2] == 6'b001111);
+    always @(posedge clk) begin
+        if (u_commit   && doc_pair_b && doc_addr_b) doc_ops_u   = doc_ops_u + 1;
+        if (swi_commit && doc_pair_b && doc_addr_b) doc_ops_act = doc_ops_act + 1;
+        if (swi_commit && doc_pair_b && (u_addr[7:0] == 8'h3D) && !u_rw &&
+            !u_gsio.u_doc.sound_ctl[6] && (u_gsio.u_doc.ptr[7:5] == 3'd5)) begin
+            doc_ctlw = doc_ctlw + 1;
+            // Only the writes that CLEAR the halt bit are starts, and those are
+            // the ones in question - the ROM's init halts all 32 at boot and
+            // would otherwise fill the log.
+            if (!u_wdata[0]) begin
+                doc_starts = doc_starts + 1;
+                if (doc_starts <= 24)
+                    $display("      DOC START #%0d at instr %0d: osc %0d <= $%02x (was $%02x), osc_en %0d",
+                             doc_starts, trace_instrs, u_gsio.u_doc.ptr[4:0], u_wdata,
+                             u_gsio.u_doc.ctl[u_gsio.u_doc.ptr[4:0]], u_gsio.u_doc.osc_en);
+            end
+        end
+    end
+
     task dump_doc;
         begin
+            $display("    the Ensoniq OPS: %0d retired to $C03C-$C03F, %0d handed to the chip, %0d control writes, %0d of them starts",
+                     doc_ops_u, doc_ops_act, doc_ctlw, doc_starts);
+            $display("    the Ensoniq OUT: L %0d..%0d  R %0d..%0d, nonzero on %0d clocks",
+                     doc_mn_l, doc_pk_l, doc_mn_r, doc_pk_r, doc_nz);
             $display("    the Ensoniq: osc_en %0d, ends %0d, irqs %0d, queue %0d, irq %0d, ctl $C03C=%02x",
                      u_gsio.u_doc.osc_en, u_gsio.u_doc.cnt_ends,
                      u_gsio.u_doc.cnt_irqs, u_gsio.u_doc.q_n,
