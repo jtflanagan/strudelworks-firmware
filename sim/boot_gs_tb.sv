@@ -2769,11 +2769,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // The bank table (docs/LONG_DATA.md rung 1): OTHER-memory read
         // candidates, how many found their bank settled in the table, how
         // many the ways served through it, how many anything here served.
-        $display("    bank table: OTHER-memory reads %0d, bank in the table %0d, served by the ways %0d (%s%%), by the front at all %0d (%s%%), loads %0d, table $%02X $%02X",
+        $display("    bank table: OTHER-memory reads %0d, bank in the table %0d, served by the ways %0d (%s%%), by the front at all %0d (%s%%), loads %0d, table $%02X $%02X; writes posted into $02-$7F %0d",
                  u_dline.cnt_ob_cand, u_dline.cnt_ob_known,
                  u_dline.cnt_ob_serves, bc_pct(longint'(u_dline.cnt_ob_serves), longint'(u_dline.cnt_ob_cand)),
                  u_dline.cnt_ob_any, bc_pct(longint'(u_dline.cnt_ob_any), longint'(u_dline.cnt_ob_cand)),
-                 u_dline.cnt_ob_loads, u_dline.ob[0], u_dline.ob[1]);
+                 u_dline.cnt_ob_loads, u_dline.ob[0], u_dline.ob[1], u_dline.cnt_post_hi);
         $display("    cache: hits %0d misses %0d fills %0d flushes %0d declines %0d late %0d drops %0d",
                  hits, misses, mem_fills, mem_flushes, mem_declines, late_fills, fifo_drops);
         $display("    last PC $%02X/%04X", last_sync[23:16], last_sync[15:0]);

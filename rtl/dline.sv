@@ -109,8 +109,11 @@
 // $C000, which is RAM class and in the image whatever the map says - so
 // no classify cone reaches the retire; RamWorks bank 0 only (a divert is a
 // bus read, never fast); mode 1 keeps writes on the bus through wr_en.  An
-// LC write ($D000+) or a write under a non-zero bank rides the dispatcher
-// as before - correct, only slower.
+// LC write ($D000+) rides the dispatcher as before - correct, only slower.
+// On the IIgs a write in bank zero posts outside $C000 up, a write into
+// banks $02-$7F posts whatever its address or bank class (RAM under every
+// map: w_hi, docs/LONG_DATA.md rung 2), and a long write into the other
+// pair banks rides the dispatcher.
 //////////////////////////////////////////////////////////////////////////////////
 module dline #(
     // Posted writes in flight.  The IIgs needs room for the SHADOW DUPLICATE
@@ -753,7 +756,7 @@ module dline #(
     // front's snoop speak since rung 3.
     logic        spl_v;
     logic [7:0]  spl_data;
-    logic [15:0] spl_addr;
+    logic [23:0] spl_addr;    // {bank, address}, for the assertion
     logic [15:0] spl_ppn;
     logic [7:0]  spl_off8;
     // THE SHADOW DUPLICATE (IIgs, 2026-09-11).  A write into a shadowed
@@ -860,8 +863,15 @@ module dline #(
     // On the IIgs: bank zero (or the DBR at zero).  A shadowed region is no
     // longer excluded - the front posts the duplicate itself (the splice
     // register, above).
-    wire w_serv  = wr_en && dq_wv && (dq_addr[15:14] != 2'b11) && !rwb_nz_q &&
-                   (!GS || dq_b0);
+    // ...and ANY WRITE INTO BANKS $02-$7F, of any bank class (IIgs,
+    // docs/LONG_DATA.md rung 2).  Those banks are RAM under every map
+    // (rtl/apple_mmu.sv xlate: its own physical bank, no switch, no SHADOW -
+    // GS_RAM_BANKS is 128), so the qualifier is virtual and exact: the whole
+    // 64 KB, $C000 up included, and never a duplicate to post.  Seven bits of
+    // the registered candidate, beside the zero-class term.
+    wire w_hi    = GS && !dq_addr[23] && (dq_addr[22:17] != 6'd0);
+    wire w_serv  = wr_en && dq_wv && !rwb_nz_q &&
+                   (((dq_addr[15:14] != 2'b11) && (!GS || dq_b0)) || w_hi);
 
     logic fc_q, claim_q;
     always_ff @(posedge clk) begin
@@ -905,12 +915,13 @@ module dline #(
     // an entry; reads anything here served (the last row and byte included);
     // entries replaced.
     logic [31:0] cnt_ob_cand, cnt_ob_known, cnt_ob_serves, cnt_ob_any, cnt_ob_loads;
+    logic [31:0] cnt_post_hi;   // rung 2: writes retired into banks $02-$7F
     always_ff @(posedge clk) begin
         if (rst) begin
             ob_v <= '0; ob_ok <= '0; ob_set <= '0; ob_lru <= 1'b0;
             ob[0] <= 8'd0; ob[1] <= 8'd0;
             cnt_ob_cand <= 32'd0; cnt_ob_known <= 32'd0; cnt_ob_serves <= 32'd0;
-            cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0;
+            cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0; cnt_post_hi <= 32'd0;
         end else begin
             // Every line's bit for a replaced entry is rewritten on this edge
             // (the claim engine's block): in service from the next clock.
@@ -933,13 +944,14 @@ module dline #(
             end
             if (cnt_clr) begin
                 cnt_ob_cand <= 32'd0; cnt_ob_known <= 32'd0; cnt_ob_serves <= 32'd0;
-                cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0;
+                cnt_ob_any <= 32'd0; cnt_ob_loads <= 32'd0; cnt_post_hi <= 32'd0;
             end else begin
                 if (ob_take && dq_v)                cnt_ob_cand   <= cnt_ob_cand   + 32'd1;
                 if (ob_take && dq_v && om != '0)    cnt_ob_known  <= cnt_ob_known  + 32'd1;
                 if (ob_take && ob_m == '0)          cnt_ob_loads  <= cnt_ob_loads  + 32'd1;
                 if (r_retire && ob_elig && cam_hit) cnt_ob_serves <= cnt_ob_serves + 32'd1;
                 if (r_retire && ob_elig)            cnt_ob_any    <= cnt_ob_any    + 32'd1;
+                if (w_retire && w_hi)               cnt_post_hi   <= cnt_post_hi   + 32'd1;
             end
         end
     end
@@ -951,6 +963,7 @@ module dline #(
             4'd3:    dbg_val2 = cnt_ob_any;
             4'd4:    dbg_val2 = cnt_ob_loads;
             4'd5:    dbg_val2 = {ob[0], ob[1], 11'd0, ob_lru, ob_v, ob_ok};
+            4'd6:    dbg_val2 = cnt_post_hi;
             default: dbg_val2 = 32'd0;
         endcase
     end
@@ -1002,7 +1015,7 @@ module dline #(
             spl_dup <= dup_go;
         end
         if (w_retire) begin
-            spl_addr <= dq_addr[15:0];
+            spl_addr <= dq_addr;
             spl_data <= cpu_dout;
             spl_ppn  <= d_ppn;
             spl_off8 <= dq_addr[7:0];   // the fold never touches a[11:4]
@@ -1054,8 +1067,8 @@ module dline #(
     // The ISA argument, checked: no data read of an address is served the
     // clock after a write to it retired (the splice lands on that edge).
     always @(posedge clk)
-        if (r_retire && spl_v && !spl_dup && spl_addr == dq_addr[15:0])
-            $error("dline: a read of $%04x served on the splice clock of a write to it", dq_addr[15:0]);
+        if (r_retire && spl_v && !spl_dup && spl_addr == dq_addr)
+            $error("dline: a read of $%06x served on the splice clock of a write to it", dq_addr);
     // ...and the FIFO never overflows: a push into a full FIFO is a lost write.
     always @(posedge clk)
         if (spl_v && pf_cnt == (PW_AW+1)'(PW_DEPTH) && !pw_take)

@@ -1,6 +1,15 @@
 # Long data: the data front serves the OTHER bank class
 
-Status: 2026-09-13, branch `long_data`. RUNG 1 (READS) ON HARDWARE,
+Status: 2026-09-13, branch `long_data`. RUNG 2 (WRITES INTO $02-$7F POSTED)
+ON HARDWARE, UNCOMMITTED ("Rung 2, as built"): GS/OS 12/0 with its disk
+unchanged, 1.42 M writes posted into $02-$7F, dispatcher fast ops -38%, clocks
+-2.9%; XMAS 11/0; boot_gs at the KEGS floor; IIe battery 35/35 with accel_vl
+unchanged (280,000,000 clocks).  Build `gs_lr2` TIMING MET wns +0.027 whs
++0.033, 0 of 96,505 failing, no data-front chain in the tail.  On the card, the
+idle Finder: 17.6 M writes posted into $02-$7F in 50.7 s, mirror mismatches 0,
+PLAIN 62.71x (rung 1's window: 61.57x; not an A/B).
+
+RUNG 1 (READS) ON HARDWARE,
 UNCOMMITTED: the two-entry bank table, `cvo` and the OTHER serve arm in
 `rtl/dline.sv` ("Rung 1, as built").  Sims: boot_gs at the KEGS floor (10
 checks), GS/OS 12/0 and XMAS 11/0 at 20 M instructions (the ways serve 85.2%
@@ -174,7 +183,7 @@ read by source register, then hardware. Explain before every run.
 |---|---|---|
 | 0 | **The healthy gate workload, and the census on the card.** Fix the GS/OS bench landing failure. Commit the bench census. Card counters for OTHER-memory data cycles and table hits at 1 and 2 entries (a debug item), read on the Finder and one ORCA/C desktop app | bench GS/OS boot clean past 20 M instructions; HW numbers in this doc - **DONE: the bench (a8d2d76), `bank_census` MET and cross-checked, the Finder measured on hardware at the unlimited target ("On hardware"); a desktop application still unmeasured.** Read it: clear with a W1 of ACCEL_CTRL[31] (read ACCEL_CTRL first and write it back with bit 31 set - the register also holds the mode, target and `fronts_dis`), then `regw 80000130 4N` / `reg 80000134` for item N: 0 data, 1 OTHER-memory reads, 2 writes, 3 I/O, 4 last, 5 second, 6 third-or-fourth, 7 miss, 8 the table |
 | 1 | **Reads.** The table (K = 2), `cvo`, `dq_o`, the serve arm; installs allowed for OTHER-class misses (check `live_cmiss`/C_OPW for class gates); `cnt_ob_serves` counted | OTHER-memory reads served / predicted, from the bench and the card; KEGS floor and battery unchanged; timing MET, no new deep tail on the tag leg (else the 3-clock fallback) - **GREEN IN SIMULATION 2026-09-13 ("Rung 1, as built"): GS/OS 85.2% served, XMAS 92.8%, floor and battery unchanged; build and card pending.** Read it: `regw 80000130 8N` / `reg 80000134`, N as listed there |
-| 2 | **Writes into $02-$7F posted**, every class | GS/OS bench clean; mirror mismatches unchanged on HW; the desktop ratio |
+| 2 | **Writes into $02-$7F posted**, every class | GS/OS bench clean; mirror mismatches unchanged on HW; the desktop ratio - **GS BENCHES GREEN 2026-09-13 ("Rung 2, as built"): GS/OS 12/0, disk unchanged, 1.42 M posts into $02-$7F, dispatcher fast ops -38%; XMAS 11/0; floor unchanged; IIe battery 35/35, accel_vl 280,000,000 clocks; `gs_lr2` MET +0.027; ON THE CARD: 17.6 M posts into $02-$7F in 50.7 s on the Finder, mirror mismatches 0, PLAIN 62.71x.** Read it: `regw 80000130 86` / `reg 80000134` |
 | 3 | **Optional.** The `$E1C019`/`$E1C02E` poll served like `$C000` (K stays 2: decided) | the demo's PLAIN ratio |
 
 ## Rung 1, as built (2026-09-13)
@@ -285,6 +294,137 @@ against the census runs `bcard_*` on fw d01d653):
 - **The clock saving is small in GS/OS's boot** (-1.1% of clocks for the same
   instructions: 710 k dispatcher ops at ~7 clocks each); the ratio that matters
   is the card's on the Finder, where OTHER memory is 17-20% of data cycles.
+
+## Rung 2, as built (2026-09-13)
+
+Writes into banks `$02-$7F` post, of every bank class.  One term in
+`rtl/dline.sv`:
+
+```
+w_hi   = GS && !dq_addr[23] && (dq_addr[22:17] != 0)       // banks $02-$7F
+w_serv = wr_en && dq_wv && !rwb_nz_q &&
+         ((dq_addr[15:14] != 2'b11 && (!GS || dq_b0)) || w_hi)
+```
+
+- **Why a virtual qualifier is exact there.** `rtl/apple_mmu.sv` xlate classes
+  `$02-$7F` as RAM, its own physical bank, write-enabled, no switch and no
+  SHADOW bit, under every map; `GS_RAM_BANKS` is 128 and never overridden, so
+  none of those banks is void.  So the whole 64 KB posts, `$C000` up included,
+  and a write there never owes a duplicate (`d_sh` is 0, `dup_go` never fires).
+- **Nothing downstream assumed bank zero.**  The stamp is the MMU query's
+  `d_ppn` (bank in its high byte); the splice into the shadow, the ways and
+  the last row, the claim abort and the instruction front's snoop all compare
+  physical pages; the page cache keys a posted write by `cl_ppn` and sends a
+  non-resident page to its miss engine like any write (`pw_ready` waits for
+  the engine to be idle); the host mirror classifies every write with its bank
+  (`classify_at(e.bank, ...)`).  `apple_mmu`'s drain still derives the IIe's
+  `cl_aux`/`cl_bank` pair from the page, which reads nonsense for bank `$7F` -
+  but the instruction front is its only consumer and never reads it.
+- **The splice-clock assertion widened to 24 bits** (`spl_addr`): with other
+  banks posting, a 16-bit compare would fire on `$7F/1234` written then
+  `$00/1234` read.
+- **Pair-bank OTHER writes stay on the dispatcher** (a long write into
+  `$00/$01/$E0/$E1` names the map and SHADOW), as the design said.
+- **The book:** `cnt_post_hi`, writes retired into `$02-$7F`, DBG_SEL item
+  `0x86`; the GS bench prints it on the `bank table:` line.
+
+**In simulation** (Verilator, mode 2, unlimited, 20 M instructions; against
+rung 1's runs `lr1_*`):
+
+| run | result | writes posted into $02-$7F | all posted writes | dispatcher fast ops | clocks | posted misses |
+|---|---|---:|---:|---|---|---|
+| suite point (250 k) | PASS at the KEGS floor 67,398, 10 checks 0 errors; every counter as rung 1's | 0 | 10,682 | 16,479 | - | 1,032 |
+| XMAS demo | PASS, 11 checks 0 errors, clashes 0 | 372,902 | 988,618 -> 1,352,903 | 6.59 M -> 6.24 M | 232.5 M -> 229.2 M (-1.4%) | 1,445 -> 2,535 |
+| GS/OS | PASS, 12 checks 0 errors, disk 1858 / 3 / 451 / 2312 as before, clashes 0 | 1,416,056 | 6.82 M -> 8.24 M | **3.75 M -> 2.33 M (-38%)** | **405.7 M -> 394.0 M (-2.9%)** | 1,553 -> 3,746 |
+
+- **The posted misses doubled**, as they should: a posted write into a bank
+  whose page is not resident is the page cache's miss engine's to land, and
+  `$02-$7F` pages are resident less often than bank zero's.  The bench's checks
+  and the disk's landing checks are clean over it.
+- **The IIe battery 35/35**, accel_vl 98 checks and 280,000,000 clocks as
+  before (`w_hi` is a constant zero there).
+- **The build, `gs_lr2`: TIMING MET** wns +0.027 whs +0.033, 0 of 96,505
+  failing; synthesis 0 undriven nets, 0 multi-driven registers.  The worst path
+  is the instruction front's (`u_iline` `miss_tag_q -> f_reg`, 12 levels).
+  The write side of the data front is shallow: `spl_v` 11 levels (slack
+  1.330), `spl_ppn` 11 (1.688), `cnt_post_hi` 11 (1.716), the posted FIFO and
+  `spl_sh` not in the >= 10 list.  Depth: 3177 paths >= 10 (gs_lr1 4171),
+  366 at >= 14 (gs_lr1 188).  **That tail is not this rung's**, counted by
+  source and end register: 193 are the bus event filter (`source_real ->
+  u_filter`), 66 the audio accumulators, 36 the dispatcher's state into the
+  core's microcode ROM, the rest DDR3, the TX ring and the arbiter; the data
+  front has only its two old chains there (the core's `ir` into `dq_addr`, the
+  prediction's late cone; `cv_q` into the revalidation counter).  None of those
+  families was touched: placement spread.  (gs_lr1's own report was
+  overwritten, so the comparison is by family, not path for path.)
+- **On hardware** (`gs_lr2` loaded, swhost fresh on `gs_census.conf`, GS/OS
+  to the Finder - the desktop byte-identical to rung 1's screenshot - idle, the
+  unlimited target; cleared at the Finder, read back to back in 7 ms), a
+  50.7 s window, beside rung 1's 35.7 s one:
+
+  | | rung 1 | rung 2 |
+  |---|---:|---:|
+  | **PLAIN** | 61.57x | **62.71x** |
+  | the census ratio | 48.38x | 51.09x |
+  | writes posted into $02-$7F (item `0x86`) | - | 17,611,576 (0.35 M/s) |
+  | dispatcher fast writes (WR) | 0.70 M/s | 0.44 M/s (-37%) |
+  | dispatcher fast ops per bus cycle | 2.33 | 2.08 |
+  | dline ops per bus cycle | 19.1 | 20.5 |
+  | OTHER-memory reads served by the ways | 81.1% | 81.1% |
+
+  The census counts 25,971,074 OTHER-memory writes in the window: the 17.6 M
+  posted are the part in `$02-$7F`; the rest are long writes into the pair
+  banks, which stay on the dispatcher (and DBR-class writes into `$02-$7F` are
+  in item `0x86` but not in the census's OTHER count).  **The mirror stayed
+  clean:** `mmismatch=0` after the boot and after the window; dropped, torn,
+  lost, unknown, verr, refused, link resets, overflows and retries all zero;
+  `fbmismatch` (the floating-bus compare) as on the earlier bits.  PLAIN is up
+  1.9% on rung 1's window - a different bit and window, so NOT an A/B, but the
+  bench's direction (-2.9% of clocks on GS/OS's boot).
+- **Rungs 1 and 2 together on GS/OS's boot:** dispatcher fast ops 4.46 M ->
+  2.33 M, clocks 410.3 M -> 394.0 M for the same 20 M instructions.
+
+## Arkanoid on hardware (2026-09-13, the rung 2 bit)
+
+`gs_lr2` on the card; swhost fresh on `gs_os.conf` (Arkanoid's 800K `.po` on
+the slot-7 SmartPort as `hd1`, the unlimited target - the IWM route,
+`gs_ark.conf`, does not boot at unlimited, docs/IWM35.md); the title screen
+("PRESS 1 FOR ONE PLAYER OR 2 FOR TWO PLAYERS"), byte-identical screenshots
+before and after, so a static screen waiting for a key.  Counters cleared on
+it, a 53.3 s window:
+
+| | Arkanoid title | GS/OS Finder, same bit |
+|---|---:|---:|
+| **PLAIN** | **52.10x** (a pre-rung bit: 51.4x, docs/IWM35.md) | 62.71x |
+| the census ratio | 45.95x | 51.09x |
+| turbo ops (instruction front) | 2.10 G | 1.45 G |
+| dline ops (data front) | **11.3 M** | 1.04 G |
+| dispatcher fast ops | 352 M | 106 M |
+| ...of them KBD (the `$C00x`/`$C01x` status reads) | **318.5 M (90.5%)** | 0.19 M |
+| data cycles (census) | 355.2 M | 1,092 M |
+| ...OTHER-class I/O | **338.8 M (95.4%)** | 0.15 M |
+| OTHER-memory reads served by the ways | 1.08 M of 1.38 M (78.5%) | 81.1% |
+| writes posted into $02-$7F | 754 k | 17.6 M |
+| mirror mismatches | 0 | 0 |
+
+**What the machine is doing:** a VBL wait through a long address.  Forty
+samples of the data front's registered candidate (DBG_SEL `0x33`, `top_w3_q`)
+read `$E1C019` - RDVBLBAR, the Mega II bank's VBL status - fifteen times, with
+class OTHER on every sample; the rest were the loop's own bytes at
+`$02/6EF5-6F00`.  That read is OTHER-class I/O, which no line holds and which
+the one-clock keyboard serve (`kb_hit`, bank class zero and `$C000` only)
+refuses, so it rides the dispatcher as a KBD fast op at ~8 clocks - six of
+them per bus cycle, on the order of half the machine's clocks.  Rungs 1 and 2
+barely touch this scene, which is why it sits at the pre-rung bit's 51x.
+
+**So rung 3 is not only the XMAS demo's.**  Serving `$E1C019` (and `$E1C02E`)
+from the card in the data front's two clocks - the register is the chipset's
+VBL bit, which the card already computes - is the lever for Arkanoid's title
+loop too: an estimate, not a measurement, of up to half the scene's clocks.
+
+**Not this plan's, noted:** `fbmismatch` climbed to 322,617,565 over the run
+(GS/OS: ~7,900) - the IIe floating-bus simulator's compare firing on a IIgs
+under `fb = serve`; not a memory mismatch (`mmismatch` 0), not chased.
 
 ## Risks and open questions
 
