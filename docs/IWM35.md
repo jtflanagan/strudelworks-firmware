@@ -1,13 +1,15 @@
-Status: 2026-09-12, branch `gs_emulation`. BENCH: the XMAS demo boots from
-the drive and LAUNCHES (bank $0E at instruction 3,427,317 of
-`sim/run_boot_gs_tb.sh --fd35=XMAS_DEMO.po --instrs=8000000 --clks=120000000`,
-17 tracks fetched, 0 late); `sim/lint.sh` clean; `sim/suite.sh gs` 11/11 with
-its boot at the floor; the 65816 battery 981,610 tests 0 failed. HARDWARE:
-every IIgs bitstream today, a control rebuild of last night's commit
-included, fails DDR3 calibration - not this work, see "On hardware".
-Latest build gs_predlate2: TIMING MET +0.008, 0 of 94,744, gates clean,
-after the timing cuts below (kept alongside: gs_agukeep at +0.061 as
-`build/results/master_top_gs_agukeep.bit`). Host fd35_test 335/335 on the Pi.
+Status: 2026-09-13, branch `gs_emulation`. **HARDWARE: the XMAS demo boots
+from the 3.5" drive on the IWM and runs, from a cold reset, with no
+keystroke** (`gs_xmas.conf`, `fd = off`, `hd = off`; 40 tracks streamed, 0
+late). What was in the way was two other SLOTS, not this chip - see "It
+boots" below. Bitstream `gs_build_msgfix`: TIMING MET wns=+0.130 whs=+0.048,
+0 of 94,662, 0 undriven, 0 multi-driven, generate scopes clean; it is the
+first one whose message-type list knows `0x31`, so the card no longer
+announces every track fill as unknown. BENCH: the demo launches (bank $0E at
+instruction 3,427,317 of `sim/run_boot_gs_tb.sh --fd35=XMAS_DEMO.po
+--instrs=8000000 --clks=120000000`); `sim/lint.sh` clean; `sim/suite.sh gs`
+11/11; the 65816 battery 981,610 tests 0 failed. Host fd35_test 335/335 on
+the Pi. The DDR3 calibrates (UART D=1 K=17).
 
 # The 3.5" drive: the IWM on the card, the disk on the host
 
@@ -138,6 +140,54 @@ this side; the Disk II is `rtl/floppy_card.sv` in its own slot.
   above; a seventh `msg_arb` source in `card_link`, below the floppy's.
 - Host: `fd35 = PATH` in the configuration; the image is fenced in
   `In Use/` like the floppies'.
+
+## It boots (2026-09-13)
+
+The demo boots from the 3.5" drive on the IWM, from a cold reset, with no
+keystroke: `gs_xmas.conf` with `fd = off`, `hd = off`, `fd35 =
+disks/XMAS_DEMO.po`.  Two things in the machine's SLOTS had to go first, and
+neither was in this chip.
+
+**Slot 6 was a Disk II, and slot 6 is the IWM.**  The host makes the Disk II
+card whenever a menu could later want one - `want_fd = asked || boot_menu ||
+runtime_menu` - so `fd = off` did NOT mean off: the runtime menu alone put a
+Disk II in slot 6, and `floppy_card`'s claim on $C0Ex is the internal IWM's
+own address range, the clash docs' "Not here" section had already named.  The
+symptom was that the boot failed DIFFERENTLY on each reset: sometimes the ROM
+never engaged the drive at all (motor never on, `FD35_STAT` ctl = 0) and the
+scan fell through to BASIC; sometimes the motor came on, the head went to
+track 0, and the machine sat at the ROM 3 splash for ever.  `PR#5` from the
+BASIC prompt booted the disk perfectly throughout, which is what said the
+drive was not the problem.  Fixed in the host: a menu no longer conjures the
+card on a IIgs (`pipeline.cpp`, `want_fd`); asked for explicitly, it is still
+made, because the clash is then the user's to have.
+
+**Slot 7 was a SmartPort with no unit.**  `hd = 7` with `hd1` empty installs
+the controller anyway - "the controller answers, with no disk behind it" - and
+with the battery RAM's startup set to Scan the ROM tries slot 7 first, boots
+it, and hangs at the splash.  This is the same failure the bench had found
+from the other side (a slot-7 ROM with no unit answered the boot read and the
+ROM crashed into an empty block), which is why the bench sends none.  `hd =
+off` in the GS confs until a SmartPort with zero units declines its boot.
+
+**The instruments that answered it**, none of which needed a rebuild:
+`swctl reg 0x80000138` (FD35_DRIVE: inserted, wp, stale, track, side, motor,
+seeks) and `reg 0x8000013C` (FD35_STAT: fill_max, ctl = {phases, q7, q6,
+drive_sel, apple35_sel}, late).  A boot the ROM never attempted reads ctl = 0
+and the motor off; a boot it attempted reads the motor on and the seek count
+climbing.  `accel`'s fast-by-kind census names a wait: the machine that had
+"partly loaded" was 209 M keyboard reads in thirty seconds with I, RAM and ROM
+frozen - a keyboard poll, not a crash.
+
+**The false notice is gone.**  The card announced every track fill as "unknown
+message type 0x31 ... is the bitstream older than this host?"  The list in
+`ft601_msg_rx.sv` had been fixed at 21:59 on 09-12 and the loaded bitstream
+built at 19:45, so the card in the machine genuinely predated its own fix.
+Rebuilt: TIMING MET wns=+0.130, whs=+0.048, 0/94662 failing, 0 undriven, 0
+multi-driven, generate scopes clean.  The notice never cost anything - the
+link fans `app_msg_*` to every consumer ungated, and `hdr_known` decides only
+what to report - but it buried the notices that mean something, and a card
+that lies about its own messages is not a card you can debug on.
 
 ## On hardware (2026-09-12)
 
