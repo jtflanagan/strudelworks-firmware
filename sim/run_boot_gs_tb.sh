@@ -165,7 +165,7 @@ xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
 srcs=(
     "$root/sim/boot_gs_tb.sv"
     "$root/rtl/cpu65816.sv" "$root/rtl/accel_seq.sv"
-    "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv"
+    "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv" "$root/rtl/bank_census.sv"
     "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv"
     "$root/rtl/gs_io.sv" "$root/rtl/gs_adb.sv" "$root/rtl/gs_doc.sv" "$root/rtl/gs_clock.sv" "$root/rtl/gs_intc.sv" "$root/rtl/gs_iwm.sv"
     "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv"

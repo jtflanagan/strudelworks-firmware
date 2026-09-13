@@ -182,6 +182,7 @@ if {$snoop || $master} {
             [file join $root rtl apple_bus_write.sv] \
             [file join $root rtl accel_seq.sv] \
             [file join $root rtl fast_census.sv] \
+            [file join $root rtl bank_census.sv] \
             [file join $root rtl iline.sv] \
             [file join $root rtl dline.sv] \
             [file join $root rtl iscan.sv] \

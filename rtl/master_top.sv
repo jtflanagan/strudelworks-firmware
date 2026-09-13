@@ -1406,7 +1406,8 @@ module master_top #(
 
     end endgenerate
 
-    // The debug pair's mux: [5:4] the module, [3:0] the item.  Item 3/0 is
+    // The debug pair's mux: [5:4] the module, [3:0] the item; [7:6] = 1 is
+    // the bank census (below the snapshot words).  Item 3/0 is
     // the dispatcher's and the fronts' live state in one word.
     // ---- WHERE THE CLOCKS GO: a histogram of every clock by what the core
     // was doing (docs/GS.md rung 6, "where the stalls are").  Each clock is
@@ -1485,6 +1486,29 @@ module master_top #(
         top_w3_q <= {cpu_dbr, dq_addr_w};
         top_w4_q <= {cpu_d_pred_bcls, cpu_d_pred_v, cpu_d_pred_rw, 4'd0, cpu_p_flags, 8'd0, cpu_din};
     end
+    // ---- THE BANK CENSUS (docs/LONG_DATA.md rung 0): rtl/bank_census.sv on
+    // DBG_SEL[7:6] = 1.  Fed ONLY from the snapshot registers above - h_ret,
+    // top_w4_q, top_w3_q - so it adds a load to no live net; declared and
+    // instantiated below them (tools/check_generate_scope.py).  The IIgs
+    // build only: on the IIe the class is a constant zero.
+    wire [31:0] bc_dbg;
+    generate if (GS) begin : g_bank_census
+        bank_census u_bank_census (
+            .clk     (apple_clk),
+            .rst     (apple_rst),
+            .clr     (accel_cnt_clr),
+            .moved_q (h_ret),
+            .pv_q    (top_w4_q[29]),
+            .prw_q   (top_w4_q[28]),
+            .pcls_q  (top_w4_q[31:30]),
+            .cand_qq (top_w3_q[23:0]),
+            .sel     (dbg_sel[3:0]),
+            .dbg     (bc_dbg)
+        );
+    end else begin : g_no_bank_census
+        assign bc_dbg = 32'd0;
+    end endgenerate
+
     wire [31:0] top_dbg = (dbg_sel[3:0] == 4'd0) ? top_w0_q :
                           (dbg_sel[3:0] == 4'd1) ? top_w1_q :
                           (dbg_sel[3:0] == 4'd2) ? top_w2_q :
@@ -1501,7 +1525,8 @@ module master_top #(
     // read is a snapshot; one clock old is what it wants to be.
     logic [31:0] dbg_val_q;
     always_ff @(posedge apple_clk)
-        dbg_val_q <= (dbg_sel[5:4] == 2'd0) ? il_dbg :
+        dbg_val_q <= (dbg_sel[7:6] == 2'd1) ? bc_dbg :
+                     (dbg_sel[5:4] == 2'd0) ? il_dbg :
                      (dbg_sel[5:4] == 2'd1) ? dl_dbg :
                      (dbg_sel[5:4] == 2'd2) ? pc_dbg : top_dbg;
     assign dbg_val = dbg_val_q;

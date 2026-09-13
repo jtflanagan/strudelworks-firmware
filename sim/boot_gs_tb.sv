@@ -1067,7 +1067,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     localparam integer BC_EVERY = 1000000;
     localparam integer BC_K     = 4;
     wire bc_move = boot_go && !cpu_rst && cpu_cyc_en;
-    wire bc_edge = bc_move && cpu_d_pred_v;
+    reg  bc_freeze = 1'b0;               // the end of the run: both censuses stop, the card's drains
+    wire bc_edge = bc_move && cpu_d_pred_v && !bc_freeze;
     longint bc_cls  [0:2][0:1];         // [class ZERO/DBR/OTHER][read, write]
     longint bc_io   [0:1];              // OTHER into a pair bank's $Cxxx, [read, write]
     longint bc_reg  [0:3];              // OTHER memory by bank region
@@ -1128,6 +1129,28 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             end
         end
     end
+
+    // ---- the card's census, fed as rtl/master_top.sv feeds it ------------------
+    // rtl/bank_census.sv on copies of the snapshot registers master_top keeps
+    // (h_ret, top_w4_q, top_w3_q).  At the end its counters must equal this
+    // bench's census count for count: the bench's was written first, from
+    // the core's contract, and is the oracle.
+    reg          bcq_ret = 1'b0, bcq_v = 1'b0, bcq_rw = 1'b0;
+    reg  [1:0]   bcq_cls = 2'd0;
+    reg  [23:0]  bcq_cand = 24'd0;
+    wire [31:0]  bcq_dbg;
+    always @(posedge clk) begin
+        bcq_ret  <= bc_move && !bc_freeze;
+        bcq_v    <= cpu_d_pred_v;
+        bcq_rw   <= cpu_d_pred_rw;
+        bcq_cls  <= cpu_d_pred_bcls;
+        bcq_cand <= u_dline.dq_addr;
+    end
+    bank_census u_bank_census (
+        .clk (clk), .rst (!boot_go), .clr (1'b0),
+        .moved_q (bcq_ret), .pv_q (bcq_v), .prw_q (bcq_rw), .pcls_q (bcq_cls),
+        .cand_qq (bcq_cand), .sel (4'd0), .dbg (bcq_dbg)
+    );
 
     function automatic string bc_pct(input longint n, input longint d);
         bc_pct = (d == 0) ? "  -  " : $sformatf("%5.1f", 100.0 * real'(n) / real'(d));
@@ -1202,6 +1225,28 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     if (pick >= 0) begin taken[pick] = 1; $write(" $%02X:%s%%", pick[7:0], bc_pct(best, mem)); end
                 end
                 $display("");
+            end
+            begin : bc_card
+                longint p0, p1, p23, pm, io;
+                p0  = bc_mru[0][0] + bc_mru[0][1];
+                p1  = bc_mru[1][0] + bc_mru[1][1];
+                p23 = bc_mru[2][0] + bc_mru[2][1] + bc_mru[3][0] + bc_mru[3][1];
+                pm  = bc_mru[4][0] + bc_mru[4][1];
+                io  = bc_io[0] + bc_io[1];
+                if (64'(u_bank_census.c_data) == data && 64'(u_bank_census.c_io) == io &&
+                    64'(u_bank_census.c_mrd) == mr && 64'(u_bank_census.c_mwr) == mw &&
+                    64'(u_bank_census.c_p0) == p0 && 64'(u_bank_census.c_p1) == p1 &&
+                    64'(u_bank_census.c_p23) == p23 && 64'(u_bank_census.c_miss) == pm)
+                    ok($sformatf("the card's bank census (rtl/bank_census.sv) agrees with the bench's: %0d data, %0d OTHER memory, %0d I/O",
+                                 data, mem, io));
+                else begin
+                    fail("the card's bank census (rtl/bank_census.sv) disagrees with the bench's");
+                    $display("      card:  data %0d mrd %0d mwr %0d io %0d p0 %0d p1 %0d p23 %0d miss %0d",
+                             u_bank_census.c_data, u_bank_census.c_mrd, u_bank_census.c_mwr, u_bank_census.c_io,
+                             u_bank_census.c_p0, u_bank_census.c_p1, u_bank_census.c_p23, u_bank_census.c_miss);
+                    $display("      bench: data %0d mrd %0d mwr %0d io %0d p0 %0d p1 %0d p23 %0d miss %0d",
+                             data, mr, mw, io, p0, p1, p23, pm);
+                end
             end
         end
     endtask
@@ -2731,6 +2776,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         dump_clash();
         dump_iwm();
         dump_doc();
+        bc_freeze = 1'b1;
+        repeat (8) @(posedge clk);
         dump_bank_census();
         dump_intc();
         // A shipped image the ROM ACCEPTS is one it does not rewrite: it
