@@ -1,8 +1,9 @@
 # UberDDR3 on the card: placement, logic depth, and the calibration that sometimes never comes
 
-Status: 2026-09-14, branch `long_data`, UNCOMMITTED. Forensics, the ODELAY answer, the
-CK_OSERDES fix and the instrumentation are DONE and on hardware (bits `gs_ddr3_ckserdes`,
-`gs_ddr3_dbg`, both MET); next the eye-margin sweep and the ranked experiments.  UberDDR3 now comes from the fork
+Status: 2026-09-14, branch `long_data`, fw e1072e1 / host 8cfb9b7 + UNCOMMITTED eye work.
+Forensics, the ODELAY answer, the CK_OSERDES fix, the instrumentation, the eye sweep and the
+centred DQ tap are DONE and on hardware (bits `gs_ddr3_ckserdes`, `gs_ddr3_dbg`, `gs_ddr3_eye`,
+`gs_ddr3_center`, all MET); the fork is at d728e6a (four commits, unpushed).  UberDDR3 now comes from the fork
 `jtflanagan/UberDDR3`, branch `strudelworks-research` (upstream `4a51b96` is the merge base).
 First change on it: `CK_OSERDES` (the DDR3 clock pin through an OSERDES): build
 `gs_ddr3_ckserdes` MET +0.011 / WHS +0.054, 0/95362; on the routed design CK - CMD went from
@@ -134,6 +135,33 @@ Fork branch `strudelworks-research`: `phy: drive the DDR3 clock pin from an OSER
 `top: pass CK_OSERDES ...`, `controller: synchronise IDELAYCTRL RDY, sticky calibration
 diagnostics, o_debug1..3` (not pushed yet - `gh auth login` first).
 
+## Change 3: the read data eye (fork `EYE_SWEEP`, `o_calib_eye`; fw `DDR3_EYE0/1`)
+
+After every lane's write/read alignment passes, the controller re-reads the alignment
+pattern at address 0 with the lane's DQ IDELAY at every tap 0..31 - the same request and the
+same `write_pattern_matches` pipeline `ANALYZE_DATA` uses - and records one bit per tap
+(states 25-30, ~3 us per lane), then loads the calibrated tap back.  `DDR3_EYE0/1`
+(`0x8000_014C/0150`, docs/PROTOCOL.md) hold the two masks; the host prints `ddreye0=
+ddreye1= ddrtap=` (the delay line's calibrated DQ tap: the register in DBG1 is one ahead of
+it) and the MCP LINK line summarises `eye 5+9/16 taps` = margin below / above the calibrated
+tap / width of the run.  A run is bounded by one bit slot (16 taps = 1.25 ns), i.e. the
+setup-plus-hold window around the sample point.  In the zero-skew Micron model each lane
+reads `000000ff` around tap 0 (the model's ideal point is below tap 0); the number that
+matters is the board's.
+
+## Change 4: `EYE_CENTER` (fork, needs `EYE_SWEEP`)
+
+While the sweep records a lane's mask it tracks the run of passing taps the calibrated tap
+falls in, and at the end loads the delay line with that run's centre instead of the walk's
+tap: seven taps below the upper edge when the run is clipped at tap 0 (the eye is close to
+one bit slot, 16 taps, wide, so the lower edge is unseen), the midpoint otherwise.  The run
+is what the sweep validated at the calibrated bit-slot alignment, so the move cannot leave
+the alignment; `idelay_data_cntvaluein` follows (so `ddrtap` reports the new tap).  The MCP
+summary marks a clipped edge with `<` / `>`: this board read `eye <7+3/11 <7+4/12 taps`
+before centring.  `gs_ddr3_center` (MET +0.017 / +0.023) on hardware: calibrates, `ddrtap=4`
+(lane 1 = 11 - 7; lane 0 at 3), the masks as before, Arkanoid boots, 0 restarts.  The sample
+point now sits 7 taps (550 ps) from the setup edge instead of 3.
+
 ## Instruments
 
 - `build/ddr3_forensics.sh TAG [WORKDIR]` / `build/ddr3_forensics.tcl`: sections A (the CK
@@ -155,8 +183,17 @@ diagnostics, o_debug1..3` (not pushed yet - `gh auth login` first).
    tap 7, RDY, no alignment hypothesis, max 23), DBG2 = 0, DBG3 = `00249249` (DQS index 9
    throughout, data start 0).  Arkanoid runs.  The next bit that never calibrates will say
    which state it stuck in or how often it restarted.
-3. Eye-margin sweep after DONE_CALIBRATE.
-4. Then, ranked by the numbers: MIG's DIC/RTT_NOM, a bounded and re-centred tap walk (the
-   wrap seen above), locality constraints, the depth cuts, and write leveling without ODELAY
-   (CK on its own MMCM output with dynamic fine phase shift stepping under the existing
-   write-level feedback machine).
+3. DONE: `gs_ddr3_eye` (MET +0.006 / +0.057) on hardware, the first eye of this board:
+   **lane 0 passes DQ taps 0..10, lane 1 0..11, calibrated DQ tap 7** (`ddreye0=000007ff
+   ddreye1=00000fff ddrtap=7`).  The sample point sits 3 taps = 234 ps from the late (setup)
+   edge and the early side runs off the bottom of the range, i.e. the fixed "DQS + 8 taps"
+   rule lands ~4-5 taps late of the eye's centre on this board (DQ-vs-DQS input path skew:
+   IOBUFDS vs IOBUF, the DQS IDELAY's CLOCK pattern vs the DQ's DATA, tDQSQ).  A third of the
+   setup margin a centred sample would have - the margin a busier bit's noise eats.  Hence
+   change 4.
+4. DONE: `gs_ddr3_center` - the DQ sample point centred (7 taps from the setup edge, was 3).
+5. Then, ranked by the numbers: MIG's DIC/RTT_NOM (does the eye widen?), a bounded tap walk
+   (the wrap seen in the model), locality constraints, the depth cuts, and write leveling
+   without ODELAY (CK on its own MMCM output with dynamic fine phase shift stepping under the
+   existing write-level feedback machine).  And the variance census: several builds of one
+   RTL, their masks and taps side by side.

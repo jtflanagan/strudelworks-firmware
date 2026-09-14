@@ -579,6 +579,7 @@ module card_link #(
     // three as DDR3_DBG1..3 for the host, since the link answers whether or
     // not the DDR3 calibrated.
     wire [31:0]  ddr3_debug_w, ddr3_debug2_w, ddr3_debug3_w;
+    wire [63:0]  ddr3_eye_w; // the read data eye per lane (DDR3_EYE0/1)
 
     // BIST_MODE 0: au_top's memory test at every power-up would hold the link
     // for seconds, and the memory it tested has since done 123 million
@@ -605,6 +606,7 @@ module card_link #(
         .ddr3_debug     (ddr3_debug_w),
         .ddr3_debug2    (ddr3_debug2_w),
         .ddr3_debug3    (ddr3_debug3_w),
+        .ddr3_eye       (ddr3_eye_w),
         .user_self_refresh (1'b0),
         .ddr3_addr   (ddr3_addr),
         .ddr3_ba     (ddr3_ba),
@@ -1160,6 +1162,8 @@ module card_link #(
         .ddr3_dbg1         (ddr3_debug_w),
         .ddr3_dbg2         (ddr3_debug2_w),
         .ddr3_dbg3         (ddr3_debug3_w),
+        .ddr3_eye0         (ddr3_eye_w[31:0]),
+        .ddr3_eye1         (ddr3_eye_w[63:32]),
         .audio_on          (audio_on),
         .audio_realtime    (audio_realtime),
         .audio_rate        (audio_rate),

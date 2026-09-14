@@ -209,6 +209,8 @@ protocol.
 | `0x8000_0140` | DDR3_DBG1 | RO | UberDDR3 `o_debug1` (our fork): `[4:0]` calibration state (17 = DONE), `[7:5]` lane, `[12:8]` reset-ROM step, `[17:13]` the lane's DQS IDELAY tap, `[22:18]` its DQ tap, `[23]` IDELAYCTRL ready, `[24]` write-late, `[25]` read-early, `[26]` added read pipe, `[31:27]` the highest state reached since the clock locked — see UBERDDR3.md |
 | `0x8000_0144` | DDR3_DBG2 | RO | `[7:0]` the controller's own restarts from the alignment search, `[15:8]` restarts from a BIST mismatch, `[23:16]` IDELAYCTRL RDY drops, `[28:24]` the state at the last restart — sticky until the clock unlocks |
 | `0x8000_0148` | DDR3_DBG3 | RO | `[5:0]` dqs_start_index, `[11:6]` stored, `[17:12]` target, `[23:18]` original target, `[30:24]` the lane's data start index |
+| `0x8000_014C` | DDR3_EYE0 | RO | byte lane 0's read data eye: bit t = 1 when the alignment pattern still read back with the lane's DQ IDELAY at tap t (78 ps); measured after every calibration; the calibrated tap (DDR3_DBG1's DQ tap minus one) sits inside the run of ones and its distance to either end is the margin |
+| `0x8000_0150` | DDR3_EYE1 | RO | byte lane 1's |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

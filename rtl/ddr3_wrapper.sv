@@ -104,6 +104,10 @@ module ddr3_wrapper #(
     output wire [31:0] ddr3_debug,
     output wire [31:0] ddr3_debug2,
     output wire [31:0] ddr3_debug3,
+    // The read data eye of each lane (the fork's EYE_SWEEP): bit t of a
+    // lane's word is 1 when the alignment pattern still read back with the
+    // lane's DQ IDELAY at tap t (78 ps each).  Lane 0 low word, lane 1 high.
+    output wire [63:0] ddr3_eye,
 
     // Request the DDR3 be put into self-refresh (see SELF_REFRESH above).
     input  wire user_self_refresh,
@@ -201,6 +205,7 @@ module ddr3_wrapper #(
         .o_debug1         (ddr3_debug),
         .o_debug2         (ddr3_debug2),
         .o_debug3         (ddr3_debug3),
+        .o_calib_eye      (ddr3_eye),
 
         .i_user_self_refresh (user_self_refresh),
         .uart_tx          ()

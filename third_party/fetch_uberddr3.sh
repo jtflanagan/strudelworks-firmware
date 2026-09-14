@@ -17,8 +17,8 @@ set -euo pipefail
 # cut to be sent upstream as a pull request; the branch head is pinned
 # here by SHA as before.
 REPO="https://github.com/jtflanagan/UberDDR3.git"
-# Pinned 2026-09-14: fork commit 3f665a5 on strudelworks-research.
-SHA="3f665a59f31fd8dd7798b0dec6becb3a1e2f62da"
+# Pinned 2026-09-14: fork commit d728e6a on strudelworks-research.
+SHA="d728e6a6c4950ed58e9fd80afbc50a09fa44e493"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 dst="$here/UberDDR3"

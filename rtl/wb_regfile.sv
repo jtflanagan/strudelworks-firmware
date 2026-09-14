@@ -336,6 +336,10 @@ module wb_regfile #(
     input  wire [31:0]     ddr3_dbg1,
     input  wire [31:0]     ddr3_dbg2,
     input  wire [31:0]     ddr3_dbg3,
+    // DDR3_EYE0/1: the read data eye of byte lane 0 and 1, one bit per DQ
+    // IDELAY tap, measured by the controller after every calibration.
+    input  wire [31:0]     ddr3_eye0,
+    input  wire [31:0]     ddr3_eye1,
     // The sound (docs/AUDIO.md): AUDIO_CTRL's bits as levels - the stream
     // on, the AYs clocked in real time - the NCO increment, and the
     // sampler's counters back for AUDIO_STAT.
@@ -451,6 +455,8 @@ module wb_regfile #(
     localparam [13:0] R_DDR3_DBG1       = 'd80; // 0x8000_0140, RO UberDDR3 o_debug1 (calibration state, lane, taps, max state)
     localparam [13:0] R_DDR3_DBG2       = 'd81; // 0x8000_0144, RO UberDDR3 o_debug2 (sticky restart counters)
     localparam [13:0] R_DDR3_DBG3       = 'd82; // 0x8000_0148, RO UberDDR3 o_debug3 (DQS indices)
+    localparam [13:0] R_DDR3_EYE0       = 'd83; // 0x8000_014C, RO lane 0's read data eye, one bit per DQ IDELAY tap
+    localparam [13:0] R_DDR3_EYE1       = 'd84; // 0x8000_0150, RO lane 1's
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -1447,6 +1453,8 @@ module wb_regfile #(
                         R_DDR3_DBG1:      wb_dat_r <= ddr3_dbg1;
                         R_DDR3_DBG2:      wb_dat_r <= ddr3_dbg2;
                         R_DDR3_DBG3:      wb_dat_r <= ddr3_dbg3;
+                        R_DDR3_EYE0:      wb_dat_r <= ddr3_eye0;
+                        R_DDR3_EYE1:      wb_dat_r <= ddr3_eye1;
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
                         R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
                         R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;

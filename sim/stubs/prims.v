@@ -129,6 +129,7 @@ module ddr3_top #(
     output wire [31:0] o_debug1,
     output wire [31:0] o_debug2,
     output wire [31:0] o_debug3,
+    output wire [32*BYTE_LANES-1:0] o_calib_eye,
     input  wire i_user_self_refresh,
     output wire uart_tx
 );
