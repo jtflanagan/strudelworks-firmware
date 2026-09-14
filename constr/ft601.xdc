@@ -186,7 +186,8 @@ set_input_delay -clock [get_clocks ft_clk_12] -min [expr {$FT601_PERIOD - $FT601
 #
 #   IOB TRUE on FT601_OE_N_reg, FT601_RD_N_reg, FT601_WR_N_reg,
 #              FT601_DATA_OUT_reg[0][*]
-#   set_multicycle_path 2 -from OE_lane_reg[*]/C -to the data and be ports (one enable flop per byte lane)
+#   set_multicycle_path 2 -from OE_data_reg[*]/C, OE_be_reg[*]/C -to the data and be ports (one enable
+#   flop per byte lane for the data pads and one for the BE pad; pinned by the board's ft601_place.xdc)
 #
 # The head of the output queue is what drives the pins, so only slot 0 is packed.
 # The tristate enable is deliberately NOT packed - an IOB's output and tristate
@@ -204,4 +205,5 @@ set_property IOB TRUE [get_cells -hier -filter {NAME =~ *u_ft/ft_wr_reg}]
 
 set_property SLEW FAST [get_ports {ft_data[*] ft_be[*] ft_wr ft_rd ft_oe}]
 
-set_multicycle_path 2 -from [get_pins -hier -filter {NAME =~ *u_ft/OE_lane_reg[*]/C}] -to [get_ports {ft_data[*] ft_be[*]}]
+set_multicycle_path 2 -from [get_pins -hier -filter {NAME =~ *u_ft/OE_data_reg[*]/C}] -to [get_ports {ft_data[*]}]
+set_multicycle_path 2 -from [get_pins -hier -filter {NAME =~ *u_ft/OE_be_reg[*]/C}] -to [get_ports {ft_be[*]}]

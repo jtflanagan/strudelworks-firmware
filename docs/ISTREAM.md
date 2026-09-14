@@ -373,6 +373,28 @@ the ten-way ihit OR in the retire, the two CAM snoop-cancel terms in
 kill_now, the replicated CAM read ports behind the candidate muxes.
 Registered-hint fallbacks remain available for each.
 
+3. *The branch's speculative lookup, cut (2026-09-14).*  The two-ledger
+   Mockingboard build put the fronts' placement under water and the
+   longest chain in the design was the target lookup's address for a
+   BRANCH: pc_addr + 1 + the candidate offset, gated by the flags
+   verdict - the core's carry flag and PC through a 16-bit add, the
+   ten-line tag compare, the row read and the byte select, 17 levels at
+   -0.121 ns.  The speculation was dead weight: a taken branch always
+   spends a dummy cycle between its operand and its target fetch, and
+   the lookup self-heals off tgt_q (the registered truth from the
+   resolve) on exactly that clock, so the byte is registered before the
+   target fetch asks for it either way.  Proof: the accel bench with and
+   without the speculation is cycle-for-cycle identical (47 588 zero-stall
+   branch serves, every front counter equal, both sweep points).  So a
+   branch's tgt_look is tgt_q, and only JMP/JSR - which have no such
+   clock - still speculate, off registers ({i_byte_q, lo_q}, no
+   arithmetic).  The family left the census (tgt_byte_q's worst path 14
+   levels at +0.317).  A scanner-fed target table (the branch scanner
+   computes every transfer's target at S_TGT and could keep it keyed by
+   the opcode's address) was the considered alternative; it has nothing
+   to give branches and its only customer would be JMP/JSR, which is
+   not a bottleneck.  It stays an option if that path ever is.
+
 ## Not here, deliberately
 
 - **A branch target buffer proper**: the scanner + CAM buys the line,

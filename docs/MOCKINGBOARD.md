@@ -26,6 +26,45 @@ That splits exactly along the seam this project already has:
   resampled out through ALSA. Nothing on the card makes a sound; nothing on
   the host is guessed.
 
+**Two sets of books (2026-09-14, branch mock_cook_books).**  Software asks
+two contradictory things of the VIA timers under acceleration.  To FIND the
+card it writes a timer, runs a known number of instructions and reads the
+counter back, accepting the card only if the count moved by the cycles
+those instructions took - so the timer must count the CORE's cycles, or a
+12x core sees a twelfth of the movement and the card is "not present".  To
+PLAY, the music sits on the T1 interrupt and the AYs' clock, and both must
+run in REAL time - the interrupt at the programmed period of wall time, the
+chips at their 1 MHz - or the tune plays at the core's speed: wrong tempo,
+and on a core-clocked AY the wrong pitch too.  So each socket now holds
+TWO 6522s, kept like a double ledger (`rtl/mockingboard.sv`):
+
+| | clock | answers reads | ports | IRQ |
+|---|---|---|---|---|
+| the core-time VIA (`via0`, `via1`) | one tick per op the core completes: a bus cycle that carried one, or a fast op; never a driver dummy | YES: every byte the bus reads is this one's | open | nowhere |
+| the real-time VIA (`via0_rt`, `via1_rt`) | one tick per phi0 cycle of the real bus, whatever the core does | no: its data is thrown away | drive the AYs, themselves clocked at the real 1 MHz | the one the CPU takes |
+
+Every access strobes BOTH: the writes, so the ledgers hold the same
+registers; and the reads too, because a read has side effects (T1C-L
+clears the T1 flag, IRA the CA1 flag) and an ISR clears the real-time
+chip's interrupt by reading.  Locked to the bus the two agree to the
+cycle - mb-audit's cycle-exact timer tests read the core-time chip and
+pass as before.  Accelerated, the core-time chip's timers run ahead, so
+an ISR that looks at IFR finds the flag it came for.  Software that PACES
+itself by polling IFR instead of taking the interrupt paces at the core's
+speed; that is the price of the split.  The speech chips' timer stays on
+the core's clock (it is what a detection routine measures); their A/!R
+reaches both ledgers' CA1.  The bench (`sim/mockingboard_tb.sv` case 6a)
+runs a 4x core: T1 = 400 reads back the core's 44 ticks after 12 bus
+cycles, and interrupts after 402 bus cycles.
+
+**On hardware, 2026-09-14:** Nox Archaist at unlimited acceleration (59x on
+the IIe, 58x on the IIgs) finds the card and plays its music at the right
+pitch and cadence, by the user's ear, on the map and in the game - the
+build before this split found no card there at all.  mb-audit is NOT the
+yardstick for this design: its cycle-exact checks read the core-time
+ledger while the interrupts come in real time, which agree only at 1x;
+the departure is the point.
+
 **Served on the card under acceleration (2026-09-04).**  In the closed
 regime (CXXX.md "The on-card slots") the VIA accesses at `$Cn00-$CnFF`
 are fast ops the card answers itself, no bus cycle; the VIAs see them
@@ -64,7 +103,7 @@ and follows the mode from it, as it follows the VIA writes.
 | 7 | Echo+ | VIA 1 at every 16-byte offset of the page |
 | 1-4, 6 | undefined | nothing answers |
 
-The VIA timers, the interrupts and the core's clock are the Mockingboard's
+The VIA timers, the interrupts and the two clocks are the Mockingboard's
 in every mode.
 
 **On the host** (strudelworks-host `src/mb_audio.cpp`) the mode changes

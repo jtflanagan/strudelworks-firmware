@@ -118,20 +118,41 @@
 // before the cycle's own tick at its commit, gives.  So the tick stays at
 // commit; only the flag moved (rtl/via6522.v irq_t1_set, irq_t2_set).
 //
-// The VIA timers count the CORE's cycles, not the bus's: slow_clock ticks
-// once per op the core completes - a bus cycle that carried one of its ops,
-// or a fast op the sequencer served from the card's memory - and never for a
-// dummy cycle the driver put on the bus while the core ran ahead.  With the
-// core locked to the bus that is exactly one tick per phi0 cycle, so a T1
-// programmed for 1000 fires every 1002 microseconds of machine time, the rate
-// the music player on the other side of the vectors is counting on.  With the
-// core accelerated the timers run at the core's pace, which is what the
-// software expects: every Mockingboard detection routine (Ultima, Skyfox,
-// Total Replay's) writes a timer and reads it back a known number of
-// INSTRUCTIONS later, and accepts the card only if the count moved by the
-// cycles those instructions took.  A timer on bus time under a 12x core
-// moves by a twelfth of that and the card is "not present" - the floppy's
-// lesson (rtl/floppy_card.sv) over again.
+// TWO SETS OF BOOKS (2026-09-14).  Software wants two different things of
+// the VIA timers, and under acceleration they contradict each other:
+//
+//   * to FIND the card, every detection routine (Ultima, Skyfox, Total
+//     Replay's, Nox Archaist's) writes a timer and reads it back a known
+//     number of INSTRUCTIONS later, accepting the card only if the count
+//     moved by the cycles those instructions took - the timer has to count
+//     the CORE's cycles, or a 12x core sees a twelfth of the movement and
+//     the card is "not present" (the floppy's lesson, rtl/floppy_card.sv)
+//   * to PLAY, the music sits on the T1 interrupt and the AYs' clock: the
+//     interrupt has to come at the programmed period of REAL time and the
+//     chips have to run at their 1 MHz, or the tune plays at the core's
+//     speed - the wrong tempo and, on a core-clocked AY, the wrong pitch
+//
+// So each socket holds two 6522s, kept like a double ledger.  The CORE-TIME
+// VIA ticks once per op the core completes - a bus cycle that carried one
+// of its ops, or a fast op served from the card's memory, never a dummy the
+// driver put on the bus while the core ran ahead - and it is the one the
+// bus READS: every register byte comes from it.  Its IRQ goes nowhere and
+// nothing hangs off its ports.  The REAL-TIME VIA ticks once per phi0 cycle
+// of the real bus (`bus_tick`) whatever the core is doing; its ports drive
+// the AYs (clocked at the same real 1 MHz), its IRQ is the one the CPU
+// sees, and its read data is thrown away.  Every access STROBES BOTH - the
+// writes, so the two ledgers hold the same registers, and the reads too,
+// because a read has side effects (T1C-L clears the T1 flag, IRA clears
+// CA1's) and the ISR that clears the real-time chip's interrupt does it by
+// reading.  With the core locked to the bus the two ledgers agree to the
+// cycle; accelerated, the core-time chip's timers run ahead, so an ISR that
+// looks at IFR finds the flag it came for.  Software that PACES itself by
+// polling IFR rather than taking the interrupt paces at the core's speed;
+// that is the price of the split, and the detection routines' win.
+//
+// The speech chips keep the core's clock (their timer is what a detection
+// routine measures, docs/MOCKINGBOARD.md); their A/!R reaches the CA1 of
+// both ledgers, so the flag reads back and the interrupt fires alike.
 //////////////////////////////////////////////////////////////////////////////////
 module mockingboard #(
     // The speech chips' sample clock: 22050 per 1020408 core cycles.  A
@@ -168,11 +189,9 @@ module mockingboard #(
     // time that the bus never saw.  Tied low without the sequencer.
     input  wire        fast_tick,
 
-    // The AYs' clock (docs/AUDIO.md): one phi0 cycle of the REAL bus
-    // (`bus_tick`) when `ay_realtime`, else the core's clock as the VIA
-    // timers count it.  Doubled in Phasor native mode either way.
+    // One phi0 cycle of the REAL bus: the real-time ledger's clock, and the
+    // AYs' (docs/AUDIO.md).  Doubled for the AYs in Phasor native mode.
     input  wire        bus_tick,
-    input  wire        ay_realtime,
     // The chips' sound, {chip3, chip2, chip1, chip0} at 10 bits: chip 0 is
     // VIA 0's first AY, 1 VIA 1's first, 2 and 3 their seconds (the host's
     // ay_[n*2 + via] order, strudelworks-host src/mb_audio.hpp).
@@ -249,25 +268,26 @@ module mockingboard #(
     // input pins float high, as port A's do (AppleWin GH#1260; mb-audit's
     // after-reset test reads IRB with DDRB clear and expects $FF).
     wire       via_reset = rst || !res_sync || !enabled;
+    // The core-time ledger's read data; the real-time ledger's ports and IRQ.
     wire [7:0] via0_data_out, via1_data_out;
     wire       via0_irq, via1_irq;
     wire [7:0] via0_pa_out, via0_pb_out, via0_ddra, via0_ddrb, via0_pa_in;
     wire [7:0] via1_pa_out, via1_pb_out, via1_ddra, via1_ddrb, via1_pa_in;
 
-    // The core's clock, see the header: a bus cycle that carried one of the
-    // core's ops, ticked at its commit, or a fast op; never a dummy.
+    // The two clocks, see the header.  The core's: a bus cycle that carried
+    // one of the core's ops, ticked at its commit, or a fast op; never a
+    // dummy.  Real time: the bus's phi0.
     wire via_slow_clock = enabled && ((op_commit && !op_dummy) || fast_tick);
+    wire via_real_clock = enabled && bus_tick;
     wire via0_strobe    = op_commit && hit_q && cs_q[0];
     wire via1_strobe    = op_commit && hit_q && cs_q[1];
 
     wire ay_selects = phasor && (mode == 3'd5 || mode == 3'd7);
     wire ay_native  = phasor && (mode == 3'd5);
 
-    // The AY clock: the chosen time base's tick, and in native mode a second
-    // pulse the clock after (the host's `div_` 4 for 8 - AppleWin's clock
-    // scale factor 2).  Under turbo the core's ticks can come every clock
-    // and the doubling saturates; that sound is not music in any case.
-    wire  ay_tick = enabled && (ay_realtime ? bus_tick : via_slow_clock);
+    // The AY clock: real time, and in native mode a second pulse the clock
+    // after (the host's `div_` 4 for 8 - AppleWin's clock scale factor 2).
+    wire  ay_tick = via_real_clock;
     logic ay_dbl_q = 1'b0;
     always_ff @(posedge clk) ay_dbl_q <= ay_tick && ay_native;
     wire  ay_ce = ay_tick || ay_dbl_q;
@@ -314,6 +334,7 @@ module mockingboard #(
         else if (op_commit && !op_dummy && dev_hit_q)  mode <= (op_addr[3] ? 3'd0 : mode) | op_addr[2:0];
     end
 
+    // The core-time ledger: what the bus reads.  Ports and IRQ open.
     via6522 via0 (
         .clk        (clk),
         .reset      (via_reset),
@@ -322,18 +343,18 @@ module mockingboard #(
         .addr       (op_addr[3:0]),
         .data_in    (op_wdata),
         .data_out   (via0_data_out),
-        .irq        (via0_irq),
+        .irq        (),
         .slow_clock (via_slow_clock),
-        .porta_in   (via0_pa_in),
+        .porta_in   (via0_pa_in),   // the AYs' read-back: the same registers in both ledgers
         .portb_in   (8'hFF),        // input pins float high (AppleWin GH#1260)
         .ca1_in     (ssi_ca1_n[0]), // the secondary speech chip's A/!R
         .ca2_in     (1'b0),
         .cb1_in     (1'b0),
         .cb2_in     (1'b0),
-        .porta_out  (via0_pa_out),
-        .portb_out  (via0_pb_out),
-        .ddra_out   (via0_ddra),
-        .ddrb_out   (via0_ddrb),
+        .porta_out  (),
+        .portb_out  (),
+        .ddra_out   (),
+        .ddrb_out   (),
         .ca2_out    (),
         .cb1_out    (),
         .cb2_out    ()
@@ -347,11 +368,62 @@ module mockingboard #(
         .addr       (op_addr[3:0]),
         .data_in    (op_wdata),
         .data_out   (via1_data_out),
-        .irq        (via1_irq),
+        .irq        (),
         .slow_clock (via_slow_clock),
         .porta_in   (via1_pa_in),
-        .portb_in   (8'hFF),        // input pins float high (AppleWin GH#1260)
+        .portb_in   (8'hFF),
         .ca1_in     (ssi_ca1_n[1]), // the primary speech chip's A/!R
+        .ca2_in     (1'b0),
+        .cb1_in     (1'b0),
+        .cb2_in     (1'b0),
+        .porta_out  (),
+        .portb_out  (),
+        .ddra_out   (),
+        .ddrb_out   (),
+        .ca2_out    (),
+        .cb1_out    (),
+        .cb2_out    ()
+    );
+
+    // The real-time ledger: the AYs and the interrupt.  Read data open.
+    via6522 via0_rt (
+        .clk        (clk),
+        .reset      (via_reset),
+        .strobe     (via0_strobe),
+        .we         (!op_rw),
+        .addr       (op_addr[3:0]),
+        .data_in    (op_wdata),
+        .data_out   (),
+        .irq        (via0_irq),
+        .slow_clock (via_real_clock),
+        .porta_in   (via0_pa_in),
+        .portb_in   (8'hFF),
+        .ca1_in     (ssi_ca1_n[0]),
+        .ca2_in     (1'b0),
+        .cb1_in     (1'b0),
+        .cb2_in     (1'b0),
+        .porta_out  (via0_pa_out),
+        .portb_out  (via0_pb_out),
+        .ddra_out   (via0_ddra),
+        .ddrb_out   (via0_ddrb),
+        .ca2_out    (),
+        .cb1_out    (),
+        .cb2_out    ()
+    );
+
+    via6522 via1_rt (
+        .clk        (clk),
+        .reset      (via_reset),
+        .strobe     (via1_strobe),
+        .we         (!op_rw),
+        .addr       (op_addr[3:0]),
+        .data_in    (op_wdata),
+        .data_out   (),
+        .irq        (via1_irq),
+        .slow_clock (via_real_clock),
+        .porta_in   (via1_pa_in),
+        .portb_in   (8'hFF),
+        .ca1_in     (ssi_ca1_n[1]),
         .ca2_in     (1'b0),
         .cb1_in     (1'b0),
         .cb2_in     (1'b0),

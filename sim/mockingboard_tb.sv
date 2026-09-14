@@ -49,6 +49,18 @@ module mockingboard_tb;
         if ( phi0 && phase_ctr == PHI0_HIGH - 1) begin phi0 <= 0; phase_ctr <= 0; end
     end
 
+    // One real-time tick a bus cycle, as apple_bus_read's data_tick.
+    reg  phi0_q = 0;
+    always @(posedge clk) phi0_q <= phi0;
+    wire bus_tick = phi0 && !phi0_q;
+
+    // An accelerated core, when asked: three fast ticks a bus cycle, spaced
+    // through phi0 low, so the core's time runs at 4x the bus's.
+    reg     accel = 1'b0;
+    reg     fast_tick = 1'b0;
+    always @(posedge clk)
+        fast_tick <= accel && !phi0 && (phase_ctr == 10 || phase_ctr == 20 || phase_ctr == 30);
+
     // ---- the scripted CPU ---------------------------------------------------
     // One op at a time: bus_op() presents it and returns when the driver has
     // finished the bus cycle that carried it (cyc_en), exactly the lockstep
@@ -132,9 +144,10 @@ module mockingboard_tb;
         .slot_assign (slot_assign), .phasor (phasor),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
-        // Without the sequencer: every cycle carries an op, no fast ops.
-        .op_dummy (1'b0), .fast_tick (1'b0),
-        .bus_tick (1'b0), .ay_realtime (1'b0), .ay_out (),
+        // Without the sequencer: every cycle carries an op, no fast ops, and
+        // real time is the phi0 the driver is on.
+        .op_dummy (1'b0), .fast_tick (fast_tick),
+        .bus_tick (bus_tick), .ay_out (),
         .rd_claim (rd_claim), .rd_data (rd_data),
         .irq (mb_irq)
     );
@@ -276,6 +289,48 @@ module mockingboard_tb;
         else
             $display("  ok: IFR reads %02x - IRQ up, T1 the cause", cpu_din);
         bus_read(VIA0 | T1CL);              // tidy: acknowledge
+
+        // --- case 6a / two sets of books under a 4x core ---------------------
+        // The core runs at 4x (three fast ticks a bus cycle).  A detection
+        // routine reads the counter back and must see the CORE's cycles
+        // moved; the music player takes the interrupt and must get it after
+        // the programmed period of REAL time.  Same write, two answers.
+        accel = 1'b1;
+        repeat (2) @(posedge cyc_en);
+        bus_write(VIA0 | T1CL, 8'd144);     // 400 = $0190
+        t1_start = bus_cycles;
+        bus_write(VIA0 | T1CH, 8'd1);
+        repeat (10) bus_read(16'h1234);     // 10 bus cycles = 40 core cycles
+        bus_read(VIA0 | T1CH);              // the high byte: 400 - ~44 = $01
+        irq_at = cpu_din;
+        bus_read(VIA0 | T1CL);              // (a T1C-L read; the flag is not up yet)
+        irq_at = irq_at * 256 + cpu_din;
+        // 12 bus cycles from the load to the low-byte read = 48 core ticks,
+        // give or take the tick-vs-commit phase; in bus time it would be 12.
+        if (irq_at > 400 - 44 || irq_at < 400 - 52) begin
+            $display("  T1C reads %0d after 12 bus cycles at 4x", irq_at);
+            fail("the counter read back is not in the core's time");
+        end else
+            $display("  ok: 4x core - T1C reads %0d after 12 bus cycles: the core's %0d ticks", irq_at, 400 - irq_at);
+        irq_at = -1;
+        while (irq_at < 0 && (bus_cycles - t1_start) < 600) begin
+            bus_read(16'h1234);
+            if (mb_irq) irq_at = bus_cycles - t1_start;
+        end
+        if (irq_at < 0)
+            fail("T1 never interrupted under the 4x core");
+        else if (irq_at < 400 || irq_at > 410)
+            fail("the T1 interrupt did not come in real time under the 4x core");
+        else
+            $display("  ok: 4x core - the IRQ came after %0d BUS cycles, the real 400", irq_at);
+        // The handler's acknowledge clears the real-time book too.
+        bus_read(VIA0 | T1CL);
+        bus_read(16'h1234);
+        bus_read(16'h1234);
+        if (mb_irq !== 1'b0) fail("reading T1C-L did not clear the real-time interrupt");
+        else                 $display("  ok: reading T1C-L clears the real-time book's flag");
+        accel = 1'b0;
+        repeat (2) @(posedge cyc_en);
 
         // --- case 7 / the machine's reset resets the card --------------------
         res_sync = 1'b0;

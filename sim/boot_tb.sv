@@ -357,7 +357,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
-        .il_cyc_en (iline_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
+        .il_cyc_en (iline_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
         .cyc_en (cpu_cyc_en), .d_din (d_din_w),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok), .wr_en (turbo_wr),
         .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick), .pending (d_pending_w),
@@ -630,7 +630,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .op_addr (p_addr), .op_rw (p_rw), .op_wdata (p_wdata),
         .op_present (p_present), .op_commit (p_commit), .op_dummy (p_dummy),
         .fast_tick (seq_fast_tick_w || turbo_tick || dline_tick),
-        .bus_tick (bus_tick), .ay_realtime (1'b0), .ay_out (mb_ay_out),
+        .bus_tick (bus_tick), .ay_out (mb_ay_out),
         .rd_claim (mb_rd_claim), .rd_data (mb_rd_data), .irq (mb_irq)
     );
 

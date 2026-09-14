@@ -105,7 +105,6 @@ module audio_tb;
 
     // ---- the DUTs -----------------------------------------------------------
     reg         fast_tick   = 1'b0;
-    reg         ay_realtime = 1'b0;
     reg         audio_on    = 1'b0;
     reg  [31:0] audio_rate  = 32'd1894081;
     wire [39:0] ay_out;
@@ -120,7 +119,7 @@ module audio_tb;
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
         .op_dummy (1'b0), .fast_tick (fast_tick),
-        .bus_tick (bus_tick), .ay_realtime (ay_realtime), .ay_out (ay_out),
+        .bus_tick (bus_tick), .ay_out (ay_out),
         .rd_claim (rd_claim), .rd_data (rd_data),
         .irq (mb_irq)
     );
@@ -293,23 +292,19 @@ module audio_tb;
         wait_samples(100);
         edges0 = ay_edges;
         wait_samples(2205);
-        $display("  AY core time: %0d periods in 2205 samples (expect ~50), peak %0d (expect ~10924)", ay_edges - edges0, ay_max);
+        $display("  AY at 1x: %0d periods in 2205 samples (expect ~50), peak %0d (expect ~10924)", ay_edges - edges0, ay_max);
         if (ay_edges - edges0 < 48 || ay_edges - edges0 > 52) fail("AY tone period wrong in core time");
         if (ay_max < 16'd10500 || ay_max > 16'd11300) fail("AY peak not a third of full scale");
 
-        // 4. the time base
+        // 4. the time base: the AYs run in real time whatever the core does
+        // (rtl/mockingboard.sv, two sets of books) - a 4x core leaves the
+        // pitch alone
         ft_on = 1'b1;
         wait_samples(100);
         edges0 = ay_edges;
         wait_samples(2205);
-        $display("  AY core time at 4x: %0d periods (expect ~199)", ay_edges - edges0);
-        if (ay_edges - edges0 < 194 || ay_edges - edges0 > 204) fail("AY tone did not follow the core's clock");
-        ay_realtime = 1'b1;
-        wait_samples(100);
-        edges0 = ay_edges;
-        wait_samples(2205);
         $display("  AY real time at 4x: %0d periods (expect ~50)", ay_edges - edges0);
-        if (ay_edges - edges0 < 48 || ay_edges - edges0 > 52) fail("AY tone did not hold in real time");
+        if (ay_edges - edges0 < 48 || ay_edges - edges0 > 52) fail("AY tone did not hold in real time under a 4x core");
         ft_on = 1'b0;
 
         // 5. the framing so far

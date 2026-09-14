@@ -337,6 +337,12 @@ if {$snoop || $master} {
             [file join $root constr apple_bus_master.xdc] \
         ]
     }
+    # The FT601 output-enable flops pinned beside their pads: a hand-written,
+    # per-board placement file (site coordinates are the die's), present only
+    # for boards that need it (constr/pt_v2/ft601_place.xdc says why).
+    if {[file exists [file join $cdir ft601_place.xdc]]} {
+        add_files -fileset constrs_1 -norecurse [file join $cdir ft601_place.xdc]
+    }
 } elseif {$ft601} {
     add_files -fileset constrs_1 -norecurse [list \
         [file join $cdir board.xdc] \

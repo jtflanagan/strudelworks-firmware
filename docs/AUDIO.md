@@ -179,14 +179,14 @@ Ensoniq's data arriving intact while the peak beside them read zero.
 tied low and the CHANNEL outputs open, so that the register file answered
 a PSG READ and the generators pruned away.  Now they run:
 
-- **`ay_ce`**, the PSG clock enable, comes from `mockingboard` and is one of
-  two things by AUDIO_CTRL bit 1: the **core's clock** (`via_slow_clock`,
-  one per op the core completes - the VIA timers' time base, machine time)
-  or **real time** (`bus_tick`, one per phi0 cycle of the real bus, whatever
-  the core is doing).  In Phasor native mode the AY clock is doubled, as the
-  host doubled it (`div_` 4 instead of 8): a second CE pulse follows each
-  tick.  Under turbo the core-time CE saturates at one per clock; the sound
-  of a 70x machine is not music in either time base, see "Decimation".
+- **`ay_ce`**, the PSG clock enable, comes from `mockingboard` and is
+  **real time**: `bus_tick`, one per phi0 cycle of the real bus, whatever
+  the core is doing - the clock of the real-time VIA ledger that drives the
+  chips (MOCKINGBOARD.md "Two sets of books", 2026-09-14).  Until then
+  AUDIO_CTRL bit 1 chose between that and the core's clock; the bit is
+  still accepted and now inert.  In Phasor native mode the AY clock is
+  doubled, as the host doubled it (`div_` 4 instead of 8): a second CE
+  pulse follows each tick.
 - **`SEL=0`** (the /8 prescaler, so a tone flips every 8 * period clocks,
   the datasheet's 16 * period a full wave) and **`MODE=1`**, the AY half of
   the core's volume table - **replaced with AppleWin's levels** (`kDac` in
@@ -226,14 +226,13 @@ costs is below anything audible, so K is a constant and there is no divide.
 That is the whole decimation, and it is the physically honest one: at 1x
 it is exactly the host's speaker (a box average of the high cycles over
 23.14 Apple cycles, then the host's triangle and DC blocker) and a
-band-limited AY; under acceleration the chips run in whatever time base
-AUDIO_CTRL chose and the window samples what a cone or an amplifier would
-see of it - in core time an octave up at 2x and fading to a DC that the
-host's blocker removes at high ratios (an Apple whose crystal runs faster),
-in real time the right pitch at the VIA timers' tempo (an accelerator
+band-limited AY; under acceleration the chips run in real time and the
+window samples what a cone or an amplifier would see of it - the right
+pitch, at the tempo of the real-time VIAs' interrupts (an accelerator
 card).  Neither is the shelved "time compression" (`shelved/AUDIO_PACING.md`
-on the host) nor the old ring's chunk-dropping; the user picks the time
-base by ear and it is a register bit.
+on the host) nor the old ring's chunk-dropping.  (Core time - an octave up
+at 2x, fading to a DC at high ratios - was the other setting of AUDIO_CTRL
+bit 1 until the VIAs got their real-time ledger, MOCKINGBOARD.md.)
 
 ## Oversampling, on the host's request (2026-09-07)
 
@@ -274,7 +273,7 @@ above the capture (`rtl/msg_arb.sv`).  A burst delays a reply by at most
 
 | address | name | |
 |---|---|---|
-| `0x8000_00F0` | AUDIO_CTRL | `[0]` stream on, `[1]` AY clock: 0 core time, 1 real time; readback adds `[16]` stream active |
+| `0x8000_00F0` | AUDIO_CTRL | `[0]` stream on, `[1]` inert (was the AY time base); readback adds `[16]` stream active |
 | `0x8000_00F4` | AUDIO_RATE | the NCO increment, `rate_hz * 2^32 / 100e6`; default 1 894 081 |
 | `0x8000_00F8` | AUDIO_STAT | `[15:0]` samples sent (mod 2^16), `[23:16]` drops, `[24]` FIFO full now |
 

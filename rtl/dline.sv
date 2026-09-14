@@ -158,6 +158,7 @@ module dline #(
 
     // The chain to the core: iline's cyc_en in, ours out; the byte.
     input  wire        il_cyc_en,     // the sequencer's, or an I retire
+    input  wire        seq_cyc_en,    // the sequencer's alone: its byte is the byte this clock
     input  wire [7:0]  accel_din,     // the sequencer's byte, when we do not serve
     input  wire [7:0]  i_din,         // iline's byte: what an I cycle consumed
     output wire        cyc_en,        // to the core
@@ -563,7 +564,17 @@ module dline #(
         logic [PTW-1:0] pt  [0:NSET-1];
         wire [127:0] srow = {rows[3][dq_sx[4*gw+3]], rows[2][dq_sx[4*gw+2]],
                              rows[1][dq_sx[4*gw+1]], rows[0][dq_sx[4*gw+0]]};
-        assign hitv[gw]  = cv[gw][dq_st[gw]] && (vt[dq_st[gw]] == stag) &&
+        // THE TAG COMPARE IN LUTS (C2, 2026-09-14).  Written as one 9-bit
+        // equality, synthesis shared it with the miss register's compare
+        // and built a carry-chain comparator: LUT6 -> CARRY4 -> LUT4, three
+        // levels at the head of the design's longest chain (the serve into
+        // the core's ALU, 17 levels).  Three 3-bit thirds, KEEP'd apart so
+        // they stay LUT6s, and the hit is one LUT over them: two levels.
+        wire [TW-1:0] vt_rd = vt[dq_st[gw]];
+        (* KEEP = "TRUE" *) wire tm0 = (vt_rd[2:0]    == stag[2:0]);
+        (* KEEP = "TRUE" *) wire tm1 = (vt_rd[5:3]    == stag[5:3]);
+        (* KEEP = "TRUE" *) wire tm2 = (vt_rd[TW-1:6] == stag[TW-1:6]);
+        assign hitv[gw]  = cv[gw][dq_st[gw]] && tm0 && tm1 && tm2 &&
                            (!GS || (dq_b0 ? cvz[gw][dq_st[gw]] :
                                     dq_d  ? cvd[gw][dq_st[gw]] :
                                             ((om[0] && cvo[0][gw][dq_st[gw]]) ||
@@ -1003,14 +1014,28 @@ module dline #(
     assign d_commit = retire;
     assign cyc_en   = il_cyc_en || retire;
     // The core's byte is one flat one-hot OR - the shadow's, each way's
-    // (wbyte is already gated), the last byte's and, when nothing here
-    // serves, the sequencer's - not a mux after an OR after an OR: two LUT
-    // levels where the build at +0.008 spent three.
+    // (wbyte is already gated), the last byte's, the last row's - and the
+    // sequencer's INSTEAD when the sequencer is the one completing this
+    // clock (C1, 2026-09-14).  The OR was flat in name only: the last
+    // byte's and last row's terms were gated by !cam_hit (the OR of the
+    // four way hits) and the sequencer's by !serve_hit, so the way hit ran
+    // in series with the byte OR - four levels from the hit to d_din.  The
+    // servers are one-hot by construction (the shadow and the cache never
+    // hold the same line; the last byte and the last row, when they also
+    // hit, carry that line's byte - every write clears the one and splices
+    // the other; the I/O servers are the IIgs's), so the gates were
+    // redundant: the servers' bytes OR flat.  The sequencer's byte is
+    // selected by ITS OWN cyc_en - registered-rooted, two levels: decided
+    // is a page_cache register - which is exactly the clock the core takes
+    // it, and never a clock this front retires on (turbo_ok needs the
+    // sequencer idle in S_DECIDE).  A stale front hit on the sequencer's
+    // clock, which the fc_q||claim_q fence exists for, therefore cannot
+    // reach the core.  The hit's fastest route to d_din is now a gate and
+    // two levels of OR.
+    wire [7:0] front_byte = ({8{sh_hit}} & dq_byte) | wbyte[0] | wbyte[1] | wbyte[2] | wbyte[3] |
+                            ({8{lb_hit}} & lb_byte) | ({8{lr_hit}} & lr_byte);
     assign d_din    = GS ? (sv_hit_q ? sv_byte_q : accel_din)
-                         : (({8{sh_hit}} & dq_byte) | wbyte[0] | wbyte[1] | wbyte[2] | wbyte[3] |
-                            ({8{lb_hit && !sh_hit && !cam_hit}} & lb_byte) |
-                            ({8{lr_hit && !sh_hit && !cam_hit && !lb_hit}} & lr_byte) |
-                            ({8{!serve_hit}} & accel_din));
+                         : (seq_cyc_en ? accel_din : front_byte);
     assign claim    = claim_q;
 
     // The last byte follows the retiring edge: whatever READ completed -

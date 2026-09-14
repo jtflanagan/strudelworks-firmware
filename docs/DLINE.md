@@ -555,6 +555,32 @@ path is the data front's serve again (rows index copy -> way 0's row ->
 byte mux -> the OR -> d_din -> the core, 15 levels) with three times the
 margin it had.
 
+**The serve cone, three levels shorter (2026-09-14, branch mock_cook_books):**
+the two-ledger Mockingboard build put the fronts' placement under water and
+the census named this cone again: dq_st -> the tag LUTRAM -> a carry-chain
+compare -> the way-hit gate -> the priority OR -> d_din -> the core's ALU
+case mux -> a/x/y/md, 17 levels (dline 8, core 9), two thirds wire.  The
+candidate registers are the earliest point there is - d_pred lands in them
+at 13 levels with +0.14 ns, so nothing can be pre-read off its cone (the
+two failures above, confirmed by today's numbers) - so the cuts are in the
+serve cycle.  C1: the OR was flat in name only - the last byte's and last
+row's terms were gated by !cam_hit and the sequencer's by !serve_hit, the
+way hit in series with the byte OR; the servers are one-hot by
+construction (the estate rule, the write-clears-and-splices rule), so the
+front's bytes OR ungated and the sequencer's byte is selected by the
+sequencer's OWN cyc_en (a new port, seq_cyc_en; two register-rooted
+levels, since `decided` is a page_cache register), which is exactly the
+clock the core takes it and never a clock this front retires on.  C2: the
+9-bit tag compare as three KEEP'd 3-bit LUT6 thirds and one LUT over
+them, where synthesis had shared it with the miss register's compare and
+built LUT6 -> CARRY4 -> LUT4.  Result: the family at 14-16 levels, logic
+3.27 -> 2.29 ns on its worst path; accel bench cycle-for-cycle identical
+(54.1x, 23439 cycles), ProDOS and Nox boot; TIMING MET +0.004 (IIe) /
++0.018 (IIgs).  What is left is the core's nine: the ALU case mux with the
+decimal adjust inside it (a load bypass would take the loads off it; the
+flags and ADC/SBC stay), and the d_din -> d_pred arc for the indirect
+modes.  Both are core work.
+
 ### Rung 4 - streams: TRIED AND REVERTED (2026-09-07)
 
 Built as planned on a branch (stream table beside the CAM, descending

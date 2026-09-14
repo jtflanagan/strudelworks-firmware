@@ -1333,7 +1333,7 @@ module master_top #(
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
         .cyc_is_i      (cpu_cyc_is_i),
-        .il_cyc_en     (iline_cyc_en),
+        .il_cyc_en     (iline_cyc_en), .seq_cyc_en (seq_cyc_en),
         .accel_din     (cpu_din),
         .i_din         (i_din_w),
         .cyc_en        (cpu_cyc_en),
@@ -2364,8 +2364,11 @@ module master_top #(
         .op_commit     (p_commit),
         .op_dummy      (p_dummy),
         .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
+        // The real-time ledger's clock and the AYs' (rtl/mockingboard.sv:
+        // two sets of books).  AUDIO_CTRL[1], audio_realtime, chose the AYs'
+        // time base before the split; the AYs run in real time now and the
+        // bit is kept for the host's sake, inert.
         .bus_tick      (bus_tick),
-        .ay_realtime   (audio_realtime),
         .ay_out        (mb_ay_out),
         .rd_claim      (mb_rd_claim),
         .rd_data       (mb_rd_data),

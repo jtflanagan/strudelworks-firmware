@@ -418,10 +418,23 @@ module iline #(
     // sequencer or the target path instead, the valid stays low and the
     // lookup self-heals off tgt_q a cycle later - the one-beat fallback,
     // paid only there.  A branch's dummy cycle absorbs even that.
-    wire [15:0] br_tgt_spec = pc_addr + 16'd1 + {{8{i_byte_q[7]}}, i_byte_q};
-    wire        spec_pending = (bk_q == BK_BR) ? br_taken
-                                               : (bk_q == BK_ABS && bk_hi);
-    wire [15:0] spec_tgt = (bk_q == BK_BR) ? br_tgt_spec : {i_byte_q, lo_q};
+    //
+    // A BRANCH DOES NOT SPECULATE HERE (2026-09-14, the scan-target
+    // experiment).  It used to: the lookup address was pc_addr + 1 + the
+    // candidate offset, gated by the flags verdict - a 16-bit add off the
+    // core's PC and carry flag at the head of the target lookup, the
+    // longest chain in the design (17 levels, -0.121 ns in the two-ledger
+    // Mockingboard build).  But a taken branch always spends a dummy cycle
+    // between its operand and its target fetch, and the lookup below
+    // self-heals off tgt_q - the registered truth from the resolve - on
+    // exactly that clock, so the byte is registered before the target fetch
+    // asks for it whether or not it was speculated a clock earlier.  Only a
+    // JMP/JSR has no such clock: its lookup still runs on the high byte
+    // being served, register-fed ({i_byte_q, lo_q}, no arithmetic).  The
+    // accel bench's zero-stall count (cnt_tgt_serves) is the proof either
+    // way.
+    wire        spec_pending = (bk_q == BK_ABS && bk_hi);
+    wire [15:0] spec_tgt = {i_byte_q, lo_q};
     wire [15:0] tgt_look = spec_pending ? spec_tgt : tgt_q;
     wire [15:0] tgt_inc  = tgt_q + 16'd1;
     wire        ht0 = v[0] && (tgt_look[15:4] == vtag[0]);

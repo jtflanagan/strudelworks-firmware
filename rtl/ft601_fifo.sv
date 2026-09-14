@@ -103,7 +103,17 @@ module ft601_fifo (
     // and cannot be packed beside it (constr/ft601.xdc).  KEEP and the
     // equivalent-register attribute stop synthesis folding them back into
     // one.
-    (* KEEP = "TRUE", EQUIVALENT_REGISTER_REMOVAL = "NO" *) logic [3:0] OE_lane = 4'b1111;
+    //
+    // EIGHT COPIES SINCE 2026-09-14: one per lane for the DATA pads and one
+    // per lane for the BE pad, because on the Pt V2 the two halves of a lane
+    // are not neighbours - lanes 0 and 1 have their sixteen data pads on
+    // the LEFT edge (bank 16, IOB_X0Y51-72) and their BE pads on the RIGHT
+    // (bank 15, with lanes 2 and 3), so one flop per lane could not sit by
+    // both and the build mcb_nobrspec left lane 0's data enables 11 ns of
+    // net from the pads (-0.360).  The copies are pinned next to their pads
+    // by constr/pt_v2/ft601_place.xdc.
+    (* KEEP = "TRUE", EQUIVALENT_REGISTER_REMOVAL = "NO" *) logic [3:0] OE_data = 4'b1111;
+    (* KEEP = "TRUE", EQUIVALENT_REGISTER_REMOVAL = "NO" *) logic [3:0] OE_be   = 4'b1111;
     (* KEEP = "TRUE" *) logic [1:0]  data_queue_count = 2'd0;
     (* KEEP = "TRUE" *) logic [3:0]  state            = S_IDLE;
 
@@ -188,8 +198,8 @@ module ft601_fifo (
     genvar gl;
     generate
         for (gl = 0; gl < 4; gl = gl + 1) begin : g_oe_lane
-            assign ft_be[gl]              = OE_lane[gl] ? 1'b1 : 1'bz;
-            assign ft_data[8*gl+7:8*gl]   = OE_lane[gl] ? DATA_OUT[0][8*gl+7:8*gl] : 8'hzz;
+            assign ft_be[gl]              = OE_be[gl]   ? 1'b1 : 1'bz;
+            assign ft_data[8*gl+7:8*gl]   = OE_data[gl] ? DATA_OUT[0][8*gl+7:8*gl] : 8'hzz;
         end
     endgenerate
     // Request whenever there is room for one more, INCLUDING when empty.  The
@@ -259,7 +269,10 @@ module ft601_fifo (
     // -------------------------------------------------------------------------
 
     always_ff @(posedge clk) begin
-        OE_lane <= {4{(rst || ft_rxf || ((state != S_RX_ACTIVE)    && (state != S_RX_WAIT3) &&
+        OE_data <= {4{(rst || ft_rxf || ((state != S_RX_ACTIVE)    && (state != S_RX_WAIT3) &&
+                                         (state != S_RX_WAIT2)     && (state != S_RX_COOLDOWN1) &&
+                                         (state != S_RX_COOLDOWN2)))}};
+        OE_be   <= {4{(rst || ft_rxf || ((state != S_RX_ACTIVE)    && (state != S_RX_WAIT3) &&
                                          (state != S_RX_WAIT2)     && (state != S_RX_COOLDOWN1) &&
                                          (state != S_RX_COOLDOWN2)))}};
         ft_oe <= (rst || ft_rxf || ((state != S_RX_ACTIVE)    && (state != S_RX_WAIT3) &&
