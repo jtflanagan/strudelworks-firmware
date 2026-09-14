@@ -162,6 +162,23 @@ before centring.  `gs_ddr3_center` (MET +0.017 / +0.023) on hardware: calibrates
 (lane 1 = 11 - 7; lane 0 at 3), the masks as before, Arkanoid boots, 0 restarts.  The sample
 point now sits 7 taps (550 ps) from the setup edge instead of 3.
 
+## The census: the same RTL, build after build
+
+`build/ddr3_census.sh` prints the clock legs of every build from its forensics text; the
+hardware columns are read over the link after each load (`ddreye0/1`, `ddrtap`, DDR3_DBG1/3).
+All builds from `gs_ddr3_center` on are the same RTL (only the build stamp differs).  The
+placer put the controller differently every time (cells in X0Y3 / X0Y2: 4929/1412,
+3807/2532, 4454/1885, 3588/2745) and WNS ranged +0.000 to +0.143; every DDR3 number - the clock legs, the
+two eyes, the tap, the DQS index, the DBG1 word bit for bit - came out identical.  The
+numbers that decide calibration no longer depend on where the placer puts the fabric.
+
+| build | WNS | CK-CMD | tDQSS | eye lane 0 / 1 | DQ tap | DQS index | restarts | calibrates |
+|---|---|---|---|---|---|---|---|---|
+| gs_ddr3_center | +0.017 | +0.052 | +0.016 | 000007ff / 00000fff | 4 (3) | 9 | 0 | yes, Arkanoid |
+| gs_ddr3_var1 | +0.000 | +0.052 | +0.016 | 000007ff / 00000fff | 4 | 9 | 0 | yes, Arkanoid |
+| gs_ddr3_var2 | +0.143 | +0.052 | +0.016 | 000007ff / 00000fff | 4 | 9 | 0 | yes, Arkanoid |
+| gs_ddr3_var3 | +0.001 | +0.052 | +0.016 | 000007ff / 00000fff | 4 | 9 | 0 | yes, Arkanoid |
+
 ## Instruments
 
 - `build/ddr3_forensics.sh TAG [WORKDIR]` / `build/ddr3_forensics.tcl`: sections A (the CK
@@ -192,7 +209,8 @@ point now sits 7 taps (550 ps) from the setup edge instead of 3.
    setup margin a centred sample would have - the margin a busier bit's noise eats.  Hence
    change 4.
 4. DONE: `gs_ddr3_center` - the DQ sample point centred (7 taps from the setup edge, was 3).
-5. Then, ranked by the numbers: MIG's DIC/RTT_NOM (does the eye widen?), a bounded tap walk
+5. DONE: the census - four builds of one RTL, four placements, one set of DDR3 numbers.
+6. Then, ranked by the numbers: MIG's DIC/RTT_NOM (does the eye widen?), a bounded tap walk
    (the wrap seen in the model), locality constraints, the depth cuts, and write leveling
    without ODELAY (CK on its own MMCM output with dynamic fine phase shift stepping under the
    existing write-level feedback machine).  And the variance census: several builds of one
