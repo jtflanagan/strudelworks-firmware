@@ -190,7 +190,16 @@ module gs_io #(
     output wire [7:0]  fd35_seeks,
     output wire [7:0]  fd35_late,
     output wire [15:0] fd35_fill_max,
-    output wire        fd35_stall
+    output wire        fd35_stall,
+    // THE 5.25" DRIVES ON THE IWM: FD_DRIVE1/2, the Disk II's registers,
+    // [0] drive 1 and [1] drive 2 - and their readback.  On a IIgs the Disk
+    // II card is not built (rtl/master_top.sv g_no_fd).
+    input  wire [1:0]  fd525_inserted,
+    input  wire [1:0]  fd525_wp,
+    input  wire [25:0] fd525_nibbles,
+    input  wire [11:0] fd525_tracks,
+    output wire [1:0]  fd525_stale,
+    output wire [13:0] fd525_phase
 );
 
     // A IIgs sees I/O at $C0xx in a PAIR bank only - $00/$01 and the Mega
@@ -396,15 +405,15 @@ module gs_io #(
         .cnt_strobes (clk_cnt_strobes), .cnt_bad (clk_cnt_bad)
     );
 
-    // ---- the IWM, a stub with no drive behind it -----------------------------
+    // ---- the IWM: the 3.5" drive and the two 5.25" drives (docs/IWM35.md) ----
     wire [7:0] iwm_rd, iwm_cnt_mode_wr;
     gs_iwm u_iwm (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_lo (u_addr[7:0]), .op_rw (u_rw), .op_wdata (u_wdata), .act (act),
         .rd_byte (iwm_rd), .apple35_sel (c031_diskreg[6]), .c031_ctrl (c031_diskreg[7]),
-        // The platter turns in the core's time, a nibble every 16 ticks at
-        // 1 MHz and every 44.8 with $C036's speed bit set.
-        .tick (core_tick), .fast_cpu (gs_cyareg[7]),
+        // The platters turn in the core's cycles alone: a nibble every 44.8
+        // for the 3.5" drive and every 32 for a 5.25", whatever $C036 asks.
+        .tick (core_tick),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
         .tx_word (fd35_word), .tx_valid (fd35_valid), .tx_take (fd35_take),
@@ -413,6 +422,9 @@ module gs_io #(
         .stale_o (fd35_stale), .track_o (fd35_track), .side_o (fd35_side),
         .motor35_o (fd35_motor35), .motor_o (fd35_motor), .ctl_o (fd35_ctl),
         .seeks (fd35_seeks), .late (fd35_late), .fill_max (fd35_fill_max),
+        .d5_inserted (fd525_inserted), .d5_wp (fd525_wp),
+        .d5_nibbles (fd525_nibbles), .d5_tracks (fd525_tracks),
+        .d5_stale_o (fd525_stale), .d5_phase_o (fd525_phase),
         .stall_o (fd35_stall),
         .cnt_mode_wr (iwm_cnt_mode_wr)
     );

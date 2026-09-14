@@ -1,4 +1,22 @@
-Status: 2026-09-13, branch `gs_emulation`. **HARDWARE: the XMAS demo boots
+Status: 2026-09-13, branch `long_data`, UNCOMMITTED.  **THE 5.25" DRIVES ARE ON
+THE IWM, AND BOTH VIRTUAL DRIVES RUN ON THE CORE'S CYCLES ALONE** (the user's
+rule: a 5.25" nibble 32 cycles, a 3.5" 44.8, no speed request or slowdown).
+BENCH: ProDOS 2.4.3 and `wave.dsk` boot off 5.25" drive 1 through the ROM's
+internal slot 6 to the BITSY BYE selector (`sim/run_boot_gs_tb.sh --fd525=`,
+21 and 17 seeks); the XMAS demo off the 3.5" drive as before (the same 17
+seeks, head and last PC); GS/OS 12/0 with its disk unchanged; the ROM boot at
+the KEGS floor.  The Disk II card is not built at GS = 1; the host keeps its
+floppy service there without a slot ROM (cross-built).  Arkanoid's 3.5" boot
+still fails at the unlimited target on hardware (it boots at 2.8), and every
+3.5" read is made at the fast speed - so not the speed bit.  The bench does NOT
+reproduce that symptom: `boot_gs_tb` fails Arkanoid's IWM boot at BOTH 2.8x
+(145 seeks, the head back at track 0, still in the ROM at 8 M instructions) and
+unlimited (146) - a difference between the bench's model and the card or host,
+not the acceleration effect, and still open.  Build and hardware pending.  (The previous
+status - the 3.5" drive booting the XMAS demo on hardware, build
+`gs_build_msgfix` - is kept below.)
+
+Previous status: 2026-09-13, branch `gs_emulation`. **HARDWARE: the XMAS demo boots
 from the 3.5" drive on the IWM and runs, from a cold reset, with no
 keystroke** (`gs_xmas.conf`, `fd = off`, `hd = off`; 40 tracks streamed, 0
 late). What was in the way was two other SLOTS, not this chip - see "It
@@ -128,6 +146,90 @@ the direction with drive 2 selected and reads it back expecting to see it
 SmartPort probe, the empty-5.25" data byte that varies, the mode register.
 With `$C031` bit 6 clear the chip answers as it did - no 5.25" drive on
 this side; the Disk II is `rtl/floppy_card.sv` in its own slot.
+
+## The virtual drives run in the core's cycles (2026-09-13)
+
+**The user's rule:** a virtual IWM drive ignores every speed request and runs
+strictly on the soft core's cycles.  A nibble is a FIXED number of cycles - 32
+for a 5.25" drive, 44.8 for the 3.5" - whatever `$C036` asks, with no motor-on
+slowdown and no 1 MHz or wall time anywhere in the drive.  The loops a driver
+counts in cycles line up by construction, and the load runs at whatever speed
+the core is accelerated to.  A wall-time path is for a physical drive, if one
+is ever attached.
+
+The 3.5" drive used to follow `$C036` bit 7 as KEGS does (16 cycles at 1 MHz,
+44.8 at 2.8).  The fixed figure was measured before it was chosen: every one of
+the 3.5" data reads of the XMAS demo's boot (462,279) and Arkanoid's
+(1,295,128) was made with bit 7 SET, so the 3.5" drivers run their loops for
+2.8 MHz and 44.8 is the cycle count they expect - and for those loaders the fix
+changes nothing (the XMAS bench on the new drive: the same 17 seeks and fills,
+the same head, the same last PC).  The same measurement says the speed bit is
+NOT why Arkanoid's IWM boot fails at the unlimited target: the bench reproduces
+that failure (146 seeks, the head back at track 0, still in the ROM at 8 M
+instructions) with every read at 2.8 MHz, before and after the change.
+
+## The 5.25" drives (2026-09-13)
+
+`$C031` bit 6 clear selects them: two drives, the Disk II's behaviour behind
+the IWM's register face, and on a IIgs the Disk II card is NOT built
+(`rtl/master_top.sv` `g_no_fd`) - slot 6's `$C0Ex` is the internal IWM.
+
+- **The heads** are `rtl/floppy_card.sv`'s stepper: the four phases are
+  magnets, each drive's head a cog in half-tracks 0..79, and ten cycles after
+  the last phase access the selected drive's cog steps one half-track toward
+  the one energised neighbour (not at all with both on), while the IWM's
+  ENABLE is on.
+- **The data register** is the same machinery as the 3.5" side's, at 32 cycles
+  a nibble: latch mode hands each nibble out once; without it (the 5.25"
+  firmware's) a nibble is held seven cycles, the Disk II's hold, and then the
+  next shows shifting in.
+- **The 5.25" hold: until the read that takes it, or 24 cycles.**  The first
+  cut held a completed nibble the Disk II's seven cycles (`floppy_card`
+  `HOLD_TICKS`), and ProDOS 2.4.3 booted its sector 0 and then hung in its boot
+  block's reader for ever.  The bench's trace (instruction 1,308,597 on) says
+  why: the loop `LDA $C08C,X / BPL` is exactly EIGHT cycles here (the branch
+  from `$09FE` back to `$09FB` crosses a page, a fourth cycle in emulation
+  mode), the nibble exactly 32 - four polls a nibble, every one landing 7.4
+  cycles after the nibble completed, 0.4 past the hold.  After one `D5` the loop
+  never saw a byte with bit 7 again (`latch=AA v=1`, the read returning the
+  partial `01`).  A real drive never locks like that - ten-bit sync bytes and
+  spindle jitter keep the phase moving - but a cycle-exact stream cannot move,
+  so the hold has to be longer than any poll loop.  Clear-on-read keeps the
+  longer hold from returning a nibble twice to a search that polls again a few
+  cycles after a hit (`CMP #$D5 / BNE`); 24 cycles is well before the next
+  nibble at 32.  A deliberate departure from the Disk II and from KEGS's
+  non-latch arm, forced by the cycle rule.  The 3.5" side is unchanged.
+- **The status byte's bit 7** is the drive's write protect (`iwm.c`: `status =
+  dsk->write_prot`) - and every 5.25" drive reads PROTECTED while writes are not
+  built, so no DOS writes into a disk that would drop the bytes.
+- **One buffer for whichever drive is in use,** tagged {side, drive, track}.  A
+  fill starts only when the SELECTED drive has a disk and the buffer is not its
+  track, so `$C031` flicking to an empty 5.25" pair never throws away the 3.5"
+  track, and an insertion is remembered until its side is selected.
+- **The host is the Disk II's, unchanged.**  A 5.25" drive asks with FD_SEEK
+  (`0x20`, `{seq, chunk 0, track, drive}`) on the IWM's link source and takes
+  the seven FD_TRACK chunks (`0x1F`, `{seq, chunk, track, drive}` then 252 words,
+  152 in the last); FD_DRIVE1/2 (`0x8000_0040/44`) say what is in the drives
+  (inserted, write protect, nibbles, tracks) and read back the IWM's stale bits
+  and head positions, FD_STAT its seeks, late count and fill maximum.  The host
+  (`src/pipeline.cpp`) keeps the floppy service on a IIgs but sends no Disk II
+  ROM and sets no slot: `fd1 = IMAGE` puts a disk in drive 1.
+- **The bench:** `sim/run_boot_gs_tb.sh --fd525=IMAGE` - `tools/nib525.py`
+  nibblizes it exactly as the host's service does (its `--verify` rebuilds
+  ProDOS 2.4.3, the DOS 3.3 System Master and `wave.dsk` byte for byte) - with
+  no slot-7 SmartPort ROM sent, so the ROM's scan reaches slot 6.
+
+## The build, gs_iwm1 (2026-09-13)
+
+TIMING MET wns +0.038 whs +0.042, 0 of 95,257 failing, max depth 21; synthesis
+0 undriven, 0 multi-driven.  The worst path is the instruction front's; the
+>= 14 tail (256) is the old families.  **One new chain, named:**
+`u_iwm/nib_acc -> u_seq/swi_byte_q`, 13 levels, slack 0.487 - the constant
+divide that makes the "bits shifted in so far" of the partial byte
+(`nib_acc / 20` or `/ 28`), through the IWM's read byte and `gs_io`'s mux into
+the dispatcher's registered byte.  Cosmetic logic on a real path; the fix is to
+register the bit count every clock (it only has to look like a byte shifting
+in).  A follow-up, not a blocker.
 
 ## Registers and messages
 

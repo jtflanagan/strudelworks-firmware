@@ -131,6 +131,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // Name every IWM access with the byte it took and the
                     // drive's state after it, for the first N accesses.
                     parameter integer FD35_TRACE = 0,
+                    // THE 5.25" DRIVES ON THE IWM (rtl/gs_iwm.sv): a 140K
+                    // image nibblized by tools/nib525.py exactly as the host's
+                    // floppy service does it (35 tracks x 6656 bytes, 6384
+                    // nibbles a track), in drive 1, and the clocks the modelled
+                    // host takes to answer a seek.
+                    parameter FD525F = "fd525.hex",
+                    parameter integer HAS_FD525 = 0,
+                    parameter integer FD525_DELAY = 50000,
                     parameter OPSF  = "",
                     parameter PAGESF = "",
                     parameter ADB_KEYMAP = "adb_keymap.hex",
@@ -732,6 +740,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .fd35_late_clr (1'b0), .fd35_fill_clr (1'b0),
         .fd35_stale (), .fd35_track (), .fd35_side (), .fd35_motor35 (), .fd35_motor (),
         .fd35_ctl (), .fd35_seeks (), .fd35_late (), .fd35_fill_max (), .fd35_stall (fd35_stall),
+        .fd525_inserted (fd525_inserted), .fd525_wp (2'b11),
+        .fd525_nibbles ({13'd6384, 13'd6384}), .fd525_tracks ({6'd35, 6'd35}),
+        .fd525_stale (), .fd525_phase (),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
 
@@ -744,6 +755,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        fd35_valid, fd35_stall;
     wire        fd35_take = 1'b1;
     reg         fd35_inserted = 1'b0;
+    reg  [1:0]  fd525_inserted = 2'b00;   // the 5.25" drives on the IWM (--fd525)
     reg [7:0]   fd35_img [0:160*FD35_STRIDE-1];
     integer     fd35_counts [0:159];
     reg         fd35_hdr_seen = 1'b0;
@@ -758,15 +770,76 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         for (k = 0; k < 160; k = k + 1) if ($fscanf(fc, "%d\n", fd35_counts[k]) != 1) fd35_counts[k] = 0;
         $fclose(fc);
     end
+    // The IWM's one link source carries both drives' seeks: FD35_SEEK ($32)
+    // for the 3.5" drive, the Disk II's FD_SEEK ($20) for a 5.25" drive.
+    reg [7:0]   fd_hdr_type = 8'd0;
+    reg [7:0]   fd525_img [0:35*6656-1];
+    reg [7:0]   fd525_req_seq = 8'd0;
+    reg [5:0]   fd525_req_track = 6'd0;
+    reg         fd525_req_drive = 1'b0;
+    integer     fd525_pending = 0;
+    integer     fd525_seeks = 0, fd525_fills = 0;
+    initial if (HAS_FD525) $readmemh(FD525F, fd525_img);
     always @(posedge clk) if (fd35_valid && fd35_take) begin
         if (!fd35_hdr_seen) begin
-            if (fd35_word[15:8] == 8'h32) fd35_hdr_seen = 1'b1;
+            if (fd35_word[15:8] == 8'h32 || fd35_word[15:8] == 8'h20) begin
+                fd35_hdr_seen = 1'b1;
+                fd_hdr_type   = fd35_word[15:8];
+            end
         end else begin
             fd35_hdr_seen = 1'b0;
-            fd35_req_seq  = fd35_word[31:24];
-            fd35_req_qtr  = fd35_word[15:8];
-            fd35_pending  = fd35_pending + 1;
-            fd35_seeks    = fd35_seeks + 1;
+            if (fd_hdr_type == 8'h32) begin
+                fd35_req_seq  = fd35_word[31:24];
+                fd35_req_qtr  = fd35_word[15:8];
+                fd35_pending  = fd35_pending + 1;
+                fd35_seeks    = fd35_seeks + 1;
+            end else begin
+                fd525_req_seq   = fd35_word[31:24];
+                fd525_req_track = fd35_word[13:8];
+                fd525_req_drive = fd35_word[0];
+                fd525_pending   = fd525_pending + 1;
+                fd525_seeks     = fd525_seeks + 1;
+            end
+        end
+    end
+    // A 5.25" track as the host's floppy service sends it: seven FD_TRACK
+    // chunks, {seq, chunk, track, drive} then 252 nibble words (152 in the
+    // last), 6656 bytes a track.
+    task send_fd525_track(input [7:0] sq, input [5:0] trk, input drv);
+        integer c, n, k, base;
+        begin
+            for (c = 0; c < 7; c = c + 1) begin
+                n = (c < 6) ? 252 : 152;
+                @(negedge clk);
+                msg_valid <= 1'b1; msg_type <= 8'h1F; msg_len <= 8'(n + 1);
+                @(negedge clk);
+                msg_valid <= 1'b0; pay_valid <= 1'b1;
+                pay_data <= {sq, c[7:0], 2'd0, trk, 7'd0, drv};
+                @(negedge clk);
+                base = trk * 6656 + c * 1008;
+                for (k = 0; k < n; k = k + 1) begin
+                    pay_data <= {fd525_img[base + 4*k + 3], fd525_img[base + 4*k + 2],
+                                 fd525_img[base + 4*k + 1], fd525_img[base + 4*k]};
+                    @(negedge clk);
+                end
+                pay_valid <= 1'b0;
+                @(negedge clk);
+            end
+            fd525_fills = fd525_fills + 1;
+        end
+    endtask
+    initial if (HAS_FD525) begin : fd525_host
+        wait (boot_go);
+        repeat (100) @(negedge clk);
+        fd525_inserted = 2'b01;         // the disk goes in drive 1
+        forever begin
+            wait (fd525_pending > 0);
+            repeat (FD525_DELAY) @(negedge clk);
+            wait (!msg_lock);
+            msg_lock = 1'b1;
+            send_fd525_track(fd525_req_seq, fd525_req_track, fd525_req_drive);
+            msg_lock = 1'b0;
+            fd525_pending = fd525_pending - 1;
         end
     end
     task send_fd35_track(input [7:0] sq, input [7:0] qtr);
@@ -819,7 +892,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     integer fd35_traced = 0;
     always @(posedge clk) if (FD35_TRACE != 0 && u_gsio.u_iwm.iwm_act && fd35_traced < FD35_TRACE) begin
         fd35_traced = fd35_traced + 1;
-        $display("    IWM %8d %s $C0%02X %s%02X  ph=%b mot=%0d q7q6=%0d%0d sel35=%0d ctl=%0d stat35=$%X trk=%0d side=%0d m35=%0d stale=%0d pos=%0d latch=%02X v=%0d mode=$%02X fast=%0d acc=%0d",
+        $display("    IWM %8d %s $C0%02X %s%02X  ph=%b mot=%0d q7q6=%0d%0d sel35=%0d ctl=%0d stat35=$%X trk=%0d side=%0d m35=%0d stale=%0d pos=%0d latch=%02X v=%0d mode=$%02X per=%0d acc=%0d hp=%0d/%0d",
                  trace_instrs, u_gsio.u_iwm.op_rw ? "rd" : "WR", u_gsio.u_iwm.op_lo,
                  u_gsio.u_iwm.op_rw ? "-> " : "<- ",
                  u_gsio.u_iwm.op_rw ? u_gsio.u_iwm.rd_byte : u_gsio.u_iwm.op_wdata,
@@ -827,7 +900,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                  u_gsio.u_iwm.apple35_sel, u_gsio.u_iwm.c031_ctrl, u_gsio.u_iwm.stat35,
                  u_gsio.u_iwm.track35, u_gsio.u_iwm.side35, u_gsio.u_iwm.motor35, u_gsio.u_iwm.stale,
                  u_gsio.u_iwm.pos, u_gsio.u_iwm.latch, u_gsio.u_iwm.latch_valid, u_gsio.u_iwm.mode,
-                 u_gsio.u_iwm.fast_cpu, u_gsio.u_iwm.nib_acc);
+                 u_gsio.u_iwm.nib_period, u_gsio.u_iwm.nib_acc,
+                 u_gsio.u_iwm.hp[0], u_gsio.u_iwm.hp[1]);
     end
 
     // THE SCAN-LINE INTERRUPT'S INGREDIENTS, named as they happen: every SCB
@@ -1594,6 +1668,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                      u_gsio.u_iwm.q6, u_gsio.u_iwm.q7, u_gsio.u_iwm.phases,
                      u_gsio.u_iwm.mode[4:3], u_gsio.u_iwm.mode[2:0],
                      u_gsio.u_iwm.apple35_sel);
+            $display("    data reads served from a disk: %0d from the 3.5\" drive, %0d from a 5.25\" drive",
+                     u_gsio.u_iwm.rd35, u_gsio.u_iwm.rd525);
+            if (HAS_FD525)
+                $display("    the 5.25\" drives: %0d seeks, %0d fills, heads at half-track %0d / %0d",
+                         fd525_seeks, fd525_fills, u_gsio.u_iwm.hp[0], u_gsio.u_iwm.hp[1]);
         end
     endtask
     // The Ensoniq's state (rtl/gs_doc.sv, docs/GS.md rung 7): which
@@ -1919,6 +1998,36 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     always @(posedge clk)
         if (cl_valid && !cl_rw && cl_wr_image)
             wr_ever[cl_ppn_w][cl_off[7:0]] = 1'b1;
+    // ...and for text page 1 of main memory (physical pages $0004-$0007),
+    // whether the LAST write to each byte OWED a copy in $E0: text shadowing
+    // on (SHADOW[0] clear) as it landed.  SHADOW cannot move while posted
+    // writes are pending (a map change waits for the drain), so the state at
+    // the landing is the state at the write.  A program that switches the
+    // text shadow off and writes the page owes nothing, and the end-of-run
+    // check below must not call that a missing duplicate.
+    // THE ONE BYTE ARKANOID'S SHADOW CHECK FAILS ON (2026-09-13): every landing
+    // in main $07F7 and in $E0/07F7, as the classified stream carries it -
+    // the op's own write, a posted write draining, or a shadow duplicate - so
+    // a duplicate that is lost or lands out of order shows as a gap.
+    always @(posedge clk)
+        if (boot_go && cl_valid && !cl_rw && cl_wr_image && (cl_off[7:0] == 8'hF7) &&
+            (cl_ppn_w == 16'h0007 || cl_ppn_w == 16'hE007))
+            $display("    BYTE WATCH %0d clk %0d instr: $%04X%02X <= $%02X  posted=%0d sh=%0d  op %02X/%04X %0s SHADOW=$%02X pending=%0d",
+                     now, trace_instrs, cl_ppn_w, cl_off[7:0], cl_wdata, cl_posted, cl_sh,
+                     u_bank, u_addr, u_rw ? "rd" : "wr", gs_shadow_w, u_dline.pending);
+    reg [255:0] wr_text_sh [0:3];
+    initial for (pgi = 0; pgi < 4; pgi = pgi + 1) wr_text_sh[pgi] = 256'd0;
+    always @(posedge clk)
+        if (cl_valid && !cl_rw && cl_wr_image && (cl_ppn_w[15:2] == 14'd1))
+            wr_text_sh[cl_ppn_w[1:0]][cl_off[7:0]] = !gs_shadow_w[0];
+    // ...and a DIRECT write into $E0's text page (a program addressing the
+    // Mega II bank itself, not a duplicate - duplicates are posted, from the
+    // data front and from the map alike) supersedes the copy: Arkanoid writes
+    // $E0/07F7 itself long after the $00 byte's duplicate landed, and $00 and
+    // $E0 then rightly differ.
+    always @(posedge clk)
+        if (cl_valid && !cl_rw && cl_wr_image && !cl_posted && (cl_ppn_w[15:2] == 14'h3801))
+            wr_text_sh[cl_ppn_w[1:0]][cl_off[7:0]] = 1'b0;
 
     // ---- THE COUT VECTOR: who writes $36/$37, and from where -----------------
     // GS/OS's COUT jumped through a zero $36/$37 after 1,431 good calls.  Every
@@ -2743,7 +2852,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // jumped into an empty block and crashed before it ever reached
         // slot 5 (docs/IWM35.md).  The plain boot keeps the ROM, so its
         // floor against the reference is unmoved.
-        if (HAS_HDV != 0 || HAS_FD35 == 0) begin
+        if (HAS_HDV != 0 || (HAS_FD35 == 0 && HAS_FD525 == 0)) begin
             push_word(hdr(T_HD_ROM, 8'd64, 16'd0));
             for (c = 0; c < 64; c = c + 1)
                 push_word({hd_rom[4*c+3], hd_rom[4*c+2], hd_rom[4*c+1], hd_rom[4*c]});
@@ -2754,7 +2863,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 $display("    rx_wr %0d rx_rd %0d unknowns %0d", rx_wr, rx_rd, unknowns);
             end else ok("the slot-7 SmartPort ROM loaded");
         end else begin
-            $display("    (no slot-7 image with a 3.5\" disk: the SmartPort ROM is not sent, as the host sends none)");
+            $display("    (no slot-7 image with a disk in the IWM: the SmartPort ROM is not sent, as the host sends none)");
         end
 
         serve <= 1'b1;
@@ -2935,14 +3044,19 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // SHADOW[0] inhibits it, which the ROM does not.  Written bytes only:
         // wr_ever is the classified stream, posted writes and duplicates
         // included.
+        // ONLY THE BYTES WHOSE LAST WRITE OWED A COPY are compared (wr_text_sh):
+        // Arkanoid switches the text shadow while it writes the page, and a
+        // byte last written with SHADOW[0] set rightly has none.
         begin : shadow_dup
-            integer pg, off, n_cmp, n_bad;
+            integer pg, off, n_cmp, n_bad, n_skip;
             logic [7:0] b0, be;
-            n_cmp = 0; n_bad = 0;
-            if (!gs_shadow_w[0]) begin
+            n_cmp = 0; n_bad = 0; n_skip = 0;
+            begin
                 for (pg = 4; pg < 8; pg = pg + 1)
                     for (off = 0; off < 256; off = off + 1)
-                        if (wr_ever[16'(pg)][off[7:0]]) begin
+                        if (wr_ever[16'(pg)][off[7:0]] && !wr_text_sh[pg - 4][off[7:0]]) begin
+                            n_skip = n_skip + 1;
+                        end else if (wr_ever[16'(pg)][off[7:0]]) begin
                             b0 = card_byte(16'(pg), 8'(off));
                             be = card_byte(16'hE000 | 16'(pg), 8'(off));
                             n_cmp = n_cmp + 1;
@@ -2953,10 +3067,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                                              pg[7:0], off[7:0], b0, pg[7:0], off[7:0], be);
                             end
                         end
-                if (n_cmp == 0)      fail("the boot wrote nothing into text page 1, so the shadow duplicate was never exercised");
-                else if (n_bad != 0) fail($sformatf("%0d of %0d written text-page bytes have no matching copy in $E0", n_bad, n_cmp));
-                else ok($sformatf("every written text-page byte (%0d) has its copy in $E0: the shadow's second landing", n_cmp));
-            end else fail("SHADOW[0] is set at the end of the boot; the text-page duplicate check needs it clear");
+                if (n_cmp == 0)      fail("the boot wrote nothing into text page 1 with the shadow on, so the duplicate was never exercised");
+                else if (n_bad != 0) fail($sformatf("%0d of %0d written text-page bytes that owed a copy have none in $E0 (%0d last written with the shadow off, not compared)",
+                                                    n_bad, n_cmp, n_skip));
+                else ok($sformatf("every written text-page byte that owed a copy (%0d) has it in $E0; %0d last written with the shadow off",
+                                  n_cmp, n_skip));
+            end
         end
 
         // ...and the ROM as it now sits in the machine's memory, page by

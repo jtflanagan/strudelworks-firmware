@@ -29,6 +29,9 @@
 #                      blind past the slot scan, as always)
 #     --fd35-delay=N   clocks the modelled host takes to answer a seek (50000)
 #     --fd35-trace=N   name the first N IWM accesses with the byte and the drive's state
+#     --fd525=FILE     a 140K .dsk/.po in 5.25" drive 1 on the IWM (tools/nib525.py
+#                      nibblizes it as the host's floppy service does)
+#     --fd525-delay=N  clocks the modelled host takes to answer a 5.25" seek (50000)
 #     --hdrom=FILE     its slot ROM (default the IIgs's,
 #                      ../strudelworks-host/assets/hdc_smartport_gs.bin; the //e's
 #                      is a different firmware and speaks a different FIFO)
@@ -62,7 +65,7 @@ instrs=20000 clks=400000000 mode=2 target=0 ddrlat=12 tag=gs vl=1 ref="" floor="
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport_gs.bin"
 hdv=""
-fd35="" fd35delay=50000 fd35trace=0
+fd35="" fd35delay=50000 fd35trace=0 fd525="" fd525delay=50000
 trace=""
 for a in "$@"; do
     case "$a" in
@@ -74,6 +77,8 @@ for a in "$@"; do
         --rom=*) rom="${a#*=}" ;;
         --hdv=*) hdv="${a#*=}" ;;
         --fd35=*) fd35="${a#*=}" ;;
+        --fd525=*) fd525="${a#*=}" ;;
+        --fd525-delay=*) fd525delay="${a#*=}" ;;
         --fd35-delay=*) fd35delay="${a#*=}" ;;
         --fd35-trace=*) fd35trace="${a#*=}" ;;
         --hdrom=*) hdrom="${a#*=}" ;;
@@ -135,6 +140,14 @@ else
     : > "$work/hdv_$tag.hex"
 fi
 # The 3.5" image, nibblized track by track as the host will do it.
+has_fd525=0
+if [ -n "$fd525" ]; then
+    has_fd525=1
+    [ -f "$fd525" ] || { echo "no image at $fd525" >&2; exit 2; }
+    python3 "$root/tools/nib525.py" "$fd525" --hex "$work/fd525_$tag.hex" > /dev/null
+else
+    : > "$work/fd525_$tag.hex"
+fi
 has_fd35=0
 if [ -n "$fd35" ]; then
     has_fd35=1
@@ -206,6 +219,7 @@ if [ "$vl" = 1 ]; then
         -GBRAMF="\"$work/gsbram_$tag.hex\"" -GHAS_BRAM="$has_bram" \
         -GFD35F="\"$work/fd35_$tag.hex\"" -GFD35_COUNTSF="\"$work/fd35_$tag.counts\"" \
         -GHAS_FD35="$has_fd35" -GFD35_DELAY="$fd35delay" -GFD35_TRACE="$fd35trace" \
+        -GFD525F="\"$work/fd525_$tag.hex\"" -GHAS_FD525="$has_fd525" -GFD525_DELAY="$fd525delay" \
         -Mdir "$obj" "${srcs[@]}" \
         -o boot_gs_tb > "$work/verilator_gs_$tag.log" 2>&1 || {
             echo "verilator build failed:" >&2; tail -40 "$work/verilator_gs_$tag.log" >&2; exit 1; }

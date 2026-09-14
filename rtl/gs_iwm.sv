@@ -3,21 +3,26 @@
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
 // gs_iwm - the IIgs's Integrated Woz Machine at $C0E0-$C0EF, with ONE 3.5"
-// DRIVE on it, the disk on the host and one track of it in the card.
+// DRIVE and TWO 5.25" DRIVES on it, the disks on the host and one track of
+// the drive in use in the card.
 //
 // THE REFERENCE IS KEGS's iwm.c: iwm_touch_switches for the soft switches,
 // read_iwm and write_iwm for the data path, iwm_read_status35 and
-// iwm_do_action35 for the drive's sixteen-way register, iwm_read_data (the
-// timed path, NOT the fast one) for the data register.  docs/IWM35.md.
+// iwm_do_action35 for the 3.5" drive's sixteen-way register, iwm_read_data
+// for the data register; the 5.25" head's stepper is the Disk II's
+// (rtl/floppy_card.sv).  docs/IWM35.md.
 //
-// WHAT CHANGED (2026-09-12).  This was a stub: a believable EMPTY IWM whose
-// whole job was to make the ROM's startup scan give up and boot from the
-// slot-7 SmartPort.  The FTA demos boot from a 3.5" disk through their own
-// loaders and nothing else - the boot block reads one sector through the
-// SmartPort ROM and the rest straight off the IWM - so the drive had to be
-// real.  The stub's parts are all still here: the switches, the mode
-// register, the ENABLE2 handshake, the status multiplexer.  What is new is
-// a disk under the head.
+// THE VIRTUAL DRIVES RUN IN THE CORE'S CYCLES AND NOTHING ELSE (the user's
+// rule, 2026-09-13).  A nibble is a fixed number of the soft core's cycles:
+// 32 for a 5.25" drive (a 4-cycle bit cell, the speed the 5.25" firmware's
+// loops are written for) and 44.8 for the 3.5" drive (a 2 us bit cell at the
+// 2.8 MHz the 3.5" drivers run at - every one of the 1.76 M 3.5" data reads
+// of the XMAS demo's and Arkanoid's boots was made with $C036's speed bit
+// set).  No speed request, no motor-on slowdown, no 1 MHz or wall time moves
+// it: the loops a driver counts in cycles line up by construction, and the
+// load goes as fast as the core is accelerated.  (This drive used to follow
+// $C036 bit 7, as KEGS does.  A wall-time path is for a physical drive, if
+// one is ever attached.)
 //
 // THE ADDRESS IS THE REGISTER.  $C0E0-$C0EF is eight pairs of soft switches:
 // the low bit is the value and the rest select which.  $C0E0-$C0E7 are the
@@ -31,8 +36,10 @@
 //   1 0  the write HANDSHAKE - $C0/$80 alternating under ENABLE2, else $80
 //   1 1  nothing (a read of an odd address returns 0)
 // An ODD address with Q7:Q6 = 1,1 and the motor OFF writes the MODE register,
-// five bits; with the motor ON it is a data write, which this drive DROPS
-// (writes are not built yet: the drive reports write-protected, see below).
+// five bits; with the motor ON it is a data write, which these drives DROP
+// (writes are not built yet: the drives report write-protected, see below).
+//
+// $C031 bit 6 CHOOSES THE SIDE: set, the 3.5" drive; clear, the 5.25" pair.
 //
 // THE 3.5" DRIVE'S OWN REGISTER.  The phase lines and $C031's bit 7 make a
 // four-bit address, {ph1, ph0, $C031[7], ph2}; with Q6 set, bit 7 of the
@@ -42,51 +49,54 @@
 // upper head, which is how the side is chosen - $C031's bit 7 is a select
 // bit, not the side.  KEGS, case for case; the table is in the always_comb.
 //
-// THE PLATTER.  The track under the head is a NIBBLE STREAM in four lanes
-// of block RAM (rtl/fd_bank.sv, as the Disk II's), `nibbles` of them per
-// track - the host says how many with the fill, since the zones differ:
-// 9694 in zone 0 down to 6578 in zone 4 (tools/nib35.py).  It turns one
-// slot per nibble time whenever the IWM's ENABLE is on, as KEGS's does
-// (iwm_touch_switches advances the position on IWM_STATE_MOTOR_ON, not on
-// the drive's own motor).  A nibble is eight 2 us bit cells, 16 us; in the
-// CORE'S TIME that is 16 ticks with the CPU at 1 MHz and 44.8 with it at
-// 2.8 (rtl/floppy_card.sv says why the tick is the core's op and not the
-// bus's cycle: a loader's loops are counted in the CPU's cycles, and a
-// platter that turned at wall time would run away from an accelerated
-// core - or the ROM's bounded sync searches would expire on a platter that
-// did not).  $C036 bit 7 says which; the count is kept in fifths of a tick.
+// THE 5.25" DRIVES' HEADS are the Disk II's: the four phases are magnets, the
+// head a cog in half-tracks 0..79 per drive, and TEN CYCLES after the last
+// phase access the selected drive's cog steps one half-track toward the one
+// energised neighbour - not at all with both on - while the IWM's ENABLE is
+// on (rtl/floppy_card.sv's rule, AppleWin's GH#1110).  The status byte's bit
+// 7 is the drive's write protect (iwm.c: `status = dsk->write_prot`), and
+// with no disk or no writes it reads protected.
 //
-// THE DATA REGISTER, IN LATCH MODE (mode bit 0, which every 3.5" driver
-// sets): a completed nibble is held, high bit set, until it is READ, and
-// each nibble is returned ONCE - the read after it sees the next nibble's
-// bits shifting in, high bit clear, so the `LDA $C0EC / BPL` poll reads
-// every nibble exactly once at any polling rate.  That is what KEGS's timed
-// path does (iwm_read_data's latch-mode arm, "don't return it again") and
-// what the IWM's own latch mode is for.  Without latch mode the nibble is
-// held for half a nibble time and then the shift-in shows, as a 5.25"
-// controller does it.
+// THE PLATTER.  The track under the head is a NIBBLE STREAM in the track
+// buffer, `nibbles` of them per track - the 3.5" fill says how many (9694 in
+// zone 0 down to 6578 in zone 4, tools/nib35.py), a 5.25" drive's register
+// says it for its disk (6384 for a sector image, tools/nib525.py).  It turns
+// one slot per nibble time whenever the IWM's ENABLE is on, as KEGS's does.
 //
-// THE BUFFER AND THE HOST are the Disk II's design (docs/FLOPPY.md): a head
-// movement, a side switch or a disk inserted makes the buffer STALE and
-// sends the host an FD35_SEEK {seq, 0, track*2+side, 0}; the host answers
-// with FD35_TRACK chunks - {seq, chunk, track*2+side, 0}, {chunks, 0,
-// nibbles}, then up to 252 words of nibbles - written straight into the
-// lanes, and the last chunk clears STALE.  While stale the register serves
-// noise, never a wrong track, and the drive reports itself STEPPING (sense
-// $4 = 0) after a step, so a driver that waits for the head to settle waits
-// for the fill.  The accelerated core is held while the buffer is stale
-// (stall_o, as the Disk II's).  A seek nobody answered is asked again after
-// FILL_RETRY_CLKS.
+// THE DATA REGISTER.  In LATCH MODE (mode bit 0, which every 3.5" driver
+// sets) a completed nibble is held, high bit set, until it is READ, and each
+// nibble is returned ONCE - the read after it sees the next nibble's bits
+// shifting in, high bit clear (iwm_read_data's latch-mode arm).  Without
+// latch mode - the 5.25" firmware's - the nibble is held for a while and then
+// the shift-in shows: seven cycles for a 5.25" drive, the Disk II's hold
+// (rtl/floppy_card.sv HOLD_TICKS), half a nibble for the 3.5".
 //
-// NOT HERE YET: writes (dropped; the host marks its disks write-protected
-// and sense $6 says so), a second drive (sense $F says drive 1 is not
-// installed, as KEGS says), eject (action $D is taken and does nothing),
-// the 5.25" side of the chip - the Disk II is rtl/floppy_card.sv, and with
-// $C031 bit 6 clear this answers as the stub always did: no 5.25" drive.
+// THE BUFFER AND THE HOST are the Disk II's design (docs/FLOPPY.md), one
+// buffer for whichever drive is in use, tagged {side, drive, track}.  When
+// the selected drive has a disk and the buffer is not its track - a step, a
+// head or drive or side select, an insertion - the buffer goes STALE and the
+// card asks the host: the 3.5" drive with FD35_SEEK {seq, 0, track*2+side, 0},
+// answered by FD35_TRACK chunks {seq, chunk, track*2+side, 0}, {chunks, 0,
+// nibbles}, up to 252 words; a 5.25" drive with the Disk II's own FD_SEEK
+// {seq, chunk 0, track, drive}, answered by seven FD_TRACK chunks {seq, chunk,
+// track, drive} then 252 words (152 in the last) - the host's floppy service,
+// unchanged, and on a IIgs the Disk II card is not built at all
+// (rtl/master_top.sv g_no_fd).  A select to a side or drive with NO disk moves
+// nothing, so $C031 flicking to the empty 5.25" pair never throws away the
+// 3.5" track.  While stale the register serves noise, never a wrong track;
+// the 3.5" drive reports itself STEPPING (sense $4 = 0) after a step; and the
+// accelerated core is held (stall_o, as the Disk II's).  A seek nobody
+// answered is asked again after FILL_RETRY_CLKS.
+//
+// NOT HERE YET: writes (dropped, reported write-protected), a second 3.5"
+// drive (sense $F says drive 1 is not installed, as KEGS says), eject (action
+// $D is taken and does nothing).
 //////////////////////////////////////////////////////////////////////////////////
 module gs_iwm #(
     parameter [7:0] T_FD35_TRACK = 8'h31,   // host -> card
     parameter [7:0] T_FD35_SEEK  = 8'h32,   // card -> host
+    parameter [7:0] T_FD_TRACK   = 8'h1F,   // host -> card, the Disk II's
+    parameter [7:0] T_FD_SEEK    = 8'h20,   // card -> host, the Disk II's
     // Ticks the IWM's ENABLE stays on after $C0E8 with the mode register's
     // "immediate off" bit clear: KEGS's 60 VBLs, one second.  A tb shortens.
     parameter integer MOTOR_OFF_TICKS = 1_000_000,
@@ -112,10 +122,9 @@ module gs_iwm #(
     input  wire        c031_ctrl,
 
     // THE CORE'S CLOCK: one per op the core retired - a bus cycle that
-    // carried one, or a fast op the bus never saw - never a dummy cycle.
+    // carried one, or a fast op the bus never saw - never a dummy cycle.  The
+    // drives' only time base.
     input  wire        tick,
-    // $C036 bit 7: the CPU at 2.8 MHz, so a nibble time is 44.8 ticks.
-    input  wire        fast_cpu,
 
     // Host -> card messages, as ft601_msg_rx decodes them.
     input  wire        msg_valid,
@@ -124,17 +133,25 @@ module gs_iwm #(
     input  wire [31:0] pay_data,
     input  wire        pay_valid,
 
-    // Card -> host: FD35_SEEK, a word at a time through msg_arb.
+    // Card -> host: FD35_SEEK or FD_SEEK, a word at a time through msg_arb.
     output wire [31:0] tx_word,
     output wire        tx_valid,
     input  wire        tx_take,
 
-    // FD35_DRIVE, live: what is in the drive.
+    // FD35_DRIVE, live: what is in the 3.5" drive.
     input  wire        drv_inserted,
     input  wire        drv_wp,
     // FD35_STAT's W1 bits.
     input  wire        late_clr,
     input  wire        fill_clr,
+
+    // FD_DRIVE1/FD_DRIVE2, live: what is in the two 5.25" drives - the Disk
+    // II's registers, [0] drive 1 and [1] drive 2; nibbles [12:0] and tracks
+    // [5:0] per drive.
+    input  wire [1:0]  d5_inserted,
+    input  wire [1:0]  d5_wp,
+    input  wire [25:0] d5_nibbles,
+    input  wire [11:0] d5_tracks,
 
     // For the registers' readback.
     output wire        stale_o,
@@ -146,8 +163,12 @@ module gs_iwm #(
     output logic [7:0] seeks,
     output logic [7:0] late,
     output logic [15:0] fill_max,      // microseconds, seek to last chunk
-    // The drive is turning with a disk in and the buffer is not its track:
-    // the accelerated core waits for the fill (rtl/accel_seq.sv stall).
+    // ...and FD_DRIVE1/2 and FD_STAT's: the buffer is not this 5.25" drive's
+    // track, and each drive's head in half-tracks.
+    output wire [1:0]  d5_stale_o,
+    output wire [13:0] d5_phase_o,     // [6:0] drive 1, [13:7] drive 2
+    // The drive in use is turning with a disk in and the buffer is not its
+    // track: the accelerated core waits for the fill (rtl/accel_seq.sv stall).
     output wire        stall_o,
 
     // Diagnostics.
@@ -155,9 +176,17 @@ module gs_iwm #(
 );
 
     // ---- geometry ------------------------------------------------------------
-    localparam integer BUF_BYTES   = 10240;          // > zone 0's 9694
+    localparam integer BUF_BYTES   = 10240;          // > zone 0's 9694, > 5.25"'s 6656
     localparam integer BUF_WORDS   = BUF_BYTES / 4;  // 2560
     localparam integer CHUNK_WORDS = 252;
+    localparam integer D5_CHUNKS   = 7;              // the Disk II's fill (docs/FLOPPY.md)
+    // The nibble time in FIFTHS of a core cycle, fixed (see the header).
+    localparam [7:0]   P35         = 8'd224;         // 44.8 cycles
+    localparam [7:0]   P525        = 8'd160;         // 32 cycles
+    // How long a completed 5.25" nibble stays readable - cleared sooner by the
+    // read that takes it (see "THE 5.25\" HOLD" below).
+    localparam [7:0]   HOLD525     = 8'd120;         // 24 cycles
+    localparam [3:0]   STEP_TICKS  = 4'd10;          // phase access -> cog moves
 
     // ---- the IWM's own latches --------------------------------------------------
     logic [4:0] mode;               // the IWM mode register
@@ -195,34 +224,41 @@ module gs_iwm #(
     assign side_o    = side35;
     assign motor35_o = motor35;
 
+    // ---- the 5.25" drives' heads (rtl/floppy_card.sv's stepper) -------------
+    logic [6:0] hp [0:1];           // each drive's head, in half-tracks 0..79
+    logic [3:0] step_timer;         // cycles until a phase access moves the cog
+    wire  [6:0] hp_sel   = hp[drive_sel];
+    wire  [5:0] trk5     = hp_sel[6:1];
+    assign d5_phase_o = {hp[1], hp[0]};
+
     // ---- the platter ----------------------------------------------------------
-    // The slot under the head and the nibble time.  A nibble is 16 ticks at
-    // 1 MHz and 44.8 at 2.8: the count runs in FIFTHS of a tick, 80 or 224
-    // per nibble, so the fast figure is exact.
     logic [13:0] pos;               // 0 .. nibbles-1
-    logic [7:0]  nib_acc;           // fifths of a tick into this slot
-    wire  [7:0]  nib_period = fast_cpu ? 8'd224 : 8'd80;
+    logic [7:0]  nib_acc;           // fifths of a cycle into this slot
+    wire  [7:0]  nib_period = apple35_sel ? P35 : P525;
     wire         spinning   = motor_on;
     wire         complete   = tick && spinning && (nib_acc + 8'd5 >= nib_period);
     // The bits of the next slot shifted in so far, for the partial byte a
     // read sees between nibbles: nothing decodes it, it only has to look
     // like a byte shifting in - bit 7 clear, the rest moving.
-    wire  [2:0]  bits_in    = fast_cpu ? nib_acc[7:5] : nib_acc[6:4];
+    wire  [7:0]  bits_q     = apple35_sel ? (nib_acc / 8'd28) : (nib_acc / 8'd20);
+    wire  [2:0]  bits_in    = (bits_q > 8'd7) ? 3'd7 : bits_q[2:0];
 
     // ---- the buffer's state ---------------------------------------------------
-    logic        stale;             // the buffer is not the head's track yet
+    // Its identity, {side, 8 bits}: side 0 the 3.5" drive with {track, head},
+    // side 1 a 5.25" drive with {drive, 0, track}.
+    logic        stale;             // the buffer is not its identity's track yet
+    logic [8:0]  buf_id;
     logic [7:0]  seq;               // the seek the host is answering
-    logic [7:0]  buf_qtr;           // the track*2+side the buffer is for
-    logic [13:0] nibbles;           // nibbles in it, from the fill
+    logic [13:0] nibbles35;         // a 3.5" track's nibbles, from its fill
     logic [15:0] chunks_r;          // chunks landed for `seq`
-    logic [3:0]  chunks_total;      // ...of how many, from the fill's word 1
+    logic [3:0]  chunks_total;      // ...of how many
     logic        seek_owed;
     logic        read_stale;        // the machine read while stale
     logic [21:0] retry_clks;
     logic [6:0]  us_pre;            // 100 clocks to the microsecond
     logic [15:0] fill_us;           // microseconds since the seek, saturating
 
-    // THE ONE DRIVE IS DRIVE 1.  With $C0EB selecting drive 2 there is
+    // THE ONE 3.5" DRIVE IS DRIVE 1.  With $C0EB selecting drive 2 there is
     // nothing there: no disk, not installed, locked, at track 0, and a step
     // moves nothing - which is what KEGS's empty drive35[1] answers, and
     // what the ROM's probe relies on to pass drive 2 by and look at drive 1
@@ -232,10 +268,22 @@ module gs_iwm #(
     // and reads it back expecting to see it.
     wire         here     = !drive_sel;
     wire         disk_in  = drv_inserted && here;
-    wire  [7:0]  head_qtr = {track35, side35};
-    wire         usable   = disk_in && !stale;
-    assign stale_o = stale;
-    assign stall_o = spinning && apple35_sel && disk_in && stale;
+    // A 5.25" drive has a disk under the head when one is in and the head is
+    // on a track the image has.
+    wire  [5:0]  tracks_sel = drive_sel ? d5_tracks[11:6] : d5_tracks[5:0];
+    wire  [12:0] nib5_sel   = drive_sel ? d5_nibbles[25:13] : d5_nibbles[12:0];
+    wire         d5_in      = d5_inserted[drive_sel] && (trk5 < tracks_sel);
+
+    // What the drive in use wants in the buffer, and whether it has a disk.
+    wire  [8:0]  tgt_id = apple35_sel ? {1'b0, track35, side35}
+                                      : {1'b1, drive_sel, 1'b0, trk5};
+    wire         tgt_in = apple35_sel ? disk_in : d5_in;
+    wire         usable = tgt_in && !stale && (buf_id == tgt_id);
+    wire  [13:0] nibbles = buf_id[8] ? {1'b0, (buf_id[7] ? d5_nibbles[25:13] : d5_nibbles[12:0])}
+                                     : nibbles35;
+    assign stale_o    = stale;
+    assign d5_stale_o = {!(buf_id[8] &&  buf_id[7] && !stale), !(buf_id[8] && !buf_id[7] && !stale)};
+    assign stall_o    = spinning && tgt_in && !usable;
 
     // Noise for an empty drive or a stale buffer: a 16-bit LFSR per tick.
     logic [15:0] lfsr;
@@ -243,13 +291,11 @@ module gs_iwm #(
 
     // ---- the track buffer -------------------------------------------------------
     // THREE BLOCK RAM TILES, 1024 words of 32 bits each, 3072 words for the
-    // 2560 a zone-0 track needs: word w lives in tile w[11:10] at index
-    // w[9:0].  Port A is the bus side (the standing read of the word the
-    // head's slot is in), port B the link side (the fill, a word at a time).
-    // Four byte lanes of 2560 (the Disk II's shape, rtl/fd_bank.sv) took a
-    // RAMB36 each at 62%; three full tiles are one fewer, and the count
-    // matters: the IIgs builds that never calibrated their DDR3 were the
-    // largest ones (docs/GS.md "The retained set and the DDR3").
+    // 2560 a zone-0 3.5" track needs (a 5.25" track is 1664): word w lives in
+    // tile w[11:10] at index w[9:0].  Port A is the bus side (the standing
+    // read of the word the head's slot is in), port B the link side (the
+    // fill, a word at a time).  Three full tiles, not four byte lanes: the
+    // count matters (docs/GS.md "The retained set and the DDR3").
     (* ram_style = "block" *) logic [31:0] tbuf0 [0:1023];
     (* ram_style = "block" *) logic [31:0] tbuf1 [0:1023];
     (* ram_style = "block" *) logic [31:0] tbuf2 [0:1023];
@@ -273,7 +319,7 @@ module gs_iwm #(
 
     // The nibble the register will take next, refreshed every clock from the
     // word the head's slot is in (one clock of RAM latency, one of lane
-    // select - a slot lasts sixteen ticks at the least).
+    // select - a slot lasts sixteen cycles at the least).
     logic [7:0] nxt;
     logic [1:0] a_lane_q, a_lane_qq;
     always_ff @(posedge clk) begin
@@ -294,14 +340,26 @@ module gs_iwm #(
     wire rx_hdr  = msg_valid;
     wire rx_word = pay_valid && (rx_left != 8'd0);
     wire rx_last = rx_word && (rx_left == 8'd1);
-    wire word_track = rx_word && (rx_type == T_FD35_TRACK);
+    wire is35    = (rx_type == T_FD35_TRACK);
+    wire is525   = (rx_type == T_FD_TRACK);
+    wire word_track = rx_word && (is35 || is525);
+    // Where a chunk's nibble words start: the 3.5" chunk carries a geometry
+    // word first.
+    wire [7:0] data_start = is35 ? 8'd2 : 8'd1;
 
+    // Word 0: {seq, chunk, qtr, 0} for the 3.5" drive; {seq, chunk, track,
+    // drive} for a 5.25" drive.
+    wire [7:0]  w0_lo    = pay_data[7:0];
     wire [7:0]  w0_qtr   = pay_data[15:8];
     wire [7:0]  w0_chunk = pay_data[23:16];
     wire [7:0]  w0_seq   = pay_data[31:24];
+    wire        accept35  = (w0_chunk < 8'd16) && !buf_id[8] && (w0_qtr == buf_id[7:0]) &&
+                            (w0_seq == seq) && drv_inserted;
+    wire        accept525 = (w0_chunk < 8'(D5_CHUNKS)) && buf_id[8] &&
+                            (w0_lo == {7'd0, buf_id[7]}) && (w0_qtr == {2'd0, buf_id[5:0]}) &&
+                            (w0_seq == seq) && d5_inserted[buf_id[7]];
 
-    // Words 0 and 1 are the chunk's own; the data starts at index 2.
-    wire fill_write = word_track && (rx_idx >= 8'd2) && fill_ok &&
+    wire fill_write = word_track && (rx_idx >= data_start) && fill_ok &&
                       (fill_word < 12'(BUF_WORDS));
     wire chunk_done = word_track && rx_last && fill_ok;
 
@@ -321,7 +379,7 @@ module gs_iwm #(
                 rx_type <= msg_type;
                 rx_idx  <= 8'd0;
                 rx_left <= msg_len;
-                if (msg_type == T_FD35_TRACK) fill_ok <= 1'b0;
+                if (msg_type == T_FD35_TRACK || msg_type == T_FD_TRACK) fill_ok <= 1'b0;
             end else if (rx_word) begin
                 rx_idx  <= rx_idx + 8'd1;
                 rx_left <= rx_left - 8'd1;
@@ -330,30 +388,41 @@ module gs_iwm #(
                         fill_chunk <= w0_chunk[3:0];
                         fill_word  <= 12'(w0_chunk[3:0]) * 12'(CHUNK_WORDS);
                         // The chunk lands only if it answers the buffer's
-                        // OWN seek: the right track and the right seq.
-                        fill_ok    <= (w0_chunk < 8'd16) && (w0_qtr == buf_qtr) &&
-                                      (w0_seq == seq) && drv_inserted;
+                        // OWN seek: the right drive, track and seq.
+                        fill_ok    <= is35 ? accept35 : accept525;
                     end else if (fill_ok) begin
-                        if (rx_idx != 8'd1) fill_word <= fill_word + 1'b1;
+                        if (rx_idx >= data_start) fill_word <= fill_word + 1'b1;
                     end
                 end
             end
         end
     end
-    // Word 1 of every chunk: {chunks[7:0], 8'd0, nibbles[15:0]}.
-    wire fill_w1 = word_track && (rx_idx == 8'd1) && fill_ok;
+    // Word 1 of every 3.5" chunk: {chunks[7:0], 8'd0, nibbles[15:0]}.
+    wire fill_w1  = word_track && is35 && (rx_idx == 8'd1) && fill_ok;
+    // A 5.25" chunk's count is fixed; its first word says so.
+    wire fill_w0_525 = word_track && is525 && (rx_idx == 8'd0) && accept525;
 
-    // ---- card -> host: FD35_SEEK ------------------------------------------------
+    // ---- card -> host: FD35_SEEK or FD_SEEK --------------------------------------
     typedef enum logic [1:0] { X_IDLE, X_HDR, X_W0 } xstate_t;
     xstate_t xs;
+    logic [8:0] tx_id;              // the seek being sent, latched as it starts
+    logic [7:0] tx_seq;
     assign tx_valid = (xs != X_IDLE);
-    assign tx_word  = (xs == X_HDR) ? {16'd0, T_FD35_SEEK, 8'd1}
-                                    : {seq, 8'd0, buf_qtr, 8'd0};
+    assign tx_word  = (xs == X_HDR) ? {16'd0, (tx_id[8] ? T_FD_SEEK : T_FD35_SEEK), 8'd1}
+                    : tx_id[8]      ? {tx_seq, 8'd0, 2'd0, tx_id[5:0], 7'd0, tx_id[7]}
+                                    : {tx_seq, 8'd0, tx_id[7:0], 8'd0};
     wire seek_sent = (xs == X_W0) && tx_take;
     always_ff @(posedge clk) begin
-        if (rst) xs <= X_IDLE;
-        else case (xs)
-            X_IDLE: if (seek_owed) xs <= X_HDR;
+        if (rst) begin
+            xs <= X_IDLE;
+            tx_id <= 9'd0;
+            tx_seq <= 8'd0;
+        end else case (xs)
+            X_IDLE: if (seek_owed) begin
+                xs     <= X_HDR;
+                tx_id  <= buf_id;
+                tx_seq <= seq;
+            end
             X_HDR:  if (tx_take) xs <= X_W0;
             X_W0:   if (tx_take) xs <= X_IDLE;
             default: xs <= X_IDLE;
@@ -388,7 +457,9 @@ module gs_iwm #(
             endcase
         end
     end
-    // A 5.25" drive with no disk reads write-protected (iwm.c:133).
+    // A 5.25" drive's sense is its write protect (iwm.c:1137).  Every 5.25"
+    // drive reads PROTECTED while writes are not built - an empty one does in
+    // KEGS too - so no DOS writes into a disk that would drop the bytes.
     wire sense = apple35_sel ? status35 : 1'b1;
 
     // KEGS: val = ((sense & 1) << 7) | (state & 0x3f): bit 5 is the IWM's
@@ -397,20 +468,37 @@ module gs_iwm #(
     wire [7:0] handshake   = (hs_count == 2'd3) ? 8'h80 : 8'hC0;
 
     // The stub's empty-5.25" register: a position that advances per read,
-    // so the ROM's SmartPort probe sees a byte with bit 6 clear.
+    // so the ROM's SmartPort probe sees a byte with bit 6 clear (KEGS's
+    // `(fbit_pos*25)>>11` for a drive with no track).
     logic [23:0] fbit;
     wire [31:0] fbit_scaled = fbit * 24'd25;
 
     // ---- the data register -----------------------------------------------------
     logic [7:0] latch;              // the completed nibble
     logic       latch_valid;        // ...not yet read (latch mode)
-    logic       half_gone;          // half a nibble time since it completed
+    logic       half_gone;          // the hold since it completed has run out
     // The byte a data read returns: the held nibble, or the next shifting in.
     wire [7:0]  slot_val  = usable ? nxt : lfsr[7:0];
     wire [7:0]  partial   = slot_val >> (4'd8 - {1'b0, bits_in});
-    wire        held      = mode[0] ? latch_valid : !half_gone;
-    wire [7:0]  data_byte = apple35_sel ? (held ? latch : partial)
-                                        : fbit_scaled[18:11];   // no 5.25" drive: a varying byte
+    // THE 5.25" HOLD (2026-09-13).  A 5.25" nibble is readable from the cycle
+    // it completes until the read that takes it, or 24 cycles, whichever is
+    // first - for either mode.  The Disk II's plain seven-cycle hold (and the
+    // 3.5" side's, below) PHASE-LOCKED: the stream here is exactly periodic
+    // (32 cycles, sync bytes included) and ProDOS 2.4.3's boot-block poll,
+    // `LDA $C08C,X / BPL` across a page boundary, is exactly 8 cycles - four
+    // polls a nibble, always landing 7.4 cycles after it completed, 0.4 past
+    // the hold, so after one D5 the loop missed every nibble for ever (the
+    // bench's trace at instruction 1,308,597).  A real drive's ten-bit sync
+    // bytes and its jitter keep the phase moving; a cycle-exact stream cannot.
+    // Clear-on-read keeps a search that polls again five cycles after a hit
+    // (`CMP #$D5 / BNE`) from seeing the same nibble twice; 24 cycles is well
+    // before the next nibble at 32.  A deliberate departure from the Disk II
+    // and from KEGS's non-latch arm, docs/IWM35.md.
+    wire        held      = !apple35_sel ? (latch_valid && !half_gone)
+                          : mode[0]      ? latch_valid : !half_gone;
+    wire [7:0]  hold_len  = apple35_sel ? {1'b0, P35[7:1]} : HOLD525;
+    wire [7:0]  data_byte = (apple35_sel || d5_inserted[drive_sel]) ? (held ? latch : partial)
+                                                                    : fbit_scaled[18:11];
 
     wire data_read = act && op_rw && !op_lo[0] && (q7q6 == 2'b00) && !enable2 && t_motor;
 
@@ -447,16 +535,41 @@ module gs_iwm #(
     wire do_step   = action && (stat35 == 4'h4) && here;   // drive 2 has no head to move
     wire [6:0] track_stepped = step_dir35 ? (track35 == 7'd0  ? 7'd0  : track35 - 7'd1)
                                           : (track35 == 7'd79 ? 7'd79 : track35 + 7'd1);
-    // The head after this access.
-    wire [6:0] track_next = do_step ? track_stepped : track35;
-    wire       side_next  = sel_lower ? 1'b0 : sel_upper ? 1'b1 : side35;
-    wire       head_moves = ({track_next, side_next} != head_qtr);
 
-    logic ins_prev;
-    wire  ins_edge = drv_inserted && !ins_prev;
-    wire  ej_edge  = !drv_inserted && ins_prev;
-    // A new track is wanted from the host.
-    wire  want = disk_in && (head_moves || ins_edge ||
+    // The 5.25" stepper: a phase access with the 5.25" side selected starts
+    // the ten-cycle wait; when it runs out the selected drive's cog moves
+    // toward the one energised neighbour.
+    wire        phase_access5 = iwm_act && !op_lo[3] && !apple35_sel;
+    wire        step_now      = tick && (step_timer == 4'd1);
+    wire [1:0]  cog      = hp_sel[1:0];
+    wire        mag_up   = phases[cog + 2'd1];
+    wire        mag_down = phases[cog + 2'd3];
+    logic [6:0] hp_new;
+    always_comb begin
+        hp_new = hp_sel;
+        if (mag_up && !mag_down && hp_sel != 7'd79) hp_new = hp_sel + 7'd1;
+        if (mag_down && !mag_up && hp_sel != 7'd0)  hp_new = hp_sel - 7'd1;
+    end
+    wire        step5 = step_now && spinning && !apple35_sel;
+
+    // Insertions, remembered until their side is in use: the drive fetches
+    // its track the first time it is selected with the disk in.
+    logic       ins_prev;
+    logic [1:0] ins5_prev;
+    logic       ins_pend;           // the 3.5" drive
+    logic [1:0] ins5_pend;          // the 5.25" drives
+    wire        ins_edge  = drv_inserted && !ins_prev;
+    wire        ej_edge   = !drv_inserted && ins_prev;
+    wire [1:0]  ins5_edge = d5_inserted & ~ins5_prev;
+    wire [1:0]  ej5_edge  = ~d5_inserted & ins5_prev;
+    wire        pend_tgt  = apple35_sel ? ins_pend : ins5_pend[drive_sel];
+    // The buffer's own disk left.
+    wire        buf_ejected = buf_id[8] ? ej5_edge[buf_id[7]] : ej_edge;
+
+    // A new track is wanted from the host: the drive in use has a disk and
+    // the buffer is not its track, or it was just put in, or a stale fill
+    // was never answered.
+    wire  want = tgt_in && ((tgt_id != buf_id) || pend_tgt ||
                  (stale && !seek_owed && (xs == X_IDLE) && (retry_clks == 22'd0)));
     wire  filled = chunk_done && (chunks_total != 4'd0) &&
                    ((chunks_r | (16'd1 << fill_chunk)) == ((16'd1 << chunks_total) - 16'd1));
@@ -464,9 +577,9 @@ module gs_iwm #(
     always_ff @(posedge clk) begin
         if (rst) begin
             stale       <= 1'b1;
+            buf_id      <= 9'd0;
             seq         <= 8'd0;
-            buf_qtr     <= 8'd0;
-            nibbles     <= 14'd9694;
+            nibbles35   <= 14'd9694;
             chunks_r    <= 16'd0;
             chunks_total <= 4'd0;
             seek_owed   <= 1'b0;
@@ -475,20 +588,28 @@ module gs_iwm #(
             us_pre      <= 7'd0;
             fill_us     <= 16'd0;
             ins_prev    <= 1'b0;
+            ins5_prev   <= 2'd0;
+            ins_pend    <= 1'b0;
+            ins5_pend   <= 2'd0;
             stepped     <= 1'b0;
             seeks       <= 8'd0;
             late        <= 8'd0;
             fill_max    <= 16'd0;
         end else begin
-            ins_prev <= drv_inserted;
+            ins_prev  <= drv_inserted;
+            ins5_prev <= d5_inserted;
+            if (ins_edge) ins_pend <= 1'b1;
+            if (ej_edge)  ins_pend <= 1'b0;
+            ins5_pend <= (ins5_pend | ins5_edge) & ~ej5_edge;
             if (stale && retry_clks != 22'd0) retry_clks <= retry_clks - 22'd1;
             us_pre <= (us_pre == 7'd99) ? 7'd0 : us_pre + 7'd1;
             if (stale && (us_pre == 7'd99) && fill_us != 16'hFFFF) fill_us <= fill_us + 16'd1;
 
-            if (head_moves || ins_edge || ej_edge) stale <= 1'b1;
-            if (head_moves || ins_edge) buf_qtr <= {track_next, side_next};
+            if (buf_ejected) stale <= 1'b1;
             if (do_step) stepped <= 1'b1;
             if (want) begin
+                stale      <= 1'b1;
+                buf_id     <= tgt_id;
                 seek_owed  <= 1'b1;
                 seq        <= seq + 8'd1;
                 chunks_r   <= 16'd0;
@@ -497,14 +618,17 @@ module gs_iwm #(
                 fill_us    <= 16'd0;
                 read_stale <= 1'b0;
                 seeks      <= seeks + 8'd1;
+                if (apple35_sel) ins_pend <= 1'b0;
+                else             ins5_pend[drive_sel] <= 1'b0;
             end
             if (seek_sent) seek_owed <= 1'b0;
 
             // The track arriving.
             if (fill_w1) begin
                 chunks_total <= pay_data[27:24];
-                nibbles      <= pay_data[13:0];
+                nibbles35    <= pay_data[13:0];
             end
+            if (fill_w0_525) chunks_total <= 4'(D5_CHUNKS);
             if (chunk_done) chunks_r <= chunks_r | (16'd1 << fill_chunk);
             if (filled) begin
                 stale   <= 1'b0;
@@ -512,13 +636,13 @@ module gs_iwm #(
                 if (read_stale && late != 8'hFF) late <= late + 8'd1;
                 if (fill_us > fill_max) fill_max <= fill_us;
             end
-            if (data_read && stale && apple35_sel && disk_in) read_stale <= 1'b1;
+            if (data_read && stale && tgt_in) read_stale <= 1'b1;
             if (late_clr) late <= 8'd0;
             if (fill_clr) fill_max <= 16'd0;
         end
     end
 
-    // ---- the platter, per tick ----------------------------------------------------
+    // ---- the platter, per cycle ---------------------------------------------------
     always_ff @(posedge clk) begin
         if (rst) begin
             pos         <= 14'd0;
@@ -538,15 +662,15 @@ module gs_iwm #(
                     half_gone   <= 1'b0;
                 end else begin
                     nib_acc <= nib_acc + 8'd5;
-                    if (nib_acc + 8'd5 >= {1'b0, nib_period[7:1]}) half_gone <= 1'b1;
+                    if (nib_acc + 8'd5 >= hold_len) half_gone <= 1'b1;
                 end
             end
             // Read once: the nibble is spent.
-            if (data_read && apple35_sel && latch_valid) latch_valid <= 1'b0;
+            if (data_read && latch_valid) latch_valid <= 1'b0;
         end
     end
 
-    // ---- the switches and the drive, per access -------------------------------
+    // ---- the switches and the drives, per access -------------------------------
     always_ff @(posedge clk) begin
         if (rst || !res_sync) begin
             mode <= 5'd0;
@@ -555,6 +679,8 @@ module gs_iwm #(
             motor_off_pend <= 1'b0;
             motor_off_ticks <= 22'd0;
             step_dir35 <= 1'b0; motor35 <= 1'b0; track35 <= 7'd0; side35 <= 1'b0;
+            hp[0] <= 7'd0; hp[1] <= 7'd0;
+            step_timer <= 4'd0;
             drive_sel <= 1'b0;
             q6 <= 1'b0; q7 <= 1'b0;
             hs_count <= 2'd0;
@@ -571,6 +697,10 @@ module gs_iwm #(
                     motor_off_ticks <= motor_off_ticks - 22'd1;
                 end
             end
+
+            // The 5.25" cog, ten cycles after the last phase access.
+            if (tick && step_timer != 4'd0) step_timer <= step_timer - 4'd1;
+            if (step5) hp[drive_sel] <= hp_new;
 
             if (iwm_act) begin
                 // ---- every access touches its switch first ----------------
@@ -593,6 +723,7 @@ module gs_iwm #(
                     3'd6: q6        <= op_lo[0];
                     default: q7     <= op_lo[0];
                 endcase
+                if (phase_access5) step_timer <= STEP_TICKS;
 
                 // ---- the 3.5" ACTION (iwm_do_action35) ----------------------
                 if (action) begin
@@ -626,7 +757,17 @@ module gs_iwm #(
         end
     end
 
+`ifndef SYNTHESIS
+    // The data reads each side served from a disk: the bench prints them.
+    integer rd35 = 0, rd525 = 0;
+    always @(posedge clk)
+        if (!rst && data_read && usable) begin
+            if (apple35_sel) rd35  <= rd35 + 1;
+            else             rd525 <= rd525 + 1;
+        end
+`endif
+
     // The reset line the phases can assert is decoded but drives nothing.
-    wire _unused = &{1'b0, iwm_reset, a_lane_qq,
+    wire _unused = &{1'b0, iwm_reset, a_lane_qq, d5_wp, nib5_sel,
                      op_wdata[7:5], fbit_scaled[31:19], fbit_scaled[10:0], 1'b0};
 endmodule

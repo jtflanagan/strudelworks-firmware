@@ -202,6 +202,10 @@ module master_top #(
     wire        fd35_valid, fd35_take;
     wire        fd35_inserted, fd35_wp, fd35_stale, fd35_side, fd35_motor35, fd35_motor;
     wire        fd35_late_clr, fd35_fill_clr, fd35_stall;
+    // The 5.25" drives on the IIgs's IWM: their readback for FD_DRIVE1/2
+    // (rtl/gs_iwm.sv), in place of the Disk II card's at GS = 1.
+    wire [1:0]  gsio_fd525_stale;
+    wire [13:0] gsio_fd525_phase;
     wire [6:0]  fd35_track;
     wire [7:0]  fd35_ctl, fd35_seeks, fd35_late;
     wire [15:0] fd35_fill_max;
@@ -1918,6 +1922,10 @@ module master_top #(
         .fd35_motor35 (fd35_motor35), .fd35_motor (fd35_motor), .fd35_ctl (fd35_ctl),
         .fd35_seeks (fd35_seeks), .fd35_late (fd35_late), .fd35_fill_max (fd35_fill_max),
         .fd35_stall (fd35_stall),
+        // FD_DRIVE1/2 name the IWM's 5.25" drives on a IIgs.
+        .fd525_inserted (fd_inserted), .fd525_wp (fd_wp),
+        .fd525_nibbles (fd_nibbles), .fd525_tracks (fd_tracks),
+        .fd525_stale (gsio_fd525_stale), .fd525_phase (gsio_fd525_phase),
         .u_claim    (gsio_u_claim),
         .rd_byte    (gsio_byte),
         .fr_vec     (gsio_fr_vec),
@@ -1955,6 +1963,8 @@ module master_top #(
     assign fd35_late    = 8'd0;
     assign fd35_fill_max = 16'd0;
     assign fd35_stall   = 1'b0;
+    assign gsio_fd525_stale = 2'b11;
+    assign gsio_fd525_phase = 14'd0;
 
     end endgenerate
 
@@ -2232,52 +2242,79 @@ module master_top #(
     // ---- the floppy ---------------------------------------------------------
     // A Disk II controller and two drives, with the images on the host and
     // one track of each in the card.  See rtl/floppy_card.sv.
-    floppy_card u_fd (
-        .clk           (apple_clk),
-        .rst           (apple_rst),
-        .cpu_rst       (cpu_rst),
-        .res_sync      (apple_res_sync),
-        .master_active (cpu_source_active),
-        .slot_assign   (fd_slot_active),
-        .op_addr       (p_addr),
-        .op_rw         (p_rw),
-        .op_wdata      (p_wdata),
-        .op_present    (p_present),
-        .op_commit     (p_commit),
-        .op_ovr        (p_ovr),
-        .op_dummy      (p_dummy),
-        .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
-        .rd_claim      (fd_rd_claim),
-        .rd_data       (fd_rd_data),
-        .msg_valid     (app_msg_valid),
-        .msg_type      (app_msg_type),
-        .msg_free      (app_msg_free),
-        .msg_len       (app_msg_len),
-        .pay_data      (app_pay_data),
-        .pay_valid     (app_pay_valid),
-        .tx_word       (fd_word),
-        .tx_valid      (fd_valid),
-        .tx_take       (fd_take),
-        .drv_inserted  (fd_inserted),
-        .drv_wp        (fd_wp),
-        .drv_nibbles   (fd_nibbles),
-        .drv_tracks    (fd_tracks),
-        .drv_flush     (fd_flush),
-        .late_clr      (fd_late_clr),
-        .fill_clr      (fd_fill_clr),
-        .rom_loaded    (fd_rom_loaded),
-        .stale_o       (fd_stale),
-        .dirty_o       (fd_dirty),
-        .phase_o       (fd_phase),
-        .motor_o       (fd_motor),
-        .drive_sel_o   (fd_drive_sel),
-        .q6_o          (fd_q6),
-        .q7_o          (fd_q7),
-        .seeks         (fd_seeks),
-        .late          (fd_late),
-        .fill_max      (fd_fill_max),
-        .stall_o       (fd_stall)
-    );
+    //
+    // THE IIe's ONLY.  On a IIgs the 5.25" drives are the IWM's (rtl/gs_iwm.sv,
+    // docs/IWM35.md): slot 6's $C0Ex IS the internal IWM, and a Disk II card
+    // answering there was a clash the machine never reconciled.  So at GS = 1
+    // the card is not built at all - no claim, no stall, no listener on the
+    // FD_TRACK messages the IWM's 5.25" side takes instead - and its outputs
+    // read as an absent card.
+    generate if (!GS) begin : g_fd
+        floppy_card u_fd (
+            .clk           (apple_clk),
+            .rst           (apple_rst),
+            .cpu_rst       (cpu_rst),
+            .res_sync      (apple_res_sync),
+            .master_active (cpu_source_active),
+            .slot_assign   (fd_slot_active),
+            .op_addr       (p_addr),
+            .op_rw         (p_rw),
+            .op_wdata      (p_wdata),
+            .op_present    (p_present),
+            .op_commit     (p_commit),
+            .op_ovr        (p_ovr),
+            .op_dummy      (p_dummy),
+            .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
+            .rd_claim      (fd_rd_claim),
+            .rd_data       (fd_rd_data),
+            .msg_valid     (app_msg_valid),
+            .msg_type      (app_msg_type),
+            .msg_free      (app_msg_free),
+            .msg_len       (app_msg_len),
+            .pay_data      (app_pay_data),
+            .pay_valid     (app_pay_valid),
+            .tx_word       (fd_word),
+            .tx_valid      (fd_valid),
+            .tx_take       (fd_take),
+            .drv_inserted  (fd_inserted),
+            .drv_wp        (fd_wp),
+            .drv_nibbles   (fd_nibbles),
+            .drv_tracks    (fd_tracks),
+            .drv_flush     (fd_flush),
+            .late_clr      (fd_late_clr),
+            .fill_clr      (fd_fill_clr),
+            .rom_loaded    (fd_rom_loaded),
+            .stale_o       (fd_stale),
+            .dirty_o       (fd_dirty),
+            .phase_o       (fd_phase),
+            .motor_o       (fd_motor),
+            .drive_sel_o   (fd_drive_sel),
+            .q6_o          (fd_q6),
+            .q7_o          (fd_q7),
+            .seeks         (fd_seeks),
+            .late          (fd_late),
+            .fill_max      (fd_fill_max),
+            .stall_o       (fd_stall)
+        );
+    end else begin : g_no_fd
+        assign fd_rd_claim   = 1'b0;
+        assign fd_rd_data    = 8'd0;
+        assign fd_word       = 32'd0;
+        assign fd_valid      = 1'b0;
+        assign fd_stall      = 1'b0;
+        assign fd_rom_loaded = 1'b0;
+        // The registers' readback is the IWM's 5.25" side (rtl/gs_iwm.sv).
+        assign fd_stale      = gsio_fd525_stale;
+        assign fd_dirty      = 2'b00;
+        assign fd_phase      = gsio_fd525_phase;
+        assign fd_motor      = fd35_motor;
+        assign fd_drive_sel  = fd35_ctl[1];
+        assign fd_q6         = fd35_ctl[2];
+        assign fd_q7         = fd35_ctl[3];
+        assign fd_seeks      = fd35_seeks;
+        assign fd_late       = fd35_late;
+        assign fd_fill_max   = fd35_fill_max;
+    end endgenerate
 
     // ---- the VidHD ----------------------------------------------------------
     // A slot ROM carrying the signature software scans for; the IIgs video
