@@ -43,6 +43,7 @@ declare -A B=(
   [gs_kbd_a2]="sim/run_gs_kbd_a2_tb.sh|^PASS$"
   [gs_doc]="sim/run_gs_doc_tb.sh|^PASS$"
   [gs_io_claim]="sim/run_gs_io_claim_tb.sh|^PASS$"
+  [gs_iwm_write]="sim/run_gs_iwm_write_tb.sh|^PASS$"
   [cpu816_cycles]="python3 sim/gen_cycle_table816.py|every observed cycle count is reachable"
   [cpu816_trace]="sim/run_cpu816_trace.sh --limit 400 --flags|^PASS$"
   [cpu816_irq]="sim/run_cpu816_irq_tb.sh|^PASS$"
@@ -97,7 +98,7 @@ declare -A B=(
 )
 QUICK="lint microcode boot_hold bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
-GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 gs_doc gs_io_claim cpu816_cycles cpu816_trace cpu816_irq mmu_xlate_gs boot_gs"
+GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 gs_doc gs_io_claim gs_iwm_write cpu816_cycles cpu816_trace cpu816_irq mmu_xlate_gs boot_gs"
 BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"
 [ "$iverilog" = 1 ] && BATTERY="$BATTERY accel_iv"
 

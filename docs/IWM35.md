@@ -1,4 +1,20 @@
-Status: 2026-09-13, branch `long_data`, UNCOMMITTED.  **THE 5.25" DRIVES ARE ON
+Status: 2026-09-14, branch `long_data`, UNCOMMITTED.  **THE IWM'S 5.25" DRIVES WRITE.**
+The Disk II card's write model on the IWM (`rtl/gs_iwm.sv`): a data write lands at the
+slot under the head, `$FF` in the slot a 40-cycle sync byte skips; bit 7 of the status
+byte is the disk's own write protect; a written track goes home as seven FD_DIRTY chunks
+with the filling seek's seq, ahead of the next seek, whenever the buffer's claim ends
+(a step or select, the motor stopping, an eject, the host's flush).  BENCH:
+`sim/run_gs_iwm_write_tb.sh` passes every property (in `suite.sh gs`), and fails the old
+filler rule as a negative control.  HARDWARE, bit `gs_iwmwr4` (MET +0.007/+0.007, DDR3
+calibrated): `wave.dsk` boots off the IWM 5.25" (17 seeks, 0 late); a cold-booted DOS 3.3
+master copy takes `SAVE WTEST` (3 tracks home), `CATALOG` lists it, `RUN WTEST` prints its
+line, and the host's image decodes to the same program.  Two faults found on the way:
+the 5.25" sense under ENABLE2 (boots hung) and the Disk II `$FF` filler (every sector
+complemented and a byte late) - both below.  Gates: `suite.sh gs` 13/13, the writable
+`wave.dsk` and the XMAS 3.5" bench boots unchanged.  Since the status below: Arkanoid boots from the 3.5" drive
+at the unlimited target on hardware (PLAIN 73.55x, bit `gs_iwm1`).
+
+Previous status: 2026-09-13, branch `long_data`, UNCOMMITTED.  **THE 5.25" DRIVES ARE ON
 THE IWM, AND BOTH VIRTUAL DRIVES RUN ON THE CORE'S CYCLES ALONE** (the user's
 rule: a 5.25" nibble 32 cycles, a 3.5" 44.8, no speed request or slowdown).
 BENCH: ProDOS 2.4.3 and `wave.dsk` boot off 5.25" drive 1 through the ROM's
@@ -200,8 +216,36 @@ the IWM's register face, and on a IIgs the Disk II card is NOT built
   nibble at 32.  A deliberate departure from the Disk II and from KEGS's
   non-latch arm, forced by the cycle rule.  The 3.5" side is unchanged.
 - **The status byte's bit 7** is the drive's write protect (`iwm.c`: `status =
-  dsk->write_prot`) - and every 5.25" drive reads PROTECTED while writes are not
-  built, so no DOS writes into a disk that would drop the bytes.
+  dsk->write_prot`): the disk's own, from FD_DRIVE1/2, and protected with no disk in.
+  UNDER ENABLE2 it is 1 for either side (KEGS: "Read status under enable2: 1"):
+  phases 1 and 3 address the SmartPort bus and bit 7 is a device's ACK, which the
+  ROM's slot-5 probe polls at `FF/581F`.  The first build with writes left this out;
+  a writable 5.25" disk read 0 there, the ROM waited on a device that is not there
+  (375,532 polls in the bench) and never booted slot 6 - on hardware "Check startup
+  device!" with one seek.  The drives had always read protected, which hid it; the
+  boot bench's drives were wired protected too, and are now writable as the host's.
+- **Writes (2026-09-14)** are the Disk II card's model (`rtl/floppy_card.sv`).  A data
+  write - an odd address with Q7 and Q6 set after the touch, the motor on, not ENABLE2
+  (`write_iwm`) - on a writable disk whose track is in the buffer lands the byte at the
+  slot under the head, taken at the load because on the IWM the load is the write, and the
+  bytes after it in the same burst land CONTIGUOUSLY, each in the slot after the last: a
+  byte written slower than 32 cycles is a nine- or ten-bit cell whose extra zero bits no
+  reader takes for a nibble, so they take no slot and the burst trails the head a little.
+  The first write build used the Disk II card's rule instead - every byte under the head,
+  a skipped slot filled with `$FF` - and on the card every sector DOS 3.3's SAVE wrote
+  decoded one byte late and complemented (I/O ERROR): RWTS WRITE16 steps 36 cycles from the
+  data prologue's `$AD` to the first data nibble, the write starts a fixed time after the
+  address field was read so the phase repeats, and at this drive's phase that step crossed
+  a slot boundary and put a phantom `$FF` at the head of every data field.  The write bench
+  now replays WRITE16's 40/36/32 spacing at all 32 phases.  The buffer's head-side port takes both the
+  fills and the stores (a byte-wide write enable); the link side only reads, for the
+  upload, so nothing writes a tile from two places.  A written buffer goes home as seven
+  FD_DIRTY chunks (`0x21`, `{seq, chunk, track, drive}`) carrying the seq that filled it
+  - the host keeps only a track it answered (`fd_service.cpp` on_dirty) - before the
+  buffer's claim ends: another track, drive or side wanted, the motor stopping, the disk
+  ejected, or FD_DRIVE's flush; a flush while an upload is going out sends the track again
+  after it.  `sim/run_gs_iwm_write_tb.sh` checks each, and that a protected disk takes
+  nothing.
 - **One buffer for whichever drive is in use,** tagged {side, drive, track}.  A
   fill starts only when the SELECTED drive has a disk and the buffer is not its
   track, so `$C031` flicking to an empty 5.25" pair never throws away the 3.5"
@@ -395,7 +439,7 @@ which is the design and was not touched - and the instruction front's
 
 ## Not here
 
-- **Writes.**  The card drops them and the host marks every disk
+- **3.5" writes.**  The card drops them and the host marks every 3.5" disk
   write-protected; sense `$6` says locked.  The write path is the IWM's
   async handshake (mode bit 1, a byte per handshake) into the buffer, then
   the Disk II's dirty-track return, then a denibblizer on the host

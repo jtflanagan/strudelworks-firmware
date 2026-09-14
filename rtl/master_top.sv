@@ -204,7 +204,7 @@ module master_top #(
     wire        fd35_late_clr, fd35_fill_clr, fd35_stall;
     // The 5.25" drives on the IIgs's IWM: their readback for FD_DRIVE1/2
     // (rtl/gs_iwm.sv), in place of the Disk II card's at GS = 1.
-    wire [1:0]  gsio_fd525_stale;
+    wire [1:0]  gsio_fd525_stale, gsio_fd525_dirty;
     wire [13:0] gsio_fd525_phase;
     wire [6:0]  fd35_track;
     wire [7:0]  fd35_ctl, fd35_seeks, fd35_late;
@@ -1925,7 +1925,9 @@ module master_top #(
         // FD_DRIVE1/2 name the IWM's 5.25" drives on a IIgs.
         .fd525_inserted (fd_inserted), .fd525_wp (fd_wp),
         .fd525_nibbles (fd_nibbles), .fd525_tracks (fd_tracks),
-        .fd525_stale (gsio_fd525_stale), .fd525_phase (gsio_fd525_phase),
+        .fd525_flush (fd_flush),
+        .fd525_stale (gsio_fd525_stale), .fd525_dirty (gsio_fd525_dirty),
+        .fd525_phase (gsio_fd525_phase),
         .u_claim    (gsio_u_claim),
         .rd_byte    (gsio_byte),
         .fr_vec     (gsio_fr_vec),
@@ -1964,6 +1966,7 @@ module master_top #(
     assign fd35_fill_max = 16'd0;
     assign fd35_stall   = 1'b0;
     assign gsio_fd525_stale = 2'b11;
+    assign gsio_fd525_dirty = 2'b00;
     assign gsio_fd525_phase = 14'd0;
 
     end endgenerate
@@ -2305,7 +2308,7 @@ module master_top #(
         assign fd_rom_loaded = 1'b0;
         // The registers' readback is the IWM's 5.25" side (rtl/gs_iwm.sv).
         assign fd_stale      = gsio_fd525_stale;
-        assign fd_dirty      = 2'b00;
+        assign fd_dirty      = gsio_fd525_dirty;
         assign fd_phase      = gsio_fd525_phase;
         assign fd_motor      = fd35_motor;
         assign fd_drive_sel  = fd35_ctl[1];

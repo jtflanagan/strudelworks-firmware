@@ -740,9 +740,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .fd35_late_clr (1'b0), .fd35_fill_clr (1'b0),
         .fd35_stale (), .fd35_track (), .fd35_side (), .fd35_motor35 (), .fd35_motor (),
         .fd35_ctl (), .fd35_seeks (), .fd35_late (), .fd35_fill_max (), .fd35_stall (fd35_stall),
-        .fd525_inserted (fd525_inserted), .fd525_wp (2'b11),
+        .fd525_inserted (fd525_inserted), .fd525_wp (fd525_wp),
         .fd525_nibbles ({13'd6384, 13'd6384}), .fd525_tracks ({6'd35, 6'd35}),
-        .fd525_stale (), .fd525_phase (),
+        .fd525_flush (2'b00),
+        .fd525_stale (), .fd525_dirty (), .fd525_phase (),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
     );
 
@@ -756,6 +757,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        fd35_take = 1'b1;
     reg         fd35_inserted = 1'b0;
     reg  [1:0]  fd525_inserted = 2'b00;   // the 5.25" drives on the IWM (--fd525)
+    // Writable, as the host's floppy service reports an image it can write.
+    reg  [1:0]  fd525_wp = 2'b00;
     reg [7:0]   fd35_img [0:160*FD35_STRIDE-1];
     integer     fd35_counts [0:159];
     reg         fd35_hdr_seen = 1'b0;
@@ -771,8 +774,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         $fclose(fc);
     end
     // The IWM's one link source carries both drives' seeks: FD35_SEEK ($32)
-    // for the 3.5" drive, the Disk II's FD_SEEK ($20) for a 5.25" drive.
+    // for the 3.5" drive, the Disk II's FD_SEEK ($20) for a 5.25" drive - and
+    // FD_DIRTY ($21) uploads of a written 5.25" track, which this host takes
+    // and drops.  Messages are split by their header's length.
     reg [7:0]   fd_hdr_type = 8'd0;
+    integer     fd_left = 0, fd_idx = 0;
+    integer     fd525_dirty_chunks = 0;
     reg [7:0]   fd525_img [0:35*6656-1];
     reg [7:0]   fd525_req_seq = 8'd0;
     reg [5:0]   fd525_req_track = 6'd0;
@@ -781,25 +788,28 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     integer     fd525_seeks = 0, fd525_fills = 0;
     initial if (HAS_FD525) $readmemh(FD525F, fd525_img);
     always @(posedge clk) if (fd35_valid && fd35_take) begin
-        if (!fd35_hdr_seen) begin
-            if (fd35_word[15:8] == 8'h32 || fd35_word[15:8] == 8'h20) begin
-                fd35_hdr_seen = 1'b1;
-                fd_hdr_type   = fd35_word[15:8];
-            end
+        if (fd_left == 0) begin
+            fd_hdr_type = fd35_word[15:8];
+            fd_left     = fd35_word[7:0];
+            fd_idx      = 0;
+            if (fd_hdr_type == 8'h21) fd525_dirty_chunks = fd525_dirty_chunks + 1;
         end else begin
-            fd35_hdr_seen = 1'b0;
-            if (fd_hdr_type == 8'h32) begin
-                fd35_req_seq  = fd35_word[31:24];
-                fd35_req_qtr  = fd35_word[15:8];
-                fd35_pending  = fd35_pending + 1;
-                fd35_seeks    = fd35_seeks + 1;
-            end else begin
-                fd525_req_seq   = fd35_word[31:24];
-                fd525_req_track = fd35_word[13:8];
-                fd525_req_drive = fd35_word[0];
-                fd525_pending   = fd525_pending + 1;
-                fd525_seeks     = fd525_seeks + 1;
+            if (fd_idx == 0) begin
+                if (fd_hdr_type == 8'h32) begin
+                    fd35_req_seq  = fd35_word[31:24];
+                    fd35_req_qtr  = fd35_word[15:8];
+                    fd35_pending  = fd35_pending + 1;
+                    fd35_seeks    = fd35_seeks + 1;
+                end else if (fd_hdr_type == 8'h20) begin
+                    fd525_req_seq   = fd35_word[31:24];
+                    fd525_req_track = fd35_word[13:8];
+                    fd525_req_drive = fd35_word[0];
+                    fd525_pending   = fd525_pending + 1;
+                    fd525_seeks     = fd525_seeks + 1;
+                end
             end
+            fd_idx  = fd_idx + 1;
+            fd_left = fd_left - 1;
         end
     end
     // A 5.25" track as the host's floppy service sends it: seven FD_TRACK
@@ -902,6 +912,18 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                  u_gsio.u_iwm.pos, u_gsio.u_iwm.latch, u_gsio.u_iwm.latch_valid, u_gsio.u_iwm.mode,
                  u_gsio.u_iwm.nib_period, u_gsio.u_iwm.nib_acc,
                  u_gsio.u_iwm.hp[0], u_gsio.u_iwm.hp[1]);
+    end
+
+    // Every 5.25" store - a byte the machine wrote into the buffered track -
+    // with the chip's state as it landed, the first 40 of them.
+    integer d5_stores_shown = 0;
+    always @(posedge clk) if (HAS_FD525 && u_gsio.u_iwm.store && d5_stores_shown < 40) begin
+        d5_stores_shown = d5_stores_shown + 1;
+        $display("    STORE %8d $C0%02X <- %02X  ph=%b en2=%0d mot=%0d q7q6=%0d%0d sel35=%0d drv=%0d pos=%0d buf_id=%03x mode=$%02X",
+                 trace_instrs, u_gsio.u_iwm.op_lo, u_gsio.u_iwm.op_wdata, u_gsio.u_iwm.phases,
+                 u_gsio.u_iwm.enable2, u_gsio.u_iwm.motor_on, u_gsio.u_iwm.q7, u_gsio.u_iwm.q6,
+                 u_gsio.u_iwm.apple35_sel, u_gsio.u_iwm.drive_sel, u_gsio.u_iwm.pos,
+                 u_gsio.u_iwm.buf_id, u_gsio.u_iwm.mode);
     end
 
     // THE SCAN-LINE INTERRUPT'S INGREDIENTS, named as they happen: every SCB
@@ -1673,6 +1695,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             if (HAS_FD525)
                 $display("    the 5.25\" drives: %0d seeks, %0d fills, heads at half-track %0d / %0d",
                          fd525_seeks, fd525_fills, u_gsio.u_iwm.hp[0], u_gsio.u_iwm.hp[1]);
+            if (HAS_FD525)
+                $display("    the 5.25\" writes: %0d bytes stored, %0d tracks sent home, %0d FD_DIRTY chunks taken",
+                         u_gsio.u_iwm.wr525, u_gsio.u_iwm.up525, fd525_dirty_chunks);
         end
     endtask
     // The Ensoniq's state (rtl/gs_doc.sv, docs/GS.md rung 7): which

@@ -192,13 +192,16 @@ module gs_io #(
     output wire [15:0] fd35_fill_max,
     output wire        fd35_stall,
     // THE 5.25" DRIVES ON THE IWM: FD_DRIVE1/2, the Disk II's registers,
-    // [0] drive 1 and [1] drive 2 - and their readback.  On a IIgs the Disk
-    // II card is not built (rtl/master_top.sv g_no_fd).
+    // [0] drive 1 and [1] drive 2, flush a pulse per drive - and their
+    // readback.  On a IIgs the Disk II card is not built (rtl/master_top.sv
+    // g_no_fd).
     input  wire [1:0]  fd525_inserted,
     input  wire [1:0]  fd525_wp,
     input  wire [25:0] fd525_nibbles,
     input  wire [11:0] fd525_tracks,
+    input  wire [1:0]  fd525_flush,
     output wire [1:0]  fd525_stale,
+    output wire [1:0]  fd525_dirty,
     output wire [13:0] fd525_phase
 );
 
@@ -424,7 +427,8 @@ module gs_io #(
         .seeks (fd35_seeks), .late (fd35_late), .fill_max (fd35_fill_max),
         .d5_inserted (fd525_inserted), .d5_wp (fd525_wp),
         .d5_nibbles (fd525_nibbles), .d5_tracks (fd525_tracks),
-        .d5_stale_o (fd525_stale), .d5_phase_o (fd525_phase),
+        .d5_flush (fd525_flush),
+        .d5_stale_o (fd525_stale), .d5_dirty_o (fd525_dirty), .d5_phase_o (fd525_phase),
         .stall_o (fd35_stall),
         .cnt_mode_wr (iwm_cnt_mode_wr)
     );

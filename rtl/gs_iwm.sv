@@ -9,8 +9,8 @@
 // THE REFERENCE IS KEGS's iwm.c: iwm_touch_switches for the soft switches,
 // read_iwm and write_iwm for the data path, iwm_read_status35 and
 // iwm_do_action35 for the 3.5" drive's sixteen-way register, iwm_read_data
-// for the data register; the 5.25" head's stepper is the Disk II's
-// (rtl/floppy_card.sv).  docs/IWM35.md.
+// for the data register; the 5.25" head's stepper and the 5.25" write model
+// are the Disk II's (rtl/floppy_card.sv).  docs/IWM35.md.
 //
 // THE VIRTUAL DRIVES RUN IN THE CORE'S CYCLES AND NOTHING ELSE (the user's
 // rule, 2026-09-13).  A nibble is a fixed number of the soft core's cycles:
@@ -36,8 +36,9 @@
 //   1 0  the write HANDSHAKE - $C0/$80 alternating under ENABLE2, else $80
 //   1 1  nothing (a read of an odd address returns 0)
 // An ODD address with Q7:Q6 = 1,1 and the motor OFF writes the MODE register,
-// five bits; with the motor ON it is a data write, which these drives DROP
-// (writes are not built yet: the drives report write-protected, see below).
+// five bits; with the motor ON it is a DATA WRITE (write_iwm's
+// iwm_write_data): a 5.25" drive takes it into the track (WRITES, below), the
+// 3.5" drive drops it (its writes are not built; its disks read locked).
 //
 // $C031 bit 6 CHOOSES THE SIDE: set, the 3.5" drive; clear, the 5.25" pair.
 //
@@ -54,8 +55,8 @@
 // phase access the selected drive's cog steps one half-track toward the one
 // energised neighbour - not at all with both on - while the IWM's ENABLE is
 // on (rtl/floppy_card.sv's rule, AppleWin's GH#1110).  The status byte's bit
-// 7 is the drive's write protect (iwm.c: `status = dsk->write_prot`), and
-// with no disk or no writes it reads protected.
+// 7 is the drive's WRITE PROTECT (iwm.c: `status = dsk->write_prot`), from
+// FD_DRIVE1/2; a drive with no disk reads protected.
 //
 // THE PLATTER.  The track under the head is a NIBBLE STREAM in the track
 // buffer, `nibbles` of them per track - the 3.5" fill says how many (9694 in
@@ -70,6 +71,19 @@
 // latch mode - the 5.25" firmware's - the nibble is held for a while and then
 // the shift-in shows: seven cycles for a 5.25" drive, the Disk II's hold
 // (rtl/floppy_card.sv HOLD_TICKS), half a nibble for the 3.5".
+//
+// WRITES (5.25", 2026-09-14).  A data write on a writable disk whose track is
+// in the buffer is taken at the load (on the IWM the load is the write) and
+// lands CONTIGUOUSLY: a burst's first byte in the slot under the head, each
+// byte after it in the next slot.  A slow byte's extra zero bits are nothing
+// a reader takes for a nibble, so they take no slot (THE WRITE BURST, below,
+// has why the Disk II card's $FF filler broke DOS 3.3 here).  In the core's
+// cycles like everything else here.  A buffer that was written is DIRTY, and before
+// the buffer's claim on its track ends - another track, drive or side wanted,
+// the motor stopping, the disk ejected, the host asking (FD_DRIVE's flush) -
+// the track goes back to the host as the Disk II's seven FD_DIRTY chunks
+// {seq, chunk, track, drive}, carrying the seq that filled it (the host keeps
+// only a track it answered), ahead of the seek for whatever comes next.
 //
 // THE BUFFER AND THE HOST are the Disk II's design (docs/FLOPPY.md), one
 // buffer for whichever drive is in use, tagged {side, drive, track}.  When
@@ -88,15 +102,16 @@
 // accelerated core is held (stall_o, as the Disk II's).  A seek nobody
 // answered is asked again after FILL_RETRY_CLKS.
 //
-// NOT HERE YET: writes (dropped, reported write-protected), a second 3.5"
-// drive (sense $F says drive 1 is not installed, as KEGS says), eject (action
-// $D is taken and does nothing).
+// NOT HERE YET: 3.5" writes (dropped; the host's 3.5" disks are locked), a
+// second 3.5" drive (sense $F says drive 1 is not installed, as KEGS says),
+// eject (action $D is taken and does nothing).
 //////////////////////////////////////////////////////////////////////////////////
 module gs_iwm #(
     parameter [7:0] T_FD35_TRACK = 8'h31,   // host -> card
     parameter [7:0] T_FD35_SEEK  = 8'h32,   // card -> host
     parameter [7:0] T_FD_TRACK   = 8'h1F,   // host -> card, the Disk II's
     parameter [7:0] T_FD_SEEK    = 8'h20,   // card -> host, the Disk II's
+    parameter [7:0] T_FD_DIRTY   = 8'h21,   // card -> host, the Disk II's
     // Ticks the IWM's ENABLE stays on after $C0E8 with the mode register's
     // "immediate off" bit clear: KEGS's 60 VBLs, one second.  A tb shortens.
     parameter integer MOTOR_OFF_TICKS = 1_000_000,
@@ -133,7 +148,8 @@ module gs_iwm #(
     input  wire [31:0] pay_data,
     input  wire        pay_valid,
 
-    // Card -> host: FD35_SEEK or FD_SEEK, a word at a time through msg_arb.
+    // Card -> host: FD35_SEEK, FD_SEEK or FD_DIRTY, a word at a time through
+    // msg_arb.
     output wire [31:0] tx_word,
     output wire        tx_valid,
     input  wire        tx_take,
@@ -147,11 +163,12 @@ module gs_iwm #(
 
     // FD_DRIVE1/FD_DRIVE2, live: what is in the two 5.25" drives - the Disk
     // II's registers, [0] drive 1 and [1] drive 2; nibbles [12:0] and tracks
-    // [5:0] per drive.
+    // [5:0] per drive; flush a pulse per drive.
     input  wire [1:0]  d5_inserted,
     input  wire [1:0]  d5_wp,
     input  wire [25:0] d5_nibbles,
     input  wire [11:0] d5_tracks,
+    input  wire [1:0]  d5_flush,
 
     // For the registers' readback.
     output wire        stale_o,
@@ -164,8 +181,10 @@ module gs_iwm #(
     output logic [7:0] late,
     output logic [15:0] fill_max,      // microseconds, seek to last chunk
     // ...and FD_DRIVE1/2 and FD_STAT's: the buffer is not this 5.25" drive's
-    // track, and each drive's head in half-tracks.
+    // track, the buffer holds this 5.25" drive's track written, and each
+    // drive's head in half-tracks.
     output wire [1:0]  d5_stale_o,
+    output wire [1:0]  d5_dirty_o,
     output wire [13:0] d5_phase_o,     // [6:0] drive 1, [13:7] drive 2
     // The drive in use is turning with a disk in and the buffer is not its
     // track: the accelerated core waits for the fill (rtl/accel_seq.sv stall).
@@ -180,6 +199,8 @@ module gs_iwm #(
     localparam integer BUF_WORDS   = BUF_BYTES / 4;  // 2560
     localparam integer CHUNK_WORDS = 252;
     localparam integer D5_CHUNKS   = 7;              // the Disk II's fill (docs/FLOPPY.md)
+    localparam integer D5_LAST     = 152;            // ...words in its seventh chunk
+    localparam integer BURST_MAX_GAP = 16;           // slots a write burst may be off the head
     // The nibble time in FIFTHS of a core cycle, fixed (see the header).
     localparam [7:0]   P35         = 8'd224;         // 44.8 cycles
     localparam [7:0]   P525        = 8'd160;         // 32 cycles
@@ -257,6 +278,23 @@ module gs_iwm #(
     logic [21:0] retry_clks;
     logic [6:0]  us_pre;            // 100 clocks to the microsecond
     logic [15:0] fill_us;           // microseconds since the seek, saturating
+    // The written track going home.
+    logic        dirty;             // the buffer (a 5.25" track) was written to
+    logic        up_owed;           // an FD_DIRTY upload is to be sent
+    logic        up_again;          // ...and another after the one going out
+    logic [8:0]  up_id;             // ...of this track
+    logic [7:0]  up_seq;            // ...as filled by this seek
+    logic        motor_prev;        // for the motor stopping
+
+    // Driven below, named here so every use follows its declaration.
+    wire [11:0] a_addr;             // the head's port
+    wire [3:0]  a_we;
+    wire [31:0] a_wdata;
+    wire        a_read;             // ...doing the standing read this clock
+    wire [11:0] b_addr;             // the link's port
+    wire [31:0] b_word;
+    wire        store;              // the machine writes a byte at the head
+    wire        want;               // a new track is wanted from the host
 
     // THE ONE 3.5" DRIVE IS DRIVE 1.  With $C0EB selecting drive 2 there is
     // nothing there: no disk, not installed, locked, at track 0, and a step
@@ -283,6 +321,7 @@ module gs_iwm #(
                                      : nibbles35;
     assign stale_o    = stale;
     assign d5_stale_o = {!(buf_id[8] &&  buf_id[7] && !stale), !(buf_id[8] && !buf_id[7] && !stale)};
+    assign d5_dirty_o = {buf_id[8] && buf_id[7] && dirty, buf_id[8] && !buf_id[7] && dirty};
     assign stall_o    = spinning && tgt_in && !usable;
 
     // Noise for an empty drive or a stale buffer: a 16-bit LFSR per tick.
@@ -292,41 +331,56 @@ module gs_iwm #(
     // ---- the track buffer -------------------------------------------------------
     // THREE BLOCK RAM TILES, 1024 words of 32 bits each, 3072 words for the
     // 2560 a zone-0 3.5" track needs (a 5.25" track is 1664): word w lives in
-    // tile w[11:10] at index w[9:0].  Port A is the bus side (the standing
-    // read of the word the head's slot is in), port B the link side (the
-    // fill, a word at a time).  Three full tiles, not four byte lanes: the
-    // count matters (docs/GS.md "The retained set and the DDR3").
+    // tile w[11:10] at index w[9:0].  Three full tiles, not four byte lanes:
+    // the count matters (docs/GS.md "The retained set and the DDR3").
+    //   Port A is the HEAD'S: the host's fill a word at a time, the machine's
+    // writes a byte at a time (a byte-wide write enable), and between them
+    // the standing read of the word the head's slot is in.  Port B is the
+    // LINK'S and only reads: a written track going back to the host.  One
+    // port writes, so nothing drives a tile from two places.
     (* ram_style = "block" *) logic [31:0] tbuf0 [0:1023];
     (* ram_style = "block" *) logic [31:0] tbuf1 [0:1023];
     (* ram_style = "block" *) logic [31:0] tbuf2 [0:1023];
-    wire  [11:0] a_word_addr = pos[13:2];
     logic [31:0] a_rd0, a_rd1, a_rd2;
-    logic [1:0]  a_tile_q;
-    wire         b_we;
-    wire  [11:0] b_addr;
+    logic [31:0] b_rd0, b_rd1, b_rd2;
+    logic [1:0]  a_tile_q, b_tile_q;
     always_ff @(posedge clk) begin
-        a_rd0 <= tbuf0[a_word_addr[9:0]];
-        a_rd1 <= tbuf1[a_word_addr[9:0]];
-        a_rd2 <= tbuf2[a_word_addr[9:0]];
-        a_tile_q <= a_word_addr[11:10];
+        for (int k = 0; k < 4; k++)
+            if (a_we[k] && a_addr[11:10] == 2'd0) tbuf0[a_addr[9:0]][8*k +: 8] <= a_wdata[8*k +: 8];
+        a_rd0 <= tbuf0[a_addr[9:0]];
     end
     always_ff @(posedge clk) begin
-        if (b_we && b_addr[11:10] == 2'd0) tbuf0[b_addr[9:0]] <= pay_data;
-        if (b_we && b_addr[11:10] == 2'd1) tbuf1[b_addr[9:0]] <= pay_data;
-        if (b_we && b_addr[11:10] == 2'd2) tbuf2[b_addr[9:0]] <= pay_data;
+        for (int k = 0; k < 4; k++)
+            if (a_we[k] && a_addr[11:10] == 2'd1) tbuf1[a_addr[9:0]][8*k +: 8] <= a_wdata[8*k +: 8];
+        a_rd1 <= tbuf1[a_addr[9:0]];
+    end
+    always_ff @(posedge clk) begin
+        for (int k = 0; k < 4; k++)
+            if (a_we[k] && a_addr[11:10] == 2'd2) tbuf2[a_addr[9:0]][8*k +: 8] <= a_wdata[8*k +: 8];
+        a_rd2 <= tbuf2[a_addr[9:0]];
+    end
+    always_ff @(posedge clk) begin
+        b_rd0 <= tbuf0[b_addr[9:0]];
+        b_rd1 <= tbuf1[b_addr[9:0]];
+        b_rd2 <= tbuf2[b_addr[9:0]];
+        a_tile_q <= a_addr[11:10];
+        b_tile_q <= b_addr[11:10];
     end
     wire [31:0] a_word = (a_tile_q == 2'd0) ? a_rd0 : (a_tile_q == 2'd1) ? a_rd1 : a_rd2;
+    assign      b_word = (b_tile_q == 2'd0) ? b_rd0 : (b_tile_q == 2'd1) ? b_rd1 : b_rd2;
 
-    // The nibble the register will take next, refreshed every clock from the
-    // word the head's slot is in (one clock of RAM latency, one of lane
-    // select - a slot lasts sixteen cycles at the least).
+    // The nibble the register will take next, refreshed from the word the
+    // head's slot is in whenever port A last did the standing read (one
+    // clock of RAM latency, one of lane select - a slot lasts sixteen cycles
+    // at the least).  A store holds it: the byte may not be under the head.
     logic [7:0] nxt;
-    logic [1:0] a_lane_q, a_lane_qq;
+    logic [1:0] a_lane_q;
+    logic       a_rd_q;
     always_ff @(posedge clk) begin
-        a_lane_q  <= pos[1:0];
-        a_lane_qq <= a_lane_q;
-        if (rst) nxt <= 8'd0;
-        else     nxt <= a_word[8*a_lane_q +: 8];
+        a_lane_q <= pos[1:0];
+        a_rd_q   <= a_read;
+        if (rst)         nxt <= 8'd0;
+        else if (a_rd_q) nxt <= a_word[8*a_lane_q +: 8];
     end
 
     // ---- host -> card: the track chunks ----------------------------------------
@@ -362,9 +416,6 @@ module gs_iwm #(
     wire fill_write = word_track && (rx_idx >= data_start) && fill_ok &&
                       (fill_word < 12'(BUF_WORDS));
     wire chunk_done = word_track && rx_last && fill_ok;
-
-    assign b_we   = fill_write;
-    assign b_addr = fill_word;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -402,29 +453,75 @@ module gs_iwm #(
     // A 5.25" chunk's count is fixed; its first word says so.
     wire fill_w0_525 = word_track && is525 && (rx_idx == 8'd0) && accept525;
 
-    // ---- card -> host: FD35_SEEK or FD_SEEK --------------------------------------
-    typedef enum logic [1:0] { X_IDLE, X_HDR, X_W0 } xstate_t;
-    xstate_t xs;
-    logic [8:0] tx_id;              // the seek being sent, latched as it starts
-    logic [7:0] tx_seq;
+    // ---- card -> host: FD_DIRTY uploads, FD35_SEEK and FD_SEEK ------------------------
+    // One stream, one message at a time.  A written track's upload goes
+    // before any seek, so the host has the track before it could be asked
+    // for it again - and, the buffer holding that track until the seek's
+    // answer overwrites it, the upload reads it through port B while the
+    // seek for the next one waits.
+    typedef enum logic [2:0] {
+        X_IDLE,
+        X_HDR,          // a seek's header
+        X_W0,           // ...and its word
+        X_UP_HDR,       // an FD_DIRTY chunk's header
+        X_UP_W0,        // ...its {seq, chunk, track, drive}
+        X_UP_DATA       // ...its words, from the buffer
+    } xstate_t;
+    xstate_t     xs;
+    logic [8:0]  tx_id;             // the seek being sent, latched as it starts
+    logic [7:0]  tx_seq;
+    logic [2:0]  x_chunk;
+    logic [7:0]  x_left;            // data words still to send this chunk
+    logic [11:0] x_word;            // the buffer word being offered
+
+    wire [7:0] chunk_len = (x_chunk == 3'd6) ? 8'(D5_LAST) : 8'(CHUNK_WORDS);
+    wire       xs_up     = (xs == X_UP_HDR) || (xs == X_UP_W0) || (xs == X_UP_DATA);
+
+    // Port B reads the word being offered, and the one after it on the clock
+    // it is taken, so the stream never waits on the RAM's latency.
+    assign b_addr   = ((xs == X_UP_DATA) && tx_take) ? x_word + 12'd1 : x_word;
+
     assign tx_valid = (xs != X_IDLE);
-    assign tx_word  = (xs == X_HDR) ? {16'd0, (tx_id[8] ? T_FD_SEEK : T_FD35_SEEK), 8'd1}
-                    : tx_id[8]      ? {tx_seq, 8'd0, 2'd0, tx_id[5:0], 7'd0, tx_id[7]}
-                                    : {tx_seq, 8'd0, tx_id[7:0], 8'd0};
+    assign tx_word  = (xs == X_HDR)    ? {16'd0, (tx_id[8] ? T_FD_SEEK : T_FD35_SEEK), 8'd1}
+                    : (xs == X_W0)     ? (tx_id[8] ? {tx_seq, 8'd0, 2'd0, tx_id[5:0], 7'd0, tx_id[7]}
+                                                   : {tx_seq, 8'd0, tx_id[7:0], 8'd0})
+                    : (xs == X_UP_HDR) ? {16'd0, T_FD_DIRTY, chunk_len + 8'd1}
+                    : (xs == X_UP_W0)  ? {up_seq, 5'd0, x_chunk, 2'd0, up_id[5:0], 7'd0, up_id[7]}
+                    :                    b_word;
     wire seek_sent = (xs == X_W0) && tx_take;
+    wire up_sent   = (xs == X_UP_DATA) && tx_take && (x_left == 8'd1) && (x_chunk == 3'd6);
     always_ff @(posedge clk) begin
         if (rst) begin
-            xs <= X_IDLE;
-            tx_id <= 9'd0;
-            tx_seq <= 8'd0;
+            xs      <= X_IDLE;
+            tx_id   <= 9'd0;
+            tx_seq  <= 8'd0;
+            x_chunk <= 3'd0;
+            x_left  <= 8'd0;
+            x_word  <= 12'd0;
         end else case (xs)
-            X_IDLE: if (seek_owed) begin
-                xs     <= X_HDR;
-                tx_id  <= buf_id;
-                tx_seq <= seq;
+            X_IDLE: begin
+                x_chunk <= 3'd0;
+                x_word  <= 12'd0;
+                if (up_owed) begin
+                    xs <= X_UP_HDR;
+                end else if (seek_owed) begin
+                    xs     <= X_HDR;
+                    tx_id  <= buf_id;
+                    tx_seq <= seq;
+                end
             end
-            X_HDR:  if (tx_take) xs <= X_W0;
-            X_W0:   if (tx_take) xs <= X_IDLE;
+            X_HDR:     if (tx_take) xs <= X_W0;
+            X_W0:      if (tx_take) xs <= X_IDLE;
+            X_UP_HDR:  if (tx_take) begin xs <= X_UP_W0; x_left <= chunk_len; end
+            X_UP_W0:   if (tx_take) xs <= X_UP_DATA;
+            X_UP_DATA: if (tx_take) begin
+                x_word <= x_word + 12'd1;
+                x_left <= x_left - 8'd1;
+                if (x_left == 8'd1) begin
+                    if (x_chunk == 3'd6) xs <= X_IDLE;
+                    else begin x_chunk <= x_chunk + 3'd1; xs <= X_UP_HDR; end
+                end
+            end
             default: xs <= X_IDLE;
         endcase
     end
@@ -457,10 +554,18 @@ module gs_iwm #(
             endcase
         end
     end
-    // A 5.25" drive's sense is its write protect (iwm.c:1137).  Every 5.25"
-    // drive reads PROTECTED while writes are not built - an empty one does in
-    // KEGS too - so no DOS writes into a disk that would drop the bytes.
-    wire sense = apple35_sel ? status35 : 1'b1;
+    // A 5.25" drive's sense is its write protect (iwm.c:1137): the disk's
+    // own, and PROTECTED with no disk in (an empty drive does in KEGS too).
+    // UNDER ENABLE2 THE SENSE IS 1 FOR EITHER SIDE ("Read status under
+    // enable2: 1"): phases 1 and 3 together address the SmartPort bus, the
+    // drives are disabled, and bit 7 is a SmartPort device's ACK - which the
+    // ROM's slot-5 probe polls at FF/581F.  A writable 5.25" disk read as 0
+    // there answered for a device that is not there, and the ROM sat in that
+    // loop and never booted slot 6 (2026-09-14, the first build with writes;
+    // the drives had always read protected, which hid it).
+    wire sense = enable2     ? 1'b1
+               : apple35_sel ? status35
+                             : (!d5_inserted[drive_sel] || d5_wp[drive_sel]);
 
     // KEGS: val = ((sense & 1) << 7) | (state & 0x3f): bit 5 is the IWM's
     // ENABLE latch, the mode in [4:0], bit 6 zero.
@@ -569,10 +674,80 @@ module gs_iwm #(
     // A new track is wanted from the host: the drive in use has a disk and
     // the buffer is not its track, or it was just put in, or a stale fill
     // was never answered.
-    wire  want = tgt_in && ((tgt_id != buf_id) || pend_tgt ||
-                 (stale && !seek_owed && (xs == X_IDLE) && (retry_clks == 22'd0)));
+    assign want = tgt_in && ((tgt_id != buf_id) || pend_tgt ||
+                  (stale && !seek_owed && (xs == X_IDLE) && (retry_clks == 22'd0)));
     wire  filled = chunk_done && (chunks_total != 4'd0) &&
                    ((chunks_r | (16'd1 << fill_chunk)) == ((16'd1 << chunks_total) - 16'd1));
+
+    // ---- the machine's writes (5.25") ------------------------------------------------
+    // A data write (write_iwm: Q7 and Q6 set after the touch, the motor on,
+    // not ENABLE2) on a writable disk whose track is in the buffer.  Not on
+    // the clock a new track is wanted - the buffer is leaving - and not under
+    // a fill, which has the port.
+    assign store = iwm_act && !op_rw && op_lo[0] && (q7q6 == 2'b11) && t_motor && !enable2 &&
+                   !apple35_sel && usable && buf_id[8] && !d5_wp[drive_sel] &&
+                   !want && !fill_write;
+
+    // THE WRITE BURST LANDS CONTIGUOUSLY.  A burst's first byte goes in the
+    // slot under the head; every byte after it goes in the slot after the
+    // last one, wherever the head has got to - as long as the head is within
+    // BURST_MAX_GAP slots of it either way (further, and it is a new burst,
+    // at the head).  A slot is eight bits.  A byte written slower than 32
+    // cycles is a nine- or ten-bit cell whose extra zero bits no reader ever
+    // takes for a nibble, so they take no slot: the burst falls a little
+    // behind the head, which is harmless, and never gets ahead of it.
+    //   The first write build did the Disk II card's rule (rtl/floppy_card.sv):
+    // every byte in the slot under the head, a slot the burst skipped filled
+    // with $FF.  Right for a run of 40-cycle sync bytes; WRONG at DOS 3.3's
+    // two 36-cycle steps - the last sync to $D5, and the data prologue's $AD
+    // to the first data nibble (RWTS WRITE16: ORA, RTS, TYA, LDY, BNE, EOR
+    // abs,Y across a page, TAX, LDA abs,X, LDX, STA).  The write starts a fixed
+    // time after the address field was read, so the phase is the same every
+    // time, and at the phase this drive's read hold leaves it the second step
+    // crossed a slot boundary: a phantom $FF at the head of every data field.
+    // Every sector SAVE wrote on the card decoded one byte late and
+    // complemented, and DOS said I/O ERROR (2026-09-14).
+    logic        wr_burst;
+    logic [13:0] wr_last;
+
+    // Slots from the last store to the head, on the circle.
+    wire [14:0] gap_raw    = {1'b0, pos} - {1'b0, wr_last};
+    wire [13:0] gap        = gap_raw[14] ? (gap_raw[13:0] + nibbles) : gap_raw[13:0];
+    wire [13:0] wr_last_p1 = (wr_last + 14'd1 >= nibbles) ? 14'd0 : wr_last + 14'd1;
+    wire        contig     = wr_burst && ((gap <= 14'(BURST_MAX_GAP)) ||
+                                          (gap >= nibbles - 14'(BURST_MAX_GAP)));
+    wire [13:0] wr_slot    = contig ? wr_last_p1 : pos;
+    wire        burst_end  = (iwm_act && ((op_lo[3:0] == 4'hE) || (op_lo[3:1] == 3'd5))) ||
+                             (step5 && (hp_new != hp_sel)) || want;
+
+    // Port A, in this priority: the host's fill (a word), a store (a byte),
+    // else the standing read of the head's word.
+    assign a_read  = !fill_write && !store;
+    assign a_addr  = fill_write ? fill_word
+                   : store      ? wr_slot[13:2]
+                   :              pos[13:2];
+    assign a_we    = fill_write ? 4'hF
+                   : store      ? (4'd1 << wr_slot[1:0])
+                   :              4'h0;
+    assign a_wdata = fill_write ? pay_data : {4{op_wdata}};
+
+    always_ff @(posedge clk) begin
+        if (rst || !res_sync) begin
+            wr_burst <= 1'b0;
+            wr_last  <= 14'd0;
+        end else begin
+            if (store) begin
+                wr_last  <= wr_slot;
+                wr_burst <= 1'b1;
+            end
+            if (burst_end) wr_burst <= 1'b0;
+        end
+    end
+
+    // The events that end the buffer's claim on a written 5.25" track.
+    wire motor_stop = motor_prev && !motor_on;
+    wire d5_leave   = buf_id[8] && (want || buf_ejected || d5_flush[buf_id[7]] || motor_stop);
+    wire flush      = d5_leave && dirty;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -595,15 +770,40 @@ module gs_iwm #(
             seeks       <= 8'd0;
             late        <= 8'd0;
             fill_max    <= 16'd0;
+            dirty       <= 1'b0;
+            up_owed     <= 1'b0;
+            up_again    <= 1'b0;
+            up_id       <= 9'd0;
+            up_seq      <= 8'd0;
+            motor_prev  <= 1'b0;
         end else begin
             ins_prev  <= drv_inserted;
             ins5_prev <= d5_inserted;
+            motor_prev <= motor_on;
             if (ins_edge) ins_pend <= 1'b1;
             if (ej_edge)  ins_pend <= 1'b0;
             ins5_pend <= (ins5_pend | ins5_edge) & ~ej5_edge;
             if (stale && retry_clks != 22'd0) retry_clks <= retry_clks - 22'd1;
             us_pre <= (us_pre == 7'd99) ? 7'd0 : us_pre + 7'd1;
             if (stale && (us_pre == 7'd99) && fill_us != 16'hFFFF) fill_us <= fill_us + 16'd1;
+
+            // Leaving a written track: it goes to the host, with the seq that
+            // filled it, before anything else goes out.  A flush while an
+            // upload is still going out - the machine wrote again behind it -
+            // sends the track once more when that one is done.
+            if (up_sent) begin
+                up_owed  <= up_again || flush;
+                up_again <= 1'b0;
+            end else if (flush) begin
+                if (xs_up) up_again <= 1'b1;
+                else       up_owed  <= 1'b1;
+            end
+            if (flush) begin
+                up_id  <= buf_id;
+                up_seq <= seq;
+            end
+            if (d5_leave) dirty <= 1'b0;
+            if (store)    dirty <= 1'b1;
 
             if (buf_ejected) stale <= 1'b1;
             if (do_step) stepped <= 1'b1;
@@ -758,16 +958,21 @@ module gs_iwm #(
     end
 
 `ifndef SYNTHESIS
-    // The data reads each side served from a disk: the bench prints them.
-    integer rd35 = 0, rd525 = 0;
+    // The data reads each side served from a disk, the 5.25" bytes written
+    // and the tracks sent home: the benches print them.
+    integer rd35 = 0, rd525 = 0, wr525 = 0, up525 = 0;
     always @(posedge clk)
-        if (!rst && data_read && usable) begin
-            if (apple35_sel) rd35  <= rd35 + 1;
-            else             rd525 <= rd525 + 1;
+        if (!rst) begin
+            if (data_read && usable) begin
+                if (apple35_sel) rd35  <= rd35 + 1;
+                else             rd525 <= rd525 + 1;
+            end
+            if (store)   wr525 <= wr525 + 1;
+            if (up_sent) up525 <= up525 + 1;
         end
 `endif
 
     // The reset line the phases can assert is decoded but drives nothing.
-    wire _unused = &{1'b0, iwm_reset, a_lane_qq, d5_wp, nib5_sel,
+    wire _unused = &{1'b0, iwm_reset, nib5_sel,
                      op_wdata[7:5], fbit_scaled[31:19], fbit_scaled[10:0], 1'b0};
 endmodule
