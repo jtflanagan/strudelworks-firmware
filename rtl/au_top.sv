@@ -111,7 +111,6 @@ module au_top (
         .calib_complete (calib_complete),
         .ddr3_debug     (ddr3_debug),
         .user_self_refresh (1'b0),
-        .refresh_ok        (probe_refresh_ok),
 
         .ddr3_addr   (ddr3_addr),
         .ddr3_ba     (ddr3_ba),
@@ -176,8 +175,7 @@ module au_top (
         .rnd_max_w     (rnd_max_w),
         .rnd_gt_gs     (rnd_gt_gs),
         .rnd_gt_leg    (rnd_gt_leg),
-        .err_count     (err_count),
-        .refresh_ok    (probe_refresh_ok)
+        .err_count     (err_count)
     );
 
     // ---- UART report -------------------------------------------------------
@@ -188,11 +186,6 @@ module au_top (
     wire [31:0] win_count, seq_mean_x10, seq_gt_gs, seq_gt_leg;
     wire [31:0] rnd_mean_x10, rnd_gt_gs, rnd_gt_leg, err_count;
     wire [15:0] seq_min_w, seq_max_w, rnd_min_w, rnd_max_w;
-
-    // Milestone 2: the probe emulates an Apple II bus cycle and tells the
-    // controller when it may refresh.  Stands in for the line buffer's hit
-    // signal until milestone 2b builds the real one.
-    wire probe_refresh_ok;
 
     wire [7:0] tx_data;
     wire       tx_valid, tx_ready;

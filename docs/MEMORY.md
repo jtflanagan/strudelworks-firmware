@@ -134,6 +134,15 @@ write-back to land in front of a fill and eat 40 ns of turnaround. At Apple
 speed a write is done a dozen clocks into its cycle. A write buffer, for the
 day the core runs faster, goes in `mem_client`'s queue.
 
+> **Removed 2026-09-14 (user decision).** The refresh gate is gone: the patch, the
+> `REFRESH_GATE` parameter, `i_refresh_ok` and every `refresh_ok` producer.  It had been
+> off since 2026-09-12 (`REFRESH_GATE = 0`) as a suspect in the IIgs bitstreams that
+> met timing and never calibrated - it was not the cause, and could not have been (its
+> branch needed `final_calibration_done`) - but dead code in the controller was one more
+> thing that could perturb the DDR3 logic, and manual refresh no longer buys anything.
+> UberDDR3 is now the pinned upstream commit, unpatched; refresh is its own tREFI timer.
+
+
 **Refresh from the cycle's position, not from hit prediction.** The refresh
 gate (DERISK.md, milestone 2) pulls a refresh in when `refresh_ok` is high.
 At Apple speed the card's memory work is done by clock ~25 of a ~98-clock bus

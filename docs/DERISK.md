@@ -500,6 +500,15 @@ simulation cannot tell us.
 the only comparison worth quoting.
 
 **2. Refresh control.** ✅ **patch written, proven in simulation**
+
+> **Removed 2026-09-14 (user decision).** The refresh gate is gone: the patch, the
+> `REFRESH_GATE` parameter, `i_refresh_ok` and every `refresh_ok` producer.  It had been
+> off since 2026-09-12 (`REFRESH_GATE = 0`) as a suspect in the IIgs bitstreams that
+> met timing and never calibrated - it was not the cause, and could not have been (its
+> branch needed `final_calibration_done`) - but dead code in the controller was one more
+> thing that could perturb the DDR3 logic, and manual refresh no longer buys anything.
+> UberDDR3 is now the pinned upstream commit, unpatched; refresh is its own tREFI timer.
+
 `patches/0001-refresh-gate.patch` against the pinned commit, applied
 automatically by `third_party/fetch_uberddr3.sh` (verified to survive a clean
 re-fetch — without that step a re-fetch would silently revert it, and the symptom

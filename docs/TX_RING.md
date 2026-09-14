@@ -267,6 +267,15 @@ requirement. The controller itself is **not** reset by the link's reset,
 only by the clock-lock reset, because recalibration is not something a
 watchdog expiry should cost.
 
+> **Removed 2026-09-14 (user decision).** The refresh gate is gone: the patch, the
+> `REFRESH_GATE` parameter, `i_refresh_ok` and every `refresh_ok` producer.  It had been
+> off since 2026-09-12 (`REFRESH_GATE = 0`) as a suspect in the IIgs bitstreams that
+> met timing and never calibrated - it was not the cause, and could not have been (its
+> branch needed `final_calibration_done`) - but dead code in the controller was one more
+> thing that could perturb the DDR3 logic, and manual refresh no longer buys anything.
+> UberDDR3 is now the pinned upstream commit, unpatched; refresh is its own tREFI timer.
+
+
 `refresh_ok` is tied low until an Apple client exists. That is upstream
 behaviour and is safe (`ddr3_wrapper.sv`).
 

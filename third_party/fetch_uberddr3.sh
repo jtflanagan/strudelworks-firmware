@@ -32,24 +32,3 @@ fi
 
 git -C "$dst" checkout --detach "$SHA"
 echo "UberDDR3 checked out at $SHA"
-
-# Local patches, applied on top of the pinned commit.
-#
-# These MUST live here rather than as edits to a vendored tree: without this
-# step a re-fetch silently reverts them, and the symptom would be a refresh
-# landing in the middle of a CPU cycle - intermittent, timing-dependent, and
-# nothing like an obvious "your patch is missing" failure.
-shopt -s nullglob
-patches=("$here"/../patches/*.patch)
-if [ ${#patches[@]} -gt 0 ]; then
-  for p in "${patches[@]}"; do
-    echo "applying $(basename "$p")"
-    git -C "$dst" apply --check "$p" || {
-      echo "ERROR: $(basename "$p") does not apply to $SHA." >&2
-      echo "       Upstream moved, or the patch was authored against a different pin." >&2
-      exit 1
-    }
-    git -C "$dst" apply "$p"
-  done
-  echo "${#patches[@]} patch(es) applied"
-fi

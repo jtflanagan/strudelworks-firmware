@@ -499,7 +499,7 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [15:0] cl_off, pf_off;
     wire [11:0] sw_state;
     wire [7:0]  rw_bank;
-    wire        rom_loaded, invalidating, image_ready, refresh_ok, rot_ok, mem_idle;
+    wire        rom_loaded, invalidating, image_ready, rot_ok, mem_idle;
     wire [31:0] hits, misses, served, mismatches, last_mismatch, diverted;
     wire [7:0]  late_fills, fifo_drops;
     reg         msg_valid = 1'b0, pay_valid = 1'b0;
@@ -633,7 +633,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .req (c_req[1]), .gnt (c_gnt[1]), .cyc (c_cyc[1]), .stb (c_stb[1]),
         .we (c_we[1]), .addr (c_addr[47:24]), .data (c_data[255:128]), .sel (c_sel[31:16]),
         .stall (c_stall[1]), .ack (c_ack[1]), .rdata (c_rdata),
-        .refresh_ok (refresh_ok), .rot_ok (rot_ok), .mem_idle (mem_idle),
+        .rot_ok (rot_ok), .mem_idle (mem_idle),
         .image_ready (image_ready)
     );
 

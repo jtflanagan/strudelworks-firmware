@@ -88,8 +88,7 @@ module tx_ring_ddr3_tb;
         .DUAL_RANK_DIMM        (0),
         .DLL_OFF               (0),
         .SPEED_BIN             (3),
-        .SDRAM_CAPACITY        (SDRAM_CAPACITY),
-        .REFRESH_GATE          (1)
+        .SDRAM_CAPACITY        (SDRAM_CAPACITY)
     ) u_ddr3 (
         .i_controller_clk (i_controller_clk),
         .i_ddr3_clk       (i_ddr3_clk),
@@ -129,7 +128,6 @@ module tx_ring_ddr3_tb;
         .o_calib_complete   (o_calib_complete),
         .o_debug1           (),
         .i_user_self_refresh(1'b0),
-        .i_refresh_ok       (1'b0),
         .uart_tx            ()
     );
 

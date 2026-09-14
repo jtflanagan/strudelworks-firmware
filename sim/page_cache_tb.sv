@@ -136,7 +136,7 @@ module page_cache_tb;
     wire [127:0] wb_data, wb_rdata;
     wire [15:0]  wb_sel;
     wire [3:0]   wb_aux, wb_rdata_aux;
-    wire         refresh_ok, rot_ok, mem_idle;
+    wire         rot_ok, mem_idle;
 
     wb_arb #(.N (2), .HAS_PRIO (1'b1)) u_arb (
         .clk (clk), .rst (rst), .rot_ok (rot_ok),
@@ -158,7 +158,7 @@ module page_cache_tb;
         .req (c_req[1]), .gnt (c_gnt[1]), .cyc (c_cyc[1]), .stb (c_stb[1]),
         .we (c_we[1]), .addr (c_addr[47:24]), .data (c_data[255:128]),
         .sel (c_sel[31:16]), .stall (c_stall[1]), .ack (c_ack[1]), .rdata (c_rdata),
-        .refresh_ok (refresh_ok), .rot_ok (rot_ok), .mem_idle (mem_idle),
+        .rot_ok (rot_ok), .mem_idle (mem_idle),
         .image_ready (image_ready)
     );
 

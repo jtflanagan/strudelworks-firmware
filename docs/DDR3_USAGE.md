@@ -330,6 +330,15 @@ and it is taking row misses either way.
 
 ### Cost 3 — Refresh, already solved, with one thing to re-check
 
+> **Removed 2026-09-14 (user decision).** The refresh gate is gone: the patch, the
+> `REFRESH_GATE` parameter, `i_refresh_ok` and every `refresh_ok` producer.  It had been
+> off since 2026-09-12 (`REFRESH_GATE = 0`) as a suspect in the IIgs bitstreams that
+> met timing and never calibrated - it was not the cause, and could not have been (its
+> branch needed `final_calibration_done`) - but dead code in the controller was one more
+> thing that could perturb the DDR3 logic, and manual refresh no longer buys anything.
+> UberDDR3 is now the pinned upstream commit, unpatched; refresh is its own tREFI timer.
+
+
 `tRFC 160 ns` per `tREFI 7.8 µs` = **2.05 %** of bandwidth nominally, **~4.1 %**
 with `REFRESH_GATE` pulling refreshes in at up to twice the nominal rate. That is
 a good trade and the reasoning in `DERISK.md` stands.

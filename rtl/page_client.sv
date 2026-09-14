@@ -31,15 +31,13 @@
 // A page's sixteen lines sit in one row, so a fill or flush after its first
 // beat is all page hits.
 //
-// REFRESH AND THE ROTATION keep mem_client's scheme unchanged: the refresh
-// gate takes a refresh when this client is idle in the cycle's window, and a
-// ring batch may start only in a window that is over before the next cycle
-// can need the memory.  When the card is not the machine's CPU there are no
+// THE ROTATION keeps mem_client's scheme: a ring batch may start only in a
+// window that is over before the next cycle can need the memory.  Refresh is
+// the DDR3 controller's own, on its tREFI timer (the refresh gate that once
+// took it in this client's idle window was removed 2026-09-14).  When the card is not the machine's CPU there are no
 // cycles to keep clear of.  The image is never cleared, exactly as before.
 //////////////////////////////////////////////////////////////////////////////////
 module page_client #(
-    parameter integer PH_REF_LO = 30,
-    parameter integer PH_REF_HI = 60,
     parameter integer PH_ROT_LO = 30,
     parameter integer PH_ROT_HI = 50
 ) (
@@ -49,10 +47,8 @@ module page_client #(
     input  wire         master_active,
     input  wire         op_present,
     // The core is accelerated (rtl/accel_seq.sv): fills and flushes land at
-    // any point in the bus cycle, so the windows below would only starve the
-    // ring's batches and hold refreshes back for no deadline that exists any
-    // more - a refresh under a fast op is a stall, not a wrong answer.  With
-    // this high both windows are the whole cycle.
+    // any point in the bus cycle, so the window below would only starve the
+    // ring's batches.  With this high it is the whole cycle.
     input  wire         accel,
 
     // From page_cache's engine: the request stream.
@@ -80,7 +76,6 @@ module page_client #(
     input  wire [127:0] rdata,
 
     // Scheduling and status.
-    output wire         refresh_ok,
     output wire         rot_ok,
     output wire         mem_idle,
     output wire         image_ready
@@ -113,11 +108,9 @@ module page_client #(
 
     // ---- the cycle's position --------------------------------------------------
     logic [7:0] phase;
-    wire in_ref_win = (phase >= PH_REF_LO[7:0]) && (phase <= PH_REF_HI[7:0]);
     wire in_rot_win = (phase >= PH_ROT_LO[7:0]) && (phase <= PH_ROT_HI[7:0]);
 
     assign mem_idle    = !pq_busy && !pq_valid && (outstanding == 8'd0);
-    assign refresh_ok  = calib_complete && mem_idle && (!master_active || accel || in_ref_win);
     assign rot_ok      = !pq_busy && !pq_valid && (!master_active || accel || in_rot_win);
     assign image_ready = calib_complete;
 

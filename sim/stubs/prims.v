@@ -100,8 +100,7 @@ module ddr3_top #(
     parameter integer WB_ERROR = 0,
     parameter integer BIST_MODE = 0,
     parameter integer ECC_ENABLE = 0,
-    parameter integer SELF_REFRESH = 0,
-    parameter integer REFRESH_GATE = 0
+    parameter integer SELF_REFRESH = 0
 ) (
     input  wire i_controller_clk, i_ddr3_clk, i_ref_clk, i_ddr3_clk_90, i_rst_n,
     input  wire i_wb_cyc, i_wb_stb, i_wb_we,
@@ -127,7 +126,7 @@ module ddr3_top #(
     output wire [BYTE_LANES-1:0]   o_ddr3_dm,
     output wire o_calib_complete,
     output wire [31:0] o_debug1,
-    input  wire i_user_self_refresh, i_refresh_ok,
+    input  wire i_user_self_refresh,
     output wire uart_tx
 );
 endmodule

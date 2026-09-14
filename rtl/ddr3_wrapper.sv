@@ -58,23 +58,12 @@ module ddr3_wrapper #(
     // 0 so the Apple II is not held in reset waiting for a memory test.
     parameter BIST_MODE = 1,
 
-    // 0 = self-refresh is driven by i_user_self_refresh, never entered on its own.
-    // Deliberate: this design wants refresh under its control, not on a timer.
-    // See docs/DERISK.md - this is NOT the same as controlling AUTO-refresh.
+    // 0 = the DDR3's low-power self-refresh mode is entered only on
+    // user_self_refresh, which nothing raises: the card never uses it.  Normal
+    // refresh is the controller's own, on its tREFI timer, exactly as upstream
+    // intends (the refresh-gate patch that pulled it into idle bus windows was
+    // removed 2026-09-14 - docs/DERISK.md).
     parameter SELF_REFRESH = 0,
-
-    // 1 = honour refresh_ok and pull auto-refresh into windows the bus logic
-    // declares free.  This is the milestone-2 patch (patches/0001-refresh-gate.patch),
-    // not upstream UberDDR3.  It only ever moves a refresh EARLIER, so refresh
-    // can never be starved and retention is safe even if refresh_ok never
-    // asserts.  See docs/DERISK.md.
-    //
-    // OFF (the user's, 2026-09-12): the controller refreshes on its own tREFI
-    // timer, as upstream does.  Removed as a candidate cause of the IIgs
-    // bitstreams that met timing and never calibrated (docs/IWM35.md "On
-    // hardware"); refresh_ok is still wired and ignored.  The three benches
-    // that set the gate to 1 explicitly still test the patch.
-    parameter REFRESH_GATE = 0,
 
     parameter AUX_WIDTH = 4
 ) (
@@ -103,11 +92,6 @@ module ddr3_wrapper #(
 
     // Request the DDR3 be put into self-refresh (see SELF_REFRESH above).
     input  wire user_self_refresh,
-
-    // High when the upcoming bus cycle will be served without touching DDR3, so
-    // a refresh may be taken now.  Advisory: the tREFI deadline still fires by
-    // itself, so tying this low is safe and reproduces upstream behaviour.
-    input  wire refresh_ok,
 
     // DDR3 device pins - names match constr/<board>/ddr3.xdc, which matches MIG's.
     output wire [13:0] ddr3_addr,
@@ -149,8 +133,7 @@ module ddr3_wrapper #(
         .WB_ERROR              (0),
         .BIST_MODE             (BIST_MODE),
         .ECC_ENABLE            (0),
-        .SELF_REFRESH          (SELF_REFRESH),
-        .REFRESH_GATE          (REFRESH_GATE)
+        .SELF_REFRESH          (SELF_REFRESH)
     ) u_ddr3 (
         .i_controller_clk (clk_ctrl),
         .i_ddr3_clk       (clk_ddr3),
@@ -202,7 +185,6 @@ module ddr3_wrapper #(
         .o_debug1         (ddr3_debug),
 
         .i_user_self_refresh (user_self_refresh),
-        .i_refresh_ok        (refresh_ok),
         .uart_tx          ()
     );
 

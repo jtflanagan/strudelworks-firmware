@@ -147,8 +147,7 @@ module latency_tb;
         .DUAL_RANK_DIMM        (0),
         .DLL_OFF               (0),
         .SPEED_BIN             (3),
-        .SDRAM_CAPACITY        (SDRAM_CAPACITY),
-        .REFRESH_GATE          (1)   // milestone-2 patch enabled
+        .SDRAM_CAPACITY        (SDRAM_CAPACITY)
     ) dut (
         .i_controller_clk (i_controller_clk),
         .i_ddr3_clk       (i_ddr3_clk),
@@ -192,7 +191,6 @@ module latency_tb;
         .o_calib_complete   (o_calib_complete),
         .o_debug1           (),
         .i_user_self_refresh(1'b0),
-        .i_refresh_ok       (refresh_ok),
         .uart_tx            ()
     );
 
@@ -222,26 +220,13 @@ module latency_tb;
 
     // GATED uses the same scattered addresses as RANDOM, but models what the real
     // design does: between accesses the bus spends a cycle served from the line
-    // buffer, during which DDR3 is idle and refresh_ok is asserted.
-    //
-    // One IIgs bus cycle is 357 ns = ~35 controller clocks.  refresh_ok is raised
-    // only for the FIRST few of those, so any refresh it triggers (PRE_REFRESH
-    // drain + tRP + tRFC, about 23 clocks on the Au's 2 Gb part) has finished
-    // before the cycle ends.  Real bus logic must do the same: assert at the
-    // START of a known-free cycle, not part way through.
-    //
-    // This pair of numbers is load-bearing, and the test is sensitive to it.
-    // Run with +define+MODEL_DENSITY (8 Gb, tRFC 350 ns) and the refresh sequence
-    // grows to ~42 clocks, no longer fits in 35, overruns into the next access,
-    // and GATED goes from 0-over-budget to 50-of-500.  That is the constraint
-    // working as designed, not a regression: the rule is "assert refresh_ok only
-    // when at least tRFC + ~7 clocks of idle remain", and a bigger device needs a
-    // bigger window.  See docs/DERISK.md.
+    // buffer, during which DDR3 is idle.  One IIgs bus cycle is 357 ns = ~35
+    // controller clocks.  (It also raised refresh_ok at the start of that cycle
+    // for the refresh-gate patch, removed 2026-09-14: refresh is now the
+    // controller's own tREFI timer, wherever it lands - docs/DERISK.md.)
     localparam integer IIGS_CYCLE_CLKS = 35;
-    localparam integer GATE_ASSERT_CLKS = 6;
 
     reg [31:0] lfsr_state;
-    reg        refresh_ok = 1'b0;
 
     function [WB_ADDR_BITS-1:0] make_addr(input [2:0] pat, input integer i);
         reg [ROW_BITS-1:0]       row;
@@ -403,12 +388,8 @@ module latency_tb;
             for (i = 0; i < N_MEASURED; i = i + 1) begin
                 a = make_addr(p[2:0], i);
                 if (p == P_GATED) begin
-                    // an idle bus cycle: DDR3 free, refresh invited at the start
-                    refresh_ok = 1'b1;
-                    repeat (GATE_ASSERT_CLKS) @(posedge i_controller_clk);
-                    refresh_ok = 1'b0;
-                    repeat (IIGS_CYCLE_CLKS - GATE_ASSERT_CLKS)
-                        @(posedge i_controller_clk);
+                    // an idle bus cycle: DDR3 free
+                    repeat (IIGS_CYCLE_CLKS) @(posedge i_controller_clk);
                 end
                 do_timed_read(a, c);
                 if (c < lo) lo = c;

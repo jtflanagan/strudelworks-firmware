@@ -598,11 +598,7 @@ module card_link #(
         .wb_rdata_aux(wb_rdata_aux),
         .calib_complete (calib_complete),
         .ddr3_debug     (ddr3_debug_w),
-        // The memory client says when a bus cycle has room for a refresh:
-        // the gate only ever pulls one EARLIER, so this is safe whatever it
-        // does (docs/DERISK.md, milestone 2).
         .user_self_refresh (1'b0),
-        .refresh_ok        (mem_refresh_ok),
         .ddr3_addr   (ddr3_addr),
         .ddr3_ba     (ddr3_ba),
         .ddr3_ras_n  (ddr3_ras_n),
@@ -996,7 +992,7 @@ module card_link #(
     // KBD_CTRL's notify: the host asking for KBD_EVENT notices.
     wire kbd_notify;
     // The memory client's scheduling outputs.
-    wire mem_refresh_ok, mem_rot_ok;
+    wire mem_rot_ok;
 
     wb_regfile #(
         .MEM_PAGES_LOG2 (MEM_PAGES_LOG2),
@@ -1421,7 +1417,6 @@ module card_link #(
         .stb   (c_stb[2]),  .we (c_we[2]),
         .addr  (c_addr[71:48]), .data (c_data[383:256]), .sel (c_sel[47:32]),
         .stall (c_stall[2]), .ack (c_ack[2]), .rdata (c_rdata),
-        .refresh_ok  (mem_refresh_ok),
         .rot_ok      (mem_rot_ok),
         .mem_idle    (),
         .image_ready (mem_image_ready)

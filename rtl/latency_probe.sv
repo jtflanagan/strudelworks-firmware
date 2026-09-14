@@ -50,16 +50,12 @@ module latency_probe #(
 
     // Bus emulation, for milestone 2.  With GATE_EMULATE = 1 the probe inserts an
     // idle gap before every access - standing in for a bus cycle served from the
-    // line buffer, during which DDR3 is free - and raises refresh_ok for the first
-    // part of it, inviting the controller to take its refresh there.
-    //
-    // IDLE_CLKS = 35 is one IIgs bus cycle (357 ns at 100 MHz).  GATE_ASSERT_CLKS
-    // must leave room for the whole refresh sequence (PRE_REFRESH + tRP + tRFC,
-    // about 23 clocks on this 2 Gb part) to finish inside the gap, or the refresh
-    // overruns into the next access - see docs/DERISK.md.
+    // line buffer, during which DDR3 is free.  IDLE_CLKS = 35 is one IIgs bus
+    // cycle (357 ns at 100 MHz).  (It also raised refresh_ok at the start of the
+    // gap for the refresh-gate patch, removed 2026-09-14: refresh is the
+    // controller's own timer - docs/DERISK.md.)
     parameter GATE_EMULATE     = 1,
-    parameter IDLE_CLKS        = 35,
-    parameter GATE_ASSERT_CLKS = 6
+    parameter IDLE_CLKS        = 35
 ) (
     input  wire clk,
     input  wire rst,             // synchronous, active high
@@ -105,10 +101,7 @@ module latency_probe #(
     output reg  [15:0] rnd_max_w,
     output reg  [31:0] rnd_gt_gs,
     output reg  [31:0] rnd_gt_leg,
-    output reg  [31:0] err_count,
-
-    // High when the controller may take a refresh now (GATE_EMULATE only).
-    output reg         refresh_ok
+    output reg  [31:0] err_count
 );
 
     localparam [2:0] S_IDLE      = 3'd0,
@@ -205,7 +198,6 @@ module latency_probe #(
             last_wait     <= 16'd0;
             last_data     <= 16'd0;
             data_error    <= 1'b0;
-            refresh_ok    <= 1'b0;
             gap_cnt       <= 16'd0;
             w_min         <= 16'hFFFF;
             w_max         <= 16'd0;
@@ -370,16 +362,11 @@ module latency_probe #(
                     state   <= GATE_EMULATE ? S_GAP : S_REQ;
                 end
 
-                // An idle bus cycle: nothing is asked of the DDR3, and for the
-                // first GATE_ASSERT_CLKS of it the controller is invited to take
-                // a refresh.  refresh_ok drops well before the gap ends so the
-                // refresh completes inside it rather than stalling the next read.
+                // An idle bus cycle: nothing is asked of the DDR3.
                 S_GAP: begin
                     wb_stb     <= 1'b0;
-                    refresh_ok <= (gap_cnt < GATE_ASSERT_CLKS[15:0]);
                     if (gap_cnt >= IDLE_CLKS[15:0] - 16'd1) begin
                         gap_cnt    <= 16'd0;
-                        refresh_ok <= 1'b0;
                         state      <= S_REQ;
                     end else begin
                         gap_cnt <= gap_cnt + 1'b1;

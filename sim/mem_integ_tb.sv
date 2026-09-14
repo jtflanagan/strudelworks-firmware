@@ -132,7 +132,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [11:0] sw_state;
     wire [7:0]  rw_bank;
     localparam integer SETS = 128, WAYS = 8;
-    wire        rom_loaded, invalidating, image_ready, refresh_ok, rot_ok, mem_idle;
+    wire        rom_loaded, invalidating, image_ready, rot_ok, mem_idle;
     wire        rom_busy, pw_ready, pw_take;
     wire [7:0]  rom_overruns;
     wire        rl_pw_valid;
@@ -237,7 +237,7 @@ module mem_integ_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .req (c_req[1]), .gnt (c_gnt[1]), .cyc (c_cyc[1]), .stb (c_stb[1]),
         .we (c_we[1]), .addr (c_addr[47:24]), .data (c_data[255:128]), .sel (c_sel[31:16]),
         .stall (c_stall[1]), .ack (c_ack[1]), .rdata (c_rdata),
-        .refresh_ok (refresh_ok), .rot_ok (rot_ok), .mem_idle (mem_idle),
+        .rot_ok (rot_ok), .mem_idle (mem_idle),
         .image_ready (image_ready)
     );
 
