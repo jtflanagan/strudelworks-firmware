@@ -57,6 +57,16 @@ if [ "$rc" != 0 ]; then
 fi
 echo "== verdict"
 build/wns.sh "$log"
+# Keep this build's routed checkpoint and DDR3 forensics under the tag: a
+# bitstream that never calibrates is diagnosed by diffing them against a
+# bitstream that does (docs/UBERDDR3.md), and the untagged copies are
+# overwritten by the next build.
+bitname=master_top; [ "$gs" = 1 ] && bitname=master_top_gs
+for f in "build/results/${bitname}_routed.dcp" build/results/ddr3_forensics.txt; do
+    [ -f "$f" ] || continue
+    [ "$(stat -c %Y "$f")" -ge "$(( $(stat -c %Y "$log") - 1800 ))" ] || continue
+    cp -f "$f" "${f%.*}_$tag.${f##*.}"
+done
 # MULTI-DRIVEN REGISTERS ARE A MISS.  Two always blocks driving one register
 # is legal to a simulator (last write wins - the bench passes) and silently
 # broken in synthesis: Vivado keeps one driver and IGNORES the other (Synth

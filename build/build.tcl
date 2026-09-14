@@ -429,6 +429,15 @@ source [file join $root build depth_report.tcl]
 write_depth_report    [file join $outdir logic_depth.rpt]
 write_depth_histogram [file join $outdir design_analysis.rpt]
 
+# DDR3 forensics: the PHY's clock leg, the clock-to-pad census, the clock
+# resources and where the controller landed - the things static timing never
+# checks and a bitstream that never calibrates has to be diffed on
+# (docs/UBERDDR3.md).  Same proc as the standalone build/ddr3_forensics.sh.
+source [file join $root build ddr3_forensics.tcl]
+if {[catch {ddr3_forensics [file join $outdir ddr3_forensics.txt]} why]} {
+    puts "WARNING: ddr3_forensics failed: $why"
+}
+
 # Copy the artefacts back into the repo, since $outdir is normally a scratch
 # directory on the Windows side that nothing else will look in.
 set results [file join $root build results]
@@ -443,10 +452,19 @@ if {[file exists $bit]} {
     puts $fh $board
     close $fh
 }
-foreach r {timing_summary.rpt utilization.rpt logic_depth.rpt design_analysis.rpt} {
+foreach r {timing_summary.rpt utilization.rpt logic_depth.rpt design_analysis.rpt ddr3_forensics.txt} {
     if {[file exists [file join $outdir $r]]} {
         file copy -force [file join $outdir $r] [file join $results $r]
     }
+}
+# The routed checkpoint too (26 MB, gitignored with the rest of build/results):
+# the bitstreams that met timing and never calibrated the DDR3 had theirs
+# overwritten by the next build before anyone could open them.  build/run_build.sh
+# keeps a tagged copy.
+set dcp [file join $outdir strudelworks.runs impl_1 ${topname}_routed.dcp]
+if {[file exists $dcp]} {
+    file copy -force $dcp [file join $results ${bitname}_routed.dcp]
+    puts "checkpoint: [file join $results ${bitname}_routed.dcp]"
 }
 
 if {$wns < 0 || $whs < 0} {

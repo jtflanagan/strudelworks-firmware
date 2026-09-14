@@ -52,6 +52,14 @@ module ddr3_wrapper #(
     // HP banks (UG471).  So no output delay line, and the PHY needs the
     // 90-degree DDR3 clock instead.
     parameter ODELAY_SUPPORTED = 0,
+    // Without ODELAY, upstream drove the DDR3 clock pin from a fabric inverter
+    // on the BUFG net while every other output leaves through an OSERDES:
+    // measured on the routed design, CK reached its pad 1.65 ns after the
+    // commands (command setup 0.40 ns instead of 1.25, DQS 0.92 ns past the
+    // CK edge at the slow corner), a fabric path that sags with IR drop.
+    // CK_OSERDES = 1 (our fork of UberDDR3) sends CK through an OSERDES too
+    // (docs/UBERDDR3.md).
+    parameter CK_OSERDES = 1,
 
     // BIST_MODE 1 = walk the whole address space once at the end of calibration.
     // Costs seconds at boot; keep it on until the board is trusted, then move to
@@ -88,7 +96,14 @@ module ddr3_wrapper #(
 
     // Status
     output wire calib_complete,
+    // UberDDR3's three debug words (the fork's layout, docs/UBERDDR3.md):
+    // 1 = the calibration FSM's state, lane, ROM step, the lane's IDELAY
+    // taps, and the highest state reached; 2 = the sticky counters (the
+    // controller's own restarts, IDELAYCTRL RDY drops); 3 = the DQS
+    // pattern indices and the lane's data start index.
     output wire [31:0] ddr3_debug,
+    output wire [31:0] ddr3_debug2,
+    output wire [31:0] ddr3_debug3,
 
     // Request the DDR3 be put into self-refresh (see SELF_REFRESH above).
     input  wire user_self_refresh,
@@ -128,6 +143,7 @@ module ddr3_wrapper #(
         .SDRAM_CAPACITY        (SDRAM_CAPACITY),
         .MICRON_SIM            (0),
         .ODELAY_SUPPORTED      (ODELAY_SUPPORTED),
+        .CK_OSERDES            (CK_OSERDES),
         .SECOND_WISHBONE       (0),
         .DLL_OFF               (0),
         .WB_ERROR              (0),
@@ -183,6 +199,8 @@ module ddr3_wrapper #(
 
         .o_calib_complete (calib_complete),
         .o_debug1         (ddr3_debug),
+        .o_debug2         (ddr3_debug2),
+        .o_debug3         (ddr3_debug3),
 
         .i_user_self_refresh (user_self_refresh),
         .uart_tx          ()

@@ -83,6 +83,16 @@ line="TIMING $verdict wns=$(fmt "$wns")"
 line+=" bit=$bitinfo"
 echo "$line"
 
+# ---- the DDR3 clock legs, from the build's forensics -----------------------
+# CK reaching its pad later than the commands eats the DRAM's command setup,
+# and DQS-to-CK has a +-0.625 ns window; neither is timed by Vivado, both are
+# placement, and a bitstream that never calibrates is diffed on these numbers
+# (docs/UBERDDR3.md).  Printed only when the forensics are this build's.
+fx="$res/ddr3_forensics.txt"
+if [ -f "$fx" ] && [ -f "$rpt" ] && [ "$(( $(stat -c %Y "$fx") - $(stat -c %Y "$rpt") ))" -lt 1800 ] && [ "$(( $(stat -c %Y "$rpt") - $(stat -c %Y "$fx") ))" -lt 1800 ]; then
+    grep -E '^ +(slow|fast) corner:' "$fx" | sed 's/^ */ddr3: /'
+fi
+
 # ---- the depth audit vs the baseline ---------------------------------------
 if [ -f "$depth" ]; then
     # rows: LVLS SLACK DPATH CLOCK START -> END ; keep "LVLS START -> END"

@@ -6,12 +6,19 @@
 # UberDDR3 is GPL-3.0-or-later, and so is this project's gateware (see
 # LICENSING.md), so vendoring would be legal.  It is still fetched rather than
 # vendored, for provenance: the pinned SHA below is checkable, and upstream's
-# code stays visibly upstream's rather than blurring into ours.
+# code stays visibly upstream's rather than blurring into ours - now from our
+# fork, whose commits on top of upstream are the ones meant to go back.
 set -euo pipefail
 
-REPO="https://github.com/AngeloJacobo/UberDDR3.git"
-# Pinned 2026-08-11.  Upstream commit 4a51b96, authored 2026-06-12.
-SHA="4a51b9671347130759c9980d6756918f084e2124"
+# Our fork, branch strudelworks-research (docs/UBERDDR3.md): upstream's
+# 4a51b96 (2026-06-12) plus the DDR3 clock pin through an OSERDES when
+# ODELAY is unsupported (CK_OSERDES) and the calibration diagnostics
+# (o_debug1..3, the IDELAYCTRL RDY synchroniser).  Every commit on it is
+# cut to be sent upstream as a pull request; the branch head is pinned
+# here by SHA as before.
+REPO="https://github.com/jtflanagan/UberDDR3.git"
+# Pinned 2026-09-14: fork commit 3f665a5 on strudelworks-research.
+SHA="3f665a59f31fd8dd7798b0dec6becb3a1e2f62da"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 dst="$here/UberDDR3"

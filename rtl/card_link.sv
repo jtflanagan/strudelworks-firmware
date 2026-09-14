@@ -574,6 +574,11 @@ module card_link #(
     wire [15:0]  wb_sel;
     wire [3:0]   wb_aux, wb_rdata_aux;
     wire         calib_complete;
+    // UberDDR3's debug words (rtl/ddr3_wrapper.sv): the calibration state
+    // for the UART's K, the sticky diagnostics, the DQS indices - and all
+    // three as DDR3_DBG1..3 for the host, since the link answers whether or
+    // not the DDR3 calibrated.
+    wire [31:0]  ddr3_debug_w, ddr3_debug2_w, ddr3_debug3_w;
 
     // BIST_MODE 0: au_top's memory test at every power-up would hold the link
     // for seconds, and the memory it tested has since done 123 million
@@ -598,6 +603,8 @@ module card_link #(
         .wb_rdata_aux(wb_rdata_aux),
         .calib_complete (calib_complete),
         .ddr3_debug     (ddr3_debug_w),
+        .ddr3_debug2    (ddr3_debug2_w),
+        .ddr3_debug3    (ddr3_debug3_w),
         .user_self_refresh (1'b0),
         .ddr3_addr   (ddr3_addr),
         .ddr3_ba     (ddr3_ba),
@@ -1150,6 +1157,9 @@ module card_link #(
         .res_drive         (res_drive),
         .ring_status       (ring_status),
         .link_stat         (link_stat),
+        .ddr3_dbg1         (ddr3_debug_w),
+        .ddr3_dbg2         (ddr3_debug2_w),
+        .ddr3_dbg3         (ddr3_debug3_w),
         .audio_on          (audio_on),
         .audio_realtime    (audio_realtime),
         .audio_rate        (audio_rate),
@@ -1475,15 +1485,17 @@ module card_link #(
     // the card's own view when the FT601 link is the thing under suspicion.
     // L and S are the link's last reset: its cause and the chip-side snapshot
     // taken as it fired (see link_cause above).  K is the DDR3 controller's
-    // calibration state (two hex digits; 17 = $17 = DONE_CALIBRATE when D=1).
+    // calibration state (two hex digits; 17 = $17 = DONE_CALIBRATE when D=1),
+    // M the highest state reached, X the controller's self-restarts.
     localparam [7:0] CH_C = 8'h43, CH_E = 8'h45, CH_O = 8'h4F, CH_EQ = 8'h3D;
     localparam [7:0] CH_P = 8'h50, CH_D = 8'h44, CH_T = 8'h54;
     localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
     localparam [7:0] CH_R = 8'h52, CH_L = 8'h4C, CH_S = 8'h53, CH_K = 8'h4B;
+    localparam [7:0] CH_M = 8'h4D, CH_X = 8'h58;
 
-    localparam [5:0] RPT_LAST = 6'd56;
-    localparam [5:0] RPT_IDLE = 6'd57;
+    localparam [6:0] RPT_LAST = 7'd66;
+    localparam [6:0] RPT_IDLE = 7'd67;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
@@ -1493,16 +1505,21 @@ module card_link #(
     // FINISH_READ, 23 DONE_CALIBRATE), reported as K so a bitstream whose
     // DDR3 never calibrates says WHERE it sticks (docs/GS.md "The retained
     // set and the DDR3": two builds that met timing and never got to D=1).
-    wire [31:0] ddr3_debug_w;
+    // M is the highest calibration state ever reached since the clock
+    // locked and X the controller's own restart count (o_debug2[7:0]): a K
+    // sampled once a second cannot tell "stuck in IDLE" from "restarting
+    // every 1.4 ms", these can (docs/UBERDDR3.md).
 
     reg [21:0] rpt_div  = 22'd0;
-    reg [5:0]  rpt_idx  = RPT_IDLE;
+    reg [6:0]  rpt_idx  = RPT_IDLE;
     reg [31:0] rpt_cnt  = 32'd0;
     reg        rpt_en   = 1'b0;
     reg        rpt_ovf  = 1'b0;
     reg        rpt_phi  = 1'b0;
     reg        rpt_cal  = 1'b0;
     reg [4:0]  rpt_kal  = 5'd0;
+    reg [4:0]  rpt_kmax = 5'd0;
+    reg [7:0]  rpt_krst = 8'd0;
     reg        rpt_torn = 1'b0;
     reg [23:0] rpt_ring = 24'd0;
     reg [2:0]  rpt_cause = 3'd0;
@@ -1521,14 +1538,16 @@ module card_link #(
                 rpt_phi <= phi0_live;
                 rpt_cal <= calib_complete;
                 rpt_kal <= ddr3_debug_w[4:0];
+                rpt_kmax <= ddr3_debug_w[31:27];
+                rpt_krst <= ddr3_debug2_w[7:0];
                 rpt_torn <= ring_status[26];
                 rpt_ring <= {2'd0, ring_status[21:0]};
                 rpt_cause <= link_cause;
                 rpt_snap  <= {link_snap, link_resets};
-                rpt_idx <= 6'd0;
+                rpt_idx <= 7'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
-                else                     rpt_idx <= rpt_idx + 6'd1;
+                else                     rpt_idx <= rpt_idx + 7'd1;
             end
         end
     end
@@ -1536,32 +1555,36 @@ module card_link #(
     reg [3:0] nib;
     always @(*) begin
         case (rpt_idx)
-            6'd2:  nib = rpt_cnt[31:28];
-            6'd3:  nib = rpt_cnt[27:24];
-            6'd4:  nib = rpt_cnt[23:20];
-            6'd5:  nib = rpt_cnt[19:16];
-            6'd6:  nib = rpt_cnt[15:12];
-            6'd7:  nib = rpt_cnt[11:8];
-            6'd8:  nib = rpt_cnt[7:4];
-            6'd9:  nib = rpt_cnt[3:0];
-            6'd13: nib = {3'b000, rpt_en};
-            6'd17: nib = {3'b000, rpt_ovf};
-            6'd21: nib = {3'b000, rpt_phi};
-            6'd25: nib = {3'b000, rpt_cal};
-            6'd29: nib = {3'b000, rpt_torn};
-            6'd33: nib = rpt_ring[23:20];
-            6'd34: nib = rpt_ring[19:16];
-            6'd35: nib = rpt_ring[15:12];
-            6'd36: nib = rpt_ring[11:8];
-            6'd37: nib = rpt_ring[7:4];
-            6'd38: nib = rpt_ring[3:0];
-            6'd42: nib = {1'b0, rpt_cause};
-            6'd46: nib = rpt_snap[15:12];
-            6'd47: nib = rpt_snap[11:8];
-            6'd48: nib = rpt_snap[7:4];
-            6'd49: nib = rpt_snap[3:0];
-            6'd53: nib = {3'b000, rpt_kal[4]};
-            6'd54: nib = rpt_kal[3:0];
+            7'd2:  nib = rpt_cnt[31:28];
+            7'd3:  nib = rpt_cnt[27:24];
+            7'd4:  nib = rpt_cnt[23:20];
+            7'd5:  nib = rpt_cnt[19:16];
+            7'd6:  nib = rpt_cnt[15:12];
+            7'd7:  nib = rpt_cnt[11:8];
+            7'd8:  nib = rpt_cnt[7:4];
+            7'd9:  nib = rpt_cnt[3:0];
+            7'd13: nib = {3'b000, rpt_en};
+            7'd17: nib = {3'b000, rpt_ovf};
+            7'd21: nib = {3'b000, rpt_phi};
+            7'd25: nib = {3'b000, rpt_cal};
+            7'd29: nib = {3'b000, rpt_torn};
+            7'd33: nib = rpt_ring[23:20];
+            7'd34: nib = rpt_ring[19:16];
+            7'd35: nib = rpt_ring[15:12];
+            7'd36: nib = rpt_ring[11:8];
+            7'd37: nib = rpt_ring[7:4];
+            7'd38: nib = rpt_ring[3:0];
+            7'd42: nib = {1'b0, rpt_cause};
+            7'd46: nib = rpt_snap[15:12];
+            7'd47: nib = rpt_snap[11:8];
+            7'd48: nib = rpt_snap[7:4];
+            7'd49: nib = rpt_snap[3:0];
+            7'd53: nib = {3'b000, rpt_kal[4]};
+            7'd54: nib = rpt_kal[3:0];
+            7'd58: nib = {3'b000, rpt_kmax[4]};
+            7'd59: nib = rpt_kmax[3:0];
+            7'd63: nib = rpt_krst[7:4];
+            7'd64: nib = rpt_krst[3:0];
             default: nib = 4'd0;
         endcase
     end
@@ -1572,37 +1595,43 @@ module card_link #(
     reg [7:0] ch;
     always @(*) begin
         case (rpt_idx)
-            6'd0:  ch = CH_C;
-            6'd1:  ch = CH_EQ;
-            6'd10: ch = CH_SP;
-            6'd11: ch = CH_E;
-            6'd12: ch = CH_EQ;
-            6'd14: ch = CH_SP;
-            6'd15: ch = CH_O;
-            6'd16: ch = CH_EQ;
-            6'd18: ch = CH_SP;
-            6'd19: ch = CH_P;
-            6'd20: ch = CH_EQ;
-            6'd22: ch = CH_SP;
-            6'd23: ch = CH_D;
-            6'd24: ch = CH_EQ;
-            6'd26: ch = CH_SP;
-            6'd27: ch = CH_T;
-            6'd28: ch = CH_EQ;
-            6'd30: ch = CH_SP;
-            6'd31: ch = CH_R;
-            6'd32: ch = CH_EQ;
-            6'd39: ch = CH_SP;
-            6'd40: ch = CH_L;
-            6'd41: ch = CH_EQ;
-            6'd43: ch = CH_SP;
-            6'd44: ch = CH_S;
-            6'd45: ch = CH_EQ;
-            6'd50: ch = CH_SP;
-            6'd51: ch = CH_K;
-            6'd52: ch = CH_EQ;
-            6'd55: ch = CH_CR;
-            6'd56: ch = CH_LF;
+            7'd0:  ch = CH_C;
+            7'd1:  ch = CH_EQ;
+            7'd10: ch = CH_SP;
+            7'd11: ch = CH_E;
+            7'd12: ch = CH_EQ;
+            7'd14: ch = CH_SP;
+            7'd15: ch = CH_O;
+            7'd16: ch = CH_EQ;
+            7'd18: ch = CH_SP;
+            7'd19: ch = CH_P;
+            7'd20: ch = CH_EQ;
+            7'd22: ch = CH_SP;
+            7'd23: ch = CH_D;
+            7'd24: ch = CH_EQ;
+            7'd26: ch = CH_SP;
+            7'd27: ch = CH_T;
+            7'd28: ch = CH_EQ;
+            7'd30: ch = CH_SP;
+            7'd31: ch = CH_R;
+            7'd32: ch = CH_EQ;
+            7'd39: ch = CH_SP;
+            7'd40: ch = CH_L;
+            7'd41: ch = CH_EQ;
+            7'd43: ch = CH_SP;
+            7'd44: ch = CH_S;
+            7'd45: ch = CH_EQ;
+            7'd50: ch = CH_SP;
+            7'd51: ch = CH_K;
+            7'd52: ch = CH_EQ;
+            7'd55: ch = CH_SP;
+            7'd56: ch = CH_M;
+            7'd57: ch = CH_EQ;
+            7'd60: ch = CH_SP;
+            7'd61: ch = CH_X;
+            7'd62: ch = CH_EQ;
+            7'd65: ch = CH_CR;
+            7'd66: ch = CH_LF;
             default: ch = hex;
         endcase
     end

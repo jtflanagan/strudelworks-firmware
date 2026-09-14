@@ -91,6 +91,7 @@ module ddr3_top #(
     parameter integer WB2_ADDR_BITS = 7,
     parameter integer WB2_DATA_BITS = 32,
     parameter integer DUAL_RANK_DIMM = 0,
+    parameter integer CK_OSERDES = 1,
     parameter integer SPEED_BIN = 0,
     parameter integer SDRAM_CAPACITY = 0,
     parameter integer MICRON_SIM = 0,
@@ -126,6 +127,8 @@ module ddr3_top #(
     output wire [BYTE_LANES-1:0]   o_ddr3_dm,
     output wire o_calib_complete,
     output wire [31:0] o_debug1,
+    output wire [31:0] o_debug2,
+    output wire [31:0] o_debug3,
     input  wire i_user_self_refresh,
     output wire uart_tx
 );
