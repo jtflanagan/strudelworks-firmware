@@ -1,6 +1,6 @@
 # A microcoded 65816: first stab at the problem space
 
-Status: **VERIFIED AGAINST THE SUITE, 2026-09-08, branch `gs_emulation`** -
+Status: **SLOT 0 REGISTERED, 2026-09-14, branch `woz_support`** - the wide slot-0 word lands in `uc_q` at the fetch edge ("Slot 0 registered" below); SingleStepTests 981,610 / 0 failed, `sim/suite.sh gs` 13/13, `boot_gs` at the KEGS floor; IIgs build `gs_slot0` TIMING MET +0.012 with the sequencer loop and the `ir`-rooted AGU family gone from the >= 14-level census; GS/OS to the Finder on hardware at 58.6x unlimited.  Earlier: **VERIFIED AGAINST THE SUITE, 2026-09-08, branch `gs_emulation`** -
 981,610 SingleStepTests/65816 cases (a 1 MB prefix of every opcode file, native
 and emulated) pass with every cycle's address, direction, data and VDA/VPA/VPB
 compared, the cycle count, the final registers and memory.  Out of context on
@@ -222,6 +222,22 @@ addressing the wide one from `ir` alone, recovered all of it. **Which array a
 read comes from is a timing decision when the array's output fans out to
 everything.**
 
+**Slot 0 registered (2026-09-14).** The half of that trap that mattered was
+the wide ROM's OUTPUT feeding `uc` combinationally. Addressing it from `ir`
+avoided the trap but left the read itself - two LUT levels - at the head of
+every slot-0 path, which is where 101 opcodes' direct-page add puts `din`
+into the AGU; the design's deepest core-to-front chains started at `ir_reg`
+for that reason (docs/IWM35.md family 2). The wide slot-0 word is now read
+from the arriving opcode (`fetch_op`) during the fetch cycle and lands in
+`uc_q` at the fetch edge, so `uc` is a flop on every cycle and `ir` is out of
+the datapath's cone. The address cone is the one `useq0` and the block RAM's
+slot-1 read already carry; the output ends at `uc_q`'s D pins. Same word,
+same edge, same enable: SingleStepTests 981,610 / 0 failed with 25 % random
+cancels, the interrupt bench and `boot_gs` at the KEGS floor all unchanged.
+One side effect removed rather than masked: `uc_q` used to hold the previous
+opcode's filler (a FETCH word) during slot 0. The generator now asserts that
+no slot 0 is a fetch.
+
 **And the microcode image did not change at all.** The `cond`/`alt` shift this
 document previously proposed turned out to be unnecessary: the block RAM output
 during cycle N already *is* the microinstruction for cycle N+1, so its
@@ -414,6 +430,9 @@ variations on each other:
    `read_operand` with different loads, so a uniform slot 0 plus a small
    side-table may be reachable), or splitting the decode ROM so only the fields
    on the critical path take the fast route.
+   **Done differently, 2026-09-14:** the slot-0 word is read during the fetch
+   cycle and registered into `uc_q`, so no cycle runs from the decode ROM's
+   combinational output at all - see "Slot 0 registered" above.
 3. **Different axis entirely: drop cycle-accuracy on the cached path.** This
    core spends the 65816's published cycle counts, and on a 99 % cache hit it
    does not have to — nothing is watching the bus. Cycle-accuracy is needed when

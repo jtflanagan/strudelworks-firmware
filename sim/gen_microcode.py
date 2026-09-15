@@ -119,7 +119,8 @@ DOUT = dict(A=0, X=1, Y=2, ZERO=3, P_B=4, PCL=5, PCH=6, MD=7)
 # ALU
 OP = dict(NOP=0, LD=1, AND=2, ORA=3, EOR=4, ADC=5, SBC=6, CMP=7, CPX=8,
           CPY=9, BIT=10, BITI=11, ASL=12, LSR=13, ROL=14, ROR=15, INC=16,
-          DEC=17, TRB=18, TSB=19, RMB=20, SMB=21, FLAG=22, TXS=23)
+          DEC=17, TRB=18, TSB=19, RMB=20, SMB=21, FLAG=22, TXS=23,
+          DADC=24, DSBC=25)
 ALU_A = dict(DIN=0, A=1, X=2, Y=3, S=4, ZERO=5, MD=6)
 WB    = dict(NONE=0, A=1, X=2, Y=3, S=4, MD=5, P=6)
 
@@ -371,9 +372,18 @@ def build(mode, acc, op=OP["NOP"], alu_a=ALU_A["DIN"], wb=WB["NONE"], fl=0,
     if decimal:
         # ADC/SBC take one more cycle on the 65C02 when D is set.  Skipping it
         # is a conditional slot, so the binary case costs nothing.
+        #
+        # The decimal OPERATION runs in that cycle (2026-09-14).  With D set
+        # the read slot writes nothing (rtl/cpu65c02.sv dec_defer) and the core
+        # keeps the operand it read (dm); this slot does the BCD add from
+        # registers and lands A and N/V/Z/C.  The bus cycle is the same dummy
+        # read at PC it always was.  What it buys: the nibble correction is off
+        # the served byte's path into A and the flags - the IIe's deepest
+        # core chain ran through it (build woz5, dline -> f_z at 15 levels).
         slots[-1]["cond"] = COND["DEC"]
         slots[-1]["alt"] = "end"
-        slots.append(u(addr_sel=ADDR["PC"]))
+        slots.append(u(addr_sel=ADDR["PC"], alu_a=ALU_A["A"], wb=WB["A"], fl=1,
+                       alu_op=OP["DADC"] if op == OP["ADC"] else OP["DSBC"]))
 
     slots.append(u(**FETCH, label="end"))
     return slots
@@ -728,10 +738,30 @@ def emit_hex():
     return "\n".join(out) + "\n"
 
 
+def check_decimal():
+    """The shape rtl/cpu65c02.sv's dec_defer rests on: every ADC/SBC word is
+    a slot whose condition is DEC and whose successor is the matching decimal
+    word, and a decimal word appears nowhere else.  A binary ADC/SBC anywhere
+    else would have its writes suppressed in decimal mode."""
+    pair = {OP["ADC"]: OP["DADC"], OP["SBC"]: OP["DSBC"]}
+    for oc in range(256):
+        slots = PROG[oc]
+        for i, m in enumerate(slots):
+            if m["alu_op"] in pair:
+                nxt = slots[i + 1] if i + 1 < len(slots) else None
+                if m["cond"] != COND["DEC"] or nxt is None or nxt["alu_op"] != pair[m["alu_op"]]:
+                    sys.exit(f"ERROR: ${oc:02X} slot {i}: ADC/SBC without its decimal slot")
+            if m["alu_op"] in pair.values():
+                prev = slots[i - 1] if i > 0 else None
+                if prev is None or pair.get(prev["alu_op"]) != m["alu_op"]:
+                    sys.exit(f"ERROR: ${oc:02X} slot {i}: a decimal word not after its ADC/SBC")
+
+
 def main():
     missing = [f"${o:02X}" for o in range(256) if o not in PROG]
     if missing:
         sys.exit(f"ERROR: {len(missing)} opcodes undefined: {' '.join(missing)}")
+    check_decimal()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     vh = os.path.join(root, "rtl", "cpu65c02_ucode.vh")
