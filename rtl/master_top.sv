@@ -2281,7 +2281,7 @@ module master_top #(
             .tx_take       (fd_take),
             .drv_inserted  (fd_inserted),
             .drv_wp        (fd_wp),
-            .drv_nibbles   (fd_nibbles),
+            .drv_cell      (fd_nibbles),
             .drv_tracks    (fd_tracks),
             .drv_flush     (fd_flush),
             .late_clr      (fd_late_clr),
