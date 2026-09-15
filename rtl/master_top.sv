@@ -681,7 +681,20 @@ module master_top #(
 
     // ---- the soft CPU -------------------------------------------------------
     // Held in reset while the machine is, so it starts where the machine does.
-    wire cpu_rst = apple_rst || !apple_res_sync;
+    //
+    // AND ON A IIgs, UNTIL ITS ROM HAS LANDED (the user, 2026-09-15).  Out of
+    // any card-level reset - power-on, a bitstream load, the link's reset or
+    // its watchdog - the loader's `seen` is clear, and whatever DDR3 holds is
+    // not known to be a ROM: the 65816 stays in reset until the host has
+    // pushed all 512 chunks and every one has drained, then starts at its
+    // reset vector.  A push over a ROM already landed (every swhost start)
+    // never clears `seen`, so a running machine is not held or reset by it;
+    // an Apple RES' does not reset the FPGA and is not affected.  Registered:
+    // `rom_ok` is a 512-input AND and cpu_rst fans out across the board.
+    // Constant zero at GS = 0.
+    logic gs_rom_hold;
+    always_ff @(posedge apple_clk) gs_rom_hold <= GS && (apple_rst || !mem_rom_loaded);
+    wire cpu_rst = apple_rst || !apple_res_sync || gs_rom_hold;
 
     // WHAT THE REST OF THE BOARD SEES.  Not the core's pins: the EFFECTIVE op
     // it is presenting.  At GS = 0 the two are the same thing and every wire

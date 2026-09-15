@@ -1050,13 +1050,20 @@ module wb_regfile #(
     // set the cache is already tracking every write.  There is no partial
     // mode - mirroring some classes but not others has no use.  Nothing here
     // clears the image: it persists like the machine's RAM.
+    //
+    // AT GS = 1 SERVING IS TIED ON, reads and writes, from the card's reset
+    // and through every write (the user, 2026-09-15).  The board sits in a
+    // //e, whose bus cannot carry the IIgs's 24-bit address space: a GS read
+    // or write of RAM on that bus is nonsense either way, and a host that
+    // turned serving off ran the machine off the IIe's memory.  Revisit when
+    // the card can sit in a IIgs.
     always_ff @(posedge clk) begin
         if (rst) begin
-            mem_serve   <= 1'b0;
+            mem_serve   <= GS;
             mem_cnt_clr <= 1'b0;
             mem_inval   <= 1'b0;
         end else begin
-            if (wr_mem_ctrl) mem_serve <= wb_dat_w[0];
+            if (wr_mem_ctrl) mem_serve <= GS || wb_dat_w[0];
             mem_cnt_clr <= wr_mem_ctrl && wb_dat_w[8];
             mem_inval   <= wr_mem_ctrl && wb_dat_w[9];
         end
@@ -1100,9 +1107,16 @@ module wb_regfile #(
     // rule docs/ACCELERATION.md states - leaving mode 2 for a state where
     // the core reads the machine's RAM (mode 0, serving off) executes the
     // stale memory the machine holds; the host enforces it.
+    //
+    // AT GS = 1 THE MODE IS TIED TO 2 (the user, 2026-09-15: "mode 2, 100%
+    // of the time").  Mode 0 hands the 65816 to the bus and mode 1 its
+    // writes, and the bus is a //e's: swhost's exit wrote mode 0 under a
+    // running GS and it ran off into a LoRes screen and a speaker buzz
+    // (docs/GS_CONTROL_PANEL.md, test D).  The target and the disable bits
+    // stay the host's.
     always_ff @(posedge clk) begin
         if (rst) begin
-            accel_mode    <= 2'd0;
+            accel_mode    <= GS ? 2'd2 : 2'd0;
             accel_target  <= 16'd0;
             accel_cnt_clr <= 1'b0;
             accel_swint_dis <= 1'b0;
@@ -1110,7 +1124,7 @@ module wb_regfile #(
             accel_fronts_dis <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
-                accel_mode    <= wb_dat_w[1:0];
+                accel_mode    <= GS ? 2'd2 : wb_dat_w[1:0];
                 accel_target  <= wb_dat_w[23:8];
                 accel_swint_dis <= wb_dat_w[28];
                 accel_game_dis  <= wb_dat_w[27];

@@ -216,7 +216,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
 
     // ---- the backplane, the reader and the driver --------------------------------
     reg  res_n = 1'b1;
-    wire cpu_rst = rst || !res_n;
+    // As rtl/master_top.sv wires it: at GS = 1 the core is also held until
+    // the ROM has landed (gs_rom_hold, registered below `rom_loaded`).
+    logic gs_rom_hold = 1'b1;
+    wire cpu_rst = rst || !res_n || gs_rom_hold;
     reg  master_active = 1'b1;
     wire [15:0] addr_drive;
     wire        rw_drive, addr_rw_oe, data_oe, dma_assert, driving, drv_sync;
@@ -625,6 +628,13 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [11:0] sw_state;
     wire [7:0]  rw_bank, rwb_p1_w;
     wire        rom_loaded, invalidating, image_ready, rot_ok, mem_idle;
+    // THE HOLD (the user, 2026-09-15; rtl/master_top.sv "AND ON A IIgs, UNTIL
+    // ITS ROM HAS LANDED"): the 65816 stays in reset out of the card's reset
+    // until the last chunk has drained.  held_fetches counts any instruction
+    // fetch the core makes while the ROM is not in: it must stay zero.
+    always @(posedge clk) gs_rom_hold <= rst || !rom_loaded;
+    integer held_fetches = 0;
+    always @(posedge clk) if (!rom_loaded && !cpu_rst && cpu_cyc_en && cpu_sync) held_fetches = held_fetches + 1;
     wire [31:0] hits, misses, served, mismatches, last_mismatch, diverted;
     wire [7:0]  late_fills, fifo_drops;
     reg         msg_valid = 1'b0, pay_valid = 1'b0;
@@ -2867,6 +2877,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         for (c = 0; c < ROM_CHUNKS; c = c + 1) send_chunk(c);
         if (!rom_loaded) fail("the IIgs ROM did not load");
         else ok($sformatf("the IIgs ROM loaded: %0d chunks into bank $FC", ROM_CHUNKS));
+        if (held_fetches != 0)
+            fail($sformatf("the 65816 fetched %0d instruction(s) before its ROM had landed", held_fetches));
+        else ok("the 65816 stayed in reset until the last ROM chunk drained");
         if (rom_overruns != 0)
             fail($sformatf("%0d ROM chunks were dropped: the load outran the seam", rom_overruns));
 

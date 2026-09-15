@@ -1,6 +1,6 @@
 # The GS Strudelworks Control Panel: our panel in front of the IIgs's own
 
-Status: 2026-09-15, branch `gs_control_panel` (fw off master 67eed4e / host off 5245bdc), UNCOMMITTED.  R0 IN SIM: llvm-mos-65816 pinned, `sim/run_gspanel.sh` runs the panel on the card's own 65816 - self-test PASS and v0 (`assets/gspanel.bin`, C) PASS with one stock-panel chain.  R0B ON HARDWARE (bit gs_bram1, fw 2026-09-15 13:05:30, TIMING MET wns +0.076 whs +0.067 fail 0/97633, SRAM): the card's battery RAM readable (debug pair `$C0+k`, GS_CLOCK_STAT 0x154), host `bram [dump]` four-copy report + follower fixes - all four copies agree on the machine (sealed $0B5E, 0 differ); lint clean, `suite gs` 13/13, `suite quick` 31/31, host tests 41/41; the expected-effects table established from the ROM.  Tooling: `screen attr` + MCP inverse marks (text_test 51/51, swmcp 37/37), `tools/gs_menu.py` walks menus by the inverse run.  Next: `tools/gs_cp_test.sh`, first row Display columns, on its own conf and battery-RAM file.
+Status: 2026-09-15, branch `gs_control_panel` (fw off master 67eed4e / host off 5245bdc), UNCOMMITTED.  R0 IN SIM: llvm-mos-65816 pinned, `sim/run_gspanel.sh` runs the panel on the card's own 65816 - self-test PASS and v0 (`assets/gspanel.bin`, C) PASS with one stock-panel chain.  R0B ON HARDWARE (bit gs_bram1, fw 2026-09-15 13:05:30, TIMING MET wns +0.076 whs +0.067 fail 0/97633, SRAM): the card's battery RAM readable (debug pair `$C0+k`, GS_CLOCK_STAT 0x154), host `bram [dump]` four-copy report + follower fixes - all four copies agree on the machine (sealed $0B5E, 0 differ); lint clean, `suite gs` 13/13, `suite quick` 31/31, host tests 41/41; the expected-effects table established from the ROM.  Tooling: `screen attr` + MCP inverse marks (text_test 51/51, swmcp 37/37), `tools/gs_menu.py` walks menus by the inverse run.  **2026-09-15: `tools/gs_cp_test.sh` row 1 (Display > Columns, $19) PASSES ON HARDWARE** (bit gs_romhold1, fw 2026-09-15 15:46:49, TIMING MET wns +0.023 whs +0.032 fail 0/97606; the depth tail >= 14 rose 413 -> 559, not yet examined) - the save lands in all four copies; warm reset 80 columns (CSW $C307, $04FB $09); cold reset boots ProDOS 8 in 40 with the setting kept (KEGS does the same with the same 256 bytes); swhost restart then warm reset 80.  On the way: **swhost's exit wrote accel mode 0 under a running GS and ran it off the IIe bus** (the "self-test"/LoRes buzz).  USER RULE: a GS is accel mode 2 with serving on, always - enforced in the host (exit, socket, levels, startup, conf) AND at GS = 1 on the card (both tied; the 65816 held in reset out of a card reset until its ROM has landed).  swhost no longer pushes a landed ROM into a running GS (a push under a running core is the leading, unproven suspect for test E2's runaway; `gs_rom_repush = on` forces it).  The HDMI keep-alive now covers the audio buffer's refill.  The boot beep's scratch is the unlimited target ignoring the ROM's own 1 MHz request (traced) - SHELVED (user).  suite gs 14/14, suite quick 31/31, host tests 41/41.  Next: the clean-start design (formal ROM load with an ack per chunk, a hold at every card reset and RES', the host's startup checklist), the link never-wedge work, then rows 2+ (colours $1A-$1C).
 
 ## Context
 On the IIgs build every card/host setting (disk images, accel, video, slot cards) is changed by
@@ -122,7 +122,7 @@ was written. This rung builds the observability and the test, and runs it on the
   | BRAM | setting | applied | observable after the event |
   |---|---|---|---|
   | $18 | type 0 colour / 1 mono | BC45 | `$C021` bit 7; `$C029` bit 5 |
-  | $19 | columns 0=40 / else 80 | every reset: FF/FA7F → FA24, if the visible $C3 ROM has the $38/$18 ID → `JSR $C300` with $98 = PR#3 (80STORE, 80COL, ALTCHAR, CSW=$C307, $04FB=1); NOT in BB7A | 80COL `$C01F` bit 7 after reset; the prompt in 80 columns |
+  | $19 | columns 0=40 / else 80 | reset: FF/FA7F → FA24, if the visible $C3 ROM has the $38/$18 ID → `JSR $C300` with $98 = PR#3; NOT in BB7A. **MEASURED 2026-09-15 (card + KEGS agree):** a WARM reset gives 80 columns; a COLD start (power-on or Ctrl-Command-Reset) that boots ProDOS 8 ends in 40 columns with $19 still $01 in all four copies and the panel still saying 80 | warm reset: 80-character `screen` rows, CSW `$C307` / KSW `$C305`, 80STORE on, `$04FB` = **$09**; cold boot into ProDOS 8: 40 columns, CSW `$FDF0`, `$04FB` $FF |
   | $1A/$1B | text / background colour | BC12 | `$C022` = $1A<<4 \| $1B |
   | $1C | border | BC24 | `$C034` low nibble |
   | $1D | 0=60 Hz / 1=50 Hz | BC2F | `$C02B` bit 4 (bits 7-5 = $29) |
@@ -135,8 +135,11 @@ was written. This rung builds the observability and the test, and runs it on the
   | $2E | cursor flash | C3EA | `$E1/0145` |
   | $34/$35, $36-$38 | date format; RAM disk | — | UNVERIFIED |
 
-  - *The stock panel's own columns.* From Ctrl-OA-Esc it is 80-column hardware whatever $19
-    says (the Desk Manager set 80STORE/80COL at FE/D43C). From the boot menu
+  - *The stock panel's own columns.* ~~From Ctrl-OA-Esc it is 80-column hardware whatever $19
+    says~~ NOT SO on hardware (2026-09-15, from BASIC): the CDA menu and panel draw 40 wide
+    while $19 = $00 and 80 wide (the 40-column frame centred) once $19 = $01 is saved, cold
+    boot included; KEGS draws them 80 wide with $19 = $01 too. The Desk Manager gives the
+    caller's 40 columns back on exit. From the boot menu
     (Ctrl-Option-Reset '1') $19 decides: FF/8FA1 sends ESC through $C300 only if $19≠0.
   - *Corrections to our own notes.* Slot 3 CAN be given to a card: $23≠0 selects the card's
     $C3 ROM through $C00B (gs_bram.hpp/GS.md say it cannot — true only of $C02D).
@@ -145,6 +148,9 @@ was written. This rung builds the observability and the test, and runs it on the
   slot 3's page belongs to a card whose ROM passes that check but is not 80-column firmware
   ($23≠0, or a card answering at $C3), a reset jumps into it — a crash to the monitor is the
   natural result. The ladder's $19 row runs with slot 3 internal and with a card in slot 3.
+  NOT REPRODUCED 2026-09-15 with slot 3 internal: $19 = $01 through two Ctrl-OA-Resets (host
+  Open-Apple override + RES') - ProDOS 8 booted each time, no monitor. Slot 3 with a card: not
+  yet run.
 - **Observability today** (BRAM trace, 2026-09-15): the card's clock chip (`rtl/gs_clock.sv`)
   decodes like KEGS; $C033/$C034 are dispatcher-served, never fast reads, and never
   `fast_quiet`-dropped. But nothing can see the card's store: no readback register,
@@ -201,6 +207,59 @@ was written. This rung builds the observability and the test, and runs it on the
   Controls: a known-harmless change (Display = Monochrome, GS.md:2972) and the same change
   after a Ctrl-Reset before opening the panel. First rows: Display columns ($19), colours
   ($1A-$1C), then slots ($21-$27) once their conf-vs-panel ownership is decided.
+- **BUILT 2026-09-15: `tools/gs_cp_test.sh`, row 1 = Display > Columns ($19).** Own conf
+  `gs_cp_test.conf` (ProDOS 8 on a copy of `po_master.po` as hd1, `gs_cp_bram.bin` removed first). Steps, every menu selection read from the inverse run: the defaults ($00 in card,
+  follower and ROM copy; the FILE IS ABSENT until the machine first saves - swhost writes it
+  only then); 40 columns, CSW $FDF0; Ctrl-Command-Esc → Control Panel → Display → Columns →
+  Right until it reads 80; before Return only the ROM copy has $01; after Return $01 in all
+  four, sealed, 0 differ; still 40 columns before a reset; warm reset → 80 (CSW $C307, 80STORE,
+  $04FB $09); cold reset (Open-Apple override + RES') → ProDOS in 40, $01 kept, the panel reads
+  80, Esc leaves nothing written; swhost restart → card/follower/file $01 from the file, warm
+  reset → 80. Parsers (`bram dump` per-copy bytes, seals, differ; screen width; CSW) checked
+  against captured replies. The reference for the cold result is KEGS with the same 256
+  bytes and disk (memory note `kegs-headless`: Xvfb, F1 = Command).
+  Side finding: starting swhost on a conf with `hd=off` rewrote $27 to $00 in card/follower/ROM
+  while the file kept $01 - the `build_bram` hole above, provoked by changing confs.
+- **FOUND AND FIXED 2026-09-15 (host, uncommitted): swhost's exit ran a live GS off the bus.**
+  The ladder's first two runs failed only at the swhost-restart step: the warm reset after the
+  restart booted ProDOS from disk (40 columns), and the user saw a LoRes screen with a speaker
+  buzz ("a self-test?") the moment swhost came back. Isolated on the machine, one variable at a
+  time, each run a swhost stop/start + a warm reset 6 s later: nothing before it (A′), the
+  button override alone (B1), a Ctrl-OA-Reset alone (B3), a Desk Manager visit alone (B2) - all
+  warm; **a Ctrl-OA-Reset THEN a panel visit (B4) - the runaway.** Test D wrote the exit path's
+  own register by hand with swhost up: `regw 8000008C 0` (ACCEL_CTRL mode 0) under that state
+  went to LoRes + burst within 2.5 s and restoring mode 2 did not bring it back.
+  **Cause:** `Pipeline` exit wrote accel mode 0 whenever a conf had set accel (pipeline.cpp, "the
+  core back at the bus's pace"); mode 0 hands the 65816 to the bus (accel_seq.sv "MODE 0 IS THE
+  OLD MACHINE TO THE CLOCK"), and on a GS that bus is a IIe backplane without the GS's memory
+  or ROM. Some states survive it (idle loops the IIe's own ROM happens to carry), which hid it.
+  Not the battery RAM (all four copies agreed throughout), not a stuck Apple key (no reset was
+  involved in D). **USER RULE: a GS is in accel mode 2, 100% of the time.**
+  **Fix (host):** no mode-0 write at exit on a GS; `set_accel` refuses modes 0/1 on a GS;
+  `set_levels` cannot lower mode or serving; startup forces mode 2 + serving even under `keep`,
+  and a first MEM_CTRL readback no longer lowers the serve level on a GS; the conf refuses
+  `accel = off|reads` and `mem = off` with `machine = iigs` (`keep` = all/on). Tests:
+  `config_test` +9 (164), `accel_test` IIgs case (69); host 41/41 on the Pi. **On hardware:** B4
+  on the fixed host - accel control stayed `00000002` through the restart, frames Text40 (not
+  LoRes), the warm reset returned to `]` in 80 columns with no disk read.
+  **And on the card (bit gs_romhold1, built 2026-09-15):** the card's own reset (host 'R' or
+  the link watchdog, card_link.sv `apple_rst = rst`) set ACCEL_CTRL mode 0 and MEM_CTRL serve 0
+  as it released the 65816.  Now at GS = 1 (wb_regfile.sv) the mode resets to 2 and ignores
+  writes, and serving resets on and ignores writes (user: the //e's bus cannot carry the GS's
+  24-bit space, so bus RAM is nonsense for reads and writes alike - revisit for a IIgs slot);
+  and master_top.sv holds the 65816 in reset (`gs_rom_hold`, registered) until rom_loader's
+  `rom_ok`, which only a card reset clears.  boot_gs_tb mirrors the hold and checks that no
+  instruction is fetched before the ROM lands.  On the machine: `regw 8000008C 0` reads back
+  `00000002`, `regw 8000004C 0` keeps serving, and the machine stays at its prompt.
+  Also found: **swhost pushed the ROM on every start, into a running GS** (the loader's posted
+  writes were meant to run before the machine does).  Test E2 (Ctrl-OA-Reset, panel visit,
+  swhost restart) ran away with 21.5 MB of events in 1.6 s while the link stayed healthy
+  (UART R=0 L=0 K=17); test F (the same with no push) was clean; a forced-push control was
+  clean too.  Over four runs a push went wrong only when the 65816 was actively running (a
+  busy event stream).  swhost now skips the push when MEM_STAT `rom_loaded` is set; the formal
+  load replaces this.
+  Also seen: a swhost restart without a reload once left the card answering no register at
+  all (GS.md's known resync failure) - a reload of the same bit cleared it.
 - Gate: the ladder green on the stock panel before R3 puts our panel in front of it.
 - Same table grows a column for our panel from R5 on (SET_ITEM → same checks, plus `status`
   and the conf's written-back key).
