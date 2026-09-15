@@ -62,13 +62,20 @@ module ft601_msg_rx_tb;
     wire [15:0] msg_free;
     wire [31:0] pay_data;
 
+    // LINK_RESET: the host's way to pull the reset lever over the link it is
+    // resetting, with no UART in the room (docs/CLEAN_START.md CS4).
+    wire        link_reset_req;
+    integer     link_resets = 0;
+    always @(posedge clk) if (!rst && link_reset_req) link_resets = link_resets + 1;
+
     ft601_msg_rx dut (
         .clk (clk), .rst (rst),
         .fifo_dout (fifo_dout), .fifo_empty (fifo_empty), .fifo_rd_en (fifo_rd_en),
         .msg_valid (msg_valid), .msg_type (msg_type),
         .msg_free (msg_free), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
-        .unknown_valid (unknown_valid), .unknown_type (unknown_type), .unknown_len (unknown_len)
+        .unknown_valid (unknown_valid), .unknown_type (unknown_type), .unknown_len (unknown_len),
+        .link_reset_req (link_reset_req)
     );
 
     // ---- watchdog, wired the way snoop_top will wire it -----------------------
@@ -119,7 +126,7 @@ module ft601_msg_rx_tb;
     endtask
 
     integer i;
-    integer base_msgs, base_enable;
+    integer base_msgs, base_enable, base_unknowns;
 
     initial begin
         $display("ft601_msg_rx_tb: host->card framing and watchdog");
@@ -226,6 +233,22 @@ module ft601_msg_rx_tb;
             $display("FAIL: the unknown type fired the watchdog");
             errors = errors + 1;
         end
+
+        // --- LINK_RESET: the reset lever, pulled over the link itself ---------
+        // It is a KNOWN type - a card that answered the host's recovery
+        // message with "unknown type, is the bitstream older than this host?"
+        // would be a card that could not be recovered without the UART.
+        base_msgs = n_msgs; base_unknowns = unknowns;
+        if (link_resets != 0) begin
+            $display("FAIL: a link reset was requested before any was asked for");
+            errors = errors + 1;
+        end
+        push_hdr(8'd0, 8'h01, 16'h0000);          // LINK_RESET
+        push(32'h00000000);                        // then a plain heartbeat
+        drain;
+        check(link_resets, 1, "LINK_RESET asked for the reset, once");
+        check(n_msgs - base_msgs, 2, "LINK_RESET decoded, framing kept");
+        check(unknowns - base_unknowns, 0, "LINK_RESET is a known type");
 
         $display("");
         if (errors == 0) $display("PASS");

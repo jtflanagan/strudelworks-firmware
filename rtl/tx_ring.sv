@@ -69,7 +69,8 @@ module tx_ring #(
     parameter integer STAGE_DEPTH = 256,    // lines of write-side staging (4 KB)
     parameter integer RECV_DEPTH  = 256,    // lines of read-side receive  (4 KB)
     parameter integer ADDR_BITS   = 24,
-    parameter integer DATA_BITS   = 128
+    parameter integer DATA_BITS   = 128,
+    parameter integer DRAIN_TICKS = 10_000_000  // 100 ms at 100 MHz: the drain's patience
 ) (
     input  wire                 clk,
     input  wire                 rst,
@@ -140,9 +141,24 @@ module tx_ring #(
     // sides' pointers go to zero on the same edge, once both are idle.
     logic drain = 1'b0;
     wire  wr_idle, rd_idle;
-    wire  all_idle = wr_idle && rd_idle;
+    // THE DRAIN'S TIMEOUT (docs/CLEAN_START.md CS5).  A drain waits for every
+    // ack still out to come home, and a batch drains in a microsecond - but an
+    // ack that never comes (a lost one, a controller that stopped answering)
+    // used to hold the ring in the drain until the FPGA was configured again,
+    // silently, and every register reply with it.  After DRAIN_TICKS the ring
+    // gives up on it: both outstanding counts go to zero, the pointers with
+    // them, and the timeouts are counted in STATUS.  An ack that turns up
+    // later is ignored (the counts only ever count down from above zero).
+    localparam integer DW = $clog2(DRAIN_TICKS + 1);
+    logic [DW-1:0] drain_cnt      = '0;
+    logic [3:0]    drain_timeouts = 4'd0;
+    wire  force_idle = drain && (drain_cnt == DRAIN_TICKS[DW-1:0]);
+    wire  all_idle   = (wr_idle && rd_idle) || force_idle;
     always_ff @(posedge clk) begin
         if (rst || drain) drain <= !all_idle;
+        if (!drain)                                drain_cnt <= '0;
+        else if (drain_cnt != DRAIN_TICKS[DW-1:0]) drain_cnt <= drain_cnt + 1'b1;
+        if (force_idle && drain_timeouts != 4'hF)  drain_timeouts <= drain_timeouts + 4'd1;
     end
 
     wire [PW-1:0] occupancy = wptr - rptr;          // issued, not yet read
@@ -276,8 +292,9 @@ module tx_ring #(
     always_ff @(posedge clk) begin
         // Acks are counted through a reset: cyc must stay up until they are
         // home, and the pointers may only go once nothing is in flight.
-        if (wr_ack && !wr_accept)      wr_out <= wr_out - 1'b1;
-        else if (wr_accept && !wr_ack) wr_out <= wr_out + 1'b1;
+        if (force_idle)                                wr_out <= '0;
+        else if (wr_ack && !wr_accept && wr_out != '0) wr_out <= wr_out - 1'b1;
+        else if (wr_accept && !wr_ack)                 wr_out <= wr_out + 1'b1;
 
         if (rst || drain) begin
             wr_busy    <= 1'b0;
@@ -365,8 +382,9 @@ module tx_ring #(
     assign rd_idle = (rd_out == '0) || (rd_ack && rd_out == 1);
 
     always_ff @(posedge clk) begin
-        if (rd_ack && !rd_accept)      rd_out <= rd_out - 1'b1;
-        else if (rd_accept && !rd_ack) rd_out <= rd_out + 1'b1;
+        if (force_idle)                                rd_out <= '0;
+        else if (rd_ack && !rd_accept && rd_out != '0) rd_out <= rd_out - 1'b1;
+        else if (rd_accept && !rd_ack)                 rd_out <= rd_out + 1'b1;
 
         if (rst || drain) begin
             rd_busy  <= 1'b0;
@@ -429,7 +447,7 @@ module tx_ring #(
     // bank's 2^21 lines need 22 bits, a smaller ring in a testbench fewer.
     wire        ring_full = (room < PW'(BATCH));
     wire [31:0] occ_ext   = 32'(occupancy);
-    assign status = {5'd0, torn, calib_complete, ring_full, 2'd0, occ_ext[21:0]};
+    assign status = {1'd0, drain_timeouts, torn, calib_complete, ring_full, 2'd0, occ_ext[21:0]};
 
     wire _unused_ok = &{1'b0, recv_full, s_adr, s_sel, 1'b0};
 

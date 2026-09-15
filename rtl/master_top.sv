@@ -549,6 +549,7 @@ module master_top #(
         .mem_flushes    (mem_flushes),
         .mem_declines   (mem_declines),
         .mem_rom_busy   (rom_busy),
+        .mem_rom_sum    (rom_sum),
         .mem_rom_over   (rom_overruns), .mem_shd_drops (mem_shd_drops),
         .gs_adb_stat    (gsio_adb_stat),
         .gs_clock_stat  (gs_clk_stat),
@@ -587,6 +588,8 @@ module master_top #(
         .app_msg_free (app_msg_free), .app_msg_len (app_msg_len),
         .app_pay_data (app_pay_data), .app_pay_valid (app_pay_valid),
         .aux_word (aux_word), .aux_valid (aux_valid), .aux_take (aux_take),
+        .rl_word (rl_word), .rl_valid (rl_valid), .rl_take (rl_take),
+        .start_hold_pending (start_hold_pending),
         .fd_word (fd_word), .fd_valid (fd_valid), .fd_take (fd_take),
         .fd35_word (fd35_word), .fd35_valid (fd35_valid), .fd35_take (fd35_take),
         .u2_word (u2_word), .u2_valid (u2_valid), .u2_take (u2_take),
@@ -2002,8 +2005,17 @@ module master_top #(
     // 16 KB of IIe ROM in 32 chunks at physical page $FFC0, or ROM 3's
     // 256 KB in 512 chunks at bank $FC page $00 (docs/GS.md).  The host's
     // chunk count follows the image's size, so one message loads either.
+    // THE FORMAL LOAD (docs/CLEAN_START.md CS2): only while the start hold
+    // holds the machine, one MEM_ROM_ACK per chunk, and the sum of every first
+    // landing for the host to compare.
     rom_loader #(.N_CHUNKS (GS ? 512 : 32),
-                 .ROM_PPN0 (GS ? 16'hFC00 : 16'hFFC0)) u_rom (
+                 .ROM_PPN0 (GS ? 16'hFC00 : 16'hFFC0),
+                 .REQUIRE_HOLD (1'b1)) u_rom (
+        .hold        (start_hold_pending),
+        .ack_word    (rl_word),
+        .ack_valid   (rl_valid),
+        .ack_take    (rl_take),
+        .rom_sum     (rom_sum),
         .clk         (apple_clk),
         .rst         (apple_rst),
         .msg_valid   (app_msg_valid),
@@ -2032,6 +2044,11 @@ module master_top #(
     wire [7:0]  rl_pw_off, rl_pw_data;
     wire        rom_busy;
     wire [7:0]  rom_overruns;
+    // CS2: the loader's acks to card_link, its sum, and the start hold back.
+    wire [31:0] rl_word;
+    wire        rl_valid, rl_take;
+    wire [31:0] rom_sum;
+    wire        start_hold_pending;
     // The shadow duplicate's drops (docs/GS.md rung 3e), read back in
     // MEM_ROM's top byte; zero at GS = 0, where there are no duplicates.
     wire [7:0]  mem_shd_drops;

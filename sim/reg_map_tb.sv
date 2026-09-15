@@ -945,6 +945,31 @@ module reg_map_tb;
             errors = errors + 1;
         end else $display("  ok: the disk still yields the Mockingboard's slot at a release");
 
+        // --- case 15a / START: the card's reset holds the machine -----------
+        // (docs/CLEAN_START.md CS1, rtl/start_hold.sv.)  Out of the card's
+        // reset the start hold drives RES' low and START says why; nothing
+        // in this bench has released it yet.  This bench drives
+        // apple_res_sync itself and never feeds res_drive back, so the RES'
+        // pulses earlier in the file reached a hold already pending.
+        if (res_drive !== 1'b1) begin
+            $display("FAIL: RES' not driven by the start hold after the card's reset"); errors = errors + 1;
+        end else $display("  ok: the card's reset holds: RES' driven low");
+        base = out_n;
+        do_read(32'h8000_0158);
+        if (out_mem[base+2][2:0] !== 3'b011 || out_mem[base+2][31:24] !== 8'd1) begin
+            $display("FAIL: START read %08x, expected pending, cause card, count 1", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: START reads pending, cause card, count 1");
+        do_write(32'h8000_0158, 32'h0000_0001);           // the host's checklist is done
+        base = out_n;
+        do_read(32'h8000_0158);
+        if (res_drive !== 1'b0) begin
+            $display("FAIL: the START release did not stop driving RES'"); errors = errors + 1;
+        end else if (out_mem[base+2][2:0] !== 3'b000 || out_mem[base+2][31:24] !== 8'd1) begin
+            $display("FAIL: START after the release read %08x, expected clear, count 1", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: writing START releases it: RES' idle, causes clear, count kept");
+
         // --- case 15 / RESET: a write pulses RES' low ------------------------
         // The programmatic Ctrl-Reset.  A short custom duration so the tb does
         // not spin: 1 unit = 256 cycles.

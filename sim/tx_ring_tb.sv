@@ -32,6 +32,7 @@ module tx_ring_tb;
     localparam integer STAGE_DEPTH = 64;
     localparam integer RECV_DEPTH  = 64;
     localparam integer MEM_LAT     = 9;           // accept to ack
+    localparam integer DRAIN_TICKS = 300;         // the real one is 100 ms; short here
     localparam integer N_WORDS     = 24000;
 
     reg clk = 0, rst = 1;
@@ -132,7 +133,8 @@ module tx_ring_tb;
 
     tx_ring #(
         .ADDR_BITS (ADDR_BITS), .BATCH (BATCH), .FLUSH_TICKS (FLUSH_TICKS),
-        .STAGE_DEPTH (STAGE_DEPTH), .RECV_DEPTH (RECV_DEPTH)
+        .STAGE_DEPTH (STAGE_DEPTH), .RECV_DEPTH (RECV_DEPTH),
+        .DRAIN_TICKS (DRAIN_TICKS)
     ) dut (
         .clk (clk), .rst (rst), .calib_complete (calib_complete),
         .s_cyc (m_cyc && !tear), .s_stb (m_stb && !tear), .s_we (m_we), .s_adr (m_adr),
@@ -167,6 +169,8 @@ module tx_ring_tb;
     assign wb_ack = ack_r;
 
     integer writes = 0, reads = 0;
+    reg     swallow = 1'b0;      // drop the acks on the floor, see below
+    integer swallowed = 0;
 
     always @(posedge clk) begin
         now = now + 1;
@@ -201,7 +205,12 @@ module tx_ring_tb;
                 reads = reads + 1;
             end
             wb_rdata_aux <= q_aux[q_head];
-            ack_r <= 1'b1;
+            // A LOST ack: the request is consumed - the write lands, CYC is
+            // honestly no longer owed anything - and the ack simply never
+            // comes.  That is the shape of the wedge the drain's timeout is
+            // there for (docs/CLEAN_START.md CS5).
+            if (swallow) swallowed = swallowed + 1;
+            else         ack_r <= 1'b1;
             q_head = (q_head + 1) % QD;
             pending = pending - 1;
         end
@@ -411,7 +420,10 @@ module tx_ring_tb;
         @(negedge clk);
         while (!(c_stb != 0 && pending != 0)) begin
             @(negedge clk);
+            // wb_stall too: left at 1 by whatever ran last, the memory model
+            // accepts nothing and this waits for a request in flight forever.
             gate = 1'b1; out_take = ($urandom % 100) < 50;
+            wb_stall = ($urandom % 100) < 15;
         end
         stop = 1; rst = 1;
         bidx = si;
@@ -431,6 +443,61 @@ module tx_ring_tb;
             $display("FAIL: after the short reset expected index %0d, source at %0d", ei, si);
             errors = errors + 1;
         end else $display("  ok: a 3-cycle reset mid-batch drained and the stream after it is clean, %0d words", si - bidx);
+
+        // --- phase 3c: an ack that never comes ---------------------------------
+        // The drain used to wait for one forever.  A reset that never finished
+        // draining left the ring stopped - and every register reply behind it -
+        // until the FPGA was configured again, which is exactly the wedge the
+        // card is not allowed to have (docs/CLEAN_START.md CS5).  Here the
+        // memory model eats a batch's requests and answers none of them: the
+        // drain must give up, zero what it was owed, count the timeout, and
+        // let the next stream through clean.
+        run_cycles(300, 50, 90);
+        @(negedge clk);
+        while (!(c_stb != 0 && pending != 0)) begin
+            @(negedge clk);
+            // wb_stall too: left at 1 by whatever ran last, the memory model
+            // accepts nothing and this waits for a request in flight forever.
+            gate = 1'b1; out_take = ($urandom % 100) < 50;
+            wb_stall = ($urandom % 100) < 15;
+        end
+        swallow = 1'b1;
+        stop = 1; rst = 1;
+        bidx = si;
+        while (!is_hdr[bidx]) bidx = bidx + 1;
+        repeat (MEM_LAT * 4) @(negedge clk);     // the model eats them all
+        if (swallowed == 0) begin
+            $display("FAIL: no ack was actually lost - the case tests nothing");
+            errors = errors + 1;
+        end
+        if (!dut.drain) begin
+            $display("FAIL: not draining with %0d lost ack(s) owed", swallowed);
+            errors = errors + 1;
+        end
+        repeat (DRAIN_TICKS + 200) @(negedge clk);
+        if (dut.drain) begin
+            $display("FAIL: the drain never gave up on a lost ack");
+            errors = errors + 1;
+        end else $display("  ok: the drain gave up on %0d lost ack(s) after its timeout", swallowed);
+        if (dut.wr_out != 0 || dut.rd_out != 0) begin
+            $display("FAIL: outstanding counts left at wr=%0d rd=%0d", dut.wr_out, dut.rd_out);
+            errors = errors + 1;
+        end else $display("  ok: the outstanding counts were zeroed with it");
+        if (status[30:27] == 0) begin
+            $display("FAIL: the drain timeout is not in the status word (%08x)", status);
+            errors = errors + 1;
+        end else $display("  ok: %0d drain timeout(s) counted in the status word", status[30:27]);
+        swallow = 1'b0;
+        si   = bidx;
+        ei   = bidx;
+        left = 0;
+        @(negedge clk); rst = 0; stop = 0;
+        run_cycles(1500, 60, 60);
+        drain;
+        if (ei != si) begin
+            $display("FAIL: after the lost ack expected index %0d, source at %0d", ei, si);
+            errors = errors + 1;
+        end else $display("  ok: the ring came back from a lost ack, %0d words", si - bidx);
 
         // --- the rest ------------------------------------------------------------
         while (si < total) run_cycles(200, 80, 90);

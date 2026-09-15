@@ -272,6 +272,7 @@ module card_link #(
     input  wire [31:0] mem_flushes,
     input  wire [31:0] mem_declines,
     input  wire        mem_rom_busy,
+    input  wire [31:0] mem_rom_sum,     // the loader's sum of every first landing (CS2)
     input  wire [7:0]  mem_rom_over,
     input  wire [31:0] gs_adb_stat,     // GS_ADB_STAT (rtl/gs_adb.sv), zero on a IIe
     input  wire [31:0] gs_clock_stat,   // GS_CLOCK_STAT (rtl/gs_clock.sv stat), zero on a IIe
@@ -370,6 +371,15 @@ module card_link #(
     input  wire [31:0] aux_word,
     input  wire        aux_valid,
     output wire        aux_take,
+
+    // ...the ROM loader's MEM_ROM_ACK (docs/CLEAN_START.md CS2), just below
+    // START_HELD and above the disk's.
+    input  wire [31:0] rl_word,
+    input  wire        rl_valid,
+    output wire        rl_take,
+    // The start hold's pending, for the loader: a MEM_ROM is taken only while
+    // the machine is held.
+    output wire        start_hold_pending,
 
     // ...and a second, the floppy's (FD_SEEK, FD_DIRTY), below the disk's
     // and above the capture.  A watching top ties fd_valid low.
@@ -470,9 +480,20 @@ module card_link #(
     //
     // 1 ms is measured, not chosen: a ~40 ns pulse left the chip untouched and
     // 1 ms made it re-enumerate.  See ft601_top for the full note.
+    // The host's LINK_RESET message pulls the same lever as its 'R', and that
+    // is the whole point of it: the UART is a second cable that the finished
+    // card will not have, so the recovery path has to live on the USB3 link
+    // it is recovering (docs/CLEAN_START.md CS4).  The message is decodable
+    // as long as the RX side is still framed, which covers every wedge that
+    // is the TX side's, the ring's or a client's - the framing losses are the
+    // watchdog's job, below.
     wire       cmd_reset_strobe;
     wire       watchdog_fired;
-    wire       link_reset_trigger = cmd_reset_strobe | watchdog_fired;
+    wire       rx_link_reset_req;      // host's LINK_RESET (0x01), from ft601_msg_rx
+    wire       ft_clk_dead;            // CLKOUT never came back after a reset (below)
+    wire       tx_stalled;             // words waiting, the chip taking none (below)
+    wire       link_reset_trigger = cmd_reset_strobe | watchdog_fired |
+                                    rx_link_reset_req | ft_clk_dead | tx_stalled;
 
     reg [16:0] cmd_rst_cnt = 17'd0;
 
@@ -485,9 +506,10 @@ module card_link #(
     // WHY the link was last reset, and what the FT601 side looked like at that
     // instant - kept across the reset it causes, since the reset is exactly
     // what would otherwise erase the evidence.  Reported on the UART as
-    // L=c (1 the host's 'R', 2 the watchdog; 4 was a malformed message, now
-    // retired - see above; the latest wins) and S=xxxx: {TXE#, RXF#, skid
-    // count[1:0], FSM state[3:0],
+    // L=cc (01 the host's 'R', 02 the watchdog, 04 its LINK_RESET message,
+    // 08 a CLKOUT that never came back, 10 a TX side that stopped moving; 4
+    // was once a malformed message, now retired - see above; the latest wins)
+    // and S=xxxx: {TXE#, RXF#, skid count[1:0], FSM state[3:0],
     // link resets[7:0]}.  The chip-side signals are sampled from the FT601's
     // clock domain without a synchronizer - a snapshot, not a control path.
     // Last night's wedge read TXE#=1 with words waiting and RXF#=1 with the
@@ -495,17 +517,18 @@ module card_link #(
     // makes the next one readable without a rebuild.
     wire [3:0] ft_dbg_state;
     wire [1:0] ft_dbg_qcount;
-    reg  [2:0] link_cause  = 3'd0;
+    reg  [4:0] link_cause  = 5'd0;
     reg  [7:0] link_resets = 8'd0;
     reg  [7:0] link_snap   = 8'd0;   // {txe, rxf, qcount, state}
 
     always @(posedge clk_ctrl) begin
         if (!clk_locked) begin
-            link_cause  <= 3'd0;
+            link_cause  <= 5'd0;
             link_resets <= 8'd0;
             link_snap   <= 8'd0;
         end else if (link_reset_trigger && !cmd_reset) begin
-            link_cause  <= {1'b0, watchdog_fired, cmd_reset_strobe};
+            link_cause  <= {tx_stalled, ft_clk_dead, rx_link_reset_req,
+                            watchdog_fired, cmd_reset_strobe};
             link_resets <= link_resets + 8'd1;
             link_snap   <= {ft_txe, ft_rxf, ft_dbg_qcount, ft_dbg_state};
         end
@@ -563,6 +586,59 @@ module card_link #(
     end
 
     wire fifo_rst = rst | rst_ft | (tickcount_ft != 5'd16);
+
+    // ---- the clock that never came back (docs/CLEAN_START.md CS5) -----------
+    // fifo_rst above waits for 16 CLKOUT edges and, until this, waited for
+    // them forever.  A chip whose session engine stopped during the reset
+    // stops CLKOUT with it, and then nothing downstream can even notice:
+    // there is no clock there to notice with, and the control side sat
+    // looking at a link that was never going to come back.  So the control
+    // side watches instead.  The FIFO's release crosses back here; if it has
+    // not arrived FT_ALIVE_TICKS after the reset let go, the reset is pulled
+    // again, and the wait doubles each attempt up to ~800 ms so a chip that
+    // is genuinely unplugged is not being reset forty times a second.
+    localparam integer FT_ALIVE_TICKS = 5_000_000;   // 50 ms at 100 MHz
+    reg  [1:0] ft_alive_sync = 2'b00;
+    always @(posedge clk_ctrl) ft_alive_sync <= {ft_alive_sync[0], (tickcount_ft == 5'd16)};
+    wire ft_alive = ft_alive_sync[1];
+
+    reg [26:0] ft_wait_cnt   = 27'd0;
+    reg [26:0] ft_wait_limit = FT_ALIVE_TICKS[26:0];
+    assign ft_clk_dead = (ft_wait_cnt == ft_wait_limit);
+
+    always @(posedge clk_ctrl) begin
+        if (!clk_locked || rst || ft_alive) begin
+            ft_wait_cnt <= 27'd0;
+            // A clock that came back resets the patience with it; a reset
+            // that is still asserted only pauses the count.
+            if (ft_alive) ft_wait_limit <= FT_ALIVE_TICKS[26:0];
+        end else if (ft_clk_dead) begin
+            ft_wait_cnt <= 27'd0;
+            if (!ft_wait_limit[26]) ft_wait_limit <= {ft_wait_limit[25:0], 1'b0};
+        end else begin
+            ft_wait_cnt <= ft_wait_cnt + 27'd1;
+        end
+    end
+
+    // ---- the TX side that stopped moving (docs/CLEAN_START.md CS6) ---------
+    // The wedge this project has actually seen reads TXE# high with words
+    // waiting: the chip is not taking anything, forever, and the link
+    // watchdog cannot see it because the HOST is still talking and still
+    // kicking it.  So: a word offered to a full TX FIFO, for two seconds,
+    // with nothing pushed in between, is a stopped chip and not a slow one.
+    // Two seconds is chosen well past anything the host does - it drains the
+    // link continuously, and the longest pause it has is a frame - so a
+    // healthy session never comes near it.
+    localparam integer TX_STALL_TICKS = 200_000_000;  // 2 s at 100 MHz
+    reg [27:0] tx_stall_cnt = 28'd0;
+    assign tx_stalled = (tx_stall_cnt == TX_STALL_TICKS[27:0]);
+
+    always @(posedge clk_ctrl) begin
+        if (!clk_locked || rst || tx_push || !out_valid || tx_stalled)
+            tx_stall_cnt <= 28'd0;
+        else
+            tx_stall_cnt <= tx_stall_cnt + 28'd1;
+    end
 
     // ---- DDR3 ---------------------------------------------------------------
     // The controller's reset is the clock-lock reset, as in au_top, and NOT
@@ -771,7 +847,8 @@ module card_link #(
         .pay_valid   (pay_valid),
         .unknown_valid (rx_unknown_valid),
         .unknown_type  (rx_unknown_type),
-        .unknown_len   (rx_unknown_len)
+        .unknown_len   (rx_unknown_len),
+        .link_reset_req (rx_link_reset_req)
     );
 
     assign app_msg_valid = msg_valid;
@@ -1010,6 +1087,9 @@ module card_link #(
     wire kbd_notify;
     // The memory client's scheduling outputs.
     wire mem_rot_ok;
+    // The start hold (rtl/start_hold.sv), for START_HELD below.
+    wire       start_pending, start_cause_card, start_cause_res;
+    wire [7:0] start_count;
 
     wb_regfile #(
         .MEM_PAGES_LOG2 (MEM_PAGES_LOG2),
@@ -1112,6 +1192,7 @@ module card_link #(
         .mem_flushes       (mem_flushes),
         .mem_declines      (mem_declines),
         .mem_rom_busy      (mem_rom_busy),
+        .mem_rom_sum       (mem_rom_sum),
         .mem_rom_over      (mem_rom_over),
         .gs_adb_stat       (gs_adb_stat),
         .gs_clock_stat     (gs_clock_stat),
@@ -1166,6 +1247,10 @@ module card_link #(
         .fb_other          (fb_other),
         .fb_peek_data      (fb_peek_data),
         .res_drive         (res_drive),
+        .start_pending     (start_pending),
+        .start_cause_card  (start_cause_card),
+        .start_cause_res   (start_cause_res),
+        .start_count       (start_count),
         .ring_status       (ring_status),
         .link_stat         (link_stat),
         .ddr3_dbg1         (ddr3_debug_w),
@@ -1285,7 +1370,38 @@ module card_link #(
     // sound's by the wall clock (docs/AUDIO.md); the capture is the one
     // unbounded source and goes last.  See msg_arb for
     // why that order is load-bearing.
-    localparam integer N_SRC = 10;
+    // ---- the START_HELD notice (docs/CLEAN_START.md CS1) ---------------------
+    // The machine is held for the host's startup checklist.  Header only:
+    // free[0] cause card, free[1] cause RES', free[15:8] the count of holds.
+    // Sent on each rising edge of `pending`.  NOT gated on the capture, like
+    // UNKNOWN_TYPE: a host that has only just opened - after a bit load, or
+    // after its own restart - is exactly the one that must hear it; a host
+    // attaching to a hold already in place reads START instead.  One pending,
+    // the latest wins, and the word carries the state as it goes out.
+    localparam [7:0] T_START_HELD = 8'h35;
+
+    reg  start_prev    = 1'b0;
+    reg  start_note    = 1'b0;
+    wire start_take;
+
+    always @(posedge clk_ctrl) begin
+        if (rst) begin
+            start_prev <= 1'b0;
+            start_note <= 1'b0;
+        end else begin
+            start_prev <= start_pending;
+            if (start_pending && !start_prev) start_note <= 1'b1;
+            else if (start_take)               start_note <= 1'b0;
+        end
+    end
+
+    assign start_hold_pending = start_pending;
+
+    // START_HELD sits just below the notices the host asked for and above
+    // the bulk traffic (aux, the floppies, the network, audio, the capture),
+    // so a busy capture cannot starve it; the ROM loader's acks come next,
+    // for the same reason - the startup checklist waits on them.
+    localparam integer N_SRC = 12;
 
     wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
     wire [N_SRC*32-1:0] mb_adr, mb_dat;
@@ -1306,7 +1422,7 @@ module card_link #(
     // read answers "is there a link, and is it in a machine").  With this
     // the UART is for the card that answers no register at all.
     wire [31:0] link_stat = {7'd0, ring_status[25], link_resets, link_snap,
-                             3'd0, link_cause, capture_enable, phi0_live};
+                             1'd0, link_cause, capture_enable, phi0_live};
 
     reply_stream u_reply (
         .clk       (clk_ctrl),
@@ -1332,29 +1448,37 @@ module card_link #(
     assign ms_valid[3]         = unk_pending;
     assign unk_take            = ms_take[3];
 
-    assign ms_word[4*32 +: 32] = aux_word;
-    assign ms_valid[4]         = aux_valid;
-    assign aux_take            = ms_take[4];
+    assign ms_word[4*32 +: 32] = {start_count, 6'd0, start_cause_res, start_cause_card, T_START_HELD, 8'd0};
+    assign ms_valid[4]         = start_note;
+    assign start_take          = ms_take[4];
 
-    assign ms_word[5*32 +: 32] = fd_word;
-    assign ms_valid[5]         = fd_valid;
-    assign fd_take             = ms_take[5];
+    assign ms_word[5*32 +: 32] = rl_word;
+    assign ms_valid[5]         = rl_valid;
+    assign rl_take             = ms_take[5];
 
-    assign ms_word[6*32 +: 32] = fd35_word;
-    assign ms_valid[6]         = fd35_valid;
-    assign fd35_take           = ms_take[6];
+    assign ms_word[6*32 +: 32] = aux_word;
+    assign ms_valid[6]         = aux_valid;
+    assign aux_take            = ms_take[6];
 
-    assign ms_word[7*32 +: 32] = u2_word;
-    assign ms_valid[7]         = u2_valid;
-    assign u2_take             = ms_take[7];
+    assign ms_word[7*32 +: 32] = fd_word;
+    assign ms_valid[7]         = fd_valid;
+    assign fd_take             = ms_take[7];
 
-    assign ms_word[8*32 +: 32] = au_word;
-    assign ms_valid[8]         = au_valid;
-    assign au_take             = ms_take[8];
+    assign ms_word[8*32 +: 32] = fd35_word;
+    assign ms_valid[8]         = fd35_valid;
+    assign fd35_take           = ms_take[8];
 
-    assign ms_word[9*32 +: 32] = cap_word;
-    assign ms_valid[9]         = cap_valid;
-    assign cap_take            = ms_take[9];
+    assign ms_word[9*32 +: 32] = u2_word;
+    assign ms_valid[9]         = u2_valid;
+    assign u2_take             = ms_take[9];
+
+    assign ms_word[10*32 +: 32] = au_word;
+    assign ms_valid[10]         = au_valid;
+    assign au_take              = ms_take[10];
+
+    assign ms_word[11*32 +: 32] = cap_word;
+    assign ms_valid[11]         = cap_valid;
+    assign cap_take             = ms_take[11];
 
     genvar gm;
     generate
@@ -1507,8 +1631,8 @@ module card_link #(
     localparam [7:0] CH_R = 8'h52, CH_L = 8'h4C, CH_S = 8'h53, CH_K = 8'h4B;
     localparam [7:0] CH_M = 8'h4D, CH_X = 8'h58;
 
-    localparam [6:0] RPT_LAST = 7'd66;
-    localparam [6:0] RPT_IDLE = 7'd67;
+    localparam [6:0] RPT_LAST = 7'd67;
+    localparam [6:0] RPT_IDLE = 7'd68;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
@@ -1535,7 +1659,7 @@ module card_link #(
     reg [7:0]  rpt_krst = 8'd0;
     reg        rpt_torn = 1'b0;
     reg [23:0] rpt_ring = 24'd0;
-    reg [2:0]  rpt_cause = 3'd0;
+    reg [4:0]  rpt_cause = 5'd0;
     reg [15:0] rpt_snap  = 16'd0;
 
     always @(posedge clk_ctrl) begin
@@ -1587,17 +1711,18 @@ module card_link #(
             7'd36: nib = rpt_ring[11:8];
             7'd37: nib = rpt_ring[7:4];
             7'd38: nib = rpt_ring[3:0];
-            7'd42: nib = {1'b0, rpt_cause};
-            7'd46: nib = rpt_snap[15:12];
-            7'd47: nib = rpt_snap[11:8];
-            7'd48: nib = rpt_snap[7:4];
-            7'd49: nib = rpt_snap[3:0];
-            7'd53: nib = {3'b000, rpt_kal[4]};
-            7'd54: nib = rpt_kal[3:0];
-            7'd58: nib = {3'b000, rpt_kmax[4]};
-            7'd59: nib = rpt_kmax[3:0];
-            7'd63: nib = rpt_krst[7:4];
-            7'd64: nib = rpt_krst[3:0];
+            7'd42: nib = {3'd0, rpt_cause[4]};
+            7'd43: nib = rpt_cause[3:0];
+            7'd47: nib = rpt_snap[15:12];
+            7'd48: nib = rpt_snap[11:8];
+            7'd49: nib = rpt_snap[7:4];
+            7'd50: nib = rpt_snap[3:0];
+            7'd54: nib = {3'b000, rpt_kal[4]};
+            7'd55: nib = rpt_kal[3:0];
+            7'd59: nib = {3'b000, rpt_kmax[4]};
+            7'd60: nib = rpt_kmax[3:0];
+            7'd64: nib = rpt_krst[7:4];
+            7'd65: nib = rpt_krst[3:0];
             default: nib = 4'd0;
         endcase
     end
@@ -1631,20 +1756,20 @@ module card_link #(
             7'd39: ch = CH_SP;
             7'd40: ch = CH_L;
             7'd41: ch = CH_EQ;
-            7'd43: ch = CH_SP;
-            7'd44: ch = CH_S;
-            7'd45: ch = CH_EQ;
-            7'd50: ch = CH_SP;
-            7'd51: ch = CH_K;
-            7'd52: ch = CH_EQ;
-            7'd55: ch = CH_SP;
-            7'd56: ch = CH_M;
-            7'd57: ch = CH_EQ;
-            7'd60: ch = CH_SP;
-            7'd61: ch = CH_X;
-            7'd62: ch = CH_EQ;
-            7'd65: ch = CH_CR;
-            7'd66: ch = CH_LF;
+            7'd44: ch = CH_SP;
+            7'd45: ch = CH_S;
+            7'd46: ch = CH_EQ;
+            7'd51: ch = CH_SP;
+            7'd52: ch = CH_K;
+            7'd53: ch = CH_EQ;
+            7'd56: ch = CH_SP;
+            7'd57: ch = CH_M;
+            7'd58: ch = CH_EQ;
+            7'd61: ch = CH_SP;
+            7'd62: ch = CH_X;
+            7'd63: ch = CH_EQ;
+            7'd66: ch = CH_CR;
+            7'd67: ch = CH_LF;
             default: ch = hex;
         endcase
     end

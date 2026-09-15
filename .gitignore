@@ -75,3 +75,5 @@ __pycache__/
 /sim/mockingboard_work/
 /sim/floppy_card_work/
 /sim/gspanel_work/
+/sim/start_hold_work/
+/sim/rom_loader_work/

@@ -49,13 +49,18 @@ module ft601_msg_rx (
     // type and the length whose payload is being skipped.
     output logic        unknown_valid,
     output logic [7:0]  unknown_type,
-    output logic [7:0]  unknown_len
+    output logic [7:0]  unknown_len,
+    // LINK_RESET (docs/CLEAN_START.md CS4): one clock when its header is
+    // decoded.  card_link pulls the same 1 ms lever as the UART's 'R' and the
+    // watchdog, so a host can always put the link back without the UART.
+    output logic        link_reset_req
 );
 
     // The types this card consumes, for the notice above - a header of any
     // other type is skipped by its length and reported, never fatal.  Every
     // consumer matches its own type; this list only decides what to report.
     localparam [7:0] T_IDLE       = 8'h00;
+    localparam [7:0] T_LINK_RESET = 8'h01;   // link layer: card_link's reset lever (CS4)
     localparam [7:0] T_BUS_ENABLE = 8'h11;
     localparam [7:0] T_REG_READ   = 8'h14;
     localparam [7:0] T_REG_WRITE  = 8'h15;
@@ -109,7 +114,8 @@ module ft601_msg_rx (
                      (hdr_type == T_U2_RX)      || (hdr_type == T_U2_STAT)   ||
                      (hdr_type == T_PRINTER_ROM) ||
                      (hdr_type == T_GS_BRAM)    || (hdr_type == T_ADB_KEY)   ||
-                     (hdr_type == T_GS_TIME)    || (hdr_type == T_FD35_TRACK);
+                     (hdr_type == T_GS_TIME)    || (hdr_type == T_FD35_TRACK) ||
+                     (hdr_type == T_LINK_RESET);
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -123,8 +129,10 @@ module ft601_msg_rx (
             unknown_valid <= 1'b0;
             unknown_type  <= 8'd0;
             unknown_len   <= 8'd0;
+            link_reset_req <= 1'b0;
         end else begin
-            msg_valid     <= 1'b0;
+            msg_valid      <= 1'b0;
+            link_reset_req <= 1'b0;
             pay_valid     <= 1'b0;
             unknown_valid <= 1'b0;
 
@@ -136,6 +144,7 @@ module ft601_msg_rx (
                     msg_len     <= hdr_len;
                     msg_free    <= fifo_dout[31:16];
                     blocks_left <= hdr_len;
+                    if (hdr_type == T_LINK_RESET) link_reset_req <= 1'b1;
                     if (!hdr_known) begin
                         unknown_valid <= 1'b1;
                         unknown_type  <= hdr_type;

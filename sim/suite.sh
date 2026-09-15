@@ -66,6 +66,8 @@ declare -A B=(
   [msg_arb]="sim/run_msg_arb_tb.sh|^PASS$"
   [no_slot_clock]="sim/run_no_slot_clock_tb.sh|^PASS: "
   [reg_map]="sim/run_reg_map_tb.sh|^PASS$"
+  [start_hold]="sim/run_start_hold_tb.sh|^PASS$"
+  [rom_loader]="sim/run_rom_loader_tb.sh|^PASS$"
   [mmu_xlate]="sim/run_mmu_xlate_tb.sh +quick|^PASS$"
   [mmu_xlate_gs]="sim/run_mmu_xlate_gs_tb.sh +quick|^PASS$"
   # The GS ROM booting against the KEGS trace, with the floor the last rung
@@ -99,7 +101,7 @@ declare -A B=(
   [page_cache]="sim/run_page_cache_tb.sh|^PASS$"
   [fb_sim_vl]="sim/run_fb_sim_vl.sh|^PASS$"
 )
-QUICK="lint microcode boot_hold bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
+QUICK="lint microcode boot_hold start_hold rom_loader bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
 GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 gs_doc gs_io_claim gs_iwm_write cpu816_cycles cpu816_trace cpu816_irq mmu_xlate_gs boot_gs gspanel"
 BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"

@@ -239,6 +239,7 @@ module wb_regfile #(
     input  wire [31:0]     mem_flushes,     // ...and dirty ones written back
     input  wire [31:0]     mem_declines,    // line requests a page was not resident for
     input  wire            mem_rom_busy,    // the ROM load is draining: the host waits
+    input  wire [31:0]     mem_rom_sum,     // the sum of every chunk's first landing (CS2)
     input  wire [7:0]      mem_rom_over,    // ...and chunks it had to drop
     input  wire [31:0]     gs_adb_stat,     // GS_ADB_STAT, the ADB micro's mouse path (rtl/gs_adb.sv)
     input  wire [31:0]     gs_clock_stat,   // GS_CLOCK_STAT, the clock chip's state (rtl/gs_clock.sv stat)
@@ -321,6 +322,12 @@ module wb_regfile #(
     // drives DMA'.  A snoop build ties CAN_MASTER low, so this never asserts
     // and its pin stays an input.  See docs/BUS_MASTER.md.
     output wire            res_drive,
+    // The start hold (rtl/start_hold.sv, docs/CLEAN_START.md CS1): pending,
+    // its causes and the count of holds, for START_HELD in card_link.
+    output wire            start_pending,
+    output wire            start_cause_card,
+    output wire            start_cause_res,
+    output wire [7:0]      start_count,
 
     // Wishbone B4 classic, 32-bit.
     // RING_STATUS, straight from tx_ring: the DDR3 ring's occupancy in
@@ -377,6 +384,8 @@ module wb_regfile #(
     localparam [13:0] R_BOOT_HOLD  = 'd4;   // 0x8000_0010, RW bit 0, W1 bit 16
     localparam [13:0] R_HD_SLOT    = 'd5;   // 0x8000_0014, RW in bits 2:0
     localparam [13:0] R_RESET      = 'd6;   // 0x8000_0018, W1 bit 0 pulses RES'
+    localparam [13:0] R_START      = 'd86;  // 0x8000_0158, the start hold; W1 bit 0 releases
+    localparam [13:0] R_ROM_SUM    = 'd87;  // 0x8000_015C, RO, the ROM's sum of first landings
     localparam [13:0] R_KBD_INJECT = 'd7;   // 0x8000_001C, W bits 6:0, W1 bits 7-8
     localparam [13:0] R_BUTTONS    = 'd8;   // 0x8000_0020, RW bits 5:0
     localparam [13:0] R_RING_STATUS = 'd9;  // 0x8000_0024, RO
@@ -494,6 +503,11 @@ module wb_regfile #(
 
     // Falling edge of an active-low line is the assertion.
     wire res_assert = res_prev && !apple_res_sync;
+    // ...and its rising edge the release.  What latches at a RES' latches at
+    // BOTH (docs/CLEAN_START.md CS1): the start hold drives RES' low from the
+    // card's reset, before the host has written what it wants, so a value
+    // written during the host's checklist has to be taken as the hold lets go.
+    wire res_release = !res_prev && apple_res_sync;
 
     assign cpu_source_active = cpu_src_active;
 
@@ -505,14 +519,15 @@ module wb_regfile #(
             res_prev        <= 1'b1;      // idle high: no phantom assert at rst
         end else begin
             res_prev <= apple_res_sync;
-            if (res_assert) begin
+            if (res_assert || res_release) begin
                 // Forced to 0 when this bitstream cannot drive.  The readback
                 // then tells the truth - desired reads back as written, active
                 // stays 0, and `capable` says why - rather than a snoop build
                 // reporting itself as the machine's CPU.
                 cpu_src_active  <= CAN_MASTER ? cpu_src_desired : 1'b0;
-                cpu_src_latches <= cpu_src_latches + 8'd1;
             end
+            // Counted once per reset, at its assertion.
+            if (res_assert) cpu_src_latches <= cpu_src_latches + 8'd1;
             if (wr_cpu_source) cpu_src_desired <= wb_dat_w[0];
         end
     end
@@ -556,7 +571,7 @@ module wb_regfile #(
             // about to let go.  See BOOT_HOLD's boot_relatch below and
             // docs/BOOT_MENU.md.  The write only ever sets `desired`; both
             // edges copy it into `active`.
-            if (res_assert || boot_relatch) begin
+            if (res_assert || res_release || boot_relatch) begin
                 mb_slot_active_q   <= CAN_MASTER ? mb_slot_desired : 3'd0;
                 mb_phasor_active_q <= CAN_MASTER ? mb_phasor_desired : 1'b0;
             end
@@ -683,7 +698,7 @@ module wb_regfile #(
         end else begin
             // Same two latch points as MB_SLOT, and the same clash rule at
             // each: the disk yields the Mockingboard's slot.  See BOOT_MENU.md.
-            if (res_assert || boot_relatch) begin
+            if (res_assert || res_release || boot_relatch) begin
                 hd_slot_active_q <= (CAN_MASTER && hd_slot_desired != mb_slot_desired)
                                     ? hd_slot_desired : 3'd0;
             end
@@ -716,7 +731,7 @@ module wb_regfile #(
             fd_slot_desired  <= 3'd0;     // no floppy until asked for
             fd_slot_active_q <= 3'd0;
         end else begin
-            if (res_assert || boot_relatch) begin
+            if (res_assert || res_release || boot_relatch) begin
                 fd_slot_active_q <= (CAN_MASTER && fd_slot_desired != mb_slot_desired &&
                                      fd_slot_desired != hd_slot_desired)
                                     ? fd_slot_desired : 3'd0;
@@ -748,7 +763,7 @@ module wb_regfile #(
             vidhd_slot_desired  <= 3'd0;   // no VidHD until asked for
             vidhd_slot_active_q <= 3'd0;
         end else begin
-            if (res_assert || boot_relatch) begin
+            if (res_assert || res_release || boot_relatch) begin
                 vidhd_slot_active_q <= (CAN_MASTER &&
                                         vidhd_slot_desired != mb_slot_desired &&
                                         vidhd_slot_desired != hd_slot_desired &&
@@ -784,7 +799,7 @@ module wb_regfile #(
             mouse_slot_desired  <= 3'd0;   // no mouse until asked for
             mouse_slot_active_q <= 3'd0;
         end else begin
-            if (res_assert || boot_relatch) begin
+            if (res_assert || res_release || boot_relatch) begin
                 mouse_slot_active_q <= (CAN_MASTER &&
                                         mouse_slot_desired != mb_slot_desired &&
                                         mouse_slot_desired != hd_slot_desired &&
@@ -827,7 +842,7 @@ module wb_regfile #(
             u2_slot_desired  <= 3'd0;   // no card until asked for
             u2_slot_active_q <= 3'd0;
         end else begin
-            if (res_assert || boot_relatch) begin
+            if (res_assert || res_release || boot_relatch) begin
                 u2_slot_active_q <= (CAN_MASTER &&
                                      u2_slot_desired != mb_slot_desired &&
                                      u2_slot_desired != hd_slot_desired &&
@@ -864,7 +879,7 @@ module wb_regfile #(
             printer_slot_desired  <= 3'd0;   // no card until asked for
             printer_slot_active_q <= 3'd0;
         end else begin
-            if (res_assert || boot_relatch) begin
+            if (res_assert || res_release || boot_relatch) begin
                 printer_slot_active_q <= (CAN_MASTER &&
                                           printer_slot_desired != mb_slot_desired &&
                                           printer_slot_desired != hd_slot_desired &&
@@ -1227,7 +1242,9 @@ module wb_regfile #(
     logic [23:0] res_cnt;
     logic [7:0]  res_pulses;
     wire  res_pulsing = (res_cnt != 24'd0);
-    assign res_drive = CAN_MASTER && res_pulsing;
+    // The host's pulse, or the start hold for as long as it is pending.
+    wire   start_hold_drive;
+    assign res_drive = CAN_MASTER && (res_pulsing || start_hold_drive);
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -1243,6 +1260,30 @@ module wb_regfile #(
     end
 
     wire [31:0] reset_rd = {res_pulses, 23'd0, res_pulsing};
+
+    // ---- START --------------------------------------------------------------
+    //
+    //   [0]      pending    RO   the machine is held for the host's checklist;
+    //                            W1 releases it (docs/CLEAN_START.md CS1)
+    //   [1]      cause_card RO   held by the card's own reset (power-on, a load,
+    //                            the link's reset or its watchdog)
+    //   [2]      cause_res  RO   held by a RES' the hold did not cause
+    //   [31:24]  count      RO   holds since the card's reset
+    //
+    // While pending, RES' is driven low: the whole machine waits.  The cause
+    // bits clear on the release.  See rtl/start_hold.sv.
+    start_hold #(.CAN_MASTER (CAN_MASTER)) u_start_hold (
+        .clk            (clk),
+        .rst            (rst),
+        .apple_res_sync (apple_res_sync),
+        .release_w1     (wr_start && wb_dat_w[0]),
+        .pending        (start_pending),
+        .cause_card     (start_cause_card),
+        .cause_res      (start_cause_res),
+        .count          (start_count),
+        .hold_drive     (start_hold_drive)
+    );
+    wire [31:0] start_rd = {start_count, 21'd0, start_cause_res, start_cause_card, start_pending};
 
     // ---- KBD_INJECT ---------------------------------------------------------
     //
@@ -1402,6 +1443,8 @@ module wb_regfile #(
                         R_BOOT_HOLD:  wb_dat_r <= boot_hold_rd;
                         R_HD_SLOT:    wb_dat_r <= hd_slot_rd;
                         R_RESET:      wb_dat_r <= reset_rd;
+                        R_START:      wb_dat_r <= start_rd;
+                        R_ROM_SUM:    wb_dat_r <= mem_rom_sum;
                         R_KBD_INJECT: wb_dat_r <= kbd_inject_rd;
                         R_BUTTONS:    wb_dat_r <= buttons_rd;
                         R_RING_STATUS: wb_dat_r <= ring_status;
@@ -1506,6 +1549,8 @@ module wb_regfile #(
                          (word == R_HD_SLOT);
     wire wr_reset      = access && !wb_ack && in_region && wb_we &&
                          (word == R_RESET);
+    wire wr_start      = access && !wb_ack && in_region && wb_we &&
+                         (word == R_START);
     wire wr_kbd_inject = access && !wb_ack && in_region && wb_we &&
                          (word == R_KBD_INJECT);
     wire wr_buttons    = access && !wb_ack && in_region && wb_we &&
