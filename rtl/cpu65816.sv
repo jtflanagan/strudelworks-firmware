@@ -222,28 +222,35 @@ module cpu65816 #(
 
     // Slot 0 of every opcode, in distributed RAM.  The opcode arrives on din at
     // the END of its fetch cycle, so the first microinstruction is the one that
-    // cannot have been prefetched - nothing was available to address the block
-    // RAM with.  This is that constraint's answer, and it is why the original
-    // part cannot execute an instruction in one cycle either.  256 words read
-    // combinationally from the registered opcode, ~1 ns rather than 2.1.
+    // cannot have been prefetched from the BLOCK RAM - nothing was available to
+    // address it with a cycle ahead.  This is that constraint's answer, and it
+    // is why the original part cannot execute an instruction in one cycle
+    // either: 256 words read from the opcode ARRIVING on the fetch cycle and
+    // landed in uc_q at the fetch edge, the edge that loads ir.
     (* rom_style = "distributed" *) logic [UC_W-1:0] ucode0 [0:255];
     initial $readmemh(UCODE0_FILE, ucode0);
 
     logic [UC_W-1:0] urom;          // block RAM output: NEXT cycle's microinstruction
     logic [UC_W-1:0] uc_q;          // the flop the datapath actually runs from
-    logic            use_dec;       // this cycle is slot 0: take the decode ROM
+    logic            slot0_q;       // this cycle is slot 0 (int_pc_hold's BRK-vs-IRQ term only)
     logic [UA_W-1:0] uaddr;         // combinational
 
-    // The wide decode ROM is addressed by `ir` ALONE, and that is a timing
-    // decision, not a convenience.  Slot 0's branch decision has to be made
-    // during the fetch cycle, from the opcode still arriving on din - but if the
-    // wide ROM served that read too, its address would depend on din and on the
-    // interrupt decision, and since its output feeds the whole datapath through
-    // `uc`, static timing would put `f_i -> take_int -> ROM -> everything` in
-    // front of every register in the core.  Measured: doing exactly that cost
-    // 14 MHz.  The fetch-cycle read gets its own 8-bit ROM below instead.
-    wire [UC_W-1:0] dec_word = ucode0[ir];
-    wire [UC_W-1:0] uc = use_dec ? dec_word : uc_q;
+    // EVERY microinstruction runs from the flop (2026-09-14).  Slot 0 used to
+    // be read from ucode0 during its own cycle, addressed by the registered
+    // ir, and muxed into `uc` in front of the whole datapath: two LUT levels
+    // at the head of every slot-0 path, which is exactly where the direct-
+    // page modes add din into the AGU (101 opcodes' slot 0) - the design's
+    // deepest core-to-front family started at ir_reg for that reason alone
+    // (docs/IWM35.md family 2, build/results/chains.txt).  Now the decode
+    // ROM is read during the FETCH cycle from the opcode on i_din and lands
+    // in uc_q at the fetch edge, so ir is out of the datapath's cone.
+    //
+    // This is NOT the trap docs/UCODE816.md records (the wide ROM's OUTPUT
+    // feeding `uc` combinationally with take_int in its address, 14 MHz):
+    // the word terminates at uc_q's D pins and nowhere else, and its address
+    // cone - i_din, take_int - is the one the 8-bit useq0 read and the block
+    // RAM's slot-1 address already carry on the same net, through more logic.
+    wire [UC_W-1:0] uc = uc_q;
 
     // Slot 0's cond/alt only, addressed by the opcode arriving now.  Eight bits
     // wide, so this feeds the next-address logic and nothing else.
@@ -252,17 +259,22 @@ module cpu65816 #(
 
     wire [7:0] fetch_op = take_int ? 8'h00 : i_din;
     wire [7:0] seq0     = useq0[fetch_op];
+    // The wide slot-0 word, read from the same arriving opcode.  A separate
+    // combinational wire, so the distributed-ROM inference is the one the
+    // rom_style attribute names (a registered read of a 256-word array is
+    // the shape Vivado would otherwise try to push into block RAM).
+    wire [UC_W-1:0] dec_word = ucode0[fetch_op];
 
     // Field extraction.  Positions come from the generated header, so these
     // cannot drift from the assembler.
-    // f_sync is taken from the FLOP rather than from `uc`, which is what keeps
-    // the decode ROM's address out of its own cone: `uc` would otherwise depend
-    // on dec_word, which depends on take_int, which depends on f_sync.  The two
-    // are identical because no opcode's slot 0 is itself a fetch - the minimum
-    // instruction is two microinstructions, checked by the generator.  A
-    // one-cycle opcode would break this equality, and the symptom would be a
-    // combinational loop reported by the linter.
-    wire       f_sync   = ~use_dec & uc_q[UCP_SYNC];
+    // f_sync: with slot 0 in uc_q like every other slot, the SYNC bit is the
+    // word's own.  (Before 2026-09-14 uc_q held a STALE word during slot 0 -
+    // the previous opcode's filler, a FETCH word - and a registered slot-0
+    // flag masked its SYNC bit.)  No opcode's slot 0 is itself a fetch - the
+    // minimum instruction is two microinstructions, asserted by the
+    // generator - and a one-cycle opcode would now simply run as one,
+    // sequenced off fetch_op like everything else on the fetch cycle.
+    wire       f_sync   = uc_q[UCP_SYNC];
     wire       f_rw     = uc[UCP_RW];
     wire [2:0] f_asel   = uc[UCP_ADDR_SEL +: 3];
     wire [2:0] f_lo_a   = uc[UCP_LO_A     +: 3];
@@ -779,7 +791,7 @@ module cpu65816 #(
     // tells them apart, both running the same sequence.  Two cycles increment
     // PC on the way into it and both must be held for an interrupt:
     //   * the hijacked opcode fetch          - take_int, the boundary cycle
-    //   * BRK's operand-read slot (slot 0)    - use_dec, ir==0, and NOT a BRK
+    //   * BRK's operand-read slot (slot 0)    - slot0_q, ir==0, and NOT a BRK
     // On the real part both are dummy reads at the SAME address, the boundary,
     // which is exactly what holding PC across them produces.  The sequence's
     // own trailing fetch is not slot 0, so the handler's first opcode still
@@ -792,7 +804,7 @@ module cpu65816 #(
     // (a $00, so a BRK), into the middle of the tool dispatcher's exit, and
     // once into RTL's successor - docs/GS.md rung 4c.
     wire int_pc_hold = take_int |
-                       (~in_rst & ~int_brk & (ir == 8'h00) & use_dec);
+                       (~in_rst & ~int_brk & (ir == 8'h00) & slot0_q);
 
     // WAI parks by looping slot 1 on itself (cond NEVER, alt 1), so the
     // sequential successor port is already pointing at slot 2 - its exit - every
@@ -1018,14 +1030,15 @@ module cpu65816 #(
             // at PC, while the pipeline fills: uaddr is forced to {$00, 2}
             // whenever rst holds, so `urom` already has slot 2 in hand.
             uc_q    <= '0;
-            use_dec <= 1'b0;
+            slot0_q <= 1'b0;
             nslot   <= 4'd2;
             ucyc    <= 4'd1;
         end else if (cyc_en) begin
             // The three-deep pipeline: the block RAM reads two cycles out, the
-            // flop holds one cycle out, and uc runs from the flop.
-            uc_q    <= urom;
-            use_dec <= f_sync;
+            // flop holds one cycle out, and uc runs from the flop.  On a fetch
+            // the word one cycle out is slot 0, from the decode ROM.
+            uc_q    <= f_sync ? dec_word : urom;
+            slot0_q <= f_sync;
             ucyc    <= f_sync ? 4'd0 : nslot;
             nslot   <= slot_n2;
 

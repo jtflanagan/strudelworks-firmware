@@ -1177,12 +1177,17 @@ def emit_hex0():
     prefetched - there was nothing to address the block RAM with.  That is the
     same constraint that stops a 6502 instruction taking one cycle, and it gets
     the same answer: a small fast decode for the first cycle only.  256 entries
-    in distributed RAM read combinationally from the registered opcode.
+    in distributed RAM, read from the opcode arriving on the fetch cycle and
+    registered into the core's uc_q at the fetch edge.
     """
     filler = encode(u(**FETCH))
     out = []
     for opcode in range(256):
         slots = PROG.get(opcode)
+        # rtl/cpu65816.sv lands slot 0 in uc_q at the fetch edge and takes
+        # f_sync from that word: a slot 0 that is itself a fetch would make
+        # a one-cycle instruction, which no 65xx has.
+        assert not (slots and slots[0].get("sync")), f"${opcode:02X}: slot 0 is a fetch"
         w = encode(slots[0]) if slots else filler
         out.append(f"{w:0{(WIDTH + 3) // 4}x}")
     return "\n".join(out) + "\n"
@@ -1192,12 +1197,13 @@ def emit_seq0():
     """Just the cond/alt of every opcode's slot 0, 8 bits per opcode.
 
     Separate from the wide decode ROM on purpose.  Slot 0's branch decision has
-    to be made during the FETCH cycle, addressed by the opcode arriving on din -
-    while the wide word is only ever read on the cycle AFTER, addressed by the
-    registered ir.  Sharing one array would make the wide ROM's address depend
-    on din and on the interrupt decision, which puts both in front of every
-    datapath path through the microinstruction.  Splitting keeps the wide read
-    addressed purely by a register.
+    to be made during the FETCH cycle, addressed by the opcode arriving on din,
+    and feeds the next-address logic combinationally.  The wide word is read
+    from the same arriving opcode but lands in the core's uc_q register at the
+    fetch edge (2026-09-14), so its output reaches no datapath path in the
+    fetch cycle.  Sharing one array with a COMBINATIONAL output into the
+    datapath is what cost 14 MHz (docs/UCODE816.md); this 8-bit array keeps the
+    next-address cone narrow.
     """
     out = []
     for opcode in range(256):

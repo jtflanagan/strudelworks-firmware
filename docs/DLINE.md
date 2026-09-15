@@ -65,7 +65,7 @@
 > in bank zero outside the regions SHADOW duplicates.  The IIe's netlist is
 > unchanged (`GS = 0` folds every bank to zero).
 
-Status: **rungs 1-3 and 5 DONE and ON HARDWARE** (rung 5: 2026-09-07,
+Status: 2026-09-14, branch `woz_support`: the decimal adjust is out of the serve cone (core-side, "The decimal adjust out of the serve cone" below) - IIe build `dec_defer` TIMING MET +0.046, Total Replay 46.1x on hardware.  Before that: **rungs 1-3 and 5 DONE and ON HARDWARE** (rung 5: 2026-09-07,
 branch `dline_capacity`, fw 52dc698 plus the margin cuts; 72.3x on the
 animated Nox map from 63.4x, wave.dsk 83x drawing / 97x flipping; build
 WNS +0.150 after the read-claim cut, no dline path in the deep tail).  **Rung 4 (streams) was
@@ -580,6 +580,22 @@ built LUT6 -> CARRY4 -> LUT4.  Result: the family at 14-16 levels, logic
 decimal adjust inside it (a load bypass would take the loads off it; the
 flags and ADC/SBC stay), and the d_din -> d_pred arc for the indirect
 modes.  Both are core work.
+
+**The decimal adjust out of the serve cone (2026-09-14, branch woz_support).**
+The first of those two is done in the core, not here: the 65C02's decimal
+ADC/SBC runs in the extra cycle the part already spends in decimal mode,
+from the operand the read slot latched (`dm`), so the nibble correction no
+longer stands between the served byte's carry chain and A/X/Y/MD/Z
+(rtl/cpu65c02.sv `dec_defer`, sim/gen_microcode.py DADC/DSBC; bit-exact by
+construction and checked by a simulation `$error` against the one-cycle
+formula; Bruce Clark's exhaustive decimal test gives the identical result
+on both forms).  IIe build `dec_defer`: TIMING MET +0.046 (woz5 missed at
+-0.070); the chains census at >= 14 levels outside the DDR3 went from 323
+paths to 195, every one positive - this cone's family (way rows -> md/a/x/y
+at 16 levels, dq_sx -> f_z) and the core's pcl -> dq_sx candidate arc are
+gone from it; dq_sx -> f_z now 14 levels at +0.311.  Choosing the adder's
+result late in the ALU (KEPT partial tree) was measured and made the flag
+trees worse; not applied.  Total Replay cold-boots on hardware at 46.1x.
 
 ### Rung 4 - streams: TRIED AND REVERTED (2026-09-07)
 

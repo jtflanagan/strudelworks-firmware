@@ -518,7 +518,15 @@ module card_link #(
         else if (tickcount < RST_TICKS) tickcount <= tickcount + 17'd1;
     end
 
-    wire rst = ~clk_locked | (tickcount < RST_TICKS) | cmd_reset;
+    // The link's reset is a FLOP, and every consumer - the Apple side's
+    // apple_rst, the TX ring, the message layer, RESET# - takes the flop.
+    // Taken as the OR of comparators it sat under the TX ring's stall, the
+    // arbiter's take and the floppy card's next-word adder into its block
+    // RAM's address: cmd_rst_cnt to g_fd bank ADDR at 13 levels in build
+    // woz4.  One clock later on assert and release, against a 1 ms pulse.
+    wire rst_d = ~clk_locked | (tickcount < RST_TICKS) | cmd_reset;
+    reg  rst   = 1'b1;
+    always @(posedge clk_ctrl) rst <= rst_d;
 
     assign ft_reset = ~rst;
 
@@ -533,10 +541,9 @@ module card_link #(
     // of the chip's clock, this is seen whether or not CLKOUT ran, and it
     // ends only once CLKOUT is running again.  The reference clears its
     // tickcount64_com on rst for the same purpose (pcileech_com.sv).
-    // From a registered copy: an asynchronous assert wants a flop output, not
-    // an OR of comparators.
-    reg rst_r = 1'b1;
-    always @(posedge clk_ctrl) rst_r <= rst;
+    // From the flop: an asynchronous assert wants a flop output, not an OR
+    // of comparators.
+    wire rst_r = rst;
 
     reg [1:0] rst_ft_sync = 2'b11;
     always @(posedge ft_clk_i or posedge rst_r) begin

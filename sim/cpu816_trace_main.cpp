@@ -22,7 +22,7 @@
 // The record format is sim/cpu816_tests.py's.  A sync cycle is the previous
 // instruction's trailing slot, so the core is parked there by setting uc_q to
 // the FETCH word (the filler line of the hex, every undefined opcode's slot)
-// with use_dec clear - the only pipeline state a fetch cycle depends on.
+// with slot0_q clear - the only pipeline state a fetch cycle depends on.
 //
 // WAI and STP park: the suite ends those with a null "--------" record, and
 // the check stops one cycle short with no fetch expected.
@@ -158,7 +158,7 @@ static void poke(const Regs &r) {
     R->cpu65816__DOT__f_e = r.e;
     R->cpu65816__DOT__in_rst = 0; R->cpu65816__DOT__hlt = 0;
     R->cpu65816__DOT__nmi_pend = 0; R->cpu65816__DOT__int_brk = 0; R->cpu65816__DOT__int_nmi = 0;
-    R->cpu65816__DOT__use_dec = 0;
+    R->cpu65816__DOT__slot0_q = 0;
     R->cpu65816__DOT__agu_c = 0; R->cpu65816__DOT__agu_hc = 0;
     for (int i = 0; i < 3; i++) R->cpu65816__DOT__uc_q[i] = fetch_word[i];
 }

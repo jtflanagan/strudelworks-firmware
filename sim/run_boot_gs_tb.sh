@@ -144,9 +144,9 @@ has_fd525=0
 if [ -n "$fd525" ]; then
     has_fd525=1
     [ -f "$fd525" ] || { echo "no image at $fd525" >&2; exit 2; }
-    python3 "$root/tools/nib525.py" "$fd525" --hex "$work/fd525_$tag.hex" > /dev/null
+    python3 "$root/tools/nib525.py" "$fd525" --hex "$work/fd525_$tag.hex" --bits --counts "$work/fd525_$tag.counts" > /dev/null
 else
-    : > "$work/fd525_$tag.hex"
+    : > "$work/fd525_$tag.hex"; : > "$work/fd525_$tag.counts"
 fi
 has_fd35=0
 if [ -n "$fd35" ]; then
@@ -219,7 +219,7 @@ if [ "$vl" = 1 ]; then
         -GBRAMF="\"$work/gsbram_$tag.hex\"" -GHAS_BRAM="$has_bram" \
         -GFD35F="\"$work/fd35_$tag.hex\"" -GFD35_COUNTSF="\"$work/fd35_$tag.counts\"" \
         -GHAS_FD35="$has_fd35" -GFD35_DELAY="$fd35delay" -GFD35_TRACE="$fd35trace" \
-        -GFD525F="\"$work/fd525_$tag.hex\"" -GHAS_FD525="$has_fd525" -GFD525_DELAY="$fd525delay" \
+        -GFD525F="\"$work/fd525_$tag.hex\"" -GFD525_COUNTSF="\"$work/fd525_$tag.counts\"" -GHAS_FD525="$has_fd525" -GFD525_DELAY="$fd525delay" \
         -Mdir "$obj" "${srcs[@]}" \
         -o boot_gs_tb > "$work/verilator_gs_$tag.log" 2>&1 || {
             echo "verilator build failed:" >&2; tail -40 "$work/verilator_gs_$tag.log" >&2; exit 1; }

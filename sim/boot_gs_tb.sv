@@ -137,6 +137,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     // nibbles a track), in drive 1, and the clocks the modelled
                     // host takes to answer a seek.
                     parameter FD525F = "fd525.hex",
+                    parameter FD525_COUNTSF = "fd525.counts",
                     parameter integer HAS_FD525 = 0,
                     parameter integer FD525_DELAY = 50000,
                     parameter OPSF  = "",
@@ -741,7 +742,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .fd35_stale (), .fd35_track (), .fd35_side (), .fd35_motor35 (), .fd35_motor (),
         .fd35_ctl (), .fd35_seeks (), .fd35_late (), .fd35_fill_max (), .fd35_stall (fd35_stall),
         .fd525_inserted (fd525_inserted), .fd525_wp (fd525_wp),
-        .fd525_nibbles ({13'd6384, 13'd6384}), .fd525_tracks ({6'd35, 6'd35}),
+        .fd525_cell ({13'd32, 13'd32}), .fd525_tracks ({6'd35, 6'd35}),
         .fd525_flush (2'b00),
         .fd525_stale (), .fd525_dirty (), .fd525_phase (),
         .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
@@ -780,13 +781,23 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     reg [7:0]   fd_hdr_type = 8'd0;
     integer     fd_left = 0, fd_idx = 0;
     integer     fd525_dirty_chunks = 0;
+    // The tracks as BIT STREAMS (tools/nib525.py --bits), 6656 bytes a track,
+    // and each track's bit count.
     reg [7:0]   fd525_img [0:35*6656-1];
+    integer     fd525_bits [0:34];
     reg [7:0]   fd525_req_seq = 8'd0;
-    reg [5:0]   fd525_req_track = 6'd0;
+    reg [7:0]   fd525_req_qtr = 8'd0;
+    reg [6:0]   fd525_req_phase = 7'd0;
     reg         fd525_req_drive = 1'b0;
     integer     fd525_pending = 0;
     integer     fd525_seeks = 0, fd525_fills = 0;
-    initial if (HAS_FD525) $readmemh(FD525F, fd525_img);
+    initial if (HAS_FD525) begin : fd525_load
+        integer fc, k;
+        $readmemh(FD525F, fd525_img);
+        fc = $fopen(FD525_COUNTSF, "r");
+        for (k = 0; k < 35; k = k + 1) if ($fscanf(fc, "%d\n", fd525_bits[k]) != 1) fd525_bits[k] = 0;
+        $fclose(fc);
+    end
     always @(posedge clk) if (fd35_valid && fd35_take) begin
         if (fd_left == 0) begin
             fd_hdr_type = fd35_word[15:8];
@@ -802,7 +813,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     fd35_seeks    = fd35_seeks + 1;
                 end else if (fd_hdr_type == 8'h20) begin
                     fd525_req_seq   = fd35_word[31:24];
-                    fd525_req_track = fd35_word[13:8];
+                    fd525_req_qtr   = fd35_word[15:8];
+                    fd525_req_phase = fd35_word[7:1];
                     fd525_req_drive = fd35_word[0];
                     fd525_pending   = fd525_pending + 1;
                     fd525_seeks     = fd525_seeks + 1;
@@ -813,23 +825,29 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         end
     end
     // A 5.25" track as the host's floppy service sends it: seven FD_TRACK
-    // chunks, {seq, chunk, track, drive} then 252 nibble words (152 in the
-    // last), 6656 bytes a track.
-    task send_fd525_track(input [7:0] sq, input [5:0] trk, input drv);
-        integer c, n, k, base;
+    // chunks, {seq, chunk, qtr, drive}, {bits}, then 252 words of the bit
+    // stream (152 in the last).  The track under a quarter-track position is
+    // the phase's (phase >> 1), as the host does for a sector image; past the
+    // image, no bits.
+    task send_fd525_track(input [7:0] sq, input [7:0] qtr, input [6:0] ph, input drv);
+        integer c, n, k, base, trk, nbits;
         begin
+            trk   = ph >> 1;
+            nbits = (trk < 35) ? fd525_bits[trk] : 0;
             for (c = 0; c < 7; c = c + 1) begin
                 n = (c < 6) ? 252 : 152;
                 @(negedge clk);
-                msg_valid <= 1'b1; msg_type <= 8'h1F; msg_len <= 8'(n + 1);
+                msg_valid <= 1'b1; msg_type <= 8'h1F; msg_len <= 8'(n + 2);
                 @(negedge clk);
                 msg_valid <= 1'b0; pay_valid <= 1'b1;
-                pay_data <= {sq, c[7:0], 2'd0, trk, 7'd0, drv};
+                pay_data <= {sq, c[7:0], qtr, 7'd0, drv};
+                @(negedge clk);
+                pay_data <= {16'd0, nbits[15:0]};
                 @(negedge clk);
                 base = trk * 6656 + c * 1008;
                 for (k = 0; k < n; k = k + 1) begin
-                    pay_data <= {fd525_img[base + 4*k + 3], fd525_img[base + 4*k + 2],
-                                 fd525_img[base + 4*k + 1], fd525_img[base + 4*k]};
+                    pay_data <= (trk < 35) ? {fd525_img[base + 4*k + 3], fd525_img[base + 4*k + 2],
+                                              fd525_img[base + 4*k + 1], fd525_img[base + 4*k]} : 32'd0;
                     @(negedge clk);
                 end
                 pay_valid <= 1'b0;
@@ -847,7 +865,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             repeat (FD525_DELAY) @(negedge clk);
             wait (!msg_lock);
             msg_lock = 1'b1;
-            send_fd525_track(fd525_req_seq, fd525_req_track, fd525_req_drive);
+            send_fd525_track(fd525_req_seq, fd525_req_qtr, fd525_req_phase, fd525_req_drive);
             msg_lock = 1'b0;
             fd525_pending = fd525_pending - 1;
         end
@@ -910,8 +928,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                  u_gsio.u_iwm.apple35_sel, u_gsio.u_iwm.c031_ctrl, u_gsio.u_iwm.stat35,
                  u_gsio.u_iwm.track35, u_gsio.u_iwm.side35, u_gsio.u_iwm.motor35, u_gsio.u_iwm.stale,
                  u_gsio.u_iwm.pos, u_gsio.u_iwm.latch, u_gsio.u_iwm.latch_valid, u_gsio.u_iwm.mode,
-                 u_gsio.u_iwm.nib_period, u_gsio.u_iwm.nib_acc,
-                 u_gsio.u_iwm.hp[0], u_gsio.u_iwm.hp[1]);
+                 8'd224, u_gsio.u_iwm.nib_acc,
+                 u_gsio.u_iwm.ph5[0], u_gsio.u_iwm.ph5[1]);
     end
 
     // Every 5.25" store - a byte the machine wrote into the buffered track -
@@ -1694,10 +1712,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                      u_gsio.u_iwm.rd35, u_gsio.u_iwm.rd525);
             if (HAS_FD525)
                 $display("    the 5.25\" drives: %0d seeks, %0d fills, heads at half-track %0d / %0d",
-                         fd525_seeks, fd525_fills, u_gsio.u_iwm.hp[0], u_gsio.u_iwm.hp[1]);
+                         fd525_seeks, fd525_fills, u_gsio.u_iwm.ph5[0], u_gsio.u_iwm.ph5[1]);
             if (HAS_FD525)
-                $display("    the 5.25\" writes: %0d bytes stored, %0d tracks sent home, %0d FD_DIRTY chunks taken",
-                         u_gsio.u_iwm.wr525, u_gsio.u_iwm.up525, fd525_dirty_chunks);
+                $display("    the 5.25\" writes: %0d bytes loaded, %0d bits written, %0d tracks sent home, %0d FD_DIRTY chunks taken",
+                         u_gsio.u_iwm.ld525, u_gsio.u_iwm.wr525, u_gsio.u_iwm.up525, fd525_dirty_chunks);
         end
     endtask
     // The Ensoniq's state (rtl/gs_doc.sv, docs/GS.md rung 7): which

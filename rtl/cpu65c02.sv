@@ -237,6 +237,7 @@ module cpu65c02 #(
     logic        agu_c;             // carry SAVED from the previous AGU add
     logic        in_rst, int_brk, int_nmi, nmi_prev, nmi_pend, hlt;
     logic [15:0] last_addr;
+    logic [7:0]  dm;                // the last din: the ADC/SBC operand, for the decimal slot
 
     wire [7:0] p_bits = {f_n, f_v, 1'b1, 1'b0, f_d, f_i, f_z, f_c};
     assign p_flags = p_bits;
@@ -407,7 +408,17 @@ module cpu65c02 #(
     // Decimal ADC/SBC, nibble at a time.  Continuous assignments so each
     // correction step visibly feeds the next.
     wire [3:0] a_lo = a[3:0],   a_hi = a[7:4];
-    wire [3:0] m_lo = din[3:0], m_hi = din[7:4];
+    // THE DECIMAL OPERATION RUNS IN ITS OWN CYCLE (2026-09-14).  The 65C02
+    // spends one extra cycle on ADC/SBC with D set - a dummy read at PC the
+    // generator already emitted - and the BCD add now happens THERE, from
+    // registers: the operand is dm (the byte the read slot latched), A and
+    // the carry are untouched in between because the read slot writes
+    // nothing in decimal mode (dec_defer).  These chains are textually the
+    // one-cycle version's with din replaced by dm.  Before, the nibble
+    // correction sat between the served byte's carry chain and A/Z: the
+    // IIe's deepest core chain (build woz5, dline dq_sx -> f_z, 15 levels,
+    // five LUT6 after the CARRY4, all of them this select and its zero test).
+    wire [3:0] m_lo = dm[3:0],  m_hi = dm[7:4];
 
     wire [4:0] adc_lo0 = {1'b0, a_lo} + {1'b0, m_lo} + {4'd0, f_c};
     wire [4:0] adc_lo1 = (adc_lo0 > 5'd9) ? (adc_lo0 + 5'd6) : adc_lo0;
@@ -424,6 +435,20 @@ module cpu65c02 #(
     wire [5:0] sbc_hi1 = sbc_hi0[5] ? (sbc_hi0 - 6'd6) : sbc_hi0;
     wire [7:0] dsbc_res = {sbc_hi1[3:0], sbc_lo1[3:0]};
 
+    // The decimal slot's binary terms, from the same registers: V is the
+    // binary overflow in both modes and SBC's carry the binary borrow, as the
+    // one-cycle version had them.
+    wire [7:0] dadd_m   = (f_alu_op == UC_OP_DSBC) ? ~dm : dm;
+    wire [8:0] dbin_sum = {1'b0, a} + {1'b0, dadd_m} + {8'd0, f_c};
+    wire [7:0] dadd_vv  = ~(a ^ dadd_m) & (a ^ dbin_sum[7:0]);
+    wire       dadd_v   = dadd_vv[7];
+
+    // A read slot of ADC/SBC with D set defers to the decimal slot: no A, no
+    // flags.  Register-rooted (a uc field and f_d), so it gates nothing late.
+    // sim/gen_microcode.py check_decimal holds every ADC/SBC word to having
+    // that slot behind it.
+    wire dec_defer = f_d && ((f_alu_op == UC_OP_ADC) || (f_alu_op == UC_OP_SBC));
+
     always_comb begin
         alu_res = alu_m;
         alu_n   = f_n;
@@ -438,15 +463,29 @@ module cpu65c02 #(
         UC_OP_EOR: begin alu_res = a ^ din; alu_n = alu_res[7]; alu_z = (alu_res == 8'h00); end
         UC_OP_ADC: begin
             alu_v   = add_v;
-            alu_res = f_d ? dadc_res : bin_sum[7:0];
-            alu_c   = f_d ? dadc_c   : bin_sum[8];
+            alu_res = bin_sum[7:0];
+            alu_c   = bin_sum[8];
             alu_n   = alu_res[7];
             alu_z   = (alu_res == 8'h00);
         end
         UC_OP_SBC: begin
             alu_v   = add_v;
-            alu_res = f_d ? dsbc_res : bin_sum[7:0];
-            alu_c   = bin_sum[8];                                // binary carry either way
+            alu_res = bin_sum[7:0];
+            alu_c   = bin_sum[8];
+            alu_n   = alu_res[7];
+            alu_z   = (alu_res == 8'h00);
+        end
+        UC_OP_DADC: begin
+            alu_v   = dadd_v;
+            alu_res = dadc_res;
+            alu_c   = dadc_c;
+            alu_n   = alu_res[7];
+            alu_z   = (alu_res == 8'h00);
+        end
+        UC_OP_DSBC: begin
+            alu_v   = dadd_v;
+            alu_res = dsbc_res;
+            alu_c   = dbin_sum[8];                               // binary borrow, as before
             alu_n   = alu_res[7];
             alu_z   = (alu_res == 8'h00);
         end
@@ -706,6 +745,57 @@ module cpu65c02 #(
     end
 `endif
 
+`ifndef SYNTHESIS
+    // The deferred decimal operation against the one-cycle one: at a read
+    // slot that defers, compute what that slot USED to write, from the live
+    // din, and demand the decimal slot write exactly that - A, N, V, Z, C.
+    // Every decimal ADC/SBC any bench runs becomes an equivalence check.
+    function automatic [11:0] dec_ref(input [7:0] ra, input [7:0] rm, input rc, input sbc);
+        logic [4:0] l0, l1;
+        logic [5:0] h0, h1;
+        logic [7:0] am, vv, res;
+        logic [8:0] bs;
+        logic       cc;
+        am = sbc ? ~rm : rm;
+        bs = {1'b0, ra} + {1'b0, am} + {8'd0, rc};
+        vv = ~(ra ^ am) & (ra ^ bs[7:0]);
+        if (!sbc) begin
+            l0 = {1'b0, ra[3:0]} + {1'b0, rm[3:0]} + {4'd0, rc};
+            l1 = (l0 > 5'd9) ? (l0 + 5'd6) : l0;
+            h0 = {2'b00, ra[7:4]} + {2'b00, rm[7:4]} + {5'd0, l1[4]};
+            h1 = (h0 > 6'd9) ? (h0 + 6'd6) : h0;
+            cc = (h1 > 6'd15);
+        end else begin
+            l0 = {1'b0, ra[3:0]} - {1'b0, rm[3:0]} - {4'd0, ~rc};
+            h0 = {2'b00, ra[7:4]} - {2'b00, rm[7:4]} - {5'd0, l0[4]};
+            l1 = l0[4] ? (l0 - 5'd6) : l0;
+            h1 = h0[5] ? (h0 - 6'd6) : h0;
+            cc = bs[8];
+        end
+        res = {h1[3:0], l1[3:0]};
+        dec_ref = {res, res[7], vv[7], (res == 8'h00), cc};
+    endfunction
+    logic [11:0] dchk_exp;
+    logic        dchk_pend;
+    always_ff @(posedge clk) begin
+        if (rst) dchk_pend <= 1'b0;
+        else if (cyc_en) begin
+            if (ld_en && dec_defer) begin
+                dchk_exp  <= dec_ref(a, din, f_c, f_alu_op == UC_OP_SBC);
+                dchk_pend <= 1'b1;
+            end else if (f_alu_op == UC_OP_DADC || f_alu_op == UC_OP_DSBC) begin
+                if (!dchk_pend)
+                    $error("cpu65c02: a decimal slot with no deferred ADC/SBC before it");
+                else if ({alu_res, alu_n, alu_v, alu_z, alu_c} != dchk_exp)
+                    $error("cpu65c02: deferred decimal %s wrote %02x nvzc=%b, the one-cycle form %02x nvzc=%b",
+                           f_alu_op == UC_OP_DSBC ? "SBC" : "ADC", alu_res, {alu_n, alu_v, alu_z, alu_c},
+                           dchk_exp[11:4], dchk_exp[3:0]);
+                dchk_pend <= 1'b0;
+            end
+        end
+    end
+`endif
+
     assign d_pred    = d_pred_mux;
     assign d_pred_v  = d_pred_known &&
                        (n_asel != UC_ADDR_PC) && (n_asel != UC_ADDR_AGU);
@@ -757,6 +847,7 @@ module cpu65c02 #(
             if (nmi_prev & ~nmi_n) nmi_pend <= 1'b1;
 
             agu_c <= agu_co;
+            dm    <= din;
 
             if (f_sync) begin
                 if (take_int) begin
@@ -790,7 +881,7 @@ module cpu65c02 #(
                 endcase
 
                 case (f_wb)
-                    UC_WB_A:  a  <= alu_res;
+                    UC_WB_A:  if (!dec_defer) a <= alu_res;
                     UC_WB_X:  x  <= alu_res;
                     UC_WB_Y:  y  <= alu_res;
                     UC_WB_S:  s  <= x;                  // TXS; see s_n above
@@ -802,7 +893,7 @@ module cpu65c02 #(
                     default: ;
                 endcase
 
-                if (f_fl) begin
+                if (f_fl && !dec_defer) begin
                     f_n <= alu_n; f_v <= alu_v; f_z <= alu_z; f_c <= alu_c;
                 end
 

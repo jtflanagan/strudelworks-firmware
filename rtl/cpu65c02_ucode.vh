@@ -138,6 +138,8 @@ localparam logic [4:0] UC_OP_RMB = 5'd20;
 localparam logic [4:0] UC_OP_SMB = 5'd21;
 localparam logic [4:0] UC_OP_FLAG = 5'd22;
 localparam logic [4:0] UC_OP_TXS = 5'd23;
+localparam logic [4:0] UC_OP_DADC = 5'd24;
+localparam logic [4:0] UC_OP_DSBC = 5'd25;
 
 localparam logic [2:0] UC_ALU_A_DIN = 3'd0;
 localparam logic [2:0] UC_ALU_A_A = 3'd1;
