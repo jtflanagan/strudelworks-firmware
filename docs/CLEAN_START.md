@@ -1,6 +1,6 @@
 # Clean start and a link that never wedges
 
-Status: 2026-09-15, branch `gs_control_panel` (on top of fw e617605 / host 831ce7e), CS1-CS7 DONE AND PROVEN ON HARDWARE (GS bit `cs16`, MET wns +0.010 whs +0.043): the ladder passes 20/20/D.  `suite quick` 33/33, `suite gs` 14/14, `start_hold_tb` 15 checks, `rom_loader_tb` 13 checks, `tx_ring_tb` and `ft601_msg_rx_tb` with their new cases; GS build `cs12` (CS1+CS2) MET wns +0.046 whs +0.025, build `cs16` (CS1-CS6) running.  CS7's hardware ladder is the remaining rung.  Two user requirements (2026-09-15): every board reset and every Apple reset runs a clean startup checklist from a known place of control; and the link never wedges - every state recoverable without a power cycle or a bitstream reload.
+Status: 2026-09-15, branch `gs_control_panel` (fw ebb96ef / host fbf9f96, not pushed), CS1-CS7 DONE AND PROVEN ON HARDWARE (GS bit `cs16`, MET wns +0.010 whs +0.043): the ladder passes 20/20/D.  `suite quick` 33/33, `suite gs` 14/14, `start_hold_tb` 15 checks, `rom_loader_tb` 13 checks, `tx_ring_tb` and `ft601_msg_rx_tb` with their new cases; GS build `cs12` (CS1+CS2) MET wns +0.046 whs +0.025, build `cs16` (CS1-CS6) running.  CS7's hardware ladder is the remaining rung.  Two user requirements (2026-09-15): every board reset and every Apple reset runs a clean startup checklist from a known place of control; and the link never wedges - every state recoverable without a power cycle or a bitstream reload.
 
 ## Why
 
