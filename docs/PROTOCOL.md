@@ -202,7 +202,7 @@ protocol.
 | `0x8000_00F8` | AUDIO_STAT | RO | `[15:0]` samples sent, `[23:16]` samples dropped for a full FIFO, `[24]` the FIFO full now |
 | `0x8000_00FC` | PRINTER_SLOT | RW bits 2:0 | the printer card's slot, 0 = off; latched at RES', never any other card's; `[16]` rom loaded, `[31:24]` $C0n0 writes seen — see PRINTER.md |
 | `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
-| `0x8000_0130` | DBG_SEL | RW bits 7:0 | the debug pair's select (GS.md rung 6): `[5:4]` the module - 0 the instruction front, 1 the data front, 2 the page cache, 3 the dispatcher and the top - and `[3:0]` the item; the item lists are the `dbg_val` muxes in rtl/iline.sv, rtl/dline.sv, rtl/page_cache.sv and rtl/master_top.sv |
+| `0x8000_0130` | DBG_SEL | RW bits 7:0 | the debug pair's select (GS.md rung 6): `[5:4]` the module - 0 the instruction front, 1 the data front, 2 the page cache, 3 the dispatcher and the top - and `[3:0]` the item; the item lists are the `dbg_val` muxes in rtl/iline.sv, rtl/dline.sv, rtl/page_cache.sv and rtl/master_top.sv.  `[7:6]` = 1 the bank census, 2 the data front's bank table, 3 the IIgs battery RAM (`[5:0]` = k, bytes 4k..4k+3) |
 | `0x8000_0134` | DBG_VAL | RO | the selected counter or state snapshot.  From swhost's control socket: `regw 80000130 SEL` then `reg 80000134` |
 | `0x8000_0138` | FD35_DRIVE | RW bits 1:0 | the 3.5" drive on the IIgs's IWM, live like FD_DRIVE1: `inserted` (its 0->1 edge is the insertion), `wp`; back: `[8]` stale, `[15:9]` track, `[16]` side, `[17]` the drive's motor, `[18]` the IWM's ENABLE, `[31:24]` seeks — see IWM35.md |
 | `0x8000_013C` | FD35_STAT | W1 bits 1:0 | `[7:0]` late (fills after a read; bit 0 clears), `[15:8]` `{phases, q7, q6, drive_sel, apple35_sel}`, `[31:16]` fill_max in MICROSECONDS, seek to last chunk (bit 1 clears) — see IWM35.md |
@@ -211,6 +211,7 @@ protocol.
 | `0x8000_0148` | DDR3_DBG3 | RO | `[5:0]` dqs_start_index, `[11:6]` stored, `[17:12]` target, `[23:18]` original target, `[30:24]` the lane's data start index |
 | `0x8000_014C` | DDR3_EYE0 | RO | byte lane 0's read data eye: bit t = 1 when the alignment pattern still read back with the lane's DQ IDELAY at tap t (78 ps); measured after every calibration; the calibrated tap (DDR3_DBG1's DQ tap minus one) sits inside the run of ones and its distance to either end is the margin |
 | `0x8000_0150` | DDR3_EYE1 | RO | byte lane 1's |
+| `0x8000_0154` | GS_CLOCK_STAT | RO | the IIgs clock chip (rtl/gs_clock.sv): `[31]` bram_ok (a whole GS_BRAM landed), `[30:28]` the chip's state (0 idle, 1 time, 2 internal, 3 bram1, 4 bram2), `[27:16]` the machine's battery RAM writes (cleared only by a link reset), `[15:8]` bad strobes, `[7:0]` strobes (both since RES'); zero on a IIe.  Its 256-byte store reads through the debug pair: DBG_SEL `$C0 + k` gives bytes 4k..4k+3, low byte first — see GS_CONTROL_PANEL.md R0B |
 
 Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.

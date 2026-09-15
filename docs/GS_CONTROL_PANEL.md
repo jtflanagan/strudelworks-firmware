@@ -1,6 +1,6 @@
 # The GS Strudelworks Control Panel: our panel in front of the IIgs's own
 
-Status: 2026-09-15, branch `gs_control_panel` (fw off master 67eed4e / host off 5245bdc), PLAN ONLY - no rung started.  Next: R0 (toolchain + CPU-level runner) and R0B (the Control Panel effects ladder, stock panel first).
+Status: 2026-09-15, branch `gs_control_panel` (fw off master 67eed4e / host off 5245bdc), UNCOMMITTED.  R0 IN SIM: llvm-mos-65816 pinned, `sim/run_gspanel.sh` runs the panel on the card's own 65816 - self-test PASS and v0 (`assets/gspanel.bin`, C) PASS with one stock-panel chain.  R0B ON HARDWARE (bit gs_bram1, fw 2026-09-15 13:05:30, TIMING MET wns +0.076 whs +0.067 fail 0/97633, SRAM): the card's battery RAM readable (debug pair `$C0+k`, GS_CLOCK_STAT 0x154), host `bram [dump]` four-copy report + follower fixes - all four copies agree on the machine (sealed $0B5E, 0 differ); lint clean, `suite gs` 13/13, `suite quick` 31/31, host tests 41/41; the expected-effects table established from the ROM.  Tooling: `screen attr` + MCP inverse marks (text_test 51/51, swmcp 37/37), `tools/gs_menu.py` walks menus by the inverse run.  Next: `tools/gs_cp_test.sh`, first row Display columns, on its own conf and battery-RAM file.
 
 ## Context
 On the IIgs build every card/host setting (disk images, accel, video, slot cards) is changed by
@@ -84,21 +84,96 @@ Interrupt flag left as the caller had it. All $C0xx access long ($00C0xx) via as
   text (aux/main columns, inverse, MouseText) → keys + list widget → chaining → service calls
   incl. timeout. 8-bit codegen first; `+mos-a16` only once the runner is green.
 
+- **PROGRESS 2026-09-15.** Toolchain unpacked and pinned (host `firmware/gspanel/TOOLCHAIN`,
+  sha256 6485bf20…, clang 23.0.0git llvm-mos 8be05461). The runner is
+  `sim/gspanel_run_main.cpp` + `sim/run_gspanel.sh` (in `suite gs` as `gspanel`, on the
+  ca65 self-test `sim/gspanel_selftest.s`; the real image with `--bin`). The panel project is
+  host `firmware/gspanel/` (crt0.s, link.ld, sdk/io.s text keys, panel/main.c, build.sh
+  `--check`, lint_absolute.py), built into `assets/gspanel.bin` (64 KB, 1307 B of code, header
+  entry $E2/000C). v0 in the runner: title, MouseText rule, the two items; Down/Up/Return
+  chains to the stock trap once and comes back, Esc leaves; the caller's S/D/DBR/P, page zero
+  and switches restored; PASS in 1.50 M cycles (almost all `text_clear`, 1,920 `poke24`s -
+  worth a row-at-a-time path later). Entry S is 3 bytes below the caller.
+  **The assembler's traps, found here and fixed:** it does not track REP/SEP, so a 16-bit
+  immediate is spelled `.byte op` + `.short v` (crt0.s `lda16`/`ldx16`/`ldy16`) - `lda #0`
+  after `rep #$30` assembled as two bytes; without `.include "imag.inc"` (`.zeropage
+  __rc0..31`) a register operand takes the widest mode, which for LDY/STX is a DBR-relative
+  16-bit address (the wrong bank). `mvn #src,#dst`; `jmp $FFxxxx` is JML; callee-saved
+  imaginary registers are `__rc20` up; lld writes `X.bin` and `X.bin.elf`.
+
 **R0B — Control Panel effects ladder, stock panel first (EARLY; no card/ROM change needed)**
 Every panel feature — stock or ours — is only done when its EFFECT is shown, not when a byte
 was written. This rung builds the observability and the test, and runs it on the stock panel.
-- **Expected effects first**: for each row, establish from ROM 3 disassembly + KEGS what the
-  setting is supposed to do and when (e.g. does Display 80 = BRAM $19 bring the machine up in
-  80 columns after reset — $E1/02D9 is read at FF/8FA1, find the other readers — and does the
-  stock panel draw in 40 or 80 regardless). Several BRAM offsets ($1D, $20, $28, RAM disk) are
-  not established in either repo; the table records only verified offsets.
+- **Expected effects — ESTABLISHED 2026-09-15 from the ROM 3 disassembly** (the ROM's
+  routines, not forum lists; unverified rows marked):
+  - *How BRAM moves.* `TOREADBR` FF/B970 reads all 256 bytes from the chip into $E1/02C0,
+    range-checks them (table FF/8371) and the checksum; any failure → FF/B925 writes the
+    defaults (FF/83C5 = the host's `kDefaults`) into the copy and `TOWRITEBR` FF/B94E writes
+    the WHOLE block back. The checksum covers $00-$FB (the X=$FA pass reads $FB).
+    Vector $E1/0094 `TOBRAMSETUP` = FF/BB7A: re-reads the chip (BBD7 → B970), applies
+    display/volume/speed/cursor/keyboard, and applies the SLOTS only when called with carry
+    clear (only the cold-reset path does; every ROM caller of the vector sets carry).
+  - *When.* The chip is re-read and applied on EVERY reset (FA62 → … → FF/BACF), on every
+    CDA-menu entry (FE/C9E8), and on Control Panel entry and exit — so the "stale RAM copy"
+    hypothesis below is retired: the copy is fresh whenever the panel saves.
+  - *A save* (Return, FF/91E5-9242) writes the WHOLE block via `JSL $E10080`; Escape only
+    re-reads the chip, discarding edits. Edits apply live while in the panel.
+
+  | BRAM | setting | applied | observable after the event |
+  |---|---|---|---|
+  | $18 | type 0 colour / 1 mono | BC45 | `$C021` bit 7; `$C029` bit 5 |
+  | $19 | columns 0=40 / else 80 | every reset: FF/FA7F → FA24, if the visible $C3 ROM has the $38/$18 ID → `JSR $C300` with $98 = PR#3 (80STORE, 80COL, ALTCHAR, CSW=$C307, $04FB=1); NOT in BB7A | 80COL `$C01F` bit 7 after reset; the prompt in 80 columns |
+  | $1A/$1B | text / background colour | BC12 | `$C022` = $1A<<4 \| $1B |
+  | $1C | border | BC24 | `$C034` low nibble |
+  | $1D | 0=60 Hz / 1=50 Hz | BC2F | `$C02B` bit 4 (bits 7-5 = $29) |
+  | $1E | volume 0-14 | BBEE | `$C03C` low nibble, `$E1/00CA` |
+  | $1F | bell PITCH (not volume) | only when the bell rings, FF/9A6D | `$E1/016D` after a bell |
+  | $20 | speed 0 normal / 1 fast | BBE3 | `$E1/0138` bit 7 (reliable); `$C036` bit 7 lazily |
+  | $21-$27 | slots (0 built-in) | COLD reset only (BB9B); $23≠0 → `STA $C00B` on every reset (BBCD) | `$C02D` (bits 7-4 ← $27-$24, bit 2 ← $22==1, bit 1 ← $58==1); `$E1/0139` |
+  | $28 | startup 0 scan / 1-7 slot | cold start only, FF/FAE1 | which `$Cn00` boots; `$07F8` = `$Cn`. Values ≥8 UNVERIFIED |
+  | $29, $2A-$2D, $2F-$31 | language, layout, repeat, keyboard modes | BC2F / ADB micro | `$C02B` bits 7-5; the rest ADB-only |
+  | $2E | cursor flash | C3EA | `$E1/0145` |
+  | $34/$35, $36-$38 | date format; RAM disk | — | UNVERIFIED |
+
+  - *The stock panel's own columns.* From Ctrl-OA-Esc it is 80-column hardware whatever $19
+    says (the Desk Manager set 80STORE/80COL at FE/D43C). From the boot menu
+    (Ctrl-Option-Reset '1') $19 decides: FF/8FA1 sends ESC through $C300 only if $19≠0.
+  - *Corrections to our own notes.* Slot 3 CAN be given to a card: $23≠0 selects the card's
+    $C3 ROM through $C00B (gs_bram.hpp/GS.md say it cannot — true only of $C02D).
+- **A lead for the unconfirmed report (hypothesis, not evidence):** with $19 = 80, every
+  reset does `JSR $C300` if the $C3 ROM the machine sees carries the $38/$18 Pascal ID. If
+  slot 3's page belongs to a card whose ROM passes that check but is not 80-column firmware
+  ($23≠0, or a card answering at $C3), a reset jumps into it — a crash to the monitor is the
+  natural result. The ladder's $19 row runs with slot 3 internal and with a card in slot 3.
 - **Observability today** (BRAM trace, 2026-09-15): the card's clock chip (`rtl/gs_clock.sv`)
   decodes like KEGS; $C033/$C034 are dispatcher-served, never fast reads, and never
   `fast_quiet`-dropped. But nothing can see the card's store: no readback register,
   `bram_ok`/`cnt_strobes`/`cnt_bad` (gs_io.sv:400/408, master_top.sv:946/1893) go nowhere; no
   socket dump of the host follower's image/state/sealed; no per-write log; `load_bram` doesn't
   say why it rejects a file. Only `peek E102C0 256`, the `bram :` log lines and the file.
-- **Add**: (fw) a BRAM window register pair (index → byte) + GS_CLOCK_STAT {bram_ok,
+- **BUILT 2026-09-15 (sim-green, not yet on HW — needs a GS bit):** the card's store reads
+  through the debug pair (DBG_SEL `$C0+k` = bytes 4k..4k+3) and GS_CLOCK_STAT `0x8000_0154`
+  {bram_ok, state, machine writes, bad, strobes}; the host's `bram [dump]` socket command
+  (four copies, seals, the differing bytes), follower RES'/gap handling + counters, a
+  `bram    : $NN old -> new` log line per changed byte, `read_bram_file` reasons. Lint clean,
+  `suite gs` 13/13, `suite quick` 31/31, host tests 41/41 on the Pi. SHADOW bit 6 on the
+  follower is NOT done (it needs the mirror's SHADOW state; rare).
+- **ON HARDWARE 2026-09-15** (gs_bram1, `gs_nox.conf`): `bram` shows all four copies sealed
+  at $0B5E, 0 bytes differ, GS_CLOCK_STAT "image landed yes"; a visit to the CDA menu, the
+  stock Control Panel and its Display page (Escape, nothing saved) took the card's strobe
+  count 4 → 68 with 0 machine writes - the ROM reads the chip on those entries and exits and
+  writes nothing, as the disassembly says.
+- **The stock panel's keys, as seen on hardware** (driven with `tools/gs_menu.py`, every key
+  checked against the inverse run):
+  - The CDA menu and the Control Panel both REOPEN ON THE ITEM LAST CHOSEN (after a quit,
+    Quit). Down at the bottom does not wrap; Up moves. Return opens, Escape cancels a page.
+  - CDA menu (under Nox): Control Panel, Alternate Display Mode, Visit Monitor, Memory
+    Peeker, Quit.
+  - Control Panel: Display, Sound, System Speed, Clock, Keyboard, Slots, Printer Port, Modem
+    Port, RAM Disk, Mouse, (blank), Quit. The clock box shows the host's time.
+  - Display page: Type, Columns, [Screen Colors] Text, Background, Border, Standards, Hertz;
+    the selection starts on Type; "Select: ←→↑↓  Cancel: Esc  Save: Return".
+- **Add** (as planned): (fw) a BRAM window + GS_CLOCK_STAT {bram_ok,
   strobes, bad, state} in wb_regfile; (host) socket/MCP `bram` = four copies byte for byte —
   card store (register walk), follower image, `gs_bram` file, ROM working copy $E1/02C0-03BF —
   each with its checksum/sealed state (checksum routine as FF/BA57, `bram_checksum`) and a
@@ -114,9 +189,8 @@ was written. This rung builds the observability and the test, and runs it on the
   - `build_bram` forces slot bytes $21/$22/$24-$27/$58 from the conf on every start
     (gs_bram.cpp:103-115), so a stock-panel slot choice never survives a swhost restart
     (decide: conf wins vs panel wins — the panel work makes the conf the owner of card slots);
-  - the ROM's RAM copy ($E1/02C0) can be stale against the chip if no RES' followed GS_BRAM,
-    so a Control Panel save could reseal over old bytes → bad checksum → ROM defaults on the
-    next boot (hypothesis; the four-copy diff settles it).
+  - ~~the ROM's RAM copy ($E1/02C0) can be stale against the chip~~ RETIRED by the ROM: the
+    chip is re-read on every reset, CDA-menu entry and Control Panel entry/exit.
 - `tools/gs_cp_test.sh` (host repo, own conf): for each setting in a table {BRAM byte,
   new value, stock-panel key path, observable effect after reset}: drive the stock panel by
   ADB keys (`adb 35 82`, arrows, Return), leave it, diff the four copies, then reset along each
@@ -221,6 +295,20 @@ swap (no disk-switched path yet); clean ROM pages (4th wb_arb client, GS.md:1030
 - Hardware (swhost stopped before every load; APPLE ON; verify from the mirror): MCP `status`,
   `peek E20000`, `raw adb 35 82`, `screen`, `key`; changes confirmed by `status`
   (accel/mem/fb/fd) and the conf's written-back keys; census at unlimited after R2.
+
+## Tooling debt: screen observation (user, 2026-09-15)
+The text screen as scripts see it (`TextRender::screen_text` → socket `screen` → MCP
+`screen` / `wait_for_text`, `pi.sh ctl screen`, every `tools/*_test.sh` that greps it) folded
+inverse, flashing and MouseText into plain letters: a highlighted menu item was
+indistinguishable from the rest, and I twice pressed Return on the CDA menu's "Quit" believing
+Control Panel was selected. The narrow fix (2026-09-15): `screen attr` (one attribute row per
+text row) and the MCP screen tool marking inverse runs, `wait_for_text(inverse=True)`.
+**Still to do:** audit every test and tool that keys on the screen (`tools/*_test.sh`,
+`menu_test.sh`, `gs_test.sh`'s Control Panel walk, swmcp callers, the host unit tests over
+`screen_text`) for checks that cannot actually observe what they claim - selections,
+highlighted rows, cursor positions - and decide whether plain `screen` should carry the
+attributes by default. Any menu-driving step in this plan verifies the selection from the
+inverse run before pressing Return.
 
 ## Risks
 - UNCONFIRMED user report (2026-09-15, not reproduced, not evidence): after setting Display to

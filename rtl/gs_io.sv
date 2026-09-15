@@ -147,6 +147,10 @@ module gs_io #(
     input  wire [31:0] pay_data,
     input  wire        pay_valid,
     output wire        bram_ok,
+    // The clock chip's store and state, read back (rtl/gs_clock.sv).
+    input  wire [5:0]  clk_dbg_idx,
+    output wire [31:0] clk_dbg_word,
+    output wire [31:0] clk_stat,
 
     // One pulse per video frame, in the machine's own time (rtl/vbeam.sv):
     // the interrupt controller's only clock.
@@ -405,7 +409,8 @@ module gs_io #(
         // The host's battery RAM image, straight through (docs/GS.md).
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid), .bram_ok (bram_ok),
-        .cnt_strobes (clk_cnt_strobes), .cnt_bad (clk_cnt_bad)
+        .cnt_strobes (clk_cnt_strobes), .cnt_bad (clk_cnt_bad),
+        .dbg_idx (clk_dbg_idx), .dbg_word (clk_dbg_word), .stat (clk_stat)
     );
 
     // ---- the IWM: the 3.5" drive and the two 5.25" drives (docs/IWM35.md) ----

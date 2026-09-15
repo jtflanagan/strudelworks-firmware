@@ -79,9 +79,9 @@ module gs_clock #(
     // THE BATTERY RAM THE HOST SHIPS (docs/GS.md, "The battery RAM the host
     // ships").  Host -> card messages as ft601_msg_rx decodes them: a
     // GS_BRAM carries the whole 256 bytes as 64 words, four bytes a word,
-    // low byte first, and is taken ALL OR NOTHING - a partial image is worse
-    // than none, because the ROM would checksum it, find it wrong and write
-    // its own defaults over the slot settings the host was trying to ship.
+    // low byte first.  The HEADER is checked (64 words or nothing is taken),
+    // but the words land in the store as they arrive - there is no second
+    // copy to commit from - so `bram_ok` is what says the whole image came.
     input  wire        msg_valid,
     input  wire [7:0]  msg_type,
     input  wire [7:0]  msg_len,
@@ -91,7 +91,19 @@ module gs_clock #(
 
     // Diagnostics.
     output logic [7:0] cnt_strobes,
-    output logic [7:0] cnt_bad
+    output logic [7:0] cnt_bad,
+
+    // THE STORE, READ BACK FOR THE HOST (docs/GS_CONTROL_PANEL.md R0B): the
+    // debug pair's item `dbg_idx` is one word of four banks' entries - BRAM
+    // bytes 4k..4k+3, low byte first, the GS_BRAM message's own layout - so
+    // 64 items are the whole 256 bytes.  A second read port on each bank's
+    // LUTRAM; nothing on the machine's path.
+    input  wire [5:0]  dbg_idx,
+    output wire [31:0] dbg_word,
+    // GS_CLOCK_STAT: [31] bram_ok, [30:28] the chip's state, [27:16] the
+    // machine's battery RAM writes (cleared only by a link reset, so a count
+    // survives RES'), [15:8] bad strobes, [7:0] strobes (both since RES').
+    output wire [31:0] stat
 );
 
     localparam [2:0] M_IDLE = 3'd0, M_TIME = 3'd1, M_INTERNAL = 3'd2,
@@ -147,9 +159,13 @@ module gs_clock #(
     wire hdr_time  = msg_valid && (msg_type == T_GS_TIME);
     wire word_time = rx_word && (rx_type == T_GS_TIME);
 
+    assign dbg_word = {bram3[dbg_idx], bram2[dbg_idx], bram1[dbg_idx], bram0[dbg_idx]};
+
     // One write port a bank.  The host's image wins a clock it shares with
-    // the machine's byte, which cannot happen in practice - the image lands
-    // before RES' is released - and is stated rather than left to chance.
+    // the machine's byte.  That is not ruled out by ordering - the host sends
+    // the image at start with the CPU running, not held in reset - but a
+    // message word and a transfer strobe on the same clock is still rare,
+    // and the order is stated rather than left to chance.
     always_ff @(posedge clk) begin
         if (word_bram) begin
             bram0[rx_idx[5:0]] <= pay_data[7:0];
@@ -177,10 +193,9 @@ module gs_clock #(
                 rx_type <= msg_type;
                 rx_idx  <= 8'd0;
                 rx_left <= msg_len;
-                // A battery RAM message is only one if it is the whole 256
-                // bytes: a partial image is worse than none, because the ROM
-                // would checksum it, find it wrong, and write its own
-                // defaults over the slot settings this was shipping.
+                // A battery RAM message is only one if its header says 64
+                // words.  The words themselves land as they arrive (above);
+                // bram_ok sets on the last.
                 if (hdr_bram && msg_len != 8'd64) rx_type <= 8'd0;
                 if (hdr_time && msg_len != 8'd1)  rx_type <= 8'd0;
             end else if (rx_word) begin
@@ -218,6 +233,15 @@ module gs_clock #(
     // write port each and the host's image writes them too.
     wire mach_wr = !rst && res_sync && strobe && (mode == M_BRAM1) &&
                    !xfer_rd && !clk_read;
+
+    // The machine's writes, counted across RES' (a battery RAM outlives it,
+    // and so should the count of what landed in one).
+    logic [11:0] cnt_mach_wr;
+    always_ff @(posedge clk) begin
+        if (rst)          cnt_mach_wr <= 12'd0;
+        else if (mach_wr) cnt_mach_wr <= cnt_mach_wr + 12'd1;
+    end
+    assign stat = {bram_ok, mode, cnt_mach_wr, cnt_bad, cnt_strobes};
 
     always_ff @(posedge clk) begin
         if (rst || !res_sync) begin

@@ -551,6 +551,7 @@ module master_top #(
         .mem_rom_busy   (rom_busy),
         .mem_rom_over   (rom_overruns), .mem_shd_drops (mem_shd_drops),
         .gs_adb_stat    (gsio_adb_stat),
+        .gs_clock_stat  (gs_clk_stat),
         .cnt_core_cyc   (cnt_core_cyc), .cnt_bus_cyc (cnt_bus_cyc),
         .mem_fifo_drops (mem_fifo_drops),
         .mem_hits (mem_hits), .mem_misses (mem_misses), .mem_mismatch (mem_mismatch),
@@ -944,6 +945,9 @@ module master_top #(
     wire [7:0]  gs_shadow_w, gs_cyareg_w, gs_sltrom_w, gs_state_w;
     wire [3:0]  gs_border;
     wire        gs_bram_ok;
+    // The clock chip's battery RAM and state, for the debug pair and
+    // GS_CLOCK_STAT (rtl/gs_clock.sv).
+    wire [31:0] gs_clk_dbg_word, gs_clk_stat;
 
     // ---- A VECTOR PULL COMES FROM THE ROM (docs/GS.md rung 4b part 8) -------
     // The 65816 forces PBR to zero for every vector fetch - rtl/cpu65816.sv
@@ -1541,7 +1545,10 @@ module master_top #(
     // read is a snapshot; one clock old is what it wants to be.
     logic [31:0] dbg_val_q;
     always_ff @(posedge apple_clk)
-        dbg_val_q <= (dbg_sel[7:6] == 2'd1) ? bc_dbg :
+        // [7:6] = 3: the IIgs clock chip's battery RAM, item k = bytes
+        // 4k..4k+3 (rtl/gs_clock.sv); zero on a IIe.
+        dbg_val_q <= (dbg_sel[7:6] == 2'd3) ? gs_clk_dbg_word :
+                     (dbg_sel[7:6] == 2'd1) ? bc_dbg :
                      (dbg_sel[7:6] == 2'd2) ? dl_dbg2 :
                      (dbg_sel[5:4] == 2'd0) ? il_dbg :
                      (dbg_sel[5:4] == 2'd1) ? dl_dbg :
@@ -1891,6 +1898,9 @@ module master_top #(
         .pay_data   (app_pay_data),
         .pay_valid  (app_pay_valid),
         .bram_ok    (gs_bram_ok),
+        .clk_dbg_idx  (dbg_sel[5:0]),
+        .clk_dbg_word (gs_clk_dbg_word),
+        .clk_stat     (gs_clk_stat),
         // The IIe keyboard's events and the real Apple keys, through to the
         // ADB micro beside the host's ADB_KEY.
         .loc_valid  (gskbd_ev_valid),
@@ -1946,6 +1956,8 @@ module master_top #(
     assign gsio_adb_stat = 32'd0;
     assign gs_border    = 4'd0;
     assign gs_bram_ok   = 1'b0;
+    assign gs_clk_dbg_word = 32'd0;
+    assign gs_clk_stat  = 32'd0;
     assign gs_park_addr = 16'hC000;
     // No Ensoniq on a IIe, so the sampler's DOC box averages silence and its
     // two multipliers fold away.

@@ -50,6 +50,7 @@ module gs_io_claim_tb #(parameter ADB_KEYMAP = "adb_keymap.hex");
         .live_mods (8'd0), .pb_sel (6'd0),
         .msg_valid (1'b0), .msg_type (8'd0), .msg_free (16'd0), .msg_len (8'd0),
         .pay_data (32'd0), .pay_valid (1'b0), .bram_ok (),
+        .clk_dbg_idx (6'd0), .clk_dbg_word (), .clk_stat (),
         .frame_tick (frame_tick), .wall_tick (1'b0),
         .c000_ext (1'b0), .c000_byte (),
         .doc_l (), .doc_r (), .irq (irq), .adb_stat (),

@@ -722,6 +722,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_free (16'd0),
         .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid), .bram_ok (bram_landed),
+        .clk_dbg_idx (6'd0), .clk_dbg_word (), .clk_stat (),
         // The IIe's own keyboard (rtl/gs_kbd_a2.sv) is a TOP-LEVEL wiring:
         // it feeds on the driver's parked dummy cycles, and this bench has no
         // driver and no backplane.  sim/gs_kbd_a2_tb.sv drives it from a

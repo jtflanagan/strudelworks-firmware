@@ -88,6 +88,9 @@ declare -A B=(
   [vbeam_vl]="sim/run_vbeam_vl.sh|^PASS$"
   [vidhd_card]="sim/run_vidhd_card_tb.sh|^PASS$"
   [trace_selftest]="sim/run_trace_selftest.sh|self-test: PASS"
+  # The control panel's runner proving itself on a hand-assembled panel
+  # (docs/GS_CONTROL_PANEL.md R0); the real image runs with --bin.
+  [gspanel]="sim/run_gspanel.sh|^PASS$"
   [cpu_tb]="sim/run_cpu_tb.sh|both suites passed"
   [cpu_predict]="sim/run_cpu_predict_tb.sh|predict/cancel contract holds"
   [accel_vl]="sim/run_accel_vl.sh|^PASS$"
@@ -98,7 +101,7 @@ declare -A B=(
 )
 QUICK="lint microcode boot_hold bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
-GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 gs_doc gs_io_claim gs_iwm_write cpu816_cycles cpu816_trace cpu816_irq mmu_xlate_gs boot_gs"
+GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 gs_doc gs_io_claim gs_iwm_write cpu816_cycles cpu816_trace cpu816_irq mmu_xlate_gs boot_gs gspanel"
 BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"
 [ "$iverilog" = 1 ] && BATTERY="$BATTERY accel_iv"
 

@@ -241,6 +241,7 @@ module wb_regfile #(
     input  wire            mem_rom_busy,    // the ROM load is draining: the host waits
     input  wire [7:0]      mem_rom_over,    // ...and chunks it had to drop
     input  wire [31:0]     gs_adb_stat,     // GS_ADB_STAT, the ADB micro's mouse path (rtl/gs_adb.sv)
+    input  wire [31:0]     gs_clock_stat,   // GS_CLOCK_STAT, the clock chip's state (rtl/gs_clock.sv stat)
     input  wire [31:0]     cnt_core_cyc,    // ACCEL_CORE_CYC (master_top): the plain ratio's numerator
     input  wire [31:0]     cnt_bus_cyc,     // ACCEL_BUS_CYC: ...and its denominator
     // THE DEBUG PAIR (docs/GS.md rung 6).  DBG_SEL picks a counter or a state
@@ -457,6 +458,7 @@ module wb_regfile #(
     localparam [13:0] R_DDR3_DBG3       = 'd82; // 0x8000_0148, RO UberDDR3 o_debug3 (DQS indices)
     localparam [13:0] R_DDR3_EYE0       = 'd83; // 0x8000_014C, RO lane 0's read data eye, one bit per DQ IDELAY tap
     localparam [13:0] R_DDR3_EYE1       = 'd84; // 0x8000_0150, RO lane 1's
+    localparam [13:0] R_GS_CLOCK        = 'd85; // 0x8000_0154, RO the IIgs clock chip (rtl/gs_clock.sv stat)
 
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
@@ -1455,6 +1457,7 @@ module wb_regfile #(
                         R_DDR3_DBG3:      wb_dat_r <= ddr3_dbg3;
                         R_DDR3_EYE0:      wb_dat_r <= ddr3_eye0;
                         R_DDR3_EYE1:      wb_dat_r <= ddr3_eye1;
+                        R_GS_CLOCK:       wb_dat_r <= gs_clock_stat;
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
                         R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
                         R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;
