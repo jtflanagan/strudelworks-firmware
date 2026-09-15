@@ -1924,7 +1924,7 @@ module master_top #(
         .fd35_stall (fd35_stall),
         // FD_DRIVE1/2 name the IWM's 5.25" drives on a IIgs.
         .fd525_inserted (fd_inserted), .fd525_wp (fd_wp),
-        .fd525_nibbles (fd_nibbles), .fd525_tracks (fd_tracks),
+        .fd525_cell (fd_nibbles), .fd525_tracks (fd_tracks),
         .fd525_flush (fd_flush),
         .fd525_stale (gsio_fd525_stale), .fd525_dirty (gsio_fd525_dirty),
         .fd525_phase (gsio_fd525_phase),

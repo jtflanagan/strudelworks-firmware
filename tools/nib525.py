@@ -23,7 +23,13 @@ nibbles (the byte at index skew comes first), and sits at the front of a
 6656-byte slot whose last 272 bytes stay $FF.  A .nib track is its 6656
 bytes as they are in the file.
 
-    tools/nib525.py IMAGE [--hex OUT] [--info] [--verify]
+    tools/nib525.py IMAGE [--hex OUT] [--bits --counts OUT] [--info] [--verify]
+
+--bits makes the hex file the tracks as the CARD reads them now (branch
+woz_support): each track's nibbles as a bit stream, high bit first, every
+$FF outside an address or data field ten bits wide (eight ones, two zeros),
+zero-padded to 6656 bytes - a port of the host's fd_nibble.cpp
+bits_from_nibbles - and --counts writes each track's bit count, one a line.
 
 The hex file is tracks x 6656 lines, one byte a line, two lowercase hex
 digits ($readmemh); track t is lines t*6656 .. t*6656+6655.  The summary
@@ -239,6 +245,40 @@ def nibblize_image(path):
     return bytes(allb), npt, tracks
 
 
+# ---- the track as bits (fd_nibble.cpp bits_from_nibbles) ---------------------
+def bits_from_nibbles(nibs):
+    """-> (TRACK_BYTES bytes of bit stream, bit count).  A $FF outside a field
+    - the address field D5 AA 96 or data field D5 AA AD, to its DE AA - is a
+    ten-bit sync nibble; everything else eight bits, high bit first."""
+    out = bytearray(TRACK_BYTES)
+    k = 0
+    def put(b):
+        nonlocal k
+        if k < 8 * TRACK_BYTES:
+            if b:
+                out[k >> 3] |= 0x80 >> (k & 7)
+            k += 1
+    in_field = False
+    n = len(nibs)
+    i = 0
+    while i < n:
+        v = nibs[i]
+        if (not in_field and v == 0xD5 and i + 2 < n and nibs[i + 1] == 0xAA and
+                nibs[i + 2] in (0x96, 0xAD)):
+            in_field = True
+        for b in range(8):
+            put((v >> (7 - b)) & 1)
+        if not in_field and v == 0xFF:
+            put(0); put(0)
+        if in_field and v == 0xDE and i + 1 < n and nibs[i + 1] == 0xAA:
+            in_field = False
+            a = nibs[i + 1]
+            for b in range(8):
+                put((a >> (7 - b)) & 1)
+            i += 1
+        i += 1
+    return bytes(out), k
+
 # ---- the reverse, for --verify: an independent reader -----------------------
 # Written from the disk format, not from the host's denibblize_track, so that
 # it does not share the encoder's arithmetic.
@@ -367,6 +407,8 @@ def main():
         sys.exit(__doc__)
     path = args[0]
     hexout = None
+    countsout = None
+    as_bits = False
     do_verify = False
     i = 1
     while i < len(args):
@@ -376,6 +418,10 @@ def main():
             i += 1
         elif args[i] == '--verify':
             do_verify = True; i += 1
+        elif args[i] == '--bits':
+            as_bits = True; i += 1
+        elif args[i] == '--counts':
+            countsout = args[i + 1]; i += 2
         else:
             sys.exit('unknown option ' + args[i])
     data = open(path, 'rb').read()
@@ -393,7 +439,19 @@ def main():
         print('verify: ' + ('PASS' if not errors else f'FAIL ({len(errors)} errors)'))
         if errors:
             sys.exit(1)
-    if hexout:
+    if hexout and as_bits:
+        allb, npt, tracks = nibblize_image(path)
+        counts = []
+        with open(hexout, 'w') as f:
+            for t in range(tracks):
+                bb, k = bits_from_nibbles(list(allb[t * TRACK_BYTES:t * TRACK_BYTES + npt]))
+                counts.append(k)
+                f.write(''.join('%02x\n' % b for b in bb))
+        if countsout:
+            with open(countsout, 'w') as f:
+                f.write(''.join('%d\n' % k for k in counts))
+        print(f'wrote {hexout}: {tracks} tracks x {TRACK_BYTES} as bits, {counts[0]} bits a track')
+    elif hexout:
         allb, npt, tracks = nibblize_image(path)
         with open(hexout, 'w') as f:
             f.write(''.join('%02x\n' % b for b in allb))

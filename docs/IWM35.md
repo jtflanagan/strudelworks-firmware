@@ -1,4 +1,27 @@
-Status: 2026-09-14, branch `long_data`, UNCOMMITTED.  **THE IWM'S 5.25" DRIVES WRITE.**
+Status: 2026-09-14, branch `woz_support`, UNCOMMITTED.  **THE IWM'S 5.25" DRIVES
+ARE BIT STREAMS**, the Disk II card's engine and protocol (docs/FLOPPY.md "The track
+as bits"): quarter-track heads, a bit platter per drive on the disk's own cell, the
+logic state sequencer for reads, a bit per cell for writes after a load, the host's
+FD_SEEK {seq, 0, qtr, phase, drive} and FD_TRACK/FD_DIRTY with the bit count, and the
+write-protect rule (a bit lands only on a disk unprotected at the landing).  The
+24-cycle clear-on-read 5.25" hold below is GONE: it existed because an exactly
+periodic nibble stream phase-locked ProDOS's eight-cycle poll against a 7-cycle hold,
+and the ten-bit sync nibbles move the phase, so the Disk II's own rule serves.  The
+3.5" drive keeps its nibble engine.  BENCH: `sim/run_gs_iwm_write_tb.sh` rewritten for
+bit tracks, PASS (quarter track, sense, 48 nibbles through sync gaps, a sector's bits
+written and read back, uploads with the bit count, a protected disk untouched, the tab
+set mid-burst, motor/flush/eject uploads, four cell phases); `sim/suite.sh gs` 13/13;
+`sim/run_boot_gs_tb.sh --fd525=` boots `wave.dsk` (102 seeks) and ProDOS 2.4.3 (118)
+to BITSY BYE through the ROM's slot 6 - every half- and quarter-track position is a
+seek now - and `--fd35=XMAS_DEMO.po --instrs=16000000 --clks=1200000000` still sees
+the demo launch off the 3.5" drive (bank $0E at instruction 3,495,651; 22 seeks, 0
+late).  The 5.25" step decision is registered a tick early, as the Disk II
+card's (docs/FLOPPY.md "The head"), after build woz3 named that stepper's live
+chain at 14 levels.  Build gs_woz_iwm1 (MET +0.003/+0.041, 0 of 96,982) named
+a new chain, the drive select to the dispatcher's byte at 15 levels, cut below
+("The build, gs_woz_iwm1"): each drive's quarter-track position is a register,
+and the 3.5" partial byte's bit count is registered.  Build and hardware pending.
+Previous status: 2026-09-14, branch `long_data`, UNCOMMITTED.  **THE IWM'S 5.25" DRIVES WRITE.**
 The Disk II card's write model on the IWM (`rtl/gs_iwm.sv`): a data write lands at the
 slot under the head, `$FF` in the slot a 40-cycle sync byte skips; bit 7 of the status
 byte is the disk's own write protect; a written track goes home as seven FD_DIRTY chunks
@@ -273,7 +296,33 @@ divide that makes the "bits shifted in so far" of the partial byte
 (`nib_acc / 20` or `/ 28`), through the IWM's read byte and `gs_io`'s mux into
 the dispatcher's registered byte.  Cosmetic logic on a real path; the fix is to
 register the bit count every clock (it only has to look like a byte shifting
-in).  A follow-up, not a blocker.
+in).  A follow-up, not a blocker.  DONE 2026-09-14 (below).
+
+## The build, gs_woz_iwm1 (2026-09-14)
+
+The 5.25" bit engine before its stepper cut: TIMING MET wns +0.003 whs +0.041,
+0 of 96,982 failing.  The worst path is the instruction front's want_tag (12
+levels).  **One new chain, named:** `u_iwm/drive_sel_reg -> u_seq/swi_byte_q`,
+15 levels, slack +0.008.  The selected drive's quarter-track position was
+computed live from its cog and pair offset, and that arithmetic fed the
+buffer-identity compare, `usable`, the partial byte and the read byte, then
+`gs_io`'s mux into the dispatcher's registered byte.
+
+**The cut.** Each drive's quarter-track position is a register (`qtr_d5`),
+written by the step with the position the registered step decision already
+computed.  The Disk II card's `qpos` is its twin and got the same register.
+The partial byte's bit count (`bits_in`, the old `nib_acc / 28` divide) is
+registered a clock late, which a byte shifting in cannot show.  Benches: the
+floppy card 50/50, `gs_iwm_write` PASS, `sim/suite.sh gs` 13/13.  The boots
+match the pre-cut runs line for line: `wave.dsk` 102 seeks and ProDOS 2.4.3 118
+seeks to BITSY BYE off the 5.25" drive, and the XMAS demo off the 3.5" drive
+launches at the same instruction, 3,495,651, with 22 seeks and 0 late.
+
+**Build gs_woz_iwm3, with the cut:** TIMING MET wns +0.038 whs +0.043, 0 of
+97,020 failing, max depth 22.  The drive-select chain is gone: the IWM's worst
+path is now 11 levels at +1.176 (the drive select into a track buffer's write
+enable).  What remains at 12 levels or more is the instruction front, the
+65816's microcode address and its IR fan-out into the dline, all older families.
 
 ## Registers and messages
 

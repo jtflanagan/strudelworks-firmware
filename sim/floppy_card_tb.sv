@@ -336,6 +336,18 @@ module floppy_card_tb;
     // The bit position the first write of a burst landed on: -1 until one does.
     integer first_w = -1;
     always @(posedge clk) if (dut.w_go && first_w < 0) first_w = dut.wpend_pos;
+    // Every bit that lands in the buffer, and a byte of the buffer as it stands.
+    integer wgos = 0;
+    always @(posedge clk) if (dut.w_go) wgos = wgos + 1;
+    reg [7:0] snap [0:6655];
+    function [7:0] buf_byte(input integer b);
+        case (b % 4)
+            0: buf_byte = dut.g_bank[0].u_bank.mem[b / 4];
+            1: buf_byte = dut.g_bank[1].u_bank.mem[b / 4];
+            2: buf_byte = dut.g_bank[2].u_bank.mem[b / 4];
+            default: buf_byte = dut.g_bank[3].u_bank.mem[b / 4];
+        endcase
+    endfunction
 
     // ---- the host's image ---------------------------------------------------
     // Nibble i of track t: one of the 64 legal 6&2 nibbles - the disk
@@ -942,6 +954,47 @@ module floppy_card_tb;
                 errors = errors + 1;
             end else $display("  ok: phase %0d - eight bytes at 32 cycles are 64 contiguous bits on the track", m);
         end
+
+        // --- case 10c / a protected disk's track is never touched ---------------
+        // The tab set: a whole write burst lands nothing, and the card's copy
+        // of the track is byte for byte what it was.  Then the tab set in the
+        // middle of a writable burst: nothing lands from that clock on, the
+        // bit already in flight included.
+        wp0 = 1'b1;
+        idle(4);
+        for (i = 0; i < 6656; i = i + 1) snap[i] = buf_byte(i);
+        at = wgos;
+        bus_read(Q6H); bus_read(Q7L);
+        bus_write(Q7H, 8'hA5);
+        bus_read(Q6L);
+        idle(30);
+        for (i = 0; i < 8; i = i + 1) write_nibble(8'h5A + i[7:0], 32);
+        bus_read(Q7L);
+        idle(8);
+        k = 0;
+        for (i = 0; i < 6656; i = i + 1) if (buf_byte(i) !== snap[i]) k = k + 1;
+        if (wgos != at || k != 0) begin
+            $display("FAIL: a protected disk took %0d bits, %0d bytes of the card's track changed", wgos - at, k);
+            errors = errors + 1;
+        end else $display("  ok: write-protected - a whole burst lands nothing, the card's track untouched");
+        wp0 = 1'b0;
+        idle(4);
+        at = wgos;
+        bus_read(Q6H); bus_read(Q7L);
+        bus_write(Q7H, 8'hC3);
+        bus_read(Q6L);
+        idle(20);
+        if (wgos == at) fail("the writable burst before the tab wrote nothing");
+        wp0 = 1'b1;
+        at2 = wgos;
+        idle(40);
+        bus_read(Q7L);
+        idle(8);
+        if (wgos != at2) begin
+            $display("FAIL: %0d bits landed after the tab was set mid-burst", wgos - at2); errors = errors + 1;
+        end else $display("  ok: the tab set mid-burst - nothing lands from that clock on");
+        wp0 = 1'b0;
+        idle(4);
 
         // --- case 11 / a quarter track: two adjacent magnets together ------------
         // RES' cleared the motor: back on, or the drive stops mid-case.

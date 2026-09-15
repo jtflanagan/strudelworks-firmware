@@ -15,8 +15,20 @@ is created and saved.  The first write model wrote only in shift state and
 lost the cells that fell in a load's cycle - Wizardry's first attempt
 failed on it; the sequencer writes at every cell in write mode, and bench
 case 10b sweeps all four cell phases.  Bench: `sim/run_floppy_card_vl.sh`
-(Verilator), 48 checks.  Host: `fd_test` 118, the menus' virtual
-write-protect tab (P on a FLOPPY row, per image; `fd1_wp`/`fd2_wp`).
+(Verilator), 50 checks.  Host: `fd_test` 120, the menus' virtual
+write-protect tab (P on a FLOPPY row, per image; `fd1_wp`/`fd2_wp`).  A
+refused write changes nothing: the card lands no bit on a disk protected at
+the landing (not even in its local track), and the host refuses a dirty
+track from a protected image before it touches RAM.  Build `woz4` (the
+registered step decision and that gate): MET +0.002/+0.033, 0 of 82,158;
+the stepper chain is gone.  Its census named the link reset into the
+floppy's block RAM address (13 levels), cut by making the link's reset a
+flop; with the quarter-track position as a register ("The head"), build
+`woz5` MISSED: wns -0.070, 5 of 82,138 failing, all in the fronts (the
+dline's served byte into the 65C02's flags and registers, the program
+counter into the dline, the instruction front's next-fetch byte) - chains
+woz4 met by +0.002 to +0.024.  No floppy or reset source is left at 11
+levels or more.  A front cut is the user's decision; woz4 is the bit that met.
 Below, "nibble" where the mechanics are described is the OLD engine's
 word; see "The track as bits".
 
@@ -127,7 +139,16 @@ sector image keeps AppleWin's integer rule (phase >> 1) and a host serving
 a WOZ maps the quarter track through its TMAP.  Every position change is a
 seek: a half-track step asks for its own position, and the host says what
 lies there.  Only while the drive is enabled or still coasting - the
-drive's own enable line gates its stepper.  Evaluating once, ten cycles
+drive's own enable line gates its stepper.  The decision is REGISTERED a
+tick early (build woz3's census named the live one at 14 levels: the pair
+rule and the quarter-track arithmetic into the buffer's leave and the
+upload's capture enables): taken when the timer reads 2, used when it
+reads 1, withdrawn by a phase access or a motor-off, dropped if the drive
+select moved.  The quarter-track position is a REGISTER per drive too,
+written with the cog by the same step, so no arithmetic sits under the
+compares that read it (the IWM's twin was build gs_woz_iwm1's 15-level
+chain from the drive select into the read byte).  The IWM's 5.25" stepper
+has both cuts.  Evaluating once, ten cycles
 after the *last* access, is AppleWin's GH#1110 rule in one sentence: two
 adjacent magnets dropped in quick succession move nothing.
 
@@ -327,15 +348,27 @@ completes when its high bit lands, zeros before a byte's first one are
 skipped), then denibblized into a sector image or stored into a `.nib`.
 The card knows nothing about formats.
 
+**Write protection is the card's rule first.**  A write lands only while
+the disk is writable - its file, its image's flag or the host's virtual
+tab (FD_DRIVEn `wp`, live) - and a bit captured just before the tab went
+on, or before a drive switch, a step or an eject, is dropped rather than
+landed: the pending write carries its drive, and lands only in that
+drive's buffer, not stale since, unprotected at the landing.  So a
+protected disk's track on the card is never modified and never goes
+dirty.  The host keeps the same rule on its side: a returned track for a
+protected drive patches neither the file nor the image in RAM.  Bench
+case 10c: a burst on a protected disk lands nothing and the card's track
+compares byte for byte; the tab set mid-burst stops landings on that
+clock.
+
 Not modelled: AppleWin's track-seam jitter, and its proportional
 rescaling of the position across track lengths.
 
 ## Not here
 
-- **The IWM's 5.25" side** (rtl/gs_iwm.sv) still has the nibble engine;
-  the same bit engine goes there next, so a WOZ plays on the IIgs.  Until
-  then the IIgs's 5.25" drives read `FD_DRIVEn`'s cell field as a nibble
-  count and are broken on this branch.
+- **The IWM's 5.25" side** (rtl/gs_iwm.sv) has the same bit engine since
+  2026-09-14 (docs/IWM35.md), so a WOZ plays on the IIgs; its 3.5" drive
+  keeps the nibble engine, and 3.5" WOZ is the next rung.
 - **WOZ writes are rung 2's acceptance test** (Wizardry's scenario disk
   from its master); the engine writes bits already.
 - **The 13-sector ROM**, and DOS 3.2's `D5 AA B5`.

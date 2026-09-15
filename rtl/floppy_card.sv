@@ -336,9 +336,10 @@ module floppy_card #(
             qpos_of = (q < 10'sd0) ? 8'd0 : q[7:0];
         end
     endfunction
-    wire [7:0] qpos [0:1];
-    assign qpos[0] = qpos_of(phase[0], qoff[0]);
-    assign qpos[1] = qpos_of(phase[1], qoff[1]);
+    // Held in a register per drive, written with the cog by the step from
+    // the registered decision - no arithmetic under the compares that use
+    // it (the IWM's twin was a 15-level chain into its read byte).
+    logic [7:0] qpos [0:1];
 
     assign phase_o = {phase[1], phase[0]};
     // The buffer's drive reports the buffer's state; the other drive is,
@@ -422,6 +423,7 @@ module floppy_card #(
     logic        wpend;
     logic        wpend_bit;
     logic [15:0] wpend_pos;
+    logic        wpend_drive;           // the drive whose track the cell belonged to
     wire  [10:0] wword = wpend_pos[15:5];
     wire  [1:0]  wbyte = wpend_pos[4:3];
     wire  [2:0]  wbit  = 3'd7 - wpend_pos[2:0];
@@ -430,7 +432,15 @@ module floppy_card #(
     wire  [31:0] wwin  = w_in0 ? win_q[0] : win_q[1];
     wire  [7:0]  wold  = wwin[8 * wbyte +: 8];
     wire  [7:0]  wnew  = wpend_bit ? (wold | (8'd1 << wbit)) : (wold & ~(8'd1 << wbit));
-    wire         w_go  = wpend && (w_in0 || w_in1);
+    // A pending write lands only in the track it was taken for: the same
+    // drive's buffer, not stale since, the disk still in and NOT PROTECTED
+    // AT THE LANDING.  A tab set between the cell and the landing, a drive
+    // switch, a step, an eject drops it (the controller below clears it):
+    // a protected disk's track on the card is never modified, whatever was
+    // in flight, and never goes dirty (2026-09-14).
+    wire         w_ok  = (wpend_drive == buf_drive) && !stale &&
+                         drv_inserted[buf_drive] && !drv_wp[buf_drive];
+    wire         w_go  = wpend && w_ok && (w_in0 || w_in1);
 
     // The byte under the head, from whichever window has it.
     wire         h_in0 = win_v[0] && (win_tag[0] == hword);
@@ -648,7 +658,44 @@ module floppy_card #(
         end
     end
     wire [7:0] qpos_new  = qpos_of(phase_new, qoff_new);
-    wire       step_move = step_now && head_on && (qpos_new != qpos[s]);
+
+    // THE STEP DECISION IS REGISTERED (2026-09-14).  Live, the magnets ran
+    // through the pair rule, the quarter-track arithmetic and its compare
+    // into step_move, and from there into the buffer's leave and the dirty
+    // upload's capture enables: 14 levels, the floppy's deepest (build woz3).
+    // The decision is taken on the tick the timer reads 2 and used on the
+    // tick it reads 1, which is when it always took effect.  Nothing that
+    // decides it can change in between unseen: a phase access restarts the
+    // timer and a motor-off access clears the magnets, and either one
+    // withdraws the decision; a drive select that moved drops it, and the
+    // switch refetches the other drive's track anyway.
+    logic [6:0]        phase_nq;
+    logic signed [1:0] qoff_nq;
+    logic [7:0]        qpos_nq;
+    logic              step_dv, step_dmove, step_dsel;
+    always_ff @(posedge clk) begin
+        if (cpu_rst) begin
+            step_dv    <= 1'b0;
+            step_dmove <= 1'b0;
+            step_dsel  <= 1'b0;
+            phase_nq   <= 7'd0;
+            qoff_nq    <= 2'sd0;
+            qpos_nq    <= 8'd0;
+        end else begin
+            if (tick && step_timer == 4'd2) begin
+                phase_nq   <= phase_new;
+                qoff_nq    <= qoff_new;
+                qpos_nq    <= qpos_new;
+                step_dsel  <= s;
+                step_dmove <= (qpos_new != qpos[s]);
+                step_dv    <= 1'b1;
+            end
+            if (step_now) step_dv <= 1'b0;
+            // Last, so an access on the registering tick withdraws it.
+            if (page_commit && (!idx[3] || idx[3:1] == 3'd4)) step_dv <= 1'b0;
+        end
+    end
+    wire       step_move = step_now && head_on && step_dv && step_dmove && (step_dsel == s);
 
     // ---- the platters, per tick -------------------------------------------------------
     // Two drives, one block each, so the per-drive state is written from
@@ -689,6 +736,7 @@ module floppy_card #(
                 if (rst) begin
                     phase[gv]      <= 7'd0;
                     qoff[gv]       <= 2'sd0;
+                    qpos[gv]       <= 8'd0;
                     spin[gv]       <= 20'd0;
                     stable[gv]     <= 10'd0;
                     bpos[gv]       <= 16'd0;
@@ -726,8 +774,9 @@ module floppy_card #(
 
                     // The head.
                     if (step_move && sel_d) begin
-                        phase[gv] <= phase_new;
-                        qoff[gv]  <= qoff_new;
+                        phase[gv] <= phase_nq;
+                        qoff[gv]  <= qoff_nq;
+                        qpos[gv]  <= qpos_nq;
                     end
                 end
             end
@@ -754,7 +803,7 @@ module floppy_card #(
     // ...and the host is owed the track it holds.
     wire flush        = leave && dirty;
     // The quarter track the buffer should hold next: under the selected head.
-    wire [7:0] tgt    = moved ? qpos_new : qpos[s];
+    wire [7:0] tgt    = moved ? qpos_nq : qpos[s];
     // A new track is wanted from the host.
     wire want         = (sel_mismatch || moved ||
                          (g_drv[0].ins_edge && !s && !buf_drive) ||
@@ -920,8 +969,14 @@ module floppy_card #(
             wpend      <= 1'b0;
             wpend_bit  <= 1'b0;
             wpend_pos  <= 16'd0;
+            wpend_drive <= 1'b0;
         end else begin
             if (tick && step_timer != 4'd0) step_timer <= step_timer - 4'd1;
+
+            // The pending write is spent when it lands, and dropped when it
+            // may not (w_ok) or its track is left.  First, so a capture on
+            // this clock is never the one cleared.
+            if (w_go || (wpend && !w_ok) || leave) wpend <= 1'b0;
 
             // A cell passes under the head.
             if (cell_tick) begin
@@ -948,11 +1003,11 @@ module floppy_card #(
                         wpend     <= 1'b1;
                         wpend_bit <= shift[7];
                         wpend_pos <= hpos;
+                        wpend_drive <= s;
                     end
                     shift <= {shift[6:0], 1'b0};
                 end
             end
-            if (w_go) wpend <= 1'b0;
 
             if (page_commit) begin
                 case (idx[3:1])

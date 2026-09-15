@@ -197,7 +197,7 @@ module gs_io #(
     // g_no_fd).
     input  wire [1:0]  fd525_inserted,
     input  wire [1:0]  fd525_wp,
-    input  wire [25:0] fd525_nibbles,
+    input  wire [25:0] fd525_cell,       // the bit cell per drive, FD_DRIVEn [10:3]
     input  wire [11:0] fd525_tracks,
     input  wire [1:0]  fd525_flush,
     output wire [1:0]  fd525_stale,
@@ -426,7 +426,7 @@ module gs_io #(
         .motor35_o (fd35_motor35), .motor_o (fd35_motor), .ctl_o (fd35_ctl),
         .seeks (fd35_seeks), .late (fd35_late), .fill_max (fd35_fill_max),
         .d5_inserted (fd525_inserted), .d5_wp (fd525_wp),
-        .d5_nibbles (fd525_nibbles), .d5_tracks (fd525_tracks),
+        .d5_cell (fd525_cell), .d5_tracks (fd525_tracks),
         .d5_flush (fd525_flush),
         .d5_stale_o (fd525_stale), .d5_dirty_o (fd525_dirty), .d5_phase_o (fd525_phase),
         .stall_o (fd35_stall),
