@@ -865,8 +865,30 @@ menu X Y ITEMY` places the title by position, presses by ADB, drags by deltas wi
 finder, releases.  The status line's `pcalls=` counts the service's calls.  Ladder row `nda` uses
 `menu 22 6 91` and `at 92 33`.
 
-*Next:* the hard disk as choose-and-restart from the chooser; a banded selection and a keyboard
-cursor in the list; SEI or a second mailbox against the CDA interrupting an NDA call
+*CHOOSE-AND-RESTART, and a boot that dropped into the monitor (the same evening):* the hard
+disk's row no longer swaps unit 1 under a mounted volume: a choice made while the machine has read
+the disk since its reset (`HdExecutor::touched`) is PENDING - the row still says "at the next reset"
+and means it - applied at the next RES' or by the restart; from the ROM's Option-Reset menu, where
+nothing is mounted, it swaps at once as before (the `4=Continue restarting` road has no RES' to
+wait for).  R twice on the hard disk's row in the chooser asks the host (`kPanelActRestart`) and
+then has GS/OS shut down and halt (`OSShutdown` $2003, flag 0 - flushed, unmounted, "you may now
+switch off"); four seconds later the host applies the pending image and cold-resets (Open-Apple
+held through RES', as the ladder boots).  On the IIgs: `system6.hdv` chosen with GS/OS running on
+`gsnda.hdv`, R R, the log's "restart asked ... in 4 s", "unit 1 <- system6.hdv, as chosen while the
+disk was in use", "restarted", and the Finder up from the new disk (`hd system6.hdv [unit 1]`).
+**THE MONITOR DROP, twice today, EXPLAINED AND FIXED (host):** a RES' with a disk command in flight
+(the Finder's disk poll) left the host's answer queued; sent after the reset, the card took it for
+the answer to the ROM's block-0 read, which then "succeeded" with nothing at $0800 → `JMP $0801` →
+BRK at $00/0801 (`hd 2210/2211` in the frame line was the sign).  `HdService` now stamps every
+command with a reset EPOCH bumped at the moment the decode thread submits the Reset, tags answers
+with it, and drops any answer from an older epoch before sending - so not even a write's HD_FETCH
+timing out a second after the reset can reach the card.  `hd_test` 179/179.  The run-queue routine
+takes a cheap runtime (`crt_env`: bank and stack, no copy/clear) since it runs every tick; the MCP
+server has `mouse_at`.
+
+*Next:* a banded selection and a keyboard cursor in the list; the ladder's nda row could add the
+restart (it needs a second GS/OS image on the Pi, `system6.hdv` is there); SEI or a second mailbox
+against the CDA interrupting an NDA call
 (a window with a drive pop-up, the image list from the host's `kPanelList`, Insert/Eject; 3.5"
 eject through GS/OS's own driver — `DControl` — before the host swaps the image; the hard disk
 as "choose and restart"); a second mailbox or SEI around the ROM-side routines so the CDA cannot
