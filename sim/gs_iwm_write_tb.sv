@@ -44,7 +44,8 @@ module gs_iwm_write_tb;
     localparam integer NIB   = 6384;
     localparam integer CHUNK = 252;
     localparam [7:0] T_FD_TRACK = 8'h1F, T_FD_SEEK = 8'h20, T_FD_DIRTY = 8'h21;
-    localparam [7:0] T_FD35_TRACK = 8'h31, T_FD35_SEEK = 8'h32, T_FD35_DIRTY = 8'h37;
+    localparam [7:0] T_FD35_TRACK = 8'h31, T_FD35_SEEK = 8'h32, T_FD35_DIRTY = 8'h37,
+                     T_FD35_EJECT = 8'h38;
     // A zone-0 3.5" track: twelve sectors a side (fd35_nibble.hpp).
     localparam integer NIB35    = 9694;
     localparam integer WORDS35  = (NIB35 + 3) / 4;          // 2424
@@ -907,6 +908,50 @@ module gs_iwm_write_tb;
                     end
                 end
             end
+        end
+
+        // ==== the MACHINE's eject ============================================
+        // GS/OS asks for the disk back with action $D.  The card cannot take
+        // it out - it is a file on the host - so it asks, and the ask must
+        // come out AFTER any track the machine wrote, or the host would drop
+        // the image with the writes still on the card.
+        begin : ej35
+            integer ej_at, dirty_at, wk;
+            op(MOTORON, 1'b1, 8'd0);
+            idle(40);
+            // The track it wants back, so there is something to write into.
+            wait_msg(T_FD35_SEEK, nmsg - 1, at, 4000);
+            if (at >= 0) begin
+                sq = out_mem[msg_at[at] + 1][31:24];
+                send35(0, 8'(sq));
+                idle(20);
+            end
+            k = errors;
+            m = nmsg;
+            // One byte, so the track is dirty...
+            op(Q6H, 1'b1, 8'd0); op(Q7H, 1'b1, 8'd0);
+            w35s = 0;
+            write35(8'h3C);
+            op(Q7L, 1'b1, 8'd0);
+            if (w35s != 1) fail("the 3.5\" write before the eject did not land");
+            // ...then the eject: phases 0, 1 and 2 on name $D, the strobe of
+            // phase 3 performs it.
+            op(PH0ON, 1'b1, 8'd0); op(PH1ON, 1'b1, 8'd0); op(PH2ON, 1'b1, 8'd0);
+            op(PH3ON, 1'b1, 8'd0);
+            idle(20);
+            op(PH3OFF, 1'b1, 8'd0); op(PH2OFF, 1'b1, 8'd0);
+            op(PH1OFF, 1'b1, 8'd0); op(PH0OFF, 1'b1, 8'd0);
+            wait_msg(T_FD35_EJECT, m, ej_at, 200000);
+            if (ej_at < 0) fail("the machine's eject sent no FD35_EJECT");
+            else begin
+                dirty_at = -1;
+                for (wk = m; wk < ej_at; wk = wk + 1)
+                    if (msg_typ[wk] == T_FD35_DIRTY && dirty_at < 0) dirty_at = wk;
+                if (dirty_at < 0)
+                    fail("the eject went out with no written track before it");
+            end
+            if (errors == k)
+                $display("  ok: the machine's eject asks the host - and the written track goes first");
         end
 
         $display("\n%0d bits written, %0d bytes loaded, %0d uploads", dut.wr525, dut.ld525, dut.up525);

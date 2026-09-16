@@ -208,6 +208,7 @@ module master_top #(
     wire [13:0] gsio_fd525_phase;
     wire [6:0]  fd35_track;
     wire [7:0]  fd35_ctl, fd35_seeks, fd35_late;
+    wire [31:0] fd35_wstat;
     wire [15:0] fd35_fill_max;
     wire [2:0]  vidhd_slot_active;
     wire        vidhd_rom_loaded;
@@ -509,6 +510,7 @@ module master_top #(
         .fd35_stale (fd35_stale), .fd35_track (fd35_track), .fd35_side (fd35_side),
         .fd35_motor35 (fd35_motor35), .fd35_motor (fd35_motor), .fd35_ctl (fd35_ctl),
         .fd35_seeks (fd35_seeks), .fd35_late (fd35_late), .fd35_fill_max (fd35_fill_max),
+        .fd35_wstat (fd35_wstat),
         .fd35_late_clr (fd35_late_clr), .fd35_fill_clr (fd35_fill_clr),
         .vidhd_slot_active (vidhd_slot_active),
         .vidhd_rom_loaded (vidhd_rom_loaded),
@@ -1949,6 +1951,7 @@ module master_top #(
         .fd35_stale (fd35_stale), .fd35_track (fd35_track), .fd35_side (fd35_side),
         .fd35_motor35 (fd35_motor35), .fd35_motor (fd35_motor), .fd35_ctl (fd35_ctl),
         .fd35_seeks (fd35_seeks), .fd35_late (fd35_late), .fd35_fill_max (fd35_fill_max),
+        .fd35_wstat (fd35_wstat),
         .fd35_stall (fd35_stall),
         // FD_DRIVE1/2 name the IWM's 5.25" drives on a IIgs.
         .fd525_inserted (fd_inserted), .fd525_wp (fd_wp),
@@ -1993,6 +1996,7 @@ module master_top #(
     assign fd35_ctl     = 8'd0;
     assign fd35_seeks   = 8'd0;
     assign fd35_late    = 8'd0;
+    assign fd35_wstat   = 32'd0;
     assign fd35_fill_max = 16'd0;
     assign fd35_stall   = 1'b0;
     assign gsio_fd525_stale = 2'b11;

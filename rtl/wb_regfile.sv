@@ -138,6 +138,7 @@ module wb_regfile #(
     input  wire [7:0]      fd35_ctl,        // {phases, q7, q6, drive_sel, apple35_sel}
     input  wire [7:0]      fd35_seeks,
     input  wire [7:0]      fd35_late,
+    input  wire [31:0]     fd35_wstat,
     input  wire [15:0]     fd35_fill_max,
     output logic           fd35_late_clr,   // pulses
     output logic           fd35_fill_clr,
@@ -395,6 +396,7 @@ module wb_regfile #(
     localparam [13:0] R_START      = 'd86;  // 0x8000_0158, the start hold; W1 bit 0 releases
     localparam [13:0] R_ROM_SUM    = 'd87;  // 0x8000_015C, RO, the ROM's sum of first landings
     localparam [13:0] R_PANEL_STAT      = 'd88; // 0x8000_0160, RO the panel's DMA: {drops, dmas}
+    localparam [13:0] R_FD35_WSTAT      = 'd89; // 0x8000_0164, RO the 3.5" write path
     localparam [13:0] R_KBD_INJECT = 'd7;   // 0x8000_001C, W bits 6:0, W1 bits 7-8
     localparam [13:0] R_BUTTONS    = 'd8;   // 0x8000_0020, RW bits 5:0
     localparam [13:0] R_RING_STATUS = 'd9;  // 0x8000_0024, RO
@@ -1525,6 +1527,7 @@ module wb_regfile #(
                         R_DDR3_EYE1:      wb_dat_r <= ddr3_eye1;
                         R_GS_CLOCK:       wb_dat_r <= gs_clock_stat;
                         R_PANEL_STAT:     wb_dat_r <= {24'd0, panel_drops, panel_dmas};
+                        R_FD35_WSTAT:     wb_dat_r <= fd35_wstat;
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
                         R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
                         R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;

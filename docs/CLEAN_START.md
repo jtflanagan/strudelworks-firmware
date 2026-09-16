@@ -103,8 +103,30 @@ same for a year.
 - `want_restart` logs the reason and `main` exits **75**; `tools/pi.sh` and `tools/swmcp/server.py`
   start swhost again on that code, bounded at ten in a row and said out loud.  Nothing else changes
   meaning: any other exit ends the session as before.
-- swhost start with nothing pending: the machine is running - the ROM is not sent (CS2's rule) and
-  only the host's own levels are written.
+- ~~swhost start with nothing pending: the machine is running - the ROM is not sent (CS2's rule)
+  and only the host's own levels are written.~~  **WITHDRAWN 2026-09-16 (the user): EVERY START IS
+  A RESET.**  That line contradicted this document's own principle - "a swhost restart ... ends in
+  the same checklist" - and it was the hole: a swhost started against a running machine attached to
+  it, with no way to know what the machine was doing and no way to recover it.  The only reset was a
+  pulse the MCP wrapper sent a second after the socket answered, which `tools/pi.sh start` never
+  sent at all; a restart that way left the IIgs with a screen of `$00`s and its typed input
+  mangled.  Now the startup, before it decides anything, reads START and - if nothing is pending -
+  pulses the host's own RESET, which the card counts as an Apple RES' (decision 3), and waits for
+  the hold; a machine that will not take it is refused rather than attached to.  From there it is
+  the formal path every other reset runs, and the startup releases the machine as its last act,
+  after every service is in place.  The MCP's pulse is gone: there is no reset left to send, and
+  none to forget.
+- **A hold DURING the startup belongs to the startup.**  `on_start_held` does not hand it to the
+  checklist until `startup_done_`.  It was unreachable before - a bitstream load's START_HELD is
+  sent long before swhost exists - and the startup's own reset made it real, both ways: with the
+  ROM still in the card's RAM the checklist would have released the machine before the panel
+  image, the levels and the disk services were in place, and without it the checklist left for a
+  restart over a ROM the startup was about to send.  `accel_test` caught the second.
+- Tests: a late start against a RUNNING card resets it exactly once and the checklist releases it
+  with no restart; a card that will not take the hold is refused, saying why; an already-held
+  card is not pulsed again.  On hardware (2026-09-16): swhost started with `tools/pi.sh start`
+  against the corrupted machine above logged the hold, sent the panel image and the ROM (512
+  chunks acked, sum verified) while held, and released it to a clean 80-column prompt.
 - Tests: `tests/accel_test.cpp` `test_clean_start` on the mock (which gained `queue_start_held`,
   `start_pending` and `forget_rom`): released after the check, the empty-image restart with the
   reason naming the ROM, the card-cause restart, and the machine left held in both.

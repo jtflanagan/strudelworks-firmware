@@ -134,6 +134,7 @@ module gs_iwm #(
     parameter [7:0] T_FD35_TRACK = 8'h31,   // host -> card
     parameter [7:0] T_FD35_SEEK  = 8'h32,   // card -> host
     parameter [7:0] T_FD35_DIRTY = 8'h37,   // card -> host, a written 3.5" track
+    parameter [7:0] T_FD35_EJECT = 8'h38,   // card -> host, the MACHINE ejected the disk
     parameter [7:0] T_FD_TRACK   = 8'h1F,   // host -> card, the Disk II's
     parameter [7:0] T_FD_SEEK    = 8'h20,   // card -> host, the Disk II's
     parameter [7:0] T_FD_DIRTY   = 8'h21,   // card -> host, the Disk II's
@@ -202,6 +203,12 @@ module gs_iwm #(
     output wire        motor35_o,
     output wire        motor_o,
     output wire [7:0]  ctl_o,          // {phases, q7, q6, drive_sel, apple35_sel}
+    // The 3.5" write path, for diagnosis: {flushes, why, lands, loads}.  A
+    // dropped write looks exactly like a machine that never wrote - ProDOS
+    // CREATE "succeeded" on hardware with nothing reaching the card
+    // (2026-09-16) - so the card says which of the two it was, and on a drop
+    // says which gate refused.
+    output wire [31:0] wstat35_o,
     output logic [7:0] seeks,
     output logic [7:0] late,
     output logic [15:0] fill_max,      // microseconds, seek to last chunk
@@ -330,6 +337,12 @@ module gs_iwm #(
     // The written track going home.
     logic        dirty;             // the buffer (a 5.25" track) was written to
     logic        dirty35;           // ...or a 3.5" one
+    logic        eject_req;         // the MACHINE asked for its 3.5" disk back
+    logic [7:0]  w35_loads;         // the machine wrote to the 3.5" data register
+    logic [7:0]  w35_lands;         // ...and the byte reached the buffer
+    logic [7:0]  w35_flushes;       // written tracks sent home
+    logic [7:0]  w35_why;           // the gates at the last load that did NOT take
+    assign wstat35_o = {w35_flushes, w35_why, w35_lands, w35_loads};
     logic        up_is35;           // the upload being sent is a 3.5" track
     logic [12:0] up35_left;         // ...with this many words still to go
     logic [13:0] up35_nibbles;      // ...and this many nibbles in all
@@ -631,7 +644,8 @@ module gs_iwm #(
         X_UP_HDR,       // an FD_DIRTY chunk's header
         X_UP_W0,        // ...its {seq, chunk, qtr, drive}
         X_UP_W1,        // ...its {bits}
-        X_UP_DATA       // ...its words, from the buffer
+        X_UP_DATA,      // ...its words, from the buffer
+        X_EJ            // the machine's eject, after everything it is owed
     } xstate_t;
     xstate_t     xs;
     logic [9:0]  tx_id;             // the seek being sent, latched as it starts
@@ -666,6 +680,12 @@ module gs_iwm #(
     // chunk early (nine of ten, caught by the bench 2026-09-16).
     wire       up_last   = up_is35 ? (up35_left <= 13'd1) : (x_chunk == 4'd6);
     wire       xs_up     = (xs == X_UP_HDR) || (xs == X_UP_W0) || (xs == X_UP_W1) || (xs == X_UP_DATA);
+    // The machine's eject waits for everything the host is owed.  `dirty35`
+    // matters as much as `up_owed`: the clock the action lands, the flush has
+    // not been taken yet, and an eject that overtook it would have the host
+    // drop the image with the writes still on the card.
+    wire       eject_owed = eject_req && !up_owed && !up_again && !dirty35 && !xs_up;
+    wire       ej_sent    = (xs == X_EJ) && tx_take;
 
     // Port B reads the word being offered, and the one after it on the clock
     // it is taken, so the stream never waits on the RAM's latency.
@@ -674,7 +694,8 @@ module gs_iwm #(
     // A 5.25" seek names the quarter track and the half-track phase the head
     // reached it by, so a host serving a sector image keeps phase >> 1.
     assign tx_valid = (xs != X_IDLE);
-    assign tx_word  = (xs == X_HDR)    ? {16'd0, (tx_id[9] ? T_FD_SEEK : T_FD35_SEEK), 8'd1}
+    assign tx_word  = (xs == X_EJ)     ? {16'd0, T_FD35_EJECT, 8'd0}
+                    : (xs == X_HDR)    ? {16'd0, (tx_id[9] ? T_FD_SEEK : T_FD35_SEEK), 8'd1}
                     : (xs == X_W0)     ? (tx_id[9] ? {tx_seq, 8'd0, tx_id[7:0], ph5[tx_id[8]], tx_id[8]}
                                                    : {tx_seq, 8'd0, tx_id[7:0], 8'd0})
                     : (xs == X_UP_HDR) ? {16'd0, (up_is35 ? T_FD35_DIRTY : T_FD_DIRTY),
@@ -688,7 +709,8 @@ module gs_iwm #(
     wire up_sent   = (xs == X_UP_DATA) && tx_take && (x_left == 8'd1) && up_last;
     always_ff @(posedge clk) begin
         if (rst) begin
-            xs      <= X_IDLE;
+            xs        <= X_IDLE;
+            up35_left <= 13'd0;
             tx_id   <= 10'd0;
             tx_seq  <= 8'd0;
             x_chunk <= 3'd0;
@@ -699,13 +721,25 @@ module gs_iwm #(
                 x_chunk <= 4'd0;
                 x_word  <= 12'd0;
                 if (up_owed) begin
+                    // ONE driver for up35_left, and it is this block.  The
+                    // bookkeeping that arms the upload loaded it too at
+                    // first, and two always_ff blocks on one register is a
+                    // BUILD error the benches never see: Verilator ran it
+                    // happily and Vivado stopped at DRC MDRV-1 forty minutes
+                    // in (2026-09-16).
+                    up35_left <= 13'((up35_nibbles + 14'd3) >> 2);
                     xs <= X_UP_HDR;
+                end else if (eject_owed) begin
+                    // After the upload and before any seek: the host must
+                    // have the writes before it lets the image go.
+                    xs <= X_EJ;
                 end else if (seek_owed) begin
                     xs     <= X_HDR;
                     tx_id  <= buf_id;
                     tx_seq <= seq;
                 end
             end
+            X_EJ:      if (tx_take) xs <= X_IDLE;
             X_HDR:     if (tx_take) xs <= X_W0;
             X_W0:      if (tx_take) xs <= X_IDLE;
             X_UP_HDR:  if (tx_take) begin xs <= X_UP_W0; x_left <= chunk_len; end
@@ -911,7 +945,7 @@ module gs_iwm #(
     // ...and for a written 3.5" track.  Its drive has no per-drive flush
     // register of its own, so the events are the ones it does have: the head
     // wanting another track, the disk leaving, the motor stopping.
-    wire d35_leave  = !buf_id[9] && (want || buf_ejected || motor_stop);
+    wire d35_leave  = !buf_id[9] && (want || buf_ejected || motor_stop || eject_req);
     wire flush35    = d35_leave && dirty35;
 
     // ---- the 5.25" sequencer and the machine's writes ----------------------------
@@ -932,13 +966,21 @@ module gs_iwm #(
                               !enable2 && !apple35_sel;
     wire        store       = load5;          // the benches' name for it
     // The same access with the 3.5" side selected: the byte the machine is
-    // writing to the disk under the head.  ENABLE2 is the drive's action and
-    // status protocol, never data, so a load under it is not a write.
+    // writing to the disk under the head.
+    //
+    // NOT gated on ENABLE2, where the 5.25" load is.  For a 5.25" drive
+    // ENABLE2 addresses the SmartPort INSTEAD of the drives, so a load under
+    // it is not a write to a disk at all; the 3.5" path is already named by
+    // `apple35_sel`, and phases 1 and 3 are this drive's own action and
+    // status register, which the ROM leaves standing around a transfer.
+    // Gating on it here dropped every write the machine made (2026-09-16:
+    // ProDOS's CREATE returned success and nothing reached the card) - and
+    // `w35_loads`/`w35_why` below are what say so rather than a guess.
     wire        load35      = iwm_act && !op_rw && op_lo[0] && (q7q6 == 2'b11) && t_motor &&
-                              !enable2 && apple35_sel;
+                              apple35_sel;
     // Write mode for the 3.5" drive: q7 set, the platter turning, a disk that
     // takes it, and its track in the buffer.
-    wire        writing35   = q7 && spinning && apple35_sel && !enable2 && w35_ok;
+    wire        writing35   = q7 && spinning && apple35_sel && w35_ok;
     // Write mode, a load since, a disk that takes it, its track here.
     wire        writing5    = q7 && wr_started && spinning && !enable2 &&
                               d5_inserted[drive_sel] && !d5_wp[drive_sel] && track_here5;
@@ -957,6 +999,10 @@ module gs_iwm #(
             w35_pend    <= 1'b0;
             w35_byte    <= 8'd0;
             w35_pos     <= 14'd0;
+            w35_loads   <= 8'd0;
+            w35_lands   <= 8'd0;
+            w35_flushes <= 8'd0;
+            w35_why     <= 8'd0;
         end else begin
             // The pending bit is spent when it lands, dropped when it may not
             // or its track is left - first, so a capture this clock stands.
@@ -967,11 +1013,22 @@ module gs_iwm #(
             // that writes faster than the platter turns overwrites the same
             // slot, which is what a real drive does to a disk too.
             if (w35_go || (w35_pend && !w35_ok) || d35_leave) w35_pend <= 1'b0;
-            if (load35 && writing35) begin
-                w35_pend <= 1'b1;
-                w35_byte <= op_wdata;
-                w35_pos  <= pos;
+            if (load35) begin
+                if (w35_loads != 8'hFF) w35_loads <= w35_loads + 8'd1;
+                if (writing35) begin
+                    w35_pend <= 1'b1;
+                    w35_byte <= op_wdata;
+                    w35_pos  <= pos;
+                end else begin
+                    // Why it was refused, latched at the load: each bit is a
+                    // condition of `writing35`/`w35_ok` as it stood.
+                    w35_why <= {enable2, q7, spinning, drv_inserted,
+                                drv_wp, stale, buf_id[9], apple35_sel};
+                end
             end
+            if (w35_go && (w35_lands != 8'hFF)) w35_lands <= w35_lands + 8'd1;
+            if ((flush35 || (up_sent && up_is35)) && (w35_flushes != 8'hFF))
+                w35_flushes <= w35_flushes + 8'd1;
 
             if (cell_tick5) begin
                 if (!q7) begin
@@ -1066,7 +1123,6 @@ module gs_iwm #(
             dirty       <= 1'b0;
             dirty35     <= 1'b0;
             up_is35     <= 1'b0;
-            up35_left   <= 13'd0;
             up35_nibbles<= 14'd0;
             up_owed     <= 1'b0;
             up_again    <= 1'b0;
@@ -1102,7 +1158,6 @@ module gs_iwm #(
                 up_bits      <= buf_bits;
                 up_is35      <= flush35;
                 up35_nibbles <= nibbles35;
-                up35_left    <= 13'((nibbles35 + 14'd3) >> 2);
             end
             if (d5_leave)  dirty   <= 1'b0;
             if (w_go)      dirty   <= 1'b1;
@@ -1185,6 +1240,7 @@ module gs_iwm #(
             motor_off_pend <= 1'b0;
             motor_off_ticks <= 22'd0;
             step_dir35 <= 1'b0; motor35 <= 1'b0; track35 <= 7'd0; side35 <= 1'b0;
+            eject_req <= 1'b0;
             ph5[0] <= 7'd0; ph5[1] <= 7'd0;
             qo5[0] <= 2'sd0; qo5[1] <= 2'sd0;
             qtr_d5[0] <= 8'd0; qtr_d5[1] <= 8'd0;
@@ -1195,6 +1251,10 @@ module gs_iwm #(
             fbit <= 24'd0;
             cnt_mode_wr <= 8'd0;
         end else begin
+            // The eject request is spent when it goes out - here, in the
+            // block that sets it, because one register has one always block
+            // (DRC MDRV-1) - and first, so an action on this clock stands.
+            if (ej_sent) eject_req <= 1'b0;
             // The motor-off timer (iwm_vbl_update): ENABLE drops a second
             // after $C0E8 unless the mode register says at once.
             if (motor_off_pend && tick) begin
@@ -1246,7 +1306,13 @@ module gs_iwm #(
                         4'h4: if (here) track35 <= track_stepped;
                         4'h8: motor35 <= 1'b1;      // the drive's motor on
                         4'h9: motor35 <= 1'b0;      // ...and off
-                        4'hD: ;                     // eject: nothing to eject
+                        // THE MACHINE'S OWN EJECT (GS/OS's Finder, the ROM's
+                        // control call).  It cannot take the disk out itself -
+                        // the disk is a file on the host - so it asks, and the
+                        // ask goes out AFTER any written track, in the same
+                        // stream, so the host cannot drop the image before the
+                        // writes it is owed have landed.
+                        4'hD: eject_req <= 1'b1;
                         default: ;                  // KEGS ignores $02, $07, $0B
                     endcase
                 end
