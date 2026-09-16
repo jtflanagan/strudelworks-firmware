@@ -1,6 +1,6 @@
 # The GS Strudelworks Control Panel: our panel in front of the IIgs's own
 
-Status: 2026-09-15, branch `gs_control_panel` (fw off master 67eed4e / host off 5245bdc), UNCOMMITTED.  R0 IN SIM: llvm-mos-65816 pinned, `sim/run_gspanel.sh` runs the panel on the card's own 65816 - self-test PASS and v0 (`assets/gspanel.bin`, C) PASS with one stock-panel chain.  R0B ON HARDWARE (bit gs_bram1, fw 2026-09-15 13:05:30, TIMING MET wns +0.076 whs +0.067 fail 0/97633, SRAM): the card's battery RAM readable (debug pair `$C0+k`, GS_CLOCK_STAT 0x154), host `bram [dump]` four-copy report + follower fixes - all four copies agree on the machine (sealed $0B5E, 0 differ); lint clean, `suite gs` 13/13, `suite quick` 31/31, host tests 41/41; the expected-effects table established from the ROM.  Tooling: `screen attr` + MCP inverse marks (text_test 51/51, swmcp 37/37), `tools/gs_menu.py` walks menus by the inverse run.  **2026-09-15: `tools/gs_cp_test.sh` row 1 (Display > Columns, $19) PASSES ON HARDWARE** (bit gs_romhold1, fw 2026-09-15 15:46:49, TIMING MET wns +0.023 whs +0.032 fail 0/97606; the depth tail >= 14 rose 413 -> 559, not yet examined) - the save lands in all four copies; warm reset 80 columns (CSW $C307, $04FB $09); cold reset boots ProDOS 8 in 40 with the setting kept (KEGS does the same with the same 256 bytes); swhost restart then warm reset 80.  On the way: **swhost's exit wrote accel mode 0 under a running GS and ran it off the IIe bus** (the "self-test"/LoRes buzz).  USER RULE: a GS is accel mode 2 with serving on, always - enforced in the host (exit, socket, levels, startup, conf) AND at GS = 1 on the card (both tied; the 65816 held in reset out of a card reset until its ROM has landed).  swhost no longer pushes a landed ROM into a running GS (a push under a running core is the leading, unproven suspect for test E2's runaway; `gs_rom_repush = on` forces it).  The HDMI keep-alive now covers the audio buffer's refill.  The boot beep's scratch is the unlimited target ignoring the ROM's own 1 MHz request (traced) - SHELVED (user).  suite gs 14/14, suite quick 31/31, host tests 41/41.  **The clean start and the never-wedge work are DONE since** (fw ebb96ef / host fbf9f96, docs/CLEAN_START.md CS1-CS7, GS bit `cs16`, fw 2026-09-15 17:41:17, TIMING MET wns +0.010 whs +0.043): a formal ROM load with an ack and a sum per chunk, RES' held at every card reset and every Apple reset until the host's checklist passes, and a link that recovers over itself - LINK_RESET decoded in the parser, the drain/CLKOUT/TX-stall watchdogs, swhost's exit 75 and the launchers that run a whole clean startup on it, none of it needing the UART.  `tools/clean_start_test.sh` PASSES on hardware: 20 swhost restarts with no ROM pushed into a running machine, 20 socket RES' pulses with 20 holds and 20 checklists passed, and the link-reset recovery (512 chunks acked, sum verified, the FT601 re-enumerating, no reload).  Next: rows 2+ (colours $1A-$1C).
+Status: 2026-09-15, branch `gs_control_panel` (fw off master 67eed4e / host off 5245bdc), UNCOMMITTED.  R0 IN SIM: llvm-mos-65816 pinned, `sim/run_gspanel.sh` runs the panel on the card's own 65816 - self-test PASS and v0 (`assets/gspanel.bin`, C) PASS with one stock-panel chain.  R0B ON HARDWARE (bit gs_bram1, fw 2026-09-15 13:05:30, TIMING MET wns +0.076 whs +0.067 fail 0/97633, SRAM): the card's battery RAM readable (debug pair `$C0+k`, GS_CLOCK_STAT 0x154), host `bram [dump]` four-copy report + follower fixes - all four copies agree on the machine (sealed $0B5E, 0 differ); lint clean, `suite gs` 13/13, `suite quick` 31/31, host tests 41/41; the expected-effects table established from the ROM.  Tooling: `screen attr` + MCP inverse marks (text_test 51/51, swmcp 37/37), `tools/gs_menu.py` walks menus by the inverse run.  **2026-09-15: `tools/gs_cp_test.sh` row 1 (Display > Columns, $19) PASSES ON HARDWARE** (bit gs_romhold1, fw 2026-09-15 15:46:49, TIMING MET wns +0.023 whs +0.032 fail 0/97606; the depth tail >= 14 rose 413 -> 559, not yet examined) - the save lands in all four copies; warm reset 80 columns (CSW $C307, $04FB $09); cold reset boots ProDOS 8 in 40 with the setting kept (KEGS does the same with the same 256 bytes); swhost restart then warm reset 80.  On the way: **swhost's exit wrote accel mode 0 under a running GS and ran it off the IIe bus** (the "self-test"/LoRes buzz).  USER RULE: a GS is accel mode 2 with serving on, always - enforced in the host (exit, socket, levels, startup, conf) AND at GS = 1 on the card (both tied; the 65816 held in reset out of a card reset until its ROM has landed).  swhost no longer pushes a landed ROM into a running GS (a push under a running core is the leading, unproven suspect for test E2's runaway; `gs_rom_repush = on` forces it).  The HDMI keep-alive now covers the audio buffer's refill.  The boot beep's scratch is the unlimited target ignoring the ROM's own 1 MHz request (traced) - SHELVED (user).  suite gs 14/14, suite quick 31/31, host tests 41/41.  **The clean start and the never-wedge work are DONE since** (fw ebb96ef / host fbf9f96, docs/CLEAN_START.md CS1-CS7, GS bit `cs16`, fw 2026-09-15 17:41:17, TIMING MET wns +0.010 whs +0.043): a formal ROM load with an ack and a sum per chunk, RES' held at every card reset and every Apple reset until the host's checklist passes, and a link that recovers over itself - LINK_RESET decoded in the parser, the drain/CLKOUT/TX-stall watchdogs, swhost's exit 75 and the launchers that run a whole clean startup on it, none of it needing the UART.  `tools/clean_start_test.sh` PASSES on hardware: 20 swhost restarts with no ROM pushed into a running machine, 20 socket RES' pulses with 20 holds and 20 checklists passed, and the link-reset recovery (512 chunks acked, sum verified, the FT601 re-enumerating, no reload).  **2026-09-15: the ladder's colour rows PASS ON HARDWARE too** (`tools/gs_cp_test.sh`, 0 failures over all four rows) - Display > Text ($1A), Background ($1B) and Border ($1C) set on the stock panel, their effect read out of $C022 and $C034 AND out of the painted frame, and carried through a warm reset, a Ctrl-Command-Reset and a swhost restart.  Host-only, on the same bit (`cs16`): the status line gained `tcol=`/`border=` and the tests gained `tools/png_pixel.py`.  Next: Display > Type ($18, colour/monochrome), then the slots ($21-$27) once their conf-vs-panel ownership is decided.
 
 ## Context
 On the IIgs build every card/host setting (disk images, accel, video, slot cards) is changed by
@@ -123,8 +123,8 @@ was written. This rung builds the observability and the test, and runs it on the
   |---|---|---|---|
   | $18 | type 0 colour / 1 mono | BC45 | `$C021` bit 7; `$C029` bit 5 |
   | $19 | columns 0=40 / else 80 | reset: FF/FA7F → FA24, if the visible $C3 ROM has the $38/$18 ID → `JSR $C300` with $98 = PR#3; NOT in BB7A. **MEASURED 2026-09-15 (card + KEGS agree):** a WARM reset gives 80 columns; a COLD start (power-on or Ctrl-Command-Reset) that boots ProDOS 8 ends in 40 columns with $19 still $01 in all four copies and the panel still saying 80 | warm reset: 80-character `screen` rows, CSW `$C307` / KSW `$C305`, 80STORE on, `$04FB` = **$09**; cold boot into ProDOS 8: 40 columns, CSW `$FDF0`, `$04FB` $FF |
-  | $1A/$1B | text / background colour | BC12 | `$C022` = $1A<<4 \| $1B |
-  | $1C | border | BC24 | `$C034` low nibble |
+  | $1A/$1B | text / background colour | BC12 | `$C022` = $1A<<4 \| $1B.  **MEASURED 2026-09-15** (host `status`): applied the moment the key is pressed in the panel, again out of the chip at every reset, and the frame really is painted in them |
+  | $1C | border | BC24 | `$C034` low nibble.  **MEASURED 2026-09-15**: same, and it is the whole frame's clear colour - the margin around the picture is it and nothing else |
   | $1D | 0=60 Hz / 1=50 Hz | BC2F | `$C02B` bit 4 (bits 7-5 = $29) |
   | $1E | volume 0-14 | BBEE | `$C03C` low nibble, `$E1/00CA` |
   | $1F | bell PITCH (not volume) | only when the bell rings, FF/9A6D | `$E1/016D` after a bell |
@@ -220,6 +220,63 @@ was written. This rung builds the observability and the test, and runs it on the
   bytes and disk (memory note `kegs-headless`: Xvfb, F1 = Command).
   Side finding: starting swhost on a conf with `hd=off` rewrote $27 to $00 in card/follower/ROM
   while the file kept $01 - the `build_bram` hole above, provoked by changing confs.
+- **BUILT AND GREEN ON HARDWARE 2026-09-15: rows 2-4, Display > Text ($1A),
+  Background ($1B), Border ($1C).**  Host-only - no firmware change and no
+  rebuild; the run is on the clean-start bit `cs16` (fw 2026-09-15 17:41:17).
+  *New observability.*  The status line carries `tcol=` ($C022, text
+  foreground in the high nibble and background in the low) and `border=`
+  ($C034's low nibble) straight out of AppleVideo's own latches
+  (apple_video.cpp:93/95, published in pipeline.cpp's decode) - the two
+  registers the frame is actually painted from - so a colour's effect is
+  readable without a screenshot.  And `tools/png_pixel.py` reads pixels out
+  of a screenshot with nothing but zlib (swhost writes 8-bit RGB, filter 0):
+  a point prints "X Y R G B", a rectangle the three colours commonest in it.
+  *What the row does.*  On the Display page, with every selection read from
+  the inverse run and every colour read back by NAME after each key (the
+  sixteen are the ROM's own list, at file offset $387xx, and the name shown
+  IS the index that lands in the battery RAM):
+  - **the defaults** are $1A=0F, $1B=06, $1C=06 - white on medium blue, a
+    medium blue border - put there by the ROM out of the chip at reset:
+    `tcol f6 border 6`, and the frame's margin 100% (7,168,225).
+  - **an edit is LIVE, with nothing saved and no reset.**  Text = Yellow took
+    $C022 to `d6` while still on the page.  At that moment only the ROM's
+    working copy holds it ($E1/02C0's $1A = 0D); the card's store and the
+    follower still read 0F.  This is the difference from Columns, which does
+    nothing at all until a reset.
+  - **Escape cancels it on the screen too.**  Escape from the page put
+    $C022 back to `f6` and left all four copies 0F/06/06, 0 bytes differing -
+    the ROM re-reads the chip, so a cancelled page is cancelled everywhere.
+    (Escape lands on the Control Panel's LIST, not back in the program - the
+    test's `open_display_page` exists because of that.)
+  - **saved** (Yellow on Black, an Orange border): `tcol d0 border 9` live,
+    and $1A=0D, $1B=00, $1C=09 in all four copies, every copy sealed, 0
+    bytes differing.
+  - **the picture, which is the point**: the margin 100% (249,86,29) orange
+    and the picture 97% black with 2% (220,205,22) yellow - the machine's own
+    repaint, in the colours just chosen.
+  - **through every reset**: a warm reset, a Ctrl-Command-Reset (ProDOS boots
+    again in 40 columns) and a swhost restart with a warm reset after it.
+    Each time FF/BB7A applied all three again out of the chip - `tcol d0
+    border 9` - the bytes survived in every copy, and the picture was the
+    same.
+  *Two things the panel does by itself*, neither of them ours: the Display
+  page's `Standards:` item flips to No the moment a colour leaves its
+  standard value and back to Yes when it returns (a MouseText marker beside
+  each item tracks the same thing per row); and both menus reopen on the
+  item chosen last, which is why nothing here counts keys.
+  *What the test rig needed.*  `scanlines = none` in the test's own conf, so
+  a text picture has EXACTLY two colours in it and the two commonest are the
+  pair; and the screen filled with a `CATALOG` before every picture check,
+  because a blank screen is one colour and proves only the background.  The
+  border needs neither: it is the clear colour, so the margin is it whatever
+  is on screen.
+  *Seen once, not reproduced (recorded, not claimed).*  A screenshot taken
+  after a swhost restart once showed a frame full of inverse `@` that the
+  mirror did not have (`screen` showed the real blank screen) - the cold
+  mirror's zeros, apparently still on the beam canvas.  Running the same
+  sequence again afterwards gave a picture 100% background, agreeing with
+  the mirror.  The ladder repaints before every picture check, so no row
+  depends on the answer.
 - **FOUND AND FIXED 2026-09-15 (host, uncommitted): swhost's exit ran a live GS off the bus.**
   The ladder's first two runs failed only at the swhost-restart step: the warm reset after the
   restart booted ProDOS from disk (40 columns), and the user saw a LoRes screen with a speaker
@@ -350,7 +407,10 @@ swap (no disk-switched path yet); clean ROM pages (4th wb_arb client, GS.md:1030
 - Host (pi5 cross build, tests on the Pi): `gs_memory_test`, `gs_rom_patch_test`,
   `gs_panel_test`, existing suite; `firmware/build.sh --check` (both ROMs + gspanel).
 - Effects ladder `tools/gs_cp_test.sh` (R0B onward): four-copy BRAM diff + per-setting
-  effect after each reset path, stock panel first, then every item of ours.
+  effect after each reset path, stock panel first, then every item of ours.  Where a
+  setting only shows in the PICTURE, `tools/png_pixel.py` reads the pixels out of a
+  screenshot (zlib only, no image library on either machine) and the host's `tcol=`
+  and `border=` say what the machine wrote to $C022 and $C034.
 - Hardware (swhost stopped before every load; APPLE ON; verify from the mirror): MCP `status`,
   `peek E20000`, `raw adb 35 82`, `screen`, `key`; changes confirmed by `status`
   (accel/mem/fb/fd) and the conf's written-back keys; census at unlimited after R2.
@@ -362,6 +422,9 @@ inverse, flashing and MouseText into plain letters: a highlighted menu item was
 indistinguishable from the rest, and I twice pressed Return on the CDA menu's "Quit" believing
 Control Panel was selected. The narrow fix (2026-09-15): `screen attr` (one attribute row per
 text row) and the MCP screen tool marking inverse runs, `wait_for_text(inverse=True)`.
+The screen's COLOURS had the same hole and are now readable two ways (the colour
+rows above): `tcol=`/`border=` in the status line for what the machine wrote, and
+`tools/png_pixel.py` over a screenshot for what was painted.
 **Still to do:** audit every test and tool that keys on the screen (`tools/*_test.sh`,
 `menu_test.sh`, `gs_test.sh`'s Control Panel walk, swmcp callers, the host unit tests over
 `screen_text`) for checks that cannot actually observe what they claim - selections,
