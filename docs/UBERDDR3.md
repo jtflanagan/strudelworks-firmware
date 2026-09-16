@@ -1,6 +1,10 @@
 # UberDDR3 on the card: placement, logic depth, and the calibration that sometimes never comes
 
-Status: 2026-09-14, branch `long_data`, fw e1072e1 / host 8cfb9b7 + UNCOMMITTED eye work.
+Status: 2026-09-16, branch `gs_control_panel`, fw c041e30 / host dce72d2 + the pblock below.
+The census's "placement no longer matters" ran out on 2026-09-16: a MET build whose DDR3
+forensics were identical to the calibrating ones never reached D=1, because slice pressure
+had pushed 261 wrapper cells out of X0Y2/X0Y3 ("Where the census's conclusion ran out").
+`constr/pt_v2/ddr3_place.xdc` pins the island to those two regions.
 Forensics, the ODELAY answer, the CK_OSERDES fix, the instrumentation, the eye sweep and the
 centred DQ tap are DONE and on hardware (bits `gs_ddr3_ckserdes`, `gs_ddr3_dbg`, `gs_ddr3_eye`,
 `gs_ddr3_center`, all MET); the fork is at d728e6a (four commits, unpushed).  UberDDR3 now comes from the fork
@@ -171,6 +175,8 @@ placer put the controller differently every time (cells in X0Y3 / X0Y2: 4929/141
 3807/2532, 4454/1885, 3588/2745) and WNS ranged +0.000 to +0.143; every DDR3 number - the clock legs, the
 two eyes, the tap, the DQS index, the DBG1 word bit for bit - came out identical.  The
 numbers that decide calibration no longer depend on where the placer puts the fabric.
+**Read that as "within X0Y2 + X0Y3" - see the next section, which is where it stopped
+being true.**
 
 | build | WNS | CK-CMD | tDQSS | eye lane 0 / 1 | DQ tap | DQS index | restarts | calibrates |
 |---|---|---|---|---|---|---|---|---|
@@ -178,6 +184,40 @@ numbers that decide calibration no longer depend on where the placer puts the fa
 | gs_ddr3_var1 | +0.000 | +0.052 | +0.016 | 000007ff / 00000fff | 4 | 9 | 0 | yes, Arkanoid |
 | gs_ddr3_var2 | +0.143 | +0.052 | +0.016 | 000007ff / 00000fff | 4 | 9 | 0 | yes, Arkanoid |
 | gs_ddr3_var3 | +0.001 | +0.052 | +0.016 | 000007ff / 00000fff | 4 | 9 | 0 | yes, Arkanoid |
+
+## Where the census's conclusion ran out: the island leaves its regions (2026-09-16)
+
+A GS build that MET timing at +0.003, whose section A and B forensics were identical to
+the four above - CK - CMD +0.052 ns, tDQSS +0.016 ns, the same OLOGIC sites for CK, CMD,
+DQS and DQ - **never reached D=1 on the card**.  `K=00 M=0E X=FF`: it got as far as
+CHECK_STARTING_DATA, the read-back of the alignment pattern, and self-restarted past the
+counter's ceiling within a second of configuration.  Three loads, and once across a
+uhubctl power cycle of the board's USB3 port, all the same.  Two builds known to
+calibrate - `gs_cs16` (written back out of its kept routed checkpoint) and
+`gs_ddr3_var3` - were loaded in between and came up `D=1 K=17 M=17 X=00`, so the board,
+the DRAM and the cable are acquitted; a 2026-09-15 IIe build, never loaded before, failed
+the same way.
+
+**The difference is section D and nothing else.**  Every calibrating build keeps the whole
+wrapper in X0Y2 + X0Y3, beside IO bank 15 and its 48 pins.  The failing build - 60.6 %
+LUTs, **82.4 % slice occupancy** - had been pushed a region further out:
+
+| build | calibrates | wrapper cells by clock region | PHY cells |
+|---|---|---|---|
+| gs_ddr3_var3 | yes | X0Y3 3664, X0Y2 2901, X0Y1 9 | X0Y2 146, X0Y3 51 |
+| gs_cs16 | yes | X0Y3 4797, X0Y2 1781 | X0Y2 146, X0Y3 51 |
+| 2026-09-16 00:30 GS | **no** | X0Y2 3354, X0Y3 2963, **X0Y1 261** | X0Y2 196, **X0Y1 1** |
+
+Static timing cannot see the cost, because the 48 DQ/DQS pins carry no input-delay
+constraint by design (the PHY centres its own read window on IDELAY taps) - DERISK.md's
+blind spot exactly.  So the lesson of "Vivado's verdict is final only for what it was
+asked" applies to the census too: it proved the DDR3 numbers are placement-independent
+*among placements that keep the island beside its bank*, and said nothing about one that
+does not.  `constr/pt_v2/ddr3_place.xdc` now pins the wrapper to
+`CLOCKREGION_X0Y2:CLOCKREGION_X0Y3` - the range the calibrating builds chose for
+themselves, constraining where it may go without packing it - so slice pressure cannot
+relieve itself through the one part of the design whose failure static timing cannot
+report.
 
 ## Instruments
 

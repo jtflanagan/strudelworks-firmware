@@ -344,6 +344,12 @@ if {$snoop || $master} {
     if {[file exists [file join $cdir ft601_place.xdc]]} {
         add_files -fileset constrs_1 -norecurse [file join $cdir ft601_place.xdc]
     }
+    # The DDR3 controller and PHY kept in the two clock regions beside their IO
+    # bank, for the same reason and in the same form: per-board, present only
+    # where it is needed (constr/pt_v2/ddr3_place.xdc says why).
+    if {[file exists [file join $cdir ddr3_place.xdc]]} {
+        add_files -fileset constrs_1 -norecurse [file join $cdir ddr3_place.xdc]
+    }
 } elseif {$ft601} {
     add_files -fileset constrs_1 -norecurse [list \
         [file join $cdir board.xdc] \
