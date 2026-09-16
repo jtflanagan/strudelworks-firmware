@@ -847,10 +847,26 @@ the work not redone.  An E right after a Down ejected nothing while reporting OK
 only because it made several calls first.  The counter is in `.noinit` now.  Ladder row `nda`
 PASSES with the chooser's keys (Down, E, Right through the host; the close box).
 
-*Next:* the 3.5" eject through GS/OS's own driver before the host swaps (today the host's
-eject is a paperclip, which the Finder tolerates but a mounted volume does not deserve); the hard
-disk as choose-and-restart from the chooser; SEI or a second mailbox against the CDA interrupting
-an NDA call
+*THE EJECT THROUGH GS/OS, and THE MOUSE BY POSITION (the same evening):* a 3.5" disk with a
+volume mounted now leaves through its own driver before the host touches the image: `sdk/tool.s
+gs_call` (the stack entry at $E1/00B0), `DInfo` to find slot 5 unit 1, `DControl` code 2; the card
+reports the machine's eject to the host (`3.5" : the machine ejected arkanoid.po`), the row shows
+"(no disk)" within a moment, and only then does the host insert the next image (or, for E, nothing
+more).  And the pointer can be PUT somewhere: the accessory registers a Desk Manager run-queue entry
+at DeskStartUp (`AddToRunQ`; a 12-byte header in $EF RAM - link, period, $A55A, reserved, from
+Apple's own Control Panel NDA - with a JML to the ROM's fifth vector $E2/0020 inline after it),
+which is called every SystemTask whatever window is in front (a DA's own action routine is called
+only while its window is front - measured: runAction never came, cursorAction only with the window
+up), and serves a request block the host DMAs to $EF/F300 (`mouseat X Y` on the control socket,
+acked at $EF/F308): Misc Tools `PosMouse`, exact in both axes - but the Event Manager redraws the
+arrow only on the next mouse motion, so the tool follows the ack with an empty ADB report.  While a
+menu is held the desktop sits in MenuSelect and nothing serves a request, so `tools/gs_mouse.py
+menu X Y ITEMY` places the title by position, presses by ADB, drags by deltas with the screenshot
+finder, releases.  The status line's `pcalls=` counts the service's calls.  Ladder row `nda` uses
+`menu 22 6 91` and `at 92 33`.
+
+*Next:* the hard disk as choose-and-restart from the chooser; a banded selection and a keyboard
+cursor in the list; SEI or a second mailbox against the CDA interrupting an NDA call
 (a window with a drive pop-up, the image list from the host's `kPanelList`, Insert/Eject; 3.5"
 eject through GS/OS's own driver — `DControl` — before the host swaps the image; the hard disk
 as "choose and restart"); a second mailbox or SEI around the ROM-side routines so the CDA cannot
