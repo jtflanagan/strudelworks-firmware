@@ -99,7 +99,14 @@ declare -A B=(
   [gspanel_svc]="sim/run_gspanel.sh --bin ../strudelworks-host/assets/gspanel.bin --keys={esc} --expect=simhost|^PASS$"
   # ...and the settings page: two Rights on the first row, and the value the
   # panel draws is the one the HOST sent back, not the one it asked for.
-  [gspanel_set]="sim/run_gspanel.sh --bin ../strudelworks-host/assets/gspanel.bin --keys={right}{right}{down}{esc} --expect=2X|^PASS$"
+  [gspanel_set]="sim/run_gspanel.sh --bin ../strudelworks-host/assets/gspanel.bin --keys={right}{right}{down}{esc} --expect-final=2X|^PASS$"
+  # A drive's own keys on the real image: down to the drive, Right puts a disk
+  # in, W turns the write-protect tab on - and the tab is drawn because the
+  # HOST sent it back, not because the key was pressed.
+  [gspanel_wp]="sim/run_gspanel.sh --bin ../strudelworks-host/assets/gspanel.bin --keys={down}{right}W{esc} --expect-final='one.po WP'|^PASS$"
+  # ...and E takes it out again, which no amount of stepping the choice is
+  # allowed to be needed for.
+  [gspanel_eject]="sim/run_gspanel.sh --bin ../strudelworks-host/assets/gspanel.bin --keys={down}{right}E{esc} --expect-final='(no disk)'|^PASS$"
   [cpu_tb]="sim/run_cpu_tb.sh|both suites passed"
   [cpu_predict]="sim/run_cpu_predict_tb.sh|predict/cancel contract holds"
   [accel_vl]="sim/run_accel_vl.sh|^PASS$"
@@ -110,7 +117,7 @@ declare -A B=(
 )
 QUICK="lint microcode boot_hold start_hold rom_loader bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
-GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 gs_doc gs_io_claim gs_iwm_write cpu816_cycles cpu816_trace cpu816_irq mmu_xlate_gs boot_gs gspanel gspanel_svc gspanel_set"
+GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 gs_doc gs_io_claim gs_iwm_write cpu816_cycles cpu816_trace cpu816_irq mmu_xlate_gs boot_gs gspanel gspanel_svc gspanel_set gspanel_wp gspanel_eject"
 BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"
 [ "$iverilog" = 1 ] && BATTERY="$BATTERY accel_iv"
 

@@ -22,6 +22,7 @@
 //
 //   gspanel_run --hex=rtl/cpu65816_ucode.hex --bin=PANEL.bin
 //               [--keys='{down}{down}{ret}{esc}'] [--expect=TEXT ...]
+//               [--expect-final=TEXT ...]   # the LAST screen, not any screen
 //               [--stock=N] [--max-cycles=N] [--screens]
 //
 // Keys: plain characters, or {ret} {esc} {up} {down} {left} {right} {tab}
@@ -198,26 +199,57 @@ static void doorbell(unsigned char seq) {
         for (unsigned i = 0; v[i]; i++) mem[0xEFF100 + i] = (unsigned char)v[i];
         mem[0xEFF100 + 48] = 2;                    // items
         mem[0xEFF2FE] = 0x00;
-    } else if (cmd == 0x02 || cmd == 0x03) {       // GET_ITEM / SET_ITEM
-        // Two rows, enough to walk and to change: one live, one that waits
-        // for a reset, and a SET the model REMEMBERS - so the panel can be
-        // seen drawing what it was told rather than what it asked for.
+    } else if (cmd == 0x02 || cmd == 0x03 || cmd == 0x07) {   // GET_ITEM / SET_ITEM / ACT
+        // Two rows, enough to walk and to change: one live, and one DRIVE -
+        // which is the row with verbs of its own, so the panel's E and W can
+        // be walked here against the real image instead of only on a card.
+        // The model REMEMBERS, so the panel is seen drawing what it was told
+        // rather than what it asked for.
         static unsigned char choice[2] = {0, 0};
+        static unsigned char wp = 0;
         const unsigned char idx = mem[0xEFF005];
+        unsigned char failed = 0;
         if (idx > 1) {
             mem[0xEFF2FE] = 0x03;                  // BADARG
         } else {
             if (cmd == 0x03) choice[idx] = mem[0xEFF006] & 3;
-            static const char* names[2] = {"Speed", "Hard disk 1"};
+            if (cmd == 0x07) {                     // the drive's own verbs
+                const unsigned char act = mem[0xEFF006];
+                if (idx != 1) failed = 1;          // only the drive has them
+                else if (act == 0x01) { choice[1] = 0; wp = 0; }        // eject
+                else if (act == 0x02) {
+                    if (choice[1] == 0) failed = 2;                     // nothing in it
+                    else wp = (unsigned char)!wp;                       // the tab
+                } else failed = 3;
+            }
+            static const char* names[2] = {"Speed", "5.25-inch disk 1"};
             static const char* vals[2][4] = {{"MAX", "1X", "2X", "4X"},
-                                             {"none", "one.po", "two.po", "three.po"}};
+                                             {"(no disk)", "one.po", "two.po", "three.po"}};
             for (unsigned i = 0; names[idx][i]; i++) mem[0xEFF100 + i] = (unsigned char)names[idx][i];
             const char* vv = vals[idx][choice[idx]];
-            for (unsigned i = 0; vv[i]; i++) mem[0xEFF100 + 24 + i] = (unsigned char)vv[i];
+            unsigned k = 0;
+            for (; vv[k]; k++) mem[0xEFF100 + 24 + k] = (unsigned char)vv[k];
+            if (idx == 1 && choice[1] != 0 && wp) {
+                static const char tag[] = " WP";
+                for (unsigned i = 0; tag[i]; i++) mem[0xEFF100 + 24 + k + i] = (unsigned char)tag[i];
+            }
             mem[0xEFF100 + 48] = idx == 0 ? 0 : 1; // class: now / at the next reset
             mem[0xEFF100 + 49] = 4;                // choices
             mem[0xEFF100 + 50] = choice[idx];
-            mem[0xEFF2FE] = 0x00;
+            // flags: a drive with a disk in it can be ejected and protected.
+            mem[0xEFF100 + 51] = 0;
+            if (idx == 1 && choice[1] != 0) {
+                mem[0xEFF100 + 51] = (unsigned char)(0x02 | 0x04 | (wp ? 0x08 : 0));
+            }
+            if (failed) {
+                static const char* why[4] = {"", "there is nothing to eject on that row",
+                                             "there is no disk in that drive", "no such action"};
+                const char* w = why[failed];
+                for (unsigned i = 0; w[i]; i++) mem[0xEFF100 + 52 + i] = (unsigned char)w[i];
+                mem[0xEFF2FE] = 0x04;              // FAILED, with the reason after the item
+            } else {
+                mem[0xEFF2FE] = 0x00;
+            }
         }
     } else {
         for (unsigned i = 0; i < 0x100; i++) mem[0xEFF100 + i] = mem[0xEFF000 + i];
@@ -245,6 +277,13 @@ static void park_at(unsigned pbr, unsigned pc, unsigned s) {
 }
 
 static std::vector<std::string> expects;
+// --expect is satisfied by ANY screen along the way, which is right for
+// "this was shown at some point" and WRONG for "this is how it ended up":
+// {right}E on a drive that starts empty passes an --expect=(no disk) on the
+// FIRST screen, before the disk was ever put in, so a broken E key still
+// passed (2026-09-16).  --expect-final is matched against the last screen
+// only, so a key that does nothing cannot be covered by the starting state.
+static std::vector<std::string> expects_final;
 static void check_expects(std::vector<bool> &seen, const std::string &scr) {
     for (size_t i = 0; i < expects.size(); i++)
         if (!seen[i] && scr.find(expects[i]) != std::string::npos) seen[i] = true;
@@ -283,6 +322,7 @@ int main(int argc, char **argv) {
         else if (a.rfind("--bin=", 0) == 0) bin = argv[i] + 6;
         else if (a.rfind("--keys=", 0) == 0) { if (!parse_keys(a.substr(7), &err)) { fprintf(stderr, "%s\n", err.c_str()); return 2; } }
         else if (a.rfind("--expect=", 0) == 0) expects.push_back(a.substr(9));
+        else if (a.rfind("--expect-final=", 0) == 0) expects_final.push_back(a.substr(15));
         else if (a.rfind("--stock=", 0) == 0) want_stock = strtol(argv[i] + 8, nullptr, 10);
         else if (a.rfind("--max-cycles=", 0) == 0) max_cycles = strtoull(argv[i] + 13, nullptr, 10);
         else if (a == "--screens") print_screens = true;
@@ -406,6 +446,9 @@ int main(int argc, char **argv) {
     }
     for (size_t i = 0; i < expects.size(); i++)
         if (!seen[i]) fail += "never on the screen: \"" + expects[i] + "\"\n";
+    for (auto &e : expects_final)
+        if (final_screen.find(e) == std::string::npos)
+            fail += "not on the FINAL screen: \"" + e + "\"\n";
     if (!keys.empty()) { snprintf(m, sizeof m, "%zu scripted keys never read\n", keys.size()); fail += m; }
     if (want_stock >= 0 && (long)stock != want_stock) { snprintf(m, sizeof m, "stock panel entered %llu times, want %ld\n", stock, want_stock); fail += m; }
 
