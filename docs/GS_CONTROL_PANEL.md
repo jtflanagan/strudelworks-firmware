@@ -824,7 +824,33 @@ tracking curve damps small reports (24 counts ~3 px, 40 ~9, 60 ~11-17), the corn
 so it iterates with a 4 px tolerance and never sends a report under 32 counts. The `corner` /
 `to X Y` / `press` / `to --hold` / `release` sequence opens the Apple menu and picks the last item.
 
-*Next:* the chooser NDA itself in `$E2`
+*THE CHOOSER, later still, ON HARDWARE:* `panel/nda.c` is now the chooser: the host's drive rows
+(the same items the CDA shows, by `SVC_GET_ITEM`; a row is a drive when its name starts "3.5",
+"5.25" or "Hard disk") with the selected one banded, and under them the disk directory's images
+for that drive (`SVC_LIST` kind 1/2/3 - kind 3, the 3.5" list, and the kind's TOTAL at $1F0 of the
+reply are new on the host), the current image starred.  Up/Down select a drive, Left/Right step its
+image through `SVC_SET_ITEM` (so what is drawn is the host's answer - Left from the first image is
+"(no disk)", an eject), a click on a name asks for that one, E ejects, W protects, [ ] page.
+On the IIgs: a click on `fd35_write.po` put it in the 3.5" drive (the host's log: `3.5" : <-
+fd35_write.po`), E ejected it, Right put `arkanoid.po` back.  **THE BUG THAT HID THE EVENTS:**
+the stub's presence check `LDA $E20004` (the header version, 2) clobbered A - the Desk Manager's
+action code - so every call arrived as "2" (runAction) and the real events (eventAction = 1, X/Y
+= the event record) were thrown away; the stub now saves A around the check (146 bytes, format
+version still 1: the panel's row read "older on GSHARDDRIVE" and replaced it - the update path,
+proven on the way).  The Desk Manager calls the action routine with cursorAction (3) every
+SystemTask; the event mask is Apple's own `$A16E`.  The window is 480 wide (the class text and
+the hints clipped at 400).  **A SECOND BUG OF THE SAME FAMILY:** the service client's sequence
+counter (`sdk/svc.c`) lived in `.bss`, which `crt_init` clears on every entry, and the accessory is
+entered once per event - so each key's first request carried the same sequence as the previous
+entry's last, and the service, by design, took it for a doorbell rung twice: the old reply again,
+the work not redone.  An E right after a Down ejected nothing while reporting OK; a click worked
+only because it made several calls first.  The counter is in `.noinit` now.  Ladder row `nda`
+PASSES with the chooser's keys (Down, E, Right through the host; the close box).
+
+*Next:* the 3.5" eject through GS/OS's own driver before the host swaps (today the host's
+eject is a paperclip, which the Finder tolerates but a mounted volume does not deserve); the hard
+disk as choose-and-restart from the chooser; SEI or a second mailbox against the CDA interrupting
+an NDA call
 (a window with a drive pop-up, the image list from the host's `kPanelList`, Insert/Eject; 3.5"
 eject through GS/OS's own driver — `DControl` — before the host swaps the image; the hard disk
 as "choose and restart"); a second mailbox or SEI around the ROM-side routines so the CDA cannot
