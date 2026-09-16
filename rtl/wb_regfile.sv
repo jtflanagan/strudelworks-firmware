@@ -249,8 +249,8 @@ module wb_regfile #(
     // PANEL_STAT: the host's replies to our 65816 panel, carried by the HD
     // card's DMA write (docs/GS_CONTROL_PANEL.md R4).  [7:0] blocks written,
     // [15:8] messages dropped because a disk command was in flight.
-    input  wire [7:0]      panel_dmas,
-    input  wire [7:0]      panel_drops,
+    input  wire [3:0]      panel_dmas,
+    input  wire [3:0]      panel_drops,
     input  wire [31:0]     cnt_core_cyc,    // ACCEL_CORE_CYC (master_top): the plain ratio's numerator
     input  wire [31:0]     cnt_bus_cyc,     // ACCEL_BUS_CYC: ...and its denominator
     // THE DEBUG PAIR (docs/GS.md rung 6).  DBG_SEL picks a counter or a state
@@ -1524,7 +1524,7 @@ module wb_regfile #(
                         R_DDR3_EYE0:      wb_dat_r <= ddr3_eye0;
                         R_DDR3_EYE1:      wb_dat_r <= ddr3_eye1;
                         R_GS_CLOCK:       wb_dat_r <= gs_clock_stat;
-                        R_PANEL_STAT:     wb_dat_r <= {16'd0, panel_drops, panel_dmas};
+                        R_PANEL_STAT:     wb_dat_r <= {24'd0, panel_drops, panel_dmas};
                         R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
                         R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
                         R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;

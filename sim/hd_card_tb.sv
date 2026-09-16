@@ -352,6 +352,11 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         end
     endtask
 
+    // The PANEL's bytes: deliberately unlike anything a disk block carries
+    // here, so stale staging-buffer contents cannot pass for a right answer.
+    function [7:0] pat_p(input integer i);
+        pat_p = 8'hA5 ^ ((i * 3) & 8'hFF);
+    endfunction
     function [7:0] pat_a(input integer i);   // the block the host sends
         pat_a = (i * 7 + 3) & 8'hFF;
     endfunction
@@ -364,7 +369,7 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
 
     integer i, k, idx, first, n_w, n_r, n_busy, n_claimed, mark, steps_before;
     // PANEL_DMA's counters, sampled before each case (docs/GS_CONTROL_PANEL.md R4).
-    reg [7:0] p_dmas0, p_drops0;
+    reg [3:0] p_dmas0, p_drops0;
     reg [1:0] p_out0;
     integer hdr_at, ev_at;
 
@@ -754,8 +759,12 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         push_word(hdr(T_PANEL_DMA, 8'd6, 16'h0000));
         push_word({16'd16, 16'hF100});          // 16 bytes to $F100
         push_word({8'd0, 8'hEF, 16'd0});        // ...of bank $EF, the panel's RAM
+        // A pattern OF ITS OWN: with pat_a here the data check below passed
+        // even with the payload never stored, because what the last disk
+        // block left in the staging buffers WAS pat_a (2026-09-16).  A test
+        // whose expected value is what the bug leaves behind is not a test.
         for (i = 0; i < 4; i = i + 1)
-            push_word({pat_a(4*i+3), pat_a(4*i+2), pat_a(4*i+1), pat_a(4*i)});
+            push_word({pat_p(4*i+3), pat_p(4*i+2), pat_p(4*i+1), pat_p(4*i)});
         // One byte per BUS cycle, and those are ~98 clocks apart: sixteen
         // bytes need a good 1600, not the 400 that first looked like enough
         // and reported four writes.
@@ -773,8 +782,22 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             if (n_w != 16) begin
                 $display("FAIL: %0d panel DMA writes, expected 16", n_w); errors = errors + 1;
             end else $display("  ok: PANEL_DMA wrote 16 bytes to $EF/F100 in order");
-            if (dut.panel_dmas !== p_dmas0 + 8'd1) fail("PANEL_STAT did not count the block");
+            if (dut.panel_dmas !== p_dmas0 + 4'd1) fail("PANEL_STAT did not count the block");
             else $display("  ok: ...counted in panel_dmas");
+            // ...AND THE BYTES ARE THE ONES SENT.  Checking only where the
+            // writes went let a real bug through: the card latched the
+            // address and count, started the DMA and sent 512 bytes of
+            // whatever the last disk block had left in the staging buffers
+            // (2026-09-16).  A DMA test that does not read the data back is
+            // not testing the DMA.
+            k = 0;
+            for (i = 0; i < 16; i = i + 1)
+                if (mem[16'hF100 + i[15:0]] !== pat_p(i)) k = k + 1;
+            if (k != 0) begin
+                $display("FAIL: %0d of 16 panel bytes wrong at $F100 (first $%02x, want $%02x)",
+                         k, mem[16'hF100], pat_p(0));
+                errors = errors + 1;
+            end else $display("  ok: ...and the bytes are the ones the host sent");
             if (dut.outstanding !== p_out0) fail("a PANEL_DMA moved the disk's outstanding count");
             else $display("  ok: ...and `outstanding` never moved - it is not a disk command");
             if (dut.panel_drops !== p_drops0) fail("an accepted PANEL_DMA counted a drop");
@@ -803,9 +826,9 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                     n_w = n_w + 1;
             if (n_w != 0) fail("a second PANEL_DMA landed while the first was draining");
             else $display("  ok: a PANEL_DMA arriving mid-drain writes nothing");
-            if (dut.panel_drops !== p_drops0 + 8'd1) fail("the refused PANEL_DMA was not counted");
+            if (dut.panel_drops !== p_drops0 + 4'd1) fail("the refused PANEL_DMA was not counted");
             else $display("  ok: ...and is counted in panel_drops");
-            if (dut.panel_dmas !== p_dmas0 + 8'd1)
+            if (dut.panel_dmas !== p_dmas0 + 4'd1)
                 fail("the FIRST of the two did not finish");
             else $display("  ok: ...and the one already running finished untouched");
 
@@ -814,7 +837,7 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
             for (i = mark; i < nops; i = i + 1) if (log_ovr[i] && !log_rw[i]) n_w = n_w + 1;
             if (n_w != 0) fail("a //e card took a PANEL_DMA");
             else $display("  ok: a //e refuses PANEL_DMA outright - it has no panel");
-            if (dut.panel_drops !== p_drops0 + 8'd1) fail("the //e did not count the refusal");
+            if (dut.panel_drops !== p_drops0 + 4'd1) fail("the //e did not count the refusal");
             else $display("  ok: ...and counts the refusal");
         end
 

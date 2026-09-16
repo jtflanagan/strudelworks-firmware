@@ -595,6 +595,44 @@ was written. This rung builds the observability and the test, and runs it on the
     which resets that block, and with it the counter the test was checking.
     It now sends a second PANEL_DMA while the first is still draining, which
     is the race the host has to space its replies around anyway.
+  **FOUND ON HARDWARE 2026-09-16: the panel's reply was the last DISK BLOCK.**
+  The first hardware run said "no host is answering" while every counter said
+  otherwise: the service logged `call 1: cmd $01 seq $01 -> status $00`, and
+  PANEL_STAT counted the block written.  What was AT $EF/F100 was a ProDOS
+  directory - "BLANK", the test volume's name.  The cause is this rung's own:
+  a PANEL_DMA latched the address, the count and the bank and started the
+  card's DMA write, but `host_wr` - which stores the host's payload words
+  into the staging buffers - tested `word_done` alone, so the panel's 128
+  data words went nowhere and the DMA faithfully wrote whatever the last disk
+  read had left in those buffers.
+  **The bench had not caught it because it checked WHERE the bytes went, not
+  WHAT they were** - addresses, bank, count, ordering, all correct, all
+  beside the point.  And the first data check added still passed, because it
+  expected `pat_a`, which is what the DISK test writes and therefore exactly
+  what the stale buffers held: *a test whose expected value is what the bug
+  leaves behind is not a test*.  The panel's payload now has a pattern of its
+  own, and the check was confirmed to FAIL without the fix before being
+  trusted (16 of 16 bytes wrong, first $03 where $A5 was sent).
+  Also found on the way: `svc_call`'s wait was `unsigned int`, which is
+  SIXTEEN BITS on this target - the timeout could not be lengthened by
+  raising the constant, because 60000 was already near the type's ceiling.
+  It is a nested count now.
+  **And a cut it forced (2026-09-15).**  The first build of R4 MISSED by two
+  picoseconds - wns -0.002, one endpoint of 98126 - on
+  `g_fronts.u_iline/want_tag_reg[1][4] -> f_reg_reg[2]`, which is nothing R4
+  touched: the design had been at +0.007 and +0.001 on the two builds before
+  it, and R4's logic shifted placement just enough to tip the instruction
+  front's own critical path over.  A miss is not green and does not get
+  loaded, and the chain is now named, so it was cut rather than worked
+  around.  The promote at F_IDLE was doing tag -> `pick` -> `p_tag` -> ARRAY
+  INDEX -> `f_reg`: a late mux choosing an INDEX and only then reading.  All
+  four tag sources are registers, so `p_reg_sel` reads the CAM row four ways
+  at once and the late signals choose between four-bit RESULTS - identical by
+  construction, since `p_tag[2:0]` is exactly the selected source's low bits,
+  and the same late-select that worked for the microcode's dual-arm fetch
+  (docs/UCODE816.md).  Only that field: the other three latched on that line
+  are not on the failing path and reading them four ways would cost more than
+  it buys.
 
 **R5 — host GsPanelService**
 - `src/gs_panel_service.{hpp,cpp}`: detection in the decode loop after `mem_.apply(e)`

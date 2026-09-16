@@ -278,8 +278,8 @@ module card_link #(
     // (docs/GS_CONTROL_PANEL.md R2).
     input  wire [7:0]  mem_rom_xland,
     // The panel's DMA counts (docs/GS_CONTROL_PANEL.md R4).
-    input  wire [7:0]  panel_dmas,
-    input  wire [7:0]  panel_drops,
+    input  wire [3:0]  panel_dmas,
+    input  wire [3:0]  panel_drops,
     input  wire [31:0] gs_adb_stat,     // GS_ADB_STAT (rtl/gs_adb.sv), zero on a IIe
     input  wire [31:0] gs_clock_stat,   // GS_CLOCK_STAT (rtl/gs_clock.sv stat), zero on a IIe
     input  wire [31:0] cnt_core_cyc,    // ACCEL_CORE_CYC: core cycles as vbeam counts them

@@ -2055,7 +2055,7 @@ module master_top #(
     // `rom_ok` deliberately says nothing about.
     wire [7:0]  rom_xlanded;
     // The panel's DMA, out of the HD card (docs/GS_CONTROL_PANEL.md R4).
-    wire [7:0]  hd_panel_dmas, hd_panel_drops;
+    wire [3:0]  hd_panel_dmas, hd_panel_drops;
     // CS2: the loader's acks to card_link, its sum, and the start hold back.
     wire [31:0] rl_word;
     wire        rl_valid, rl_take;

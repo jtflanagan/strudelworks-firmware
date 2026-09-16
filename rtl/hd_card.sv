@@ -127,9 +127,13 @@ module hd_card #(
     output wire [7:0]  ovr_wdata,
 
     // PANEL_DMA's own counts: blocks written for the panel, and messages
-    // dropped because this card was busy with a disk when one arrived.
-    output logic [7:0] panel_dmas,
-    output logic [7:0] panel_drops,
+    // dropped because this card was busy with a disk when one arrived.  FOUR
+    // BITS each, wrapping: these are diagnostics - "it is happening" and
+    // "the host is not spacing its replies" - not data anything depends on,
+    // and the design has no timing margin to spend on counters (the R4 build
+    // missed by 2 ps).
+    output logic [3:0] panel_dmas,
+    output logic [3:0] panel_drops,
 
     // A claimed READ cycle and the byte to emit.  Registered at op_present.
     output logic       rd_claim,
@@ -324,7 +328,7 @@ module hd_card #(
             done_evt  <= 1'b0;
             fetch_evt <= 1'b0;
             panel_evt <= 1'b0;
-            panel_drops <= 8'd0;
+            panel_drops <= 4'd0;
         end else begin
             done_evt  <= 1'b0;
             fetch_evt <= 1'b0;
@@ -349,7 +353,7 @@ module hd_card #(
                 // counted so a host that keeps missing can be told.
                 if (hdr_panel && !panel_ok) begin
                     rx_type     <= 8'd0;
-                    panel_drops <= panel_drops + 8'd1;
+                    panel_drops <= panel_drops + 4'd1;
                 end
                 // A ROM message is only a ROM if it is the whole ROM.
                 if (hdr_rom && msg_len != 8'd64) rx_type <= 8'd0;
@@ -454,7 +458,14 @@ module hd_card #(
     // ---- buffer writes -----------------------------------------------------------
     // One writer at a time per bank: the host's word, or a captured byte.
     wire        cap      = (st == S_DMA_R) && op_commit && in_flight;
-    wire        host_wr  = word_done && (rx_idx >= 8'd2) && (rx_idx < 8'd130);
+    // The host's bytes into the staging buffers - an HD_DONE's, and a
+    // PANEL_DMA's, which carries its payload the same way and is written out
+    // by the same DMA.  MISSING THE PANEL HERE cost an evening: the card
+    // latched the panel reply's address and count, started the write, and
+    // sent 512 bytes of whatever the last DISK BLOCK had left in these
+    // buffers - a ProDOS directory, landing where the panel was waiting for
+    // its answer (2026-09-16).
+    wire        host_wr  = (word_done || word_panel) && (rx_idx >= 8'd2) && (rx_idx < 8'd130);
     wire [6:0]  host_idx = rx_idx[6:0] - 7'd2;
     wire [6:0]  waddr    = host_wr ? host_idx : cidx[8:2];
 
@@ -485,7 +496,7 @@ module hd_card #(
             to_cnt      <= '0;
             widx        <= 10'd0;
             panel_run   <= 1'b0;
-            panel_dmas  <= 8'd0;
+            panel_dmas  <= 4'd0;
         end else begin
             // The port.  A write arms; an armed read executes, saturating at
             // three outstanding, which no driver reaches.
@@ -538,7 +549,7 @@ module hd_card #(
                             st <= S_IDLE;
                             if (panel_run) begin
                                 panel_run  <= 1'b0;
-                                panel_dmas <= panel_dmas + 8'd1;
+                                panel_dmas <= panel_dmas + 4'd1;
                             end else begin
                                 outstanding <= outstanding - 2'd1;
                             end
