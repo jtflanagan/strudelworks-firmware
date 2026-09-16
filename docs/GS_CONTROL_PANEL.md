@@ -574,6 +574,28 @@ was written. This rung builds the observability and the test, and runs it on the
   request → doorbell → poll → copy reply to $E0/0400; bench host model answers like its
   HD_DONE model; repeat with an `--hdv` boot to prove HD `outstanding` untouched.
 
+- **BUILT 2026-09-15, sim-green.**  PANEL_DMA is type $33, taken by `hd_card`
+  and written with the DMA it already has: the same payload shape as an
+  HD_DONE's, the same seam, and nothing new into the machine's memory.  It is
+  NOT a disk command - `outstanding` never moves - and the card takes one only
+  at GS = 1, only while the core owns the bus, only with that card idle and
+  nothing of the disk's in flight.  Refused, it is consumed whole (so its
+  words cannot be read as the next message's) and counted; PANEL_STAT
+  (0x8000_0160 - the plan's 0x154 had been taken by GS_CLOCK since) carries
+  {drops, blocks}.  $34 is reserved for the panel's bell and not decoded.
+  Tested in `sim/hd_card_tb.sv`, which already runs twice - as a //e and as a
+  IIgs - so the refusal on a //e and the acceptance on a IIgs are the same
+  test run two ways.
+  **Two things found building it:**
+  - *The state machine was held in reset unless the HD CARD was enabled* - a
+    slot assigned AND its ROM loaded.  A panel reply could never have been
+    written on a machine configured with `hd = off`, which has nothing to do
+    with the panel.  It now runs whenever a IIgs core owns the bus.
+  - *The first refusal test forced the refusal by dropping `master_active`* -
+    which resets that block, and with it the counter the test was checking.
+    It now sends a second PANEL_DMA while the first is still draining, which
+    is the race the host has to space its replies around anyway.
+
 **R5 — host GsPanelService**
 - `src/gs_panel_service.{hpp,cpp}`: detection in the decode loop after `mem_.apply(e)`
   (pipeline.cpp:~4070) on a write to $EF/FFF0 → copy $EF/F000-F0FF from `mem_` → worker →
@@ -587,6 +609,27 @@ was written. This rung builds the observability and the test, and runs it on the
   needs send), CMakeLists test registration (:158-169). `tests/gs_panel_test.cpp`: fake
   mirror, bad sum, LIST paging on a temp dir, SET classes. HW: panel shows HELLO's version.
 
+- **BUILT 2026-09-15, sim-green.**  The panel writes its request to $EF/F000
+  and rings $EF/FFF0; both are ordinary writes and the card sends them in
+  order, so the request is in the mirror before the doorbell and is read
+  straight out of the image - no round trip, nothing to wait for.  The answer
+  is one PANEL_DMA of 512 bytes to $EF/F100, written in address order, so the
+  LAST byte to land is the sequence at $EF/F2FF.  That byte is the entire
+  handshake.  Replies are offered one at a time and only while
+  `HdService::idle()`, because the card refuses one that lands on a busy card.
+  `GsPanelService` knows nothing of Pipeline - every question is a callback -
+  so `tests/gs_panel_test.cpp` drives it with a fake and no card, link or
+  machine.  Beyond the happy path it pins: a bad checksum is answered BADSUM
+  rather than acted on; **a doorbell rung twice for one sequence re-sends the
+  answer but does NOT do the work again**, so a lost reply can never move a
+  setting twice; and a refused change comes back with the item as it really
+  is and the reason, which is what the panel shows.
+  The panel's half is `sdk/svc.c`: build, sum, ring, and poll the sequence
+  byte with a BOUNDED wait - a host that is not there is not fatal, the panel
+  says so and the stock panel is still one Return away.  The runner's doorbell
+  now models the service instead of echoing the request, and `suite gs` runs
+  the real image against it (`gspanel_svc`).
+
 **R6 — the real pages**
 - Disks: fd1/fd2 LIVE via `apply_floppies` (pipeline.cpp:2119); hd1 AT RESET via
   `hd_svc_->request_image` + reset (hd_service.cpp:132-135 swap rule).
@@ -597,6 +640,24 @@ was written. This rung builds the observability and the test, and runs it on the
 - An item is done only with its row in `tools/gs_cp_test.sh` green: set it from our panel by
   keys, check the effect on the machine (`status`, mirror, `screen`), the conf write-back, and
   that it survives the reset path its class promises.
+
+- **BUILT 2026-09-15, sim-green.**  The panel's page is the host's rows and
+  then its own two (Standard Control Panel, Quit).  **Every row prints WHEN it
+  bites** - "now", "at the next reset", "when swhost restarts" - beside the
+  value, because which one it is cannot be guessed from the setting's name,
+  and a panel that changes something without saying when is worse than none.
+  Left and right step a choice: the host is TOLD, and answers with the item as
+  it now really is, which is what the panel draws - never what it asked for.
+  A refusal comes back with the reason and is printed.  The rows so far:
+  Speed (the accelerator's target, live), Monitor and Scan lines (live, the
+  host's own), Floating bus (live; a IIgs refuses "watched" - the //e
+  backplane cannot answer for the GS's memory), Hard disk 1 (at the next
+  reset, chosen from the disk directory), Save to the conf, Apply now.
+  `suite gs` walks it: `gspanel_set` presses Right twice and checks the panel
+  shows the value the MODEL sent back.
+  Also fixed: `firmware/gspanel/build.sh` reported the first `.text` line of
+  the map as the image size, so adding code read as a SHRINK from 1307 bytes
+  to 706.  It prints the real extents now.
 
 **Later (not in this plan's scope)**: slot cards mb/u2/printer (latch at RES' + GS_BRAM
 rebuilt — needs a BRAM resend and a swhost self-restart: BUS_ENABLE 0, `execv`); fd35 runtime

@@ -196,8 +196,29 @@ static void doorbell(unsigned char seq) {
         // One word, because the suite's expectation is matched as a word.
         static const char v[] = "simhost";
         for (unsigned i = 0; v[i]; i++) mem[0xEFF100 + i] = (unsigned char)v[i];
-        mem[0xEFF100 + 48] = 7;                    // items
+        mem[0xEFF100 + 48] = 2;                    // items
         mem[0xEFF2FE] = 0x00;
+    } else if (cmd == 0x02 || cmd == 0x03) {       // GET_ITEM / SET_ITEM
+        // Two rows, enough to walk and to change: one live, one that waits
+        // for a reset, and a SET the model REMEMBERS - so the panel can be
+        // seen drawing what it was told rather than what it asked for.
+        static unsigned char choice[2] = {0, 0};
+        const unsigned char idx = mem[0xEFF005];
+        if (idx > 1) {
+            mem[0xEFF2FE] = 0x03;                  // BADARG
+        } else {
+            if (cmd == 0x03) choice[idx] = mem[0xEFF006] & 3;
+            static const char* names[2] = {"Speed", "Hard disk 1"};
+            static const char* vals[2][4] = {{"MAX", "1X", "2X", "4X"},
+                                             {"none", "one.po", "two.po", "three.po"}};
+            for (unsigned i = 0; names[idx][i]; i++) mem[0xEFF100 + i] = (unsigned char)names[idx][i];
+            const char* vv = vals[idx][choice[idx]];
+            for (unsigned i = 0; vv[i]; i++) mem[0xEFF100 + 24 + i] = (unsigned char)vv[i];
+            mem[0xEFF100 + 48] = idx == 0 ? 0 : 1; // class: now / at the next reset
+            mem[0xEFF100 + 49] = 4;                // choices
+            mem[0xEFF100 + 50] = choice[idx];
+            mem[0xEFF2FE] = 0x00;
+        }
     } else {
         for (unsigned i = 0; i < 0x100; i++) mem[0xEFF100 + i] = mem[0xEFF000 + i];
         mem[0xEFF2FE] = 0x00;
