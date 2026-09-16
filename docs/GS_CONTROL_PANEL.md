@@ -886,9 +886,17 @@ timing out a second after the reset can reach the card.  `hd_test` 179/179.  The
 takes a cheap runtime (`crt_env`: bank and stack, no copy/clear) since it runs every tick; the MCP
 server has `mouse_at`.
 
-*Next:* a banded selection and a keyboard cursor in the list; the ladder's nda row could add the
-restart (it needs a second GS/OS image on the Pi, `system6.hdv` is there); SEI or a second mailbox
-against the CDA interrupting an NDA call
+*THE LIST'S CURSOR (the same night):* Up/Down walk the drive rows and then the list, the row under
+the cursor banded in both; Return on a name asks for it (the star still marks what is in the drive);
+a click on a drive row moves the cursor there, on a name asks for it; [ ] page with the cursor kept on
+the names.  On the IIgs: six Downs from the hard disk row banded `bustest.dsk` in the 5.25" drive
+2's list, Return put it in the drive (`floppy : drive 2 <- bustest.dsk`).  The ladder's nda row
+now also does the restart: Right to `system6.hdv` (pending), R R, "restart asked", GS/OS up from
+the other disk, then back to the copy for the removal.
+
+*Next:* SEI or a second mailbox against the CDA interrupting an NDA call; the 5.25" drives could
+take GS/OS's eject too where a volume is mounted (a Disk II has no eject to speak of, so the host's
+is what there is)
 (a window with a drive pop-up, the image list from the host's `kPanelList`, Insert/Eject; 3.5"
 eject through GS/OS's own driver — `DControl` — before the host swaps the image; the hard disk
 as "choose and restart"); a second mailbox or SEI around the ROM-side routines so the CDA cannot
