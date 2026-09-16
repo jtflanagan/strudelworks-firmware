@@ -5,7 +5,12 @@ the track goes home as `T_FD35_DIRTY`, and the host denibblizes it back into the
 protect is now the FILE's or a virtual tab's (`fd35_wp`, and the Control Panel's
 W), where it used to be the constant `true` that stood for "writes are not built".
 `sim/run_gs_iwm_write_tb.sh` and `fd35_test` both cover it; `suite gs` 18/18, host
-tests 43/43.
+tests 43/43.  **ON HARDWARE (bit gs_fd35hs, MET +0.006/+0.056):** ProDOS's
+`CREATE /WRTST/FOO` on the 3.5" volume changed the image file, every sector of the three
+written tracks decoded, the directory entry is in the FILE (read on the Pi, not the
+machine), `FOO` survives a swhost restart that re-reads the image, and with `fd35_wp = on`
+the same CREATE answers WRITE PROTECTED with the file unchanged.  It took two fixes the
+benches could not see - "Why the first 3.5" writes reached nothing" below.
 Previous status: 2026-09-14, branch `woz_support`, UNCOMMITTED.  **THE IWM'S 5.25" DRIVES
 ARE BIT STREAMS**, the Disk II card's engine and protocol (docs/FLOPPY.md "The track
 as bits"): quarter-track heads, a bit platter per drive on the disk's own cell, the
@@ -127,6 +132,44 @@ holds open (the fence moves the file, and an open descriptor follows the inode).
 A track whose seq this host never answered is dropped, and a protected disk takes
 nothing - not the file, and not the track in RAM either, so the next fill is the
 disk as it really is.
+
+## Why the first 3.5" writes reached nothing (2026-09-16)
+
+On hardware, ProDOS's `CREATE` on the 3.5" volume returned success, the file never appeared
+and the image never changed.  Two separate faults, found in order, and neither visible to the
+benches that existed:
+
+1. **The host threw the written tracks away.**  `link_parser.cpp` forwards card->host messages
+   to `on_other` only for the types on an explicit list, and `FD35_DIRTY` (0x37) and
+   `FD35_EJECT` (0x38) were never added - so both went to `default` and were dropped.  The card's
+   own `FD35_WSTAT` said 255+ writes, 255+ landed, six tracks sent home; the service counted
+   none arriving.  Every test of the write-back passed, because they called
+   `Fd35Service::on_dirty` directly and never went through the parser.  And the status line's
+   `unk=` - which read 0 - counts the OTHER direction (messages the card did not recognise);
+   the host parser's own unknown count was shown nowhere.  Now: both types are routed,
+   `link_test` feeds every card->host type through the parser framed as the card frames it (and
+   was verified to fail without the fix), and an unrouted card message is counted
+   (`unrouted=`/`unroutedlast=`) and logged the first time as DROPPED.
+
+2. **Nothing paced the ROM's write loop.**  With the tracks arriving, the service counted three
+   written and the file still did not change.  Diffing each returned track against the fill it
+   came from showed the rewritten data field with about one byte in four missing and everything
+   after it closed up - so the field did not decode, and the decoder skipped it (by design)
+   while writing the untouched sectors back unchanged:
+
+       was: B2 9F F4 D9 ED DF 9F BF BE A7 DD AB AB F7 DD AB BE ED DD AB F9 D6
+       now: B2 9F F4    ED DF 9F    BE A7 DD AB    F7 DD    BE ED DD    F9 D6
+
+   The ROM writes by polling the IWM's write HANDSHAKE and loading the moment bit 7 says the
+   register is ready; the real IWM holds it not-ready until the byte has shifted out.  This card
+   answered a constant `$80` - always ready - so the ROM wrote about five bytes into every four
+   44.8-cycle slots.  The bench had never seen it because its own writes were spaced at exactly
+   one slot, which is the very pacing the ROM leaves to the IWM.  Now, on the 3.5" side, bit 7
+   is `!w35_busy`: set by an accepted load, cleared when the slot turns over (or the write or the
+   platter stops).  The bench writes the way the ROM does - poll, load, no spacing of its own -
+   and was run on the OLD RTL first, where it failed exactly as the hardware did ("22 of 24
+   handshake-paced bytes did not follow the one before into the next slot (0 polls)"); on the
+   new, 24 bytes land one per slot in 960 polls.
 
 ## Why
 

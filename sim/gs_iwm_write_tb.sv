@@ -170,6 +170,27 @@ module gs_iwm_write_tb;
         end
     endtask
 
+    // A 3.5" write THE WAY THE ROM DOES IT: poll the write handshake ($C0EC
+    // with Q7 set) until bit 7 says the register is ready, then load - no
+    // spacing of its own at all.  The real IWM is what paces the ROM to one
+    // byte per slot; `write35` above paced ITSELF at one slot per write, which
+    // is exactly what hid the card's constant "ready" (2026-09-16: on
+    // hardware about one byte in four of every rewritten sector was lost).
+    integer paced_polls = 0;
+    task write35_paced(input [7:0] b);
+        integer pp;
+        begin
+            pp = 0;
+            op(Q6L, 1'b1, 8'd0);                    // read the handshake
+            while (!din[7] && pp < 400) begin
+                op(Q6L, 1'b1, 8'd0);
+                pp = pp + 1;
+            end
+            paced_polls = paced_polls + pp;
+            op(Q6H, 1'b0, b);                       // STA $C0ED: the load
+        end
+    endtask
+
     // Every bit that lands in the buffer, and the first position of a burst.
     integer wgos = 0, first_w = -1;
     always @(posedge clk) if (!rst && dut.w_go) begin
@@ -770,7 +791,7 @@ module gs_iwm_write_tb;
         // head, and the track goes home as T_FD35_DIRTY - the fill's shape in
         // the other direction.
         begin : d35
-            integer b35, want_at, bad35, ch, hdr, words_seen, n_ch, exp_len;
+            integer b35, want_at, bad35, ch, hdr, words_seen, n_ch, exp_len, p0;
             reg [7:0] got35 [0:NIB35-1];
             build35;
             // The 5.25" side goes quiet: motor off, then the 3.5" selected.
@@ -824,6 +845,33 @@ module gs_iwm_write_tb;
                     end
                 end
                 if (errors == k) $display("  ok: eight bytes land in eight slots under the head, one per slot");
+
+                // --- ...and paced by the IWM, as the ROM writes --------------
+                k = errors;
+                op(Q6H, 1'b1, 8'd0); op(Q7H, 1'b1, 8'd0);
+                // The record of the eight spaced writes is KEPT: the upload
+                // check below compares the whole track against every write.
+                paced_polls = 0;
+                p0 = w35s;
+                for (i = 0; i < 24; i = i + 1) write35_paced(data15[i % 15]);
+                op(Q7L, 1'b1, 8'd0);
+                bad35 = 0;
+                for (i = p0 + 1; i < w35s && i < 64; i = i + 1)
+                    if (w35_at[i] !== ((w35_at[i - 1] + 1) % NIB35)) bad35 = bad35 + 1;
+                if (w35s - p0 != 24) begin
+                    $display("FAIL: %0d of 24 handshake-paced 3.5\" bytes landed", w35s - p0); errors = errors + 1;
+                end else if (bad35 != 0) begin
+                    $display("FAIL: %0d of 24 handshake-paced bytes did not follow the one before into the next slot (%0d polls)",
+                             bad35, paced_polls);
+                    errors = errors + 1;
+                end
+                if (paced_polls == 0) begin
+                    $display("FAIL: the handshake never said NOT ready - nothing paces the ROM");
+                    errors = errors + 1;
+                end
+                if (errors == k)
+                    $display("  ok: 24 bytes written as fast as the handshake allows land one per slot (%0d polls)",
+                             paced_polls);
 
                 // --- the written track goes home ------------------------------
                 // The motor stopping ends the buffer's claim.
@@ -902,8 +950,8 @@ module gs_iwm_write_tb;
                             $display("FAIL: %0d nibbles of the returned 3.5\" track are wrong", bad35);
                             errors = errors + 1;
                         end else begin
-                            $display("  ok: %0d chunks carry the track back, the eight written slots changed and %0d others not",
-                                     CHUNKS35, NIB35 - 8);
+                            $display("  ok: %0d chunks carry the track back, the %0d written slots changed and %0d others not",
+                                     CHUNKS35, w35s, NIB35 - w35s);
                         end
                     end
                 end

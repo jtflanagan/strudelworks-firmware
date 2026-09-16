@@ -482,6 +482,7 @@ module gs_iwm #(
     logic        w35_pend;
     logic [7:0]  w35_byte;
     logic [13:0] w35_pos;
+    logic        w35_busy;          // the write register is full: the handshake says not ready
 
     // A bit to write: a read-modify-write of its byte from a window copy, held
     // until a window has the word (two clocks at most; a cell is four cycles).
@@ -838,7 +839,16 @@ module gs_iwm #(
                                            : 8'hFF;
                 2'b01:   rd_byte = status_byte;
                 // Bit 6 is the write underrun, clear with nothing writing.
-                2'b10:   rd_byte = enable2 ? handshake : 8'h80;
+                // The write handshake.  On the 3.5" side bit 7 is REAL: not
+                // ready from a load until the slot under the head turns over.
+                // That is what paces the ROM's write loop to one byte per slot
+                // - it polls this and loads the moment it reads ready - and a
+                // constant $80 let it write about 5 bytes into every 4 slots,
+                // so one byte in four of every rewritten sector was lost and
+                // no written sector decoded (2026-09-16, on hardware).
+                2'b10:   rd_byte = enable2     ? handshake
+                                 : apple35_sel ? {!w35_busy, 7'h00}
+                                 :               8'h80;
                 default: rd_byte = 8'h00;
             endcase
         end
@@ -997,6 +1007,7 @@ module gs_iwm #(
             wpend_pos   <= 16'd0;
             wpend_drive <= 1'b0;
             w35_pend    <= 1'b0;
+            w35_busy    <= 1'b0;
             w35_byte    <= 8'd0;
             w35_pos     <= 14'd0;
             w35_loads   <= 8'd0;
@@ -1013,10 +1024,15 @@ module gs_iwm #(
             // that writes faster than the platter turns overwrites the same
             // slot, which is what a real drive does to a disk too.
             if (w35_go || (w35_pend && !w35_ok) || d35_leave) w35_pend <= 1'b0;
+            // Busy from an accepted load until the slot turns over (or the
+            // write ends): set here, in the block that takes the load, and
+            // cleared here too - one register, one block.
+            if (complete || !spinning || !q7) w35_busy <= 1'b0;
             if (load35) begin
                 if (w35_loads != 8'hFF) w35_loads <= w35_loads + 8'd1;
                 if (writing35) begin
                     w35_pend <= 1'b1;
+                    w35_busy <= 1'b1;
                     w35_byte <= op_wdata;
                     w35_pos  <= pos;
                 end else begin
