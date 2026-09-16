@@ -274,6 +274,9 @@ module card_link #(
     input  wire        mem_rom_busy,
     input  wire [31:0] mem_rom_sum,     // the loader's sum of every first landing (CS2)
     input  wire [7:0]  mem_rom_over,
+    // The card's extended ROM: absolute chunks drained whole
+    // (docs/GS_CONTROL_PANEL.md R2).
+    input  wire [7:0]  mem_rom_xland,
     input  wire [31:0] gs_adb_stat,     // GS_ADB_STAT (rtl/gs_adb.sv), zero on a IIe
     input  wire [31:0] gs_clock_stat,   // GS_CLOCK_STAT (rtl/gs_clock.sv stat), zero on a IIe
     input  wire [31:0] cnt_core_cyc,    // ACCEL_CORE_CYC: core cycles as vbeam counts them
@@ -1194,6 +1197,7 @@ module card_link #(
         .mem_rom_busy      (mem_rom_busy),
         .mem_rom_sum       (mem_rom_sum),
         .mem_rom_over      (mem_rom_over),
+        .mem_rom_xland     (mem_rom_xland),
         .gs_adb_stat       (gs_adb_stat),
         .gs_clock_stat     (gs_clock_stat),
         .cnt_core_cyc      (cnt_core_cyc), .cnt_bus_cyc (cnt_bus_cyc),

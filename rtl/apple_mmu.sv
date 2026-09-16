@@ -218,6 +218,15 @@ module apple_mmu #(
     // Where a read of an unpopulated bank lands.  One page, write-protected,
     // so the ROM's memory sizing finds no memory there twice running.
     parameter logic [7:0] GS_VOID_BANK = 8'hFB,
+    // THE CARD'S OWN BANKS, which no IIgs has (docs/GS_CONTROL_PANEL.md):
+    // our 65816 panel's code lives in $E2-$EE, read-only and identity-mapped
+    // like the ROM, and its RAM in $EF.  Both are carved out of what would
+    // otherwise be void.  Safe to take: the ROM's memory sizing stops at $80
+    // and never looks up here, $F0 is left alone as the ROM-disk convention,
+    // and ROM 3 probes $F8 for "ROMTOOLS" - neither is in this range.
+    parameter logic [7:0] GS_XROM_LO   = 8'hE2,
+    parameter logic [7:0] GS_XROM_HI   = 8'hEE,
+    parameter logic [7:0] GS_XRAM_BANK = 8'hEF,
     // CYAREG's POWER-ON value (KEGS moremem.c:61 and sim65816.c:714): bit 7
     // is the speed bit, set, and bit 6 is the POWER-ON STATUS BIT, which a
     // ROM 3 sets at startup and reads back to tell a cold start from a warm
@@ -642,9 +651,15 @@ module apple_mmu #(
     function automatic gs_rom(input [7:0] bk);
         gs_rom = (bk >= GS_ROM_BASE);
     endfunction
-    // Everything that is neither a pair, nor the ROM, nor populated RAM.
+    // The card's extended ROM: $E2-$EE, ours, not the machine's.
+    function automatic gs_xrom(input [7:0] bk);
+        gs_xrom = (bk >= GS_XROM_LO) && (bk <= GS_XROM_HI);
+    endfunction
+    // Everything that is neither a pair, nor the ROM, nor the card's own
+    // banks, nor populated RAM.
     function automatic gs_void(input [7:0] bk);
-        gs_void = !gs_pair(bk) && !gs_rom(bk) && (bk >= GS_RAM_BANKS[7:0]);
+        gs_void = !gs_pair(bk) && !gs_rom(bk) && !gs_xrom(bk) &&
+                  (bk != GS_XRAM_BANK) && (bk >= GS_RAM_BANKS[7:0]);
     endfunction
 
     function automatic [3:0] region(input [7:0] pg);
@@ -1003,15 +1018,32 @@ module apple_mmu #(
                     // $FC-$FF (ROM 3) or $FE-$FF (ROM 01): the ROM, itself.
                     r = R_RAM; cls = CLS_ROM; wr = 1'b0; fs = 1'b1; fold = 1'b0;
                     sh = 1'b0; bank = va[23:16]; pg = va[15:8];
+                end else if (gs_xrom(va[23:16])) begin
+                    // $E2-$EE: the card's extended ROM, itself, read-only.
+                    // The panel is fetched from here and nothing writes it.
+                    r = R_RAM; cls = CLS_ROM; wr = 1'b0; fs = 1'b1; fold = 1'b0;
+                    sh = 1'b0; bank = va[23:16]; pg = va[15:8];
                 end else if (gs_void(va[23:16])) begin
-                    // A bank with no RAM behind it.  Reads answer from one
+                    // A bank with no RAM behind it.  Reads answer from ONE
                     // write-protected page, writes land nowhere - so the
                     // ROM's memory sizing finds the memory that exists and
                     // stops there.
+                    //
+                    // ONE page, which is what KEGS does and what this
+                    // comment always said: every unpopulated page there
+                    // points at the same 256-byte dummy (moremem.c's
+                    // BANK_BAD_MEM).  This passed va[15:8] through instead,
+                    // so a void read answered from bank $FB at the page the
+                    // machine named - 256 different pages, none of them the
+                    // host mirror's, which folded to $FB00 and was right.
+                    // Folding also keeps every void read on one cache line
+                    // rather than scattering it over the bank.
                     r = R_RAM; cls = CLS_RAM; wr = 1'b0; fs = 1'b1; fold = 1'b0;
-                    sh = 1'b0; bank = GS_VOID_BANK; pg = va[15:8];
+                    sh = 1'b0; bank = GS_VOID_BANK; pg = 8'd0;
                 end else begin
-                    // $02-$7F: ordinary RAM, its own bank, no switch on it.
+                    // $02-$7F, and $EF - the panel's RAM, which is a bank
+                    // like any other and written like one: ordinary RAM, its
+                    // own bank, no switch on it.
                     // Shadowing is banks $00/$01's alone; $C036 bit 4's
                     // shadow-in-all-banks is not built (docs/GS.md, later).
                     r = R_RAM; cls = CLS_RAM; wr = !rw; fs = 1'b1; fold = 1'b0;
@@ -1355,12 +1387,15 @@ module apple_mmu #(
         end else if (gs_void(op_bank)) pf_bank = GS_VOID_BANK;
         else                          pf_bank = op_bank;
     end
-    assign     pf_ppn     = {pf_bank, pf_pg};
+    // ...and the void's page folds here too, or the shallow path would name
+    // a page xlate does not (the assertion below is what says so).
+    wire [7:0] pf_pg_sel = (GS && gs_void(op_bank)) ? 8'd0 : pf_pg;
+    assign     pf_ppn     = {pf_bank, pf_pg_sel};
 `ifndef SYNTHESIS
     always_ff @(posedge clk) begin
-        if (!rst && op_present && {pf_bank, pf_pg} !== n_ppn)
+        if (!rst && op_present && {pf_bank, pf_pg_sel} !== n_ppn)
             $error("apple_mmu: the shallow ppn $%04X differs from xlate's $%04X at %02X/%04X rw=%0d",
-                   {pf_bank, pf_pg}, n_ppn, op_bank, op_addr, op_rw);
+                   {pf_bank, pf_pg_sel}, n_ppn, op_bank, op_addr, op_rw);
     end
 `endif
 

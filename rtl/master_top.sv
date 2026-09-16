@@ -551,6 +551,7 @@ module master_top #(
         .mem_rom_busy   (rom_busy),
         .mem_rom_sum    (rom_sum),
         .mem_rom_over   (rom_overruns), .mem_shd_drops (mem_shd_drops),
+        .mem_rom_xland  (rom_xlanded),
         .gs_adb_stat    (gsio_adb_stat),
         .gs_clock_stat  (gs_clk_stat),
         .cnt_core_cyc   (cnt_core_cyc), .cnt_bus_cyc (cnt_bus_cyc),
@@ -2010,7 +2011,11 @@ module master_top #(
     // landing for the host to compare.
     rom_loader #(.N_CHUNKS (GS ? 512 : 32),
                  .ROM_PPN0 (GS ? 16'hFC00 : 16'hFFC0),
-                 .REQUIRE_HOLD (1'b1)) u_rom (
+                 .REQUIRE_HOLD (1'b1),
+                 // The card's extended ROM, banks $E2-$EE: a IIgs build only
+                 // (docs/GS_CONTROL_PANEL.md R2).  A IIe refuses an absolute
+                 // chunk outright - it has no such banks to put one in.
+                 .ABS_EN (GS)) u_rom (
         .hold        (start_hold_pending),
         .ack_word    (rl_word),
         .ack_valid   (rl_valid),
@@ -2032,6 +2037,7 @@ module master_top #(
         .pw_take     (pw_take_w && !pw_valid_w),
         .busy        (rom_busy),
         .overruns    (rom_overruns),
+        .xlanded     (rom_xlanded),
         .rom_ok      (mem_rom_loaded)
     );
 
@@ -2044,6 +2050,9 @@ module master_top #(
     wire [7:0]  rl_pw_off, rl_pw_data;
     wire        rom_busy;
     wire [7:0]  rom_overruns;
+    // Absolute chunks drained whole: the extended ROM's own count, which
+    // `rom_ok` deliberately says nothing about.
+    wire [7:0]  rom_xlanded;
     // CS2: the loader's acks to card_link, its sum, and the start hold back.
     wire [31:0] rl_word;
     wire        rl_valid, rl_take;
@@ -2366,27 +2375,40 @@ module master_top #(
     // registers it then writes go out on the bus unanswered, and the host
     // draws the picture from its mirror of auxiliary memory.  See
     // rtl/vidhd_card.sv and docs/VIDHD.md.
-    vidhd_card u_vidhd (
-        .clk           (apple_clk),
-        .rst           (apple_rst),
-        .res_sync      (apple_res_sync),
-        .master_active (cpu_source_active),
-        .slot_assign   (vidhd_slot_active),
-        .op_addr       (op_addr),
-        .op_rw         (op_rw),
-        .op_present    (op_present),
-        .op_commit     (op_commit),
-        .op_ovr        (op_ovr),
-        .rd_claim      (vidhd_rd_claim),
-        .rd_data       (vidhd_rd_data),
-        .msg_valid     (app_msg_valid),
-        .msg_type      (app_msg_type),
-        .msg_free      (app_msg_free),
-        .msg_len       (app_msg_len),
-        .pay_data      (app_pay_data),
-        .pay_valid     (app_pay_valid),
-        .rom_loaded    (vidhd_rom_loaded)
-    );
+    //
+    // NOT BUILT ON A IIgs (user, 2026-09-15; docs/GS_CONTROL_PANEL.md).  A
+    // VidHD is a card that gives a IIe the IIgs's video registers and Super
+    // Hi-Res; a IIgs has a VGC and its software knows it.  The host refuses
+    // the key outright at machine = iigs, so the card would never be
+    // assigned a slot anyway - building it there only puts another claim
+    // term in the slot read mux below, which is on the read path.
+    generate if (!GS) begin : g_vidhd
+        vidhd_card u_vidhd (
+            .clk           (apple_clk),
+            .rst           (apple_rst),
+            .res_sync      (apple_res_sync),
+            .master_active (cpu_source_active),
+            .slot_assign   (vidhd_slot_active),
+            .op_addr       (op_addr),
+            .op_rw         (op_rw),
+            .op_present    (op_present),
+            .op_commit     (op_commit),
+            .op_ovr        (op_ovr),
+            .rd_claim      (vidhd_rd_claim),
+            .rd_data       (vidhd_rd_data),
+            .msg_valid     (app_msg_valid),
+            .msg_type      (app_msg_type),
+            .msg_free      (app_msg_free),
+            .msg_len       (app_msg_len),
+            .pay_data      (app_pay_data),
+            .pay_valid     (app_pay_valid),
+            .rom_loaded    (vidhd_rom_loaded)
+        );
+    end else begin : g_no_vidhd
+        assign vidhd_rd_claim   = 1'b0;
+        assign vidhd_rd_data    = 8'd0;
+        assign vidhd_rom_loaded = 1'b0;
+    end endgenerate
 
     // ---- the Mockingboard ---------------------------------------------------
     // Two VIAs answering for an empty slot, and since docs/AUDIO.md the AYs'

@@ -57,7 +57,18 @@ module rom_loader #(
     // while `hold` says the machine is held for the startup checklist - the
     // ROM never lands under a running machine.  0 (the benches that drive the
     // loader directly): never refused for that.
-    parameter bit          REQUIRE_HOLD = 1'b0
+    parameter bit          REQUIRE_HOLD = 1'b0,
+    // THE CARD'S EXTENDED ROM (docs/GS_CONTROL_PANEL.md R2).  A MEM_ROM whose
+    // first word has bit 31 set is an ABSOLUTE chunk: its low 16 bits are the
+    // physical page the 512 bytes land on, rather than an index counted from
+    // ROM_PPN0.  That is how our 65816 panel gets into banks $E2-$EE without
+    // a second message type, a second seam, or any change to the base ROM's
+    // completeness check - an absolute chunk is NOT one of the `seen` and
+    // never satisfies `rom_ok`; it is counted on its own in `xlanded`.
+    // ABS_EN off (a IIe) refuses them outright.
+    parameter bit          ABS_EN = 1'b0,
+    parameter logic [7:0]  ABS_LO = 8'hE2,
+    parameter logic [7:0]  ABS_HI = 8'hEE
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -82,6 +93,7 @@ module rom_loader #(
     output wire        busy,          // draining: the host waits on this
     output logic [7:0] overruns,      // chunks dropped because one was draining
     output wire        rom_ok,        // all 32 chunks have landed whole
+    output logic [7:0] xlanded,       // absolute chunks drained whole
 
     // The start hold (rtl/start_hold.sv): the machine is held.
     input  wire        hold,
@@ -104,7 +116,8 @@ module rom_loader #(
                      ST_OVERRUN   = 4'd1,   // arrived while a chunk was draining
                      ST_NOT_HELD  = 4'd2,   // the machine is running: refused
                      ST_BAD_LEN   = 4'd3,   // not {chunk} + 128 words
-                     ST_BAD_INDEX = 4'd4;   // chunk number past the ROM
+                     ST_BAD_INDEX = 4'd4,   // chunk number past the ROM
+                     ST_BAD_PPN   = 4'd5;   // an absolute chunk outside $E2-$EE
 
     localparam integer CHUNK_WORDS = 128;      // 128 words = 512 bytes a chunk
     localparam integer CW = $clog2(N_CHUNKS);  // bits of chunk index
@@ -128,6 +141,11 @@ module rom_loader #(
     logic [8:0] dr_k;              // the byte being drained, 0..511
     logic       draining;
     logic [CW-1:0] dr_chunk;
+    // An absolute chunk's landing page, registered at msg_end beside dr_chunk.
+    logic          abs_q;      // ...the message being staged is absolute
+    logic [15:0]   abs_ppn_q;
+    logic          dr_abs;
+    logic [15:0]   dr_ppn;
 
     // Clocks since the last op, saturating: 0..WIN is the safe window, and
     // the saturated value means the machine has stopped presenting at all.
@@ -150,7 +168,10 @@ module rom_loader #(
     // chunk number and the top bit of the byte index, counted from the base.
     wire [CW:0] dr_page = {dr_chunk, dr_k[8]};
     assign pw_valid = draining && image_ready && in_window;
-    assign pw_ppn   = ROM_PPN0 + {{(15 - CW){1'b0}}, dr_page};
+    // A chunk is two pages either way; an absolute one counts from the page
+    // the host named instead of from ROM_PPN0.
+    assign pw_ppn   = dr_abs ? (dr_ppn + {15'd0, dr_k[8]})
+                             : (ROM_PPN0 + {{(15 - CW){1'b0}}, dr_page});
     assign pw_off   = dr_k[7:0];
     assign pw_data  = dr_word[8 * dr_k[1:0] +: 8];
     assign busy     = draining;
@@ -227,6 +248,11 @@ module rom_loader #(
             dr_k     <= 9'd0;
             dr_chunk <= '0;
             overruns <= 8'd0;
+            xlanded  <= 8'd0;
+            abs_q    <= 1'b0;
+            abs_ppn_q <= 16'd0;
+            dr_abs   <= 1'b0;
+            dr_ppn   <= 16'd0;
             rej      <= 1'b0;
             rej_status <= ST_OK;
             dr_sum   <= '0;
@@ -254,6 +280,7 @@ module rom_loader #(
                 end
                 rx_idx  <= 8'd0;
                 rx_left <= msg_len;
+                abs_q   <= 1'b0;
             end else if (rx_word) begin
                 rx_idx  <= rx_idx + 8'd1;
                 rx_left <= rx_left - 8'd1;
@@ -263,7 +290,21 @@ module rom_loader #(
                         ack_raise_status <= rej_status;
                         ack_raise_chunk  <= pay_data[11:0];
                         rej              <= 1'b0;
-                    end else if (pay_data[31:CW] != '0) begin
+                    end else if (pay_data[31]) begin
+                        // ABSOLUTE: the low 16 bits are the landing page.
+                        // Refused unless this build has the card's extended
+                        // ROM and the page is inside it - a stray absolute
+                        // chunk must not be able to write anywhere else.
+                        if (!ABS_EN || pay_data[15:8] < ABS_LO || pay_data[15:8] > ABS_HI) begin
+                            rx_type          <= 8'd0;
+                            ack_raise        <= 1'b1;
+                            ack_raise_status <= ST_BAD_PPN;
+                            ack_raise_chunk  <= pay_data[11:0];
+                        end else begin
+                            abs_q     <= 1'b1;
+                            abs_ppn_q <= pay_data[15:0];
+                        end
+                    end else if (pay_data[30:CW] != '0) begin
                         // Past the ROM: stop staging this one.
                         rx_type          <= 8'd0;
                         ack_raise        <= 1'b1;
@@ -281,15 +322,26 @@ module rom_loader #(
                 draining <= 1'b1;
                 dr_k     <= 9'd0;
                 dr_chunk <= chunk;
+                dr_abs   <= abs_q;
+                dr_ppn   <= abs_ppn_q;
                 dr_sum   <= '0;
             end else if (draining && pw_take) begin
                 if (dr_k == 9'd511) begin
                     draining       <= 1'b0;
-                    seen[dr_chunk] <= 1'b1;
-                    if (!seen[dr_chunk]) rom_sum <= rom_sum + {15'd0, dr_sum_last};
+                    // An absolute chunk satisfies nothing: `seen` and
+                    // `rom_sum` are the BASE ROM's completeness, and
+                    // `rom_ok` must mean that and only that.  It is counted
+                    // on its own, and acked with its sum like any other so
+                    // the host can check the bytes it sent.
+                    if (dr_abs) begin
+                        xlanded <= xlanded + 8'd1;
+                    end else begin
+                        seen[dr_chunk] <= 1'b1;
+                        if (!seen[dr_chunk]) rom_sum <= rom_sum + {15'd0, dr_sum_last};
+                    end
                     ack_raise        <= 1'b1;
                     ack_raise_status <= ST_OK;
-                    ack_raise_chunk  <= 12'(dr_chunk);
+                    ack_raise_chunk  <= dr_abs ? dr_ppn[11:0] : 12'(dr_chunk);
                     ack_raise_sum    <= dr_sum_last[15:0];
                 end else begin
                     dr_k   <= dr_k + 9'd1;

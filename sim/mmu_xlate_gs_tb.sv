@@ -176,19 +176,30 @@ module mmu_xlate_gs_tb;
         logic [7:0]  pg, bank;
         logic [1:0]  cls;
         logic        wr, fs, fold, sh, side, pair, isrom, isvoid, mega, odd;
+        logic        isxrom, isxram;
         begin
             pg = a[15:8];
             r  = m_region(pg);
             pair   = (bk == 8'h00) || (bk == 8'h01) || (bk == 8'hE0) || (bk == 8'hE1);
             isrom  = (bk >= 8'hFC);
-            isvoid = !pair && !isrom && (bk >= 8'd128);
+            // The CARD's own banks (docs/GS_CONTROL_PANEL.md): the panel's
+            // code in $E2-$EE, read-only and itself, and its RAM in $EF,
+            // which is a bank like any other.  Neither is void.
+            isxrom = (bk >= 8'hE2) && (bk <= 8'hEE);
+            isxram = (bk == 8'hEF);
+            isvoid = !pair && !isrom && !isxrom && !isxram && (bk >= 8'd128);
             mega   = bk[7];      // $E0/$E1 of the pair
             odd    = bk[0];
             sh = 1'b0; fold = 1'b0; bank = bk; pg = a[15:8];
 
             if (!pair) begin
                 if (isrom)       begin cls = CLS_ROM; wr = 1'b0;  fs = 1'b1; bank = bk;      end
-                else if (isvoid) begin cls = CLS_RAM; wr = 1'b0;  fs = 1'b1; bank = 8'hFB;   end
+                else if (isxrom) begin cls = CLS_ROM; wr = 1'b0;  fs = 1'b1; bank = bk;      end
+                // ONE page: KEGS points every unpopulated page at the same
+                // 256-byte dummy (moremem.c BANK_BAD_MEM), and the host's
+                // mirror folds to $FB00 the same way.
+                else if (isvoid) begin cls = CLS_RAM; wr = 1'b0;  fs = 1'b1; bank = 8'hFB;
+                                       pg = 8'd0;                            end
                 else             begin cls = CLS_RAM; wr = !rw;   fs = 1'b1; bank = bk;      end
             end else if (shadow[6] && !mega && r >= R_IO && r <= R_LCE) begin
                 // The I/O and language-card inhibit, banks $00/$01 only.
@@ -371,12 +382,17 @@ module mmu_xlate_gs_tb;
 
     // The banks worth sweeping: both pairs, the RAM either side of the
     // populated edge, the void, and the ROM's first and last.
-    localparam int NBK = 12;
+    localparam int NBK = 17;
     logic [7:0] banks [0:NBK-1];
     initial begin
         banks[0]=8'h00; banks[1]=8'h01; banks[2]=8'h02; banks[3]=8'h10;
         banks[4]=8'h7F; banks[5]=8'h80; banks[6]=8'hC0; banks[7]=8'hE0;
         banks[8]=8'hE1; banks[9]=8'hFB; banks[10]=8'hFC; banks[11]=8'hFF;
+        // The card's own, and the banks either side of them that must NOT
+        // change: $DF still void, $E2 and $EE the ends of the extended ROM,
+        // $EF the panel's RAM, $F0 void again (the ROM-disk convention).
+        banks[12]=8'hDF; banks[13]=8'hE2; banks[14]=8'hEE;
+        banks[15]=8'hEF; banks[16]=8'hF0;
         sl_v[0]=8'h00; sl_v[1]=8'hFF; sl_v[2]=8'h52;
     end
 

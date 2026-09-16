@@ -36,17 +36,18 @@ module rom_loader_tb;
     reg [31:0] pay_data = 32'd0;
     wire       pw_valid, busy, rom_ok, ack_valid;
     wire [15:0] pw_ppn;
-    wire [7:0]  pw_off, pw_data, overruns;
+    wire [7:0]  pw_off, pw_data, overruns, xlanded;
     wire [31:0] ack_word, rom_sum;
 
-    rom_loader #(.N_CHUNKS (N), .ROM_PPN0 (16'hFFC0), .REQUIRE_HOLD (1'b1)) dut (
+    rom_loader #(.N_CHUNKS (N), .ROM_PPN0 (16'hFFC0), .REQUIRE_HOLD (1'b1),
+                 .ABS_EN (1'b1), .ABS_LO (8'hE2), .ABS_HI (8'hEE)) dut (
         .clk (clk), .rst (rst),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
         .op_present (1'b0), .image_ready (1'b1),
         .pw_valid (pw_valid), .pw_ppn (pw_ppn), .pw_off (pw_off), .pw_data (pw_data),
         .pw_take (pw_valid),
-        .busy (busy), .overruns (overruns), .rom_ok (rom_ok),
+        .busy (busy), .overruns (overruns), .xlanded (xlanded), .rom_ok (rom_ok),
         .hold (hold), .ack_word (ack_word), .ack_valid (ack_valid), .ack_take (ack_valid),
         .rom_sum (rom_sum)
     );
@@ -69,6 +70,22 @@ module rom_loader_tb;
     // ---- drained bytes, counted ---------------------------------------------
     integer drained = 0;
     always @(posedge clk) if (pw_valid) drained = drained + 1;
+    // ...and WHERE they landed, for the absolute chunks: the first and last
+    // page and offset seen since the marker was cleared, so a chunk can be
+    // checked to have gone to the two pages the host named and no others.
+    integer   seam_n = 0;
+    reg [15:0] seam_ppn_first, seam_ppn_last;
+    reg [7:0]  seam_off_first, seam_off_last, seam_data_first;
+    always @(posedge clk) if (pw_valid) begin
+        if (seam_n == 0) begin
+            seam_ppn_first  <= pw_ppn;
+            seam_off_first  <= pw_off;
+            seam_data_first <= pw_data;
+        end
+        seam_ppn_last <= pw_ppn;
+        seam_off_last <= pw_off;
+        seam_n = seam_n + 1;
+    end
 
     // ---- acks, collected ------------------------------------------------------
     integer n_acks = 0;
@@ -130,8 +147,24 @@ module rom_loader_tb;
               "not held: refused, acked NOT_HELD naming chunk 3");
         check(drained == 0 && !rom_ok, "...and nothing drained");
 
-        // 2. held: the whole ROM
+        // 1b. AN ABSOLUTE CHUNK BEFORE THE BASE ROM IS WHOLE (the card's
+        //     extended ROM, docs/GS_CONTROL_PANEL.md R2).  It lands, and
+        //     rom_ok stays FALSE: the panel's banks satisfy nothing that the
+        //     start hold waits on.  Tested here because once the ROM below
+        //     has loaded, rom_ok is true for its own good reason and this
+        //     property can no longer be seen.
         hold = 1'b1;
+        n0 = n_acks; seam_n = 0;
+        send(5, 129, 32'h8000_E200);
+        wait_ack(n0);
+        check(ack_status(last_payload) == 4'd0 && seam_n == 512,
+              "an absolute chunk lands before the base ROM is whole");
+        check(!rom_ok, "...and rom_ok stays false: an absolute chunk satisfies nothing");
+        check(xlanded == 8'd1 && rom_sum == 32'd0,
+              "...counted in xlanded, absent from rom_sum");
+        drained = 0;        // below counts the BASE ROM's own bytes
+
+        // 2. held: the whole ROM
         bad = 0; total = 32'd0;
         for (c = 0; c < N; c = c + 1) begin
             n0 = n_acks;
@@ -175,6 +208,49 @@ module rom_loader_tb;
         check(ack_status(last_payload) == 4'd0 && ack_sum(last_payload) == 16'(chunk_sum(9)),
               "a chunk sent again after landing: acked OK with its sum");
         check(rom_sum == total, "...and rom_sum does not count it twice");
+
+        // 6. THE CARD'S EXTENDED ROM: an ABSOLUTE chunk (word 0 bit 31), whose
+        //    low sixteen bits are the page it lands on rather than an index
+        //    counted from ROM_PPN0 (docs/GS_CONTROL_PANEL.md R2).
+        n0 = n_acks;
+        total = rom_sum;
+        seam_n = 0;
+        send(5, 129, 32'h8000_E200);
+        wait_ack(n0);
+        check(ack_status(last_payload) == 4'd0, "an absolute chunk: acked OK");
+        check(ack_chunk(last_payload) == 12'h200, "...named by the low twelve bits of its page");
+        check(ack_sum(last_payload) == 16'(chunk_sum(5)), "...with the sum of the bytes sent");
+        check(seam_n == 512, "...512 bytes drained");
+        check(seam_ppn_first == 16'hE200 && seam_off_first == 8'd0,
+              "...starting at $E2/00, offset 0");
+        check(seam_ppn_last == 16'hE201 && seam_off_last == 8'hFF,
+              "...ending at $E2/01, offset $FF - a chunk is two pages");
+        check(seam_data_first == 8'(rom_word(5, 0) & 32'hFF), "...and the first byte is the one sent");
+        check(xlanded == 8'd2, "...counted in xlanded");
+        check(rom_sum == total, "...and it is NOT part of the base ROM's sum");
+
+        //    The far end of the range, and then one past it in both
+        //    directions: an absolute chunk must not be able to write outside
+        //    the card's own banks.
+        n0 = n_acks;
+        seam_n = 0;
+        send(6, 129, 32'h8000_EE7E);
+        wait_ack(n0);
+        check(ack_status(last_payload) == 4'd0 && seam_ppn_first == 16'hEE7E,
+              "the top bank $EE is taken too");
+        check(xlanded == 8'd3, "...and counted");
+        n0 = n_acks;
+        seam_n = 0;
+        send(6, 129, 32'h8000_E100);
+        wait_ack(n0);
+        check(ack_status(last_payload) == 4'd5, "a page below $E2: acked BAD_PPN");
+        check(seam_n == 0, "...and nothing drained");
+        n0 = n_acks;
+        seam_n = 0;
+        send(6, 129, 32'h8000_EF00);
+        wait_ack(n0);
+        check(ack_status(last_payload) == 4'd5, "a page above $EE: acked BAD_PPN");
+        check(seam_n == 0 && xlanded == 8'd3, "...nothing drained, nothing counted");
 
         if (errors == 0) $display("PASS");
         else             $display("FAIL: %0d error(s)", errors);

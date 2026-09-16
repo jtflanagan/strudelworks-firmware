@@ -241,6 +241,9 @@ module wb_regfile #(
     input  wire            mem_rom_busy,    // the ROM load is draining: the host waits
     input  wire [31:0]     mem_rom_sum,     // the sum of every chunk's first landing (CS2)
     input  wire [7:0]      mem_rom_over,    // ...and chunks it had to drop
+    // ABSOLUTE chunks drained whole: the card's extended ROM ($E2-$EE), which
+    // the base ROM's `rom_ok` says nothing about (docs/GS_CONTROL_PANEL.md).
+    input  wire [7:0]      mem_rom_xland,
     input  wire [31:0]     gs_adb_stat,     // GS_ADB_STAT, the ADB micro's mouse path (rtl/gs_adb.sv)
     input  wire [31:0]     gs_clock_stat,   // GS_CLOCK_STAT, the clock chip's state (rtl/gs_clock.sv stat)
     input  wire [31:0]     cnt_core_cyc,    // ACCEL_CORE_CYC (master_top): the plain ratio's numerator
@@ -1103,7 +1106,7 @@ module wb_regfile #(
     // not send the next chunk until they have drained.
     wire [31:0] mem_stat_rd = {mem_fifo_drops, mem_late_fills, mem_rom_loaded,
                                mem_invalidating, mem_intc8rom, mem_image_ready, mem_sw};
-    wire [31:0] mem_rom_rd  = {mem_shd_drops, 8'd0, mem_rom_over, 7'd0, mem_rom_busy};
+    wire [31:0] mem_rom_rd  = {mem_shd_drops, mem_rom_xland, mem_rom_over, 7'd0, mem_rom_busy};
 
     // ---- ACCEL_CTRL ---------------------------------------------------------
     // (ACCEL_STAT, read straight through from the sequencer: [0] accelerating,

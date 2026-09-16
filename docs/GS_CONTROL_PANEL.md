@@ -24,7 +24,8 @@ changes through a service port, chaining to the stock ROM panel for the stock op
   D=0, DBR=0. Chain = JSL to `LDA $00C015 / PHA / JML $FF8FB0`, its RTL returns to us.
   Desk Manager (FE/D467): M=X=1, DBR=0, runs the CDA on page 1 (S≈$01FB, ~200 B free, page 1
   restored after). Boot menu (FF/F915): native M=X=1 from emulation code; after our RTL only S
-  balance + D=0 matter. Self-test checksum bypass as KEGS: 0x36CB0 `D0 02` → `18 18`.
+  balance + D=0 matter. **Self-test checksum: COMPENSATED, not bypassed** (user,
+  2026-09-15) — see R3.
 - **Space**: every void bank ($80-$DF, $E2-$FB) reads physical bank $FB on the card; ROM 3
   probes $F8/0000 for "ROMTOOLS"; $F0 = ROM-disk convention ⇒ use **$E2-$EE ROM, $EF RAM**.
   ROM sizing stops at $80, KEGS maps nothing there.
@@ -438,6 +439,57 @@ was written. This rung builds the observability and the test, and runs it on the
 - Tests: `sim/mmu_xlate_gs_tb.sv` (model :184/:191, add banks $E2/$EE/$EF),
   `tests/gs_memory_test.cpp` (:60-75, :160). Doc: GS.md memory table (~:287).
 
+- **BUILT 2026-09-15, sim-green.**  The map has the card's banks on both
+  sides: $E2-$EE is CLS_ROM, read-only and identity-mapped, $EF is a plain
+  RAM bank written like any other, and both are carved out of what was void,
+  leaving $DF and $F0 void as before - so the ROM's memory sizing, which
+  stops at $80, never meets them, $F0 stays the ROM-disk convention and $F8
+  keeps its "ROMTOOLS" probe.  `sim/mmu_xlate_gs_tb.sv` sweeps five more
+  banks ($DF, $E2, $EE, $EF, $F0) beside the twelve: 3584 maps, 95,108,621
+  checks, 0 mismatches, with `apple_mmu`'s own assertion - the shallow
+  prefetch ppn against xlate's - quiet throughout.  `tests/gs_memory_test.cpp`
+  the same on the host, against the model written the other way round.  Lint
+  clean at GS=0 and GS=1, `suite quick` 33/33, `suite gs` 14/14, host tests
+  41/41.  **BUILT AND LOADED** (fw 2026-09-15 21:04:25, GS bit `master_top_gs`):
+  TIMING MET wns +0.007 whs +0.051 fail 0/98021 - level with the clean-start
+  bit's +0.010, so the read mux the VidHD left is not on the critical path
+  and the tie-off bought nothing measurable.  The machine boots on it and
+  `tools/gs_cp_test.sh` is green over all six rows, which is the regression
+  an RTL change under everything needs; R1 has no positive hardware check of
+  its own, because a read of $E2 proves nothing until R2 puts a ROM there.
+  *The depth tail could not be read honestly here*: `build/depth_baseline.txt`
+  is ONE file shared by the GS and IIe builds, last saved at 12:00, so its
+  "NEW DEEP TAIL: 340 endpoints" compares this build with a baseline from
+  another variant and names nothing.  A per-variant baseline would be needed
+  before that number means anything - NOT done, and flagged to the user.
+  **Two bugs found on the way, both of them silent:**
+  - *MEM_ROM overruns were unreadable.*  `mem_rom_overruns` read [23:16],
+    which the card leaves zero; the count is at [15:8]
+    (`wb_regfile.sv` `mem_rom_rd = {drops, 8'd0, over, 7'd0, busy}`).  So
+    `mem_report` could never say a ROM chunk had been dropped however many
+    the card counted - a diagnostic that had never once been able to fire.
+  - *The void was the CARD's bug, not the host's.*  This plan carried the
+    mismatch as "host one page vs card whole bank $FB" without saying which
+    was right.  KEGS says: `fixup_any_bank_any_page(..., BANK_BAD_MEM,
+    BANK_BAD_MEM)` points every unpopulated page at ONE shared 256-byte
+    dummy (moremem.c).  The host folded to $FB00 and was right; the card
+    passed `va[15:8]` through and answered from 256 different pages of bank
+    $FB - and its own comment said "reads answer from one write-protected
+    page" the whole time.  Now folded to page 0 in both the xlate arm and
+    the shallow prefetch path (they must agree or the `$error` fires), which
+    also keeps every void read on one cache line instead of scattering it.
+    *Neither of these was going to be caught by two models agreeing*: the
+    host's two expressions agreed with each other because both came from the
+    host's idea, and the card's two agreed with each other for the same
+    reason.  It took reading the oracle.
+- **No VidHD on the GS, done.**  `machine = iigs` with any `vidhd` is now a
+  configuration error rather than something honoured downstream
+  (`config_test` +5, 169), so no synthesised ROM, no "Your Card" mark and no
+  VIDHD_SLOT can follow from it; the SHR path already asked the machine and
+  not the card (`vidhd_on_ || cfg_.iigs`).  On the card `vidhd_card` is no
+  longer built at GS=1 at all - one fewer claim term in the slot read mux,
+  which is on the read path.
+
 **R2 — extended ROM load**
 - `rtl/rom_loader.sv`: MEM_ROM word 0 bit 31 = absolute chunk `{1,15'd0,ppn16}` (no `seen`
   change, counts `xlanded` into MEM_ROM_STAT [23:16]); register `dr_ppn` at msg_end. No new
@@ -447,12 +499,63 @@ was written. This rung builds the observability and the test, and runs it on the
   pipeline.cpp:1268-1331, check the `xlanded` delta, `AppleMemory::load_ext_rom` beside
   `load_gs_rom` (apple_memory.cpp:459).
 - Bench: `boot_gs_tb` with XROM params sending absolute chunks. HW: MCP `peek E20000` = "SWCP".
+
+- **BUILT 2026-09-15, sim-green.**  A MEM_ROM whose first word has BIT 31 set
+  is an ABSOLUTE chunk: its low sixteen bits are the physical page its 512
+  bytes land on, instead of an index counted from the loader's base.  No
+  second message type, no second seam, and nothing about the base ROM moves -
+  an absolute chunk is not one of the `seen`, never joins `rom_sum`, and
+  **never satisfies `rom_ok`**, which is what the start hold waits on.  It is
+  counted on its own in `xlanded`, which lands in MEM_ROM_STAT's [23:16] -
+  the field the host was wrongly reading as overruns until R1 fixed it.
+  Refusals are the CARD's, not only the host's: a page outside $E2-$EE, or
+  any absolute chunk at all on a IIe build (`ABS_EN` off), is acked BAD_PPN
+  and lands nothing.
+  *Host*: a `gs_xrom = PATH` key, IIgs only (a IIe has no bank $E2 to put it
+  in); the file read as whole 512-byte chunks and given to the mirror so a
+  `peek` of $E2/0000 can answer; and the send placed BEFORE the machine's own
+  ROM, so `rom_ok` is the last thing to become true.  The acked retry loop is
+  NOT duplicated - it came out of the startup path into
+  `Pipeline::send_rom_chunks`, so both ROMs get identical retry, timeout and
+  sum checking - and the load is verified against the card's `xlanded` delta.
+  *One bank for now*, $E2, though the map reserves $E2-$EE: `xlanded` is
+  eight bits, 64 KB is exactly 128 chunks, and a bigger panel would wrap the
+  counter and make the delta check a lie.  Widen the counter with the range.
+  *Tests*: `sim/rom_loader_tb.sv` - an absolute chunk lands at the page named,
+  spans exactly the two pages, is acked with the sum of the bytes sent and
+  named by the low twelve bits of its page, counts in `xlanded`, stays out of
+  `rom_sum`, and **leaves `rom_ok` false** (checked before the base ROM is
+  whole, which is the only place that property can still be seen); $EE taken,
+  $E1 and $EF refused.  Lint clean GS=0/GS=1, `suite quick` 33/33, `suite gs`
+  14/14, host tests pass.
 - Measure the Nox map + desktop census at unlimited before/after (64 KB = 2 more pages per
   cache set; expected one-off eviction flushes, not a standing loss).
 
 **R3 — ROM patch + panel v0 on hardware**
+- **The self-test checksum is COMPENSATED, not bypassed** (user, 2026-09-15).
+  The plan used to copy KEGS and patch the test out (0x36CB0 `D0 02` →
+  `18 18`).  That disables a real integrity check for the life of the
+  machine, and it is not necessary.  MEASURED, the routine and the numbers
+  both: FF/6CCC is a 16-bit `ADC` sum with the carry chained, walking every
+  even offset of each of banks $FC-$FF (`LDY #$FFFF`, `ADC ($FD),Y`, Y -= 2,
+  the last word at 0), and FF/6CAD compares the total against a CONSTANT,
+  `CMP #$1234`.  **The stock ROM 3 sums to exactly $1234** - Apple built it
+  to hit that - so the patched image can be made to hit it too.  Proven in
+  Python over the real file: patching FF/8FAC to `5C 0C 00 E2` takes the sum
+  to $A223; writing $7010 into one spare word restores it to $1234, and the
+  ROM then passes its own self-test with the test itself untouched.  Two
+  iterations to converge, because a changed word can change how many carries
+  the chain makes.
+  *Open*: WHICH spare word.  The demonstration used 0x35400, inside a
+  650-byte run of $00 in bank $FF, on the assumption that a run that long is
+  padding - likely, but not shown.  Either establish that nothing reads it,
+  or find the ROM's own correction word (there must be one: the sum did not
+  come to $1234 by luck).  The correction is a single word wherever it goes,
+  so moving it is free.
 - `src/gs_rom_patch.{hpp,cpp}`: table `{addr, old[], new[], why}`; verify every old byte, apply
-  all or none, refuse ROM 01; JML target from the ext ROM header, no header ⇒ no patch. Call
+  all or none, refuse ROM 01; JML target from the ext ROM header, no header ⇒ no patch.
+  The checksum correction is computed from the patched image, not hard-coded:
+  a table entry whose value is "whatever makes the sum $1234 again". Call
   site pipeline.cpp:786-791 between `load_gs_rom_file` and `mem_.load_gs_rom`; unpatched copy
   sent if the ext load fails. Fix the stale "NO PATCH" comment (fd_service.cpp:447) and GS.md.
 - Panel v0: a two-item menu (Standard Control Panel / Quit), plus entry S/D/P logged to EF:F3xx.
