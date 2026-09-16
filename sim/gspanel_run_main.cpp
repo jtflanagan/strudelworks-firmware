@@ -173,13 +173,36 @@ static std::string screen_text() {
     return s;
 }
 
-// ---- the doorbell: echo the request as the reply --------------------------
+// ---- the doorbell: a small model of the host's service ---------------------
+// Enough of src/gs_panel_service.cpp to exercise the panel's side: the
+// checksum is checked as the host checks it, HELLO is answered with a version
+// the test can look for on the screen, and anything else is echoed (which is
+// what this did before there was a service at all).  The status and then the
+// sequence go in last, in that order, because that is the order the card's
+// DMA writes them and the sequence is the panel's only handshake.
 static unsigned long long bells = 0;
+static unsigned long long bad_sums = 0;
 static void doorbell(unsigned char seq) {
     bells++;
-    for (unsigned i = 0; i < 0x100; i++) mem[0xEFF100 + i] = mem[0xEFF000 + i];
-    mem[0xEFF2FE] = 0x00;          // status: ok
-    mem[0xEFF2FF] = seq;           // the completion byte, last
+    const unsigned char cmd = mem[0xEFF002];
+    const unsigned n = mem[0xEFF003] | (unsigned(mem[0xEFF004]) << 8);
+    unsigned sum = 0;
+    for (unsigned i = 0; i < 5 + n; i++) sum += mem[0xEFF000 + i];
+    for (unsigned i = 0; i < 0x200; i++) mem[0xEFF100 + i] = 0;
+    if ((sum & 0xFF) != mem[0xEFF005 + n]) {
+        bad_sums++;
+        mem[0xEFF2FE] = 0x01;                      // BADSUM: the panel resends
+    } else if (cmd == 0x01) {                      // HELLO
+        // One word, because the suite's expectation is matched as a word.
+        static const char v[] = "simhost";
+        for (unsigned i = 0; v[i]; i++) mem[0xEFF100 + i] = (unsigned char)v[i];
+        mem[0xEFF100 + 48] = 7;                    // items
+        mem[0xEFF2FE] = 0x00;
+    } else {
+        for (unsigned i = 0; i < 0x100; i++) mem[0xEFF100 + i] = mem[0xEFF000 + i];
+        mem[0xEFF2FE] = 0x00;
+    }
+    mem[0xEFF2FF] = seq;           // the completion byte, LAST
 }
 
 // ---- registers --------------------------------------------------------------

@@ -53,6 +53,7 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     localparam [7:0] T_HD_FETCH = 8'h1A;
     localparam [7:0] T_HD_DATA  = 8'h1B;
     localparam [7:0] T_BUS_EVENTS = 8'h12;
+    localparam [7:0] T_PANEL_DMA  = 8'h33;   // docs/GS_CONTROL_PANEL.md R4
 
     localparam [15:0] EXEC  = 16'hC0F0;     // slot 7's EXECUTE port
     localparam [15:0] SLOTROM = 16'hC700;
@@ -362,6 +363,9 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     endfunction
 
     integer i, k, idx, first, n_w, n_r, n_busy, n_claimed, mark, steps_before;
+    // PANEL_DMA's counters, sampled before each case (docs/GS_CONTROL_PANEL.md R4).
+    reg [7:0] p_dmas0, p_drops0;
+    reg [1:0] p_out0;
     integer hdr_at, ev_at;
 
     initial begin
@@ -735,6 +739,85 @@ module hd_card_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         mem[16'hFFFC] = 8'h00; mem[16'hFFFD] = 8'hF0;          // the vector the block overwrote
 
         $display("");
+        // --- PANEL_DMA: the host answering our 65816 panel -----------------------
+        // (docs/GS_CONTROL_PANEL.md R4.)  The same DMA write this card does
+        // for a disk, borrowed by a message that is not a disk command: it
+        // must never touch `outstanding`, must be taken only with this card
+        // idle, and must be refused outright on a //e, which has no panel
+        // and no banks to put one in.
+        while (busy) @(posedge clk);            // whatever ran above is done
+        repeat (40) @(posedge clk);
+        mark = nops;
+        p_dmas0  = dut.panel_dmas;
+        p_drops0 = dut.panel_drops;
+        p_out0   = dut.outstanding;
+        push_word(hdr(T_PANEL_DMA, 8'd6, 16'h0000));
+        push_word({16'd16, 16'hF100});          // 16 bytes to $F100
+        push_word({8'd0, 8'hEF, 16'd0});        // ...of bank $EF, the panel's RAM
+        for (i = 0; i < 4; i = i + 1)
+            push_word({pat_a(4*i+3), pat_a(4*i+2), pat_a(4*i+1), pat_a(4*i)});
+        // One byte per BUS cycle, and those are ~98 clocks apart: sixteen
+        // bytes need a good 1600, not the 400 that first looked like enough
+        // and reported four writes.
+        repeat (2600) @(posedge clk);
+
+        if (GS_DUT != 0) begin
+            n_w = 0; first = -1;
+            for (i = mark; i < nops; i = i + 1)
+                if (log_ovr[i] && !log_rw[i]) begin
+                    if (first < 0) first = i;
+                    if (log_addr[i] !== 16'hF100 + n_w[15:0]) fail("a panel DMA write was out of sequence");
+                    if (log_bank[i] !== 8'hEF) fail("a panel DMA write went to the wrong bank");
+                    n_w = n_w + 1;
+                end
+            if (n_w != 16) begin
+                $display("FAIL: %0d panel DMA writes, expected 16", n_w); errors = errors + 1;
+            end else $display("  ok: PANEL_DMA wrote 16 bytes to $EF/F100 in order");
+            if (dut.panel_dmas !== p_dmas0 + 8'd1) fail("PANEL_STAT did not count the block");
+            else $display("  ok: ...counted in panel_dmas");
+            if (dut.outstanding !== p_out0) fail("a PANEL_DMA moved the disk's outstanding count");
+            else $display("  ok: ...and `outstanding` never moved - it is not a disk command");
+            if (dut.panel_drops !== p_drops0) fail("an accepted PANEL_DMA counted a drop");
+
+            // ...and a SECOND one arriving while the first is still draining
+            // is refused, consumed whole, and counted - never interleaved
+            // into the first one's block.  This is the race the host has to
+            // space its replies around, so it is the one worth testing.
+            mark = nops;
+            p_drops0 = dut.panel_drops;
+            p_dmas0  = dut.panel_dmas;
+            push_word(hdr(T_PANEL_DMA, 8'd6, 16'h0000));
+            push_word({16'd16, 16'hF100});
+            push_word({8'd0, 8'hEF, 16'd0});
+            for (i = 0; i < 4; i = i + 1)
+                push_word({pat_a(4*i+3), pat_a(4*i+2), pat_a(4*i+1), pat_a(4*i)});
+            repeat (300) @(posedge clk);         // it is mid-drain now
+            push_word(hdr(T_PANEL_DMA, 8'd6, 16'h0000));
+            push_word({16'd16, 16'hF200});
+            push_word({8'd0, 8'hEF, 16'd0});
+            for (i = 0; i < 4; i = i + 1) push_word(32'hA5A5_5A5A);
+            repeat (2600) @(posedge clk);
+            n_w = 0;
+            for (i = mark; i < nops; i = i + 1)
+                if (log_ovr[i] && !log_rw[i] && log_addr[i] >= 16'hF200 && log_addr[i] < 16'hF210)
+                    n_w = n_w + 1;
+            if (n_w != 0) fail("a second PANEL_DMA landed while the first was draining");
+            else $display("  ok: a PANEL_DMA arriving mid-drain writes nothing");
+            if (dut.panel_drops !== p_drops0 + 8'd1) fail("the refused PANEL_DMA was not counted");
+            else $display("  ok: ...and is counted in panel_drops");
+            if (dut.panel_dmas !== p_dmas0 + 8'd1)
+                fail("the FIRST of the two did not finish");
+            else $display("  ok: ...and the one already running finished untouched");
+
+        end else begin
+            n_w = 0;
+            for (i = mark; i < nops; i = i + 1) if (log_ovr[i] && !log_rw[i]) n_w = n_w + 1;
+            if (n_w != 0) fail("a //e card took a PANEL_DMA");
+            else $display("  ok: a //e refuses PANEL_DMA outright - it has no panel");
+            if (dut.panel_drops !== p_drops0 + 8'd1) fail("the //e did not count the refusal");
+            else $display("  ok: ...and counts the refusal");
+        end
+
         if (errors == 0) $display("PASS");
         else             $display("FAIL: %0d error(s)", errors);
         $finish;

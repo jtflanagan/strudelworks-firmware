@@ -277,6 +277,9 @@ module card_link #(
     // The card's extended ROM: absolute chunks drained whole
     // (docs/GS_CONTROL_PANEL.md R2).
     input  wire [7:0]  mem_rom_xland,
+    // The panel's DMA counts (docs/GS_CONTROL_PANEL.md R4).
+    input  wire [7:0]  panel_dmas,
+    input  wire [7:0]  panel_drops,
     input  wire [31:0] gs_adb_stat,     // GS_ADB_STAT (rtl/gs_adb.sv), zero on a IIe
     input  wire [31:0] gs_clock_stat,   // GS_CLOCK_STAT (rtl/gs_clock.sv stat), zero on a IIe
     input  wire [31:0] cnt_core_cyc,    // ACCEL_CORE_CYC: core cycles as vbeam counts them
@@ -1198,6 +1201,8 @@ module card_link #(
         .mem_rom_sum       (mem_rom_sum),
         .mem_rom_over      (mem_rom_over),
         .mem_rom_xland     (mem_rom_xland),
+        .panel_dmas        (panel_dmas),
+        .panel_drops       (panel_drops),
         .gs_adb_stat       (gs_adb_stat),
         .gs_clock_stat     (gs_clock_stat),
         .cnt_core_cyc      (cnt_core_cyc), .cnt_bus_cyc (cnt_bus_cyc),

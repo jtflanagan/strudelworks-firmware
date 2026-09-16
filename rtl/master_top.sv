@@ -552,6 +552,7 @@ module master_top #(
         .mem_rom_sum    (rom_sum),
         .mem_rom_over   (rom_overruns), .mem_shd_drops (mem_shd_drops),
         .mem_rom_xland  (rom_xlanded),
+        .panel_dmas     (hd_panel_dmas), .panel_drops (hd_panel_drops),
         .gs_adb_stat    (gsio_adb_stat),
         .gs_clock_stat  (gs_clk_stat),
         .cnt_core_cyc   (cnt_core_cyc), .cnt_bus_cyc (cnt_bus_cyc),
@@ -2053,6 +2054,8 @@ module master_top #(
     // Absolute chunks drained whole: the extended ROM's own count, which
     // `rom_ok` deliberately says nothing about.
     wire [7:0]  rom_xlanded;
+    // The panel's DMA, out of the HD card (docs/GS_CONTROL_PANEL.md R4).
+    wire [7:0]  hd_panel_dmas, hd_panel_drops;
     // CS2: the loader's acks to card_link, its sum, and the start hold back.
     wire [31:0] rl_word;
     wire        rl_valid, rl_take;
@@ -2276,6 +2279,8 @@ module master_top #(
         .ovr_bank      (hd_ovr_bank),
         .ovr_rw        (hd_ovr_rw),
         .ovr_wdata     (hd_ovr_wdata),
+        .panel_dmas    (hd_panel_dmas),
+        .panel_drops   (hd_panel_drops),
         .rd_claim      (hd_rd_claim),
         .rd_data       (hd_rd_data),
         .msg_valid     (app_msg_valid),

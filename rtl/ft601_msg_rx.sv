@@ -89,6 +89,11 @@ module ft601_msg_rx (
     localparam [7:0] T_GS_TIME   = 8'h30;   // rtl/gs_clock.sv
     localparam [7:0] T_FD35_TRACK = 8'h31;  // rtl/gs_iwm.sv (the same lie, 2026-09-12: the
                                             // first IWM bit reported every track it took)
+    // The panel's (docs/GS_CONTROL_PANEL.md R4): the host's reply to a
+    // request our 65816 panel left in its own RAM, carried into the machine
+    // by the HD card's DMA write.  $34 is reserved beside it for the bell
+    // the panel will want and is not decoded yet.
+    localparam [7:0] T_PANEL_DMA = 8'h33;   // rtl/hd_card.sv
 
     logic [7:0] blocks_left = 8'd0;
 
@@ -115,6 +120,7 @@ module ft601_msg_rx (
                      (hdr_type == T_PRINTER_ROM) ||
                      (hdr_type == T_GS_BRAM)    || (hdr_type == T_ADB_KEY)   ||
                      (hdr_type == T_GS_TIME)    || (hdr_type == T_FD35_TRACK) ||
+                     (hdr_type == T_PANEL_DMA)  ||
                      (hdr_type == T_LINK_RESET);
 
     always_ff @(posedge clk) begin

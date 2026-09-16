@@ -84,7 +84,16 @@ module hd_card #(
     parameter [7:0] T_HD_ROM   = 8'h18,
     parameter [7:0] T_HD_DONE  = 8'h19,
     parameter [7:0] T_HD_FETCH = 8'h1A,
-    parameter [7:0] T_HD_DATA  = 8'h1B
+    parameter [7:0] T_HD_DATA  = 8'h1B,
+    // PANEL_DMA (docs/GS_CONTROL_PANEL.md R4): how the host answers our
+    // 65816 panel.  The panel writes a request into its own RAM and rings a
+    // doorbell; the host, which sees every write, composes the reply and puts
+    // it back with one of these.  It is the SAME payload and the same DMA
+    // write this card already does for an HD_DONE - there is no second seam
+    // into the machine's memory and no reason to build one - but it is not a
+    // disk command: it never touches `outstanding`, and it is taken only
+    // when this card has nothing of its own in flight.
+    parameter [7:0] T_PANEL_DMA = 8'h33
 ) (
     input  wire        clk,
     // The CARD's reset: clears the ROM, the buffer and the size latch.
@@ -116,6 +125,11 @@ module hd_card #(
     output wire [7:0]  ovr_bank,        // the DMA buffer's bank; 0 on a //e
     output wire        ovr_rw,
     output wire [7:0]  ovr_wdata,
+
+    // PANEL_DMA's own counts: blocks written for the panel, and messages
+    // dropped because this card was busy with a disk when one arrived.
+    output logic [7:0] panel_dmas,
+    output logic [7:0] panel_drops,
 
     // A claimed READ cycle and the byte to emit.  Registered at op_present.
     output logic       rd_claim,
@@ -229,6 +243,16 @@ module hd_card #(
     wire word_done  = rx_word && (rx_type == T_HD_DONE);
     wire word_fetch = rx_word && (rx_type == T_HD_FETCH);
 
+    // A PANEL_DMA is taken only on a IIgs, only while the soft core owns the
+    // bus, only with this card idle, and only with no disk command
+    // outstanding - so it can never land in the middle of one or move the
+    // status a SmartPort call is about to read.  Refused, it is consumed to
+    // the end (its words must not be mistaken for the next message's) and
+    // counted.
+    wire hdr_panel  = rx_hdr && (msg_type == T_PANEL_DMA);
+    wire word_panel = rx_word && (rx_type == T_PANEL_DMA);
+    wire panel_ok;                 // ...assigned below, where `st` exists
+
     // What a DMA has been told: base address, byte count, and the status the
     // command ends with.  `size` is the size-in-blocks latch for $C0n9/$C0nA.
     logic [15:0] dma_base;
@@ -280,6 +304,11 @@ module hd_card #(
     state_t st;
 
     wire accept = busy && (st == S_IDLE);
+    assign panel_ok = (GS != 0) && master_active && (st == S_IDLE) && (outstanding == 2'd0);
+    // The panel's DMA is running, so the end of S_DMA_W must not decrement a
+    // disk command's count - there is no disk command.
+    logic panel_run;
+    logic panel_evt;               // a PANEL_DMA is complete
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -294,9 +323,12 @@ module hd_card #(
             size      <= 16'd0;
             done_evt  <= 1'b0;
             fetch_evt <= 1'b0;
+            panel_evt <= 1'b0;
+            panel_drops <= 8'd0;
         end else begin
             done_evt  <= 1'b0;
             fetch_evt <= 1'b0;
+            panel_evt <= 1'b0;
 
             if (timed_out) status <= 8'h51;     // error $28, no device connected
 
@@ -312,6 +344,13 @@ module hd_card #(
                     if (msg_len == 8'd0) done_evt <= 1'b1;
                 end
                 if ((hdr_done || hdr_fetch) && !accept) rx_type <= 8'd0;
+                // A PANEL_DMA this card cannot take now: consumed to the end
+                // so its words are not read as the next message's, and
+                // counted so a host that keeps missing can be told.
+                if (hdr_panel && !panel_ok) begin
+                    rx_type     <= 8'd0;
+                    panel_drops <= panel_drops + 8'd1;
+                end
                 // A ROM message is only a ROM if it is the whole ROM.
                 if (hdr_rom && msg_len != 8'd64) rx_type <= 8'd0;
             end else if (rx_word) begin
@@ -329,6 +368,18 @@ module hd_card #(
                         dma_bank <= pay_data[23:16];   // spare, until now
                     end
                     if (rx_last) done_evt <= 1'b1;
+                end
+                if (word_panel) begin
+                    // [0] = {count, addr}, [1] = {bank, 0}: the same words an
+                    // HD_DONE carries, minus the size latch, which is the
+                    // disk's and must not move for a panel reply.
+                    if (rx_idx == 8'd0) begin
+                        dma_base  <= pay_data[15:0];
+                        dma_count <= clamp512(pay_data[31:16]);
+                    end else if (rx_idx == 8'd1) begin
+                        dma_bank  <= pay_data[23:16];
+                    end
+                    if (rx_last) panel_evt <= 1'b1;
                 end
                 if (word_fetch) begin
                     if (rx_idx == 8'd0) begin
@@ -415,8 +466,16 @@ module hd_card #(
     end
 
     // ---- the state machine -------------------------------------------------------
+    // Live for the HD card when it is enabled - and on a IIgs whenever the
+    // soft core owns the bus, WHETHER OR NOT THERE IS A HARD DISK.  The
+    // panel's DMA borrows this state machine (docs/GS_CONTROL_PANEL.md R4),
+    // and `enabled` also wants a slot and a loaded HD ROM: held in reset by
+    // those, a panel reply could never be written on a machine configured
+    // with `hd = off`, which has nothing to do with the panel.
+    wire fsm_live = enabled || ((GS != 0) && master_active);
+
     always_ff @(posedge clk) begin
-        if (cpu_rst || !enabled) begin
+        if (cpu_rst || !fsm_live) begin
             st          <= S_IDLE;
             armed       <= 1'b0;
             outstanding <= 2'd0;
@@ -425,6 +484,8 @@ module hd_card #(
             in_flight   <= 1'b0;
             to_cnt      <= '0;
             widx        <= 10'd0;
+            panel_run   <= 1'b0;
+            panel_dmas  <= 8'd0;
         end else begin
             // The port.  A write arms; an armed read executes, saturating at
             // three outstanding, which no driver reaches.
@@ -441,7 +502,16 @@ module hd_card #(
 
             case (st)
                 S_IDLE: begin
-                    if (done_evt) begin
+                    if (panel_evt) begin
+                        // The panel's reply into the machine's memory.  No
+                        // command is outstanding and none is created: this
+                        // borrows the write path and nothing else.
+                        if (dma_count != 10'd0) begin
+                            pidx      <= 10'd0;
+                            panel_run <= 1'b1;
+                            st        <= S_DMA_W;
+                        end
+                    end else if (done_evt) begin
                         // The oldest outstanding command is answered.  With
                         // bytes to move the core is paused first; the count
                         // drops when the last has gone out, so the port stays
@@ -465,8 +535,13 @@ module hd_card #(
                     if (ours && dma_w_active) begin
                         pidx <= pidx + 10'd1;
                         if (pidx == dma_count - 10'd1) begin
-                            st          <= S_IDLE;
-                            outstanding <= outstanding - 2'd1;
+                            st <= S_IDLE;
+                            if (panel_run) begin
+                                panel_run  <= 1'b0;
+                                panel_dmas <= panel_dmas + 8'd1;
+                            end else begin
+                                outstanding <= outstanding - 2'd1;
+                            end
                         end
                     end
                 end
