@@ -1,4 +1,12 @@
-Status: 2026-09-14, branch `woz_support`, UNCOMMITTED.  **THE IWM'S 5.25" DRIVES
+Status: 2026-09-16, branch `gs_control_panel`.  **THE 3.5" DRIVE WRITES** - see
+"The 3.5" drive writes" below: the machine's byte lands in the slot under the head,
+the track goes home as `T_FD35_DIRTY`, and the host denibblizes it back into the
+800K image, writing only the sectors that really decoded.  The drive's write
+protect is now the FILE's or a virtual tab's (`fd35_wp`, and the Control Panel's
+W), where it used to be the constant `true` that stood for "writes are not built".
+`sim/run_gs_iwm_write_tb.sh` and `fd35_test` both cover it; `suite gs` 18/18, host
+tests 43/43.
+Previous status: 2026-09-14, branch `woz_support`, UNCOMMITTED.  **THE IWM'S 5.25" DRIVES
 ARE BIT STREAMS**, the Disk II card's engine and protocol (docs/FLOPPY.md "The track
 as bits"): quarter-track heads, a bit platter per drive on the disk's own cell, the
 logic state sequencer for reads, a bit per cell for writes after a load, the host's
@@ -78,6 +86,47 @@ GS/OS itself from a floppy.  The chip and the drive are `rtl/gs_iwm.sv`
 host's `src/fd35_service.cpp`, with `src/fd35_nibble.cpp` making the tracks.
 The reference is KEGS 1.38's `iwm.c`, function for function; the bench is
 `sim/run_boot_gs_tb.sh --fd35=IMAGE`.
+
+## The 3.5" drive writes (2026-09-16)
+
+The 5.25" drives on this IWM are bit streams; the 3.5" drive keeps its NIBBLE
+engine, and that makes its write the simpler of the two.  A slot is a whole
+nibble, not a cell, so there is no read-modify-write, no window to wait for and
+no bit position to compute: the machine's load puts the byte into the slot under
+the head, addressed from `pos` exactly as the 3.5" read already addresses it.
+
+- **The load** is `load35`: a data write (Q7 and Q6 set after the touch, the
+  motor on) with the 3.5" side selected and NOT under ENABLE2 - ENABLE2 is the
+  drive's action and status protocol, never data.
+- **The landing rule is the 5.25" side's in this drive's terms** (`w35_ok`): the
+  buffer must hold a 3.5" track it has actually been filled with, the disk must
+  still be in, and it must not be write-protected AT THE LANDING.
+- **A byte per slot.**  A machine that writes faster than the platter turns
+  overwrites the same slot, as it would a real disk; one that writes slower
+  leaves a slot untouched.  The bench's first cut spaced its writes 62 ticks
+  apart and skipped every third slot - a 3.5" nibble is `P35`/5 = 44.8 ticks -
+  which is the machine's business and not the drive's.
+- **The track goes home** as `T_FD35_DIRTY` (0x37), the fill's shape in the other
+  direction: `{seq, chunk, qtr, 0}`, then `{chunks, 0, nibbles}`, then the words.
+  A 3.5" track is not a fixed number of chunks - ten in zone 0, seven in zone 4 -
+  so the upload counts WORDS down rather than chunks up, and the last chunk is
+  the one with no word after it.  **Getting that test wrong ended the upload a
+  whole chunk early** (nine of ten): "no more than a chunk left" is already true
+  partway through the second-to-last chunk, so the test has to be
+  `up35_left <= 1` at a chunk's final word.  The bench caught it.
+
+On the host, `fd35_nibble.cpp`'s `denibblize_track` is the inverse of
+`nibblize_track`: it scans the track as a RING (a track the machine wrote begins
+wherever the head was), checks each address field's checksum AND that it names
+this very track, and decodes each data field.  **A sector that does not decode
+leaves the image alone** - a track comes home whole even when the machine rewrote
+one sector of it, and a garbled sector must not blank the copy on disk - so the
+function returns which sectors it actually recovered and `Fd35Service::on_dirty`
+writes only those, straight into the 800K file through the descriptor the insert
+holds open (the fence moves the file, and an open descriptor follows the inode).
+A track whose seq this host never answered is dropped, and a protected disk takes
+nothing - not the file, and not the track in RAM either, so the next fill is the
+disk as it really is.
 
 ## Why
 

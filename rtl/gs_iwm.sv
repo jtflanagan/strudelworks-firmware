@@ -117,13 +117,23 @@
 // step; and the accelerated core is held (stall_o, as the Disk II's).  A
 // seek nobody answered is asked again after FILL_RETRY_CLKS.
 //
-// NOT HERE YET: 3.5" writes (dropped; the host's 3.5" disks are locked), a
-// second 3.5" drive (sense $F says drive 1 is not installed, as KEGS says),
-// eject (action $D is taken and does nothing), 3.5" WOZ images.
+// THE 3.5" DRIVE WRITES.  Its platter is a NIBBLE engine, not the 5.25"
+// drives' bit stream, so a write is a whole byte landing in the slot under
+// the head rather than a bit in a cell: the machine's load puts the byte at
+// `pos`, and the same rule as the 5.25" side decides whether it lands at all
+// - a disk still in, not write-protected AT THE LANDING, and the buffer
+// holding that very track.  A written track goes home as T_FD35_DIRTY, the
+// same shape as the fill in the other direction, when the buffer's claim
+// ends (a step, a select, the motor stopping, an eject, the host's flush).
+//
+// NOT HERE YET: a second 3.5" drive (sense $F says drive 1 is not installed,
+// as KEGS says), eject (action $D is taken and does nothing), 3.5" WOZ
+// images.
 //////////////////////////////////////////////////////////////////////////////////
 module gs_iwm #(
     parameter [7:0] T_FD35_TRACK = 8'h31,   // host -> card
     parameter [7:0] T_FD35_SEEK  = 8'h32,   // card -> host
+    parameter [7:0] T_FD35_DIRTY = 8'h37,   // card -> host, a written 3.5" track
     parameter [7:0] T_FD_TRACK   = 8'h1F,   // host -> card, the Disk II's
     parameter [7:0] T_FD_SEEK    = 8'h20,   // card -> host, the Disk II's
     parameter [7:0] T_FD_DIRTY   = 8'h21,   // card -> host, the Disk II's
@@ -319,6 +329,10 @@ module gs_iwm #(
     logic [15:0] fill_us;           // microseconds since the seek, saturating
     // The written track going home.
     logic        dirty;             // the buffer (a 5.25" track) was written to
+    logic        dirty35;           // ...or a 3.5" one
+    logic        up_is35;           // the upload being sent is a 3.5" track
+    logic [12:0] up35_left;         // ...with this many words still to go
+    logic [13:0] up35_nibbles;      // ...and this many nibbles in all
     logic        up_owed;           // an FD_DIRTY upload is to be sent
     logic        up_again;          // ...and another after the one going out
     logic [9:0]  up_id;             // ...of this track
@@ -448,6 +462,14 @@ module gs_iwm #(
     logic        rd_v_q;            // last clock issued a window read
     logic [10:0] rd_tag_q;
 
+    // A BYTE to write, the 3.5" drive's: its platter is nibbles, so the whole
+    // byte lands in the slot under the head and there is no read-modify-write
+    // and no window to wait for - the buffer word is addressed straight from
+    // `pos`, the way the 3.5" read already addresses it.
+    logic        w35_pend;
+    logic [7:0]  w35_byte;
+    logic [13:0] w35_pos;
+
     // A bit to write: a read-modify-write of its byte from a window copy, held
     // until a window has the word (two clocks at most; a cell is four cycles).
     logic        wpend, wpend_bit, wpend_drive;
@@ -466,6 +488,12 @@ module gs_iwm #(
                          d5_inserted[buf_id[8]] && !d5_wp[buf_id[8]];
     wire         w_go  = wpend && w_ok && (w_in0 || w_in1) && !fill_write;
 
+    // The same landing rule as the 5.25" side, in the 3.5" drive's terms: the
+    // buffer must still be holding a 3.5" track it has actually been filled
+    // with, the disk still in, and NOT protected at the landing.
+    wire         w35_ok = !buf_id[9] && !stale && drv_inserted && !drv_wp;
+    wire         w35_go = w35_pend && w35_ok && !fill_write && !w_go;
+
     // The byte under the head, from whichever window has it.
     wire         h_in0   = win_v[0] && (win_tag[0] == hword);
     wire         h_in1   = win_v[1] && (win_tag[1] == hword);
@@ -475,15 +503,19 @@ module gs_iwm #(
 
     // Port A, in this priority: the host's fill (a word), a 5.25" bit (its
     // byte), else the standing read.
-    assign a_read  = !fill_write && !w_go;
+    assign a_read  = !fill_write && !w_go && !w35_go;
     assign a_addr  = fill_write   ? fill_word
                    : w_go         ? {1'b0, wword}
+                   : w35_go       ? w35_pos[13:2]
                    : !apple35_sel ? {1'b0, (rd_sel_q ? hword : hword_p1)}
                    :                pos[13:2];
     assign a_we    = fill_write ? 4'hF
                    : w_go       ? (4'd1 << wbyte)
+                   : w35_go     ? (4'd1 << w35_pos[1:0])
                    :              4'h0;
-    assign a_wdata = fill_write ? pay_data : {4{wnew}};
+    assign a_wdata = fill_write ? pay_data
+                   : w35_go     ? {4{w35_byte}}
+                   :              {4{wnew}};
 
     always_ff @(posedge clk) begin
         rd_v_q   <= a_read && !apple35_sel;
@@ -604,11 +636,35 @@ module gs_iwm #(
     xstate_t     xs;
     logic [9:0]  tx_id;             // the seek being sent, latched as it starts
     logic [7:0]  tx_seq;
-    logic [2:0]  x_chunk;
+    logic [3:0]  x_chunk;           // four bits: a zone-0 3.5" track is ten
     logic [7:0]  x_left;            // data words still to send this chunk
     logic [11:0] x_word;            // the buffer word being offered
 
-    wire [7:0] chunk_len = (x_chunk == 3'd6) ? 8'(D5_LAST) : 8'(CHUNK_WORDS);
+    // A 3.5" track's chunks are not a fixed count - a zone-0 track is ten and
+    // a zone-4 one is seven - so the upload counts WORDS down instead, and
+    // the last chunk is the one with no more than a chunk's worth left.  The
+    // 5.25" side keeps its fixed seven, untouched.
+    wire [12:0] up35_words = 13'((up35_nibbles + 14'd3) >> 2);
+    // ceil(words / 252), and words is at most 2424, so at most ten.  Spelled
+    // out rather than divided: it is one 13-bit compare per arm.
+    wire [7:0]  up35_chunks = (up35_words <= 13'd252)  ? 8'd1
+                            : (up35_words <= 13'd504)  ? 8'd2
+                            : (up35_words <= 13'd756)  ? 8'd3
+                            : (up35_words <= 13'd1008) ? 8'd4
+                            : (up35_words <= 13'd1260) ? 8'd5
+                            : (up35_words <= 13'd1512) ? 8'd6
+                            : (up35_words <= 13'd1764) ? 8'd7
+                            : (up35_words <= 13'd2016) ? 8'd8
+                            : (up35_words <= 13'd2268) ? 8'd9
+                            :                            8'd10;
+    wire [7:0] chunk_len = up_is35
+                         ? ((up35_left > 13'(CHUNK_WORDS)) ? 8'(CHUNK_WORDS) : 8'(up35_left))
+                         : ((x_chunk == 4'd6) ? 8'(D5_LAST) : 8'(CHUNK_WORDS));
+    // Evaluated at the LAST WORD of a chunk (x_left == 1), so the test is "no
+    // word after this one" - not "no more than a chunk left", which is true
+    // partway through the second-to-last chunk and ended the upload an entire
+    // chunk early (nine of ten, caught by the bench 2026-09-16).
+    wire       up_last   = up_is35 ? (up35_left <= 13'd1) : (x_chunk == 4'd6);
     wire       xs_up     = (xs == X_UP_HDR) || (xs == X_UP_W0) || (xs == X_UP_W1) || (xs == X_UP_DATA);
 
     // Port B reads the word being offered, and the one after it on the clock
@@ -621,12 +677,15 @@ module gs_iwm #(
     assign tx_word  = (xs == X_HDR)    ? {16'd0, (tx_id[9] ? T_FD_SEEK : T_FD35_SEEK), 8'd1}
                     : (xs == X_W0)     ? (tx_id[9] ? {tx_seq, 8'd0, tx_id[7:0], ph5[tx_id[8]], tx_id[8]}
                                                    : {tx_seq, 8'd0, tx_id[7:0], 8'd0})
-                    : (xs == X_UP_HDR) ? {16'd0, T_FD_DIRTY, chunk_len + 8'(D5_HDR)}
-                    : (xs == X_UP_W0)  ? {up_seq, 5'd0, x_chunk, up_id[7:0], 7'd0, up_id[8]}
-                    : (xs == X_UP_W1)  ? {16'd0, up_bits}
+                    : (xs == X_UP_HDR) ? {16'd0, (up_is35 ? T_FD35_DIRTY : T_FD_DIRTY),
+                                          chunk_len + 8'(D5_HDR)}
+                    : (xs == X_UP_W0)  ? {up_seq, 4'd0, x_chunk, up_id[7:0],
+                                          (up_is35 ? 8'd0 : {7'd0, up_id[8]})}
+                    : (xs == X_UP_W1)  ? (up_is35 ? {up35_chunks, 8'd0, 2'd0, up35_nibbles}
+                                                  : {16'd0, up_bits})
                     :                    b_word;
     wire seek_sent = (xs == X_W0) && tx_take;
-    wire up_sent   = (xs == X_UP_DATA) && tx_take && (x_left == 8'd1) && (x_chunk == 3'd6);
+    wire up_sent   = (xs == X_UP_DATA) && tx_take && (x_left == 8'd1) && up_last;
     always_ff @(posedge clk) begin
         if (rst) begin
             xs      <= X_IDLE;
@@ -637,7 +696,7 @@ module gs_iwm #(
             x_word  <= 12'd0;
         end else case (xs)
             X_IDLE: begin
-                x_chunk <= 3'd0;
+                x_chunk <= 4'd0;
                 x_word  <= 12'd0;
                 if (up_owed) begin
                     xs <= X_UP_HDR;
@@ -655,9 +714,10 @@ module gs_iwm #(
             X_UP_DATA: if (tx_take) begin
                 x_word <= x_word + 12'd1;
                 x_left <= x_left - 8'd1;
+                if (up_is35) up35_left <= up35_left - 13'd1;
                 if (x_left == 8'd1) begin
-                    if (x_chunk == 3'd6) xs <= X_IDLE;
-                    else begin x_chunk <= x_chunk + 3'd1; xs <= X_UP_HDR; end
+                    if (up_last) xs <= X_IDLE;
+                    else begin x_chunk <= x_chunk + 4'd1; xs <= X_UP_HDR; end
                 end
             end
             default: xs <= X_IDLE;
@@ -848,6 +908,11 @@ module gs_iwm #(
     wire motor_stop = motor_prev && !motor_on;
     wire d5_leave   = buf_id[9] && (want || buf_ejected || d5_flush[buf_id[8]] || motor_stop);
     wire flush      = d5_leave && dirty;
+    // ...and for a written 3.5" track.  Its drive has no per-drive flush
+    // register of its own, so the events are the ones it does have: the head
+    // wanting another track, the disk leaving, the motor stopping.
+    wire d35_leave  = !buf_id[9] && (want || buf_ejected || motor_stop);
+    wire flush35    = d35_leave && dirty35;
 
     // ---- the 5.25" sequencer and the machine's writes ----------------------------
     logic [7:0] shift5;             // the shift register
@@ -866,6 +931,14 @@ module gs_iwm #(
     wire        load5       = iwm_act && !op_rw && op_lo[0] && (q7q6 == 2'b11) && t_motor &&
                               !enable2 && !apple35_sel;
     wire        store       = load5;          // the benches' name for it
+    // The same access with the 3.5" side selected: the byte the machine is
+    // writing to the disk under the head.  ENABLE2 is the drive's action and
+    // status protocol, never data, so a load under it is not a write.
+    wire        load35      = iwm_act && !op_rw && op_lo[0] && (q7q6 == 2'b11) && t_motor &&
+                              !enable2 && apple35_sel;
+    // Write mode for the 3.5" drive: q7 set, the platter turning, a disk that
+    // takes it, and its track in the buffer.
+    wire        writing35   = q7 && spinning && apple35_sel && !enable2 && w35_ok;
     // Write mode, a load since, a disk that takes it, its track here.
     wire        writing5    = q7 && wr_started && spinning && !enable2 &&
                               d5_inserted[drive_sel] && !d5_wp[drive_sel] && track_here5;
@@ -881,10 +954,24 @@ module gs_iwm #(
             wpend_bit   <= 1'b0;
             wpend_pos   <= 16'd0;
             wpend_drive <= 1'b0;
+            w35_pend    <= 1'b0;
+            w35_byte    <= 8'd0;
+            w35_pos     <= 14'd0;
         end else begin
             // The pending bit is spent when it lands, dropped when it may not
             // or its track is left - first, so a capture this clock stands.
             if (w_go || (wpend && !w_ok) || d5_leave) wpend <= 1'b0;
+
+            // The 3.5" drive's pending BYTE, on the same rule.  It is taken
+            // at the load and lands in the slot the head is on: a machine
+            // that writes faster than the platter turns overwrites the same
+            // slot, which is what a real drive does to a disk too.
+            if (w35_go || (w35_pend && !w35_ok) || d35_leave) w35_pend <= 1'b0;
+            if (load35 && writing35) begin
+                w35_pend <= 1'b1;
+                w35_byte <= op_wdata;
+                w35_pos  <= pos;
+            end
 
             if (cell_tick5) begin
                 if (!q7) begin
@@ -977,6 +1064,10 @@ module gs_iwm #(
             late        <= 8'd0;
             fill_max    <= 16'd0;
             dirty       <= 1'b0;
+            dirty35     <= 1'b0;
+            up_is35     <= 1'b0;
+            up35_left   <= 13'd0;
+            up35_nibbles<= 14'd0;
             up_owed     <= 1'b0;
             up_again    <= 1'b0;
             up_id       <= 10'd0;
@@ -999,19 +1090,24 @@ module gs_iwm #(
             // upload is still going out - the machine wrote again behind it -
             // sends the track once more when that one is done.
             if (up_sent) begin
-                up_owed  <= up_again || flush;
+                up_owed  <= up_again || flush || flush35;
                 up_again <= 1'b0;
-            end else if (flush) begin
+            end else if (flush || flush35) begin
                 if (xs_up) up_again <= 1'b1;
                 else       up_owed  <= 1'b1;
             end
-            if (flush) begin
-                up_id   <= buf_id;
-                up_seq  <= seq;
-                up_bits <= buf_bits;
+            if (flush || flush35) begin
+                up_id        <= buf_id;
+                up_seq       <= seq;
+                up_bits      <= buf_bits;
+                up_is35      <= flush35;
+                up35_nibbles <= nibbles35;
+                up35_left    <= 13'((nibbles35 + 14'd3) >> 2);
             end
-            if (d5_leave) dirty <= 1'b0;
-            if (w_go)     dirty <= 1'b1;
+            if (d5_leave)  dirty   <= 1'b0;
+            if (w_go)      dirty   <= 1'b1;
+            if (d35_leave) dirty35 <= 1'b0;
+            if (w35_go)    dirty35 <= 1'b1;
 
             if (buf_ejected) stale <= 1'b1;
             if (do_step) stepped <= 1'b1;

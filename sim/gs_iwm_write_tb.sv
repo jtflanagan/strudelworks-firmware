@@ -44,6 +44,11 @@ module gs_iwm_write_tb;
     localparam integer NIB   = 6384;
     localparam integer CHUNK = 252;
     localparam [7:0] T_FD_TRACK = 8'h1F, T_FD_SEEK = 8'h20, T_FD_DIRTY = 8'h21;
+    localparam [7:0] T_FD35_TRACK = 8'h31, T_FD35_SEEK = 8'h32, T_FD35_DIRTY = 8'h37;
+    // A zone-0 3.5" track: twelve sectors a side (fd35_nibble.hpp).
+    localparam integer NIB35    = 9694;
+    localparam integer WORDS35  = (NIB35 + 3) / 4;          // 2424
+    localparam integer CHUNKS35 = (WORDS35 + CHUNK - 1) / CHUNK;   // 10
     localparam [7:0] PH0OFF = 8'hE0, PH0ON = 8'hE1, PH1OFF = 8'hE2, PH1ON = 8'hE3,
                      PH2OFF = 8'hE4, PH2ON = 8'hE5, PH3OFF = 8'hE6, PH3ON = 8'hE7,
                      MOTOROFF = 8'hE8, MOTORON = 8'hE9, DRV1 = 8'hEA, DRV2 = 8'hEB,
@@ -69,6 +74,10 @@ module gs_iwm_write_tb;
     // Whole variables per drive, concatenated into the ports: a part-select
     // written from the initial block does not reach a port reliably.
     reg         ins0 = 1'b0, ins1 = 1'b0, wp0 = 1'b0, wp1 = 1'b0, fl0 = 1'b0, fl1 = 1'b0;
+    // The 3.5" drive: its own select, disk and tab, so its writes can be
+    // walked here beside the 5.25" drives' (docs/IWM35.md, "The 3.5" drive
+    // writes").
+    reg         sel35 = 1'b0, ins35 = 1'b0, wp35 = 1'b1;
     wire [1:0]  d5_inserted = {ins1, ins0}, d5_wp = {wp1, wp0}, d5_flush = {fl1, fl0};
     wire [1:0]  d5_stale, d5_dirty;
     wire [13:0] d5_phase;
@@ -78,12 +87,12 @@ module gs_iwm_write_tb;
         .clk (clk), .rst (rst), .res_sync (1'b1),
         .op_lo (op_lo), .op_rw (op_rw), .op_wdata (op_wdata), .act (act),
         .rd_byte (rd_byte),
-        .apple35_sel (1'b0), .c031_ctrl (1'b0),
+        .apple35_sel (sel35), .c031_ctrl (1'b0),
         .tick (tick),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
         .tx_word (tx_word), .tx_valid (tx_valid), .tx_take (tx_take),
-        .drv_inserted (1'b0), .drv_wp (1'b1),
+        .drv_inserted (ins35), .drv_wp (wp35),
         .late_clr (1'b0), .fill_clr (1'b0),
         .d5_inserted (d5_inserted), .d5_wp (d5_wp),
         .d5_cell ({13'd32, 13'd32}), .d5_tracks ({6'd35, 6'd35}),
@@ -135,6 +144,28 @@ module gs_iwm_write_tb;
         integer wi;
         begin
             for (wi = 0; wi < n_wait; wi = wi + 1) begin @(posedge clk); #1; end
+        end
+    endtask
+
+    // Every BYTE that lands in the 3.5" buffer, and where the first one went.
+    integer w35s = 0, first_w35 = -1;
+    integer w35_at [0:63];
+    reg [7:0] w35_of [0:63];
+    always @(posedge clk) if (!rst && dut.w35_go) begin
+        if (w35s < 64) begin w35_at[w35s] = dut.w35_pos; w35_of[w35s] = dut.w35_byte; end
+        w35s = w35s + 1;
+        if (first_w35 < 0) first_w35 = dut.w35_pos;
+    end
+    // One 3.5" write: the load, then ONE SLOT's worth of ticks.  A 3.5"
+    // nibble is P35/5 = 44.8 ticks, so 45 turns the platter exactly one slot
+    // per write; write slower and a slot goes by untouched, which is what a
+    // real drive does too (the IWM does not buffer) - the bench's first cut
+    // used 62 and dropped every third slot.
+    task write35(input [7:0] b);
+        begin
+            op(Q6H, 1'b0, b);           // STA $C0ED with Q7 already high
+            op(Q6L, 1'b1, 8'd0);
+            idle(43);                   // + the two ops above = 45 ticks
         end
     endtask
 
@@ -252,6 +283,43 @@ module gs_iwm_write_tb;
         end
     endtask
 
+    // The 3.5" host image: a nibble per slot, whatever pattern - the card
+    // does not decode it, and the bench only has to see its OWN bytes come
+    // back changed where it wrote and unchanged everywhere else.
+    reg [7:0] img35 [0:NIB35-1];
+    task build35;
+        integer bi;
+        begin
+            for (bi = 0; bi < NIB35; bi = bi + 1) img35[bi] = 8'((bi * 7 + 11) & 8'hFF) | 8'h80;
+        end
+    endtask
+    task send35(input integer qtr, input [7:0] sq);
+        integer sc, sn, sk, sb;
+        begin
+            for (sc = 0; sc < CHUNKS35; sc = sc + 1) begin
+                sn = (sc < CHUNKS35 - 1) ? CHUNK : (WORDS35 - (CHUNKS35 - 1) * CHUNK);
+                @(negedge clk);
+                msg_valid = 1'b1; msg_type = T_FD35_TRACK; msg_len = 8'(sn + 2);
+                @(negedge clk);
+                msg_valid = 1'b0; pay_valid = 1'b1;
+                pay_data = {sq, 8'(sc), 8'(qtr), 8'd0};
+                @(negedge clk);
+                pay_data = {8'(CHUNKS35), 8'd0, 16'(NIB35)};
+                for (sk = 0; sk < sn; sk = sk + 1) begin
+                    @(negedge clk);
+                    sb = 4 * (sc * CHUNK + sk);
+                    pay_data = {(sb + 3 < NIB35) ? img35[sb + 3] : 8'd0,
+                                (sb + 2 < NIB35) ? img35[sb + 2] : 8'd0,
+                                (sb + 1 < NIB35) ? img35[sb + 1] : 8'd0,
+                                img35[sb]};
+                end
+                @(negedge clk);
+                pay_valid = 1'b0;
+            end
+            @(posedge clk); #1;
+        end
+    endtask
+
     function [31:0] seekw(input [7:0] sq, input integer qtr, input integer ph, input integer drv);
         seekw = {sq, 8'd0, 8'(qtr), 7'(ph), 1'(drv)};
     endfunction
@@ -260,7 +328,7 @@ module gs_iwm_write_tb;
     reg [31:0] out_mem [0:131071];
     integer    msg_at  [0:4095];
     reg [7:0]  msg_typ [0:4095];
-    integer    nout = 0, nmsg = 0, left = 0, ndirty = 0, nseek = 0;
+    integer    nout = 0, nmsg = 0, left = 0, ndirty = 0, nseek = 0, ndirty35 = 0;
     always @(posedge clk) if (!rst && tx_valid && tx_take) begin
         out_mem[nout] = tx_word;
         if (left == 0) begin
@@ -270,6 +338,7 @@ module gs_iwm_write_tb;
             left = tx_word[7:0];
             if (tx_word[15:8] == T_FD_DIRTY) ndirty = ndirty + 1;
             if (tx_word[15:8] == T_FD_SEEK)  nseek  = nseek + 1;
+            if (tx_word[15:8] == T_FD35_DIRTY) ndirty35 = ndirty35 + 1;
         end else begin
             left = left - 1;
         end
@@ -694,6 +763,151 @@ module gs_iwm_write_tb;
             end
         end
         if (found == 0) $display("  ok: eight bytes at 32 cycles are 64 contiguous bits on all four cell phases");
+
+        // ==== the 3.5" drive writes ==========================================
+        // Its platter is nibbles, so a write is a BYTE in the slot under the
+        // head, and the track goes home as T_FD35_DIRTY - the fill's shape in
+        // the other direction.
+        begin : d35
+            integer b35, want_at, bad35, ch, hdr, words_seen, n_ch, exp_len;
+            reg [7:0] got35 [0:NIB35-1];
+            build35;
+            // The 5.25" side goes quiet: motor off, then the 3.5" selected.
+            op(MOTOROFF, 1'b1, 8'd0);
+            idle(400);
+            m = nmsg;
+            @(negedge clk); sel35 = 1'b1; ins35 = 1'b1; wp35 = 1'b0;
+            @(negedge clk);
+            op(MOTORON, 1'b1, 8'd0);
+            idle(40);
+            wait_msg(T_FD35_SEEK, m, at, 4000);
+            if (at < 0) fail("no FD35_SEEK for the 3.5\" disk");
+            else begin
+                sq = out_mem[msg_at[at] + 1][31:24];
+                send35(0, 8'(sq));
+                idle(20);
+                if (dut.stale !== 1'b0) fail("the 3.5\" track did not fill");
+                else $display("  ok: the 3.5\" drive asks for its track and the fill lands");
+
+                // --- a protected disk takes nothing ---------------------------
+                k = errors;
+                @(negedge clk); wp35 = 1'b1; @(negedge clk);
+                op(Q6H, 1'b1, 8'd0); op(Q7H, 1'b1, 8'd0);
+                w35s = 0;
+                write35(8'hA5);
+                if (w35s != 0) fail("a protected 3.5\" disk took a write");
+                op(Q7L, 1'b1, 8'd0);
+                @(negedge clk); wp35 = 1'b0; @(negedge clk);
+                if (errors == k) $display("  ok: a write-protected 3.5\" disk takes nothing");
+
+                // --- eight bytes land where the head is -----------------------
+                k = errors;
+                op(Q6H, 1'b1, 8'd0); op(Q7H, 1'b1, 8'd0);
+                w35s = 0; first_w35 = -1;
+                for (i = 0; i < 8; i = i + 1) write35(data15[i]);
+                op(Q7L, 1'b1, 8'd0);
+                if (first_w35 < 0) fail("no 3.5\" byte landed at all");
+                else if (w35s != 8) fail("not eight 3.5\" bytes landed");
+                else begin
+                    // Eight DISTINCT slots, one after another as the platter
+                    // turns - "eight landed" alone would also be true of
+                    // eight writes into the same slot, which is a different
+                    // (and wrong) drive.
+                    bad35 = 0;
+                    for (i = 0; i < 8; i = i + 1)
+                        if (w35_at[i] !== ((first_w35 + i) % NIB35)) bad35 = bad35 + 1;
+                    if (bad35 != 0) begin
+                        $display("FAIL: %0d of the eight bytes did not land in consecutive slots", bad35);
+                        for (i = 0; i < 8; i = i + 1) $display("      %0d -> slot %0d", i, w35_at[i]);
+                        errors = errors + 1;
+                    end
+                end
+                if (errors == k) $display("  ok: eight bytes land in eight slots under the head, one per slot");
+
+                // --- the written track goes home ------------------------------
+                // The motor stopping ends the buffer's claim.
+                m = nmsg; ndirty35 = 0;
+                op(MOTOROFF, 1'b1, 8'd0);
+                idle(600);
+                n_ch = 0;
+                // `left != 0` too: ndirty35 counts HEADERS, so the tenth is
+                // there long before its words are, and reading the buffer
+                // then finds zeroes that were never sent.
+                while ((ndirty35 < CHUNKS35 || left != 0) && n_ch < 200000) begin
+                    wait_clk(1); n_ch = n_ch + 1;
+                end
+                if (ndirty35 != CHUNKS35) begin
+                    $display("FAIL: %0d FD35_DIRTY chunks, expected %0d", ndirty35, CHUNKS35);
+                    errors = errors + 1;
+                end else begin
+                    // Every chunk's header, then its words into got35.
+                    bad35 = 0; words_seen = 0;
+                    ch = 0;
+                    for (k = m; k < nmsg; k = k + 1) begin
+                        if (msg_typ[k] == T_FD35_DIRTY) begin
+                            hdr = msg_at[k];
+                            exp_len = (ch < CHUNKS35 - 1) ? CHUNK : (WORDS35 - (CHUNKS35 - 1) * CHUNK);
+                            if (out_mem[hdr][7:0] !== 8'(exp_len + 2)) begin
+                                $display("    chunk %0d len %0d, want %0d", ch, out_mem[hdr][7:0], exp_len + 2);
+                                bad35 = bad35 + 1;
+                            end
+                            if (out_mem[hdr + 1] !== {8'(sq), 8'(ch), 8'd0, 8'd0}) begin
+                                $display("    chunk %0d w0 %08x, want %08x", ch, out_mem[hdr + 1],
+                                         {8'(sq), 8'(ch), 8'd0, 8'd0});
+                                bad35 = bad35 + 1;
+                            end
+                            if (out_mem[hdr + 2] !== {8'(CHUNKS35), 8'd0, 16'(NIB35)}) begin
+                                $display("    chunk %0d w1 %08x, want %08x", ch, out_mem[hdr + 2],
+                                         {8'(CHUNKS35), 8'd0, 16'(NIB35)});
+                                bad35 = bad35 + 1;
+                            end
+                            for (i = 0; i < exp_len; i = i + 1) begin
+                                b35 = 4 * (ch * CHUNK + i);
+                                if (b35 + 0 < NIB35) got35[b35 + 0] = out_mem[hdr + 3 + i][7:0];
+                                if (b35 + 1 < NIB35) got35[b35 + 1] = out_mem[hdr + 3 + i][15:8];
+                                if (b35 + 2 < NIB35) got35[b35 + 2] = out_mem[hdr + 3 + i][23:16];
+                                if (b35 + 3 < NIB35) got35[b35 + 3] = out_mem[hdr + 3 + i][31:24];
+                                words_seen = words_seen + 1;
+                            end
+                            ch = ch + 1;
+                        end
+                    end
+                    if (bad35 != 0) begin
+                        $display("FAIL: %0d wrong fields in the FD35_DIRTY headers", bad35);
+                        errors = errors + 1;
+                    end else if (words_seen != WORDS35) begin
+                        $display("FAIL: the upload carried %0d words, expected %0d", words_seen, WORDS35);
+                        errors = errors + 1;
+                    end else begin
+                        // The eight bytes we wrote, and NOTHING else, differ
+                        // from the track the host sent down.
+                        // What the card says it landed, where it says it
+                        // landed it - and nothing else touched.  Checked
+                        // against the RECORD of the writes rather than an
+                        // assumption about where the head would be, so the
+                        // property is "the upload carries exactly what was
+                        // written" and not "the head moved as I guessed".
+                        bad35 = 0;
+                        for (i = 0; i < NIB35; i = i + 1) begin
+                            want_at = -1;
+                            for (k = 0; k < w35s; k = k + 1)
+                                if (i == w35_at[k]) want_at = k;
+                            if (want_at >= 0) begin
+                                if (got35[i] !== w35_of[want_at]) bad35 = bad35 + 1;
+                            end else if (got35[i] !== img35[i]) bad35 = bad35 + 1;
+                        end
+                        $display("    (wrote %0d slots from %0d)", w35s, first_w35);
+                        if (bad35 != 0) begin
+                            $display("FAIL: %0d nibbles of the returned 3.5\" track are wrong", bad35);
+                            errors = errors + 1;
+                        end else begin
+                            $display("  ok: %0d chunks carry the track back, the eight written slots changed and %0d others not",
+                                     CHUNKS35, NIB35 - 8);
+                        end
+                    end
+                end
+            end
+        end
 
         $display("\n%0d bits written, %0d bytes loaded, %0d uploads", dut.wr525, dut.ld525, dut.up525);
         if (errors == 0) $display("PASS");
