@@ -802,7 +802,29 @@ in the image, and the next boot's memory holds the menu line in bank $04 ($04/FD
 file. Panel sim walks (suite gs: gspanel_svc/set/wp/eject) PASS on the new panel image.
 Ladder row: `tools/gs_cp_test.sh nda` (install refused / installed / loaded / removed) **PASSES on hardware** (2026-09-16).
 
-*Next:* header version 2 with the four JML vectors in `crt0.s`; the chooser NDA itself in `$E2`
+*The ROM side, later the same day, ON HARDWARE:* `crt0.s` header version 2 with the four vectors at
+`$E2/0010..1C` (plain JMPs, the stub arrives with PBR = $E2; the CDA entry moved to `$0020`, read from
+the header by the host's patch and the runner), an NDA entry that builds the same C runtime as the
+panel (`crt_init` factored out) with the Desk Manager's registers in a block at `$EF/0100`, its own
+page-zero save slot and interrupts off for the call; `sdk/tool.s` pushing a toolbox call from a
+block at `$EF/0110` (a LONG goes high word first - the first cut word-swapped NewWindow's pointer);
+`panel/nda.c` opening a titled window and drawing two lines. On the IIgs: "Strudelworks Disks" from
+the Finder's Apple menu opens a window saying "Hello from the card's ROM (bank $E2)" and
+"strudelworks host is answering" (the service answered through the mailbox from under the desktop),
+its close box closes it through our Close, and the init's hello shows as `pcalls=` (the status line's
+new field) at every DeskStartUp. **The Toolbox numbers and bit orders came from ORCA/C's headers on
+GitHub, not memory**: fTitle is `$8000` and fVis `$0020` (the reverse of what I remembered - the
+first window had no title and a zoom box), GetWFrame is `$2C0E` (a wrong number is a wrong stack shape:
+a `$220E` sent the RTS after it into the panel's code), DrawCString `$A604`. Open's result goes into
+the caller's 4-byte space above the RTL address (`STA 5,S / 7,S`, as Apple's own NDAs end). The
+Desk Manager calls the action routine with runAction (2) although the period is $FFFF.
+**`tools/gs_mouse.py`** drives the ADB mouse by where the pointer IS (two screenshots around a probe;
+the tip is the diff box's top-left): the card hands the machine at most 63 counts per read, GS/OS's
+tracking curve damps small reports (24 counts ~3 px, 40 ~9, 60 ~11-17), the corner pins the pointer,
+so it iterates with a 4 px tolerance and never sends a report under 32 counts. The `corner` /
+`to X Y` / `press` / `to --hold` / `release` sequence opens the Apple menu and picks the last item.
+
+*Next:* the chooser NDA itself in `$E2`
 (a window with a drive pop-up, the image list from the host's `kPanelList`, Insert/Eject; 3.5"
 eject through GS/OS's own driver — `DControl` — before the host swaps the image; the hard disk
 as "choose and restart"); a second mailbox or SEI around the ROM-side routines so the CDA cannot
