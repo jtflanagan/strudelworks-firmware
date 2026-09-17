@@ -53,8 +53,10 @@ module rom_loader_tb;
     );
 
     // ---- the ROM image and its sums ----------------------------------------
+    // `salt` makes a DIFFERENT ROM for the replacement test (5b); 0 otherwise.
+    reg [31:0] salt = 32'd0;
     function automatic [31:0] rom_word(input integer c, input integer w);
-        rom_word = (c * 32'h01000193) ^ (w * 32'h9E3779B9) ^ 32'h5A5AA5A5;
+        rom_word = (c * 32'h01000193) ^ (w * 32'h9E3779B9) ^ 32'h5A5AA5A5 ^ salt;
     endfunction
     function automatic [16:0] chunk_sum(input integer c);
         integer w, b;
@@ -208,6 +210,35 @@ module rom_loader_tb;
         check(ack_status(last_payload) == 4'd0 && ack_sum(last_payload) == 16'(chunk_sum(9)),
               "a chunk sent again after landing: acked OK with its sum");
         check(rom_sum == total, "...and rom_sum does not count it twice");
+
+        // 5b. A DIFFERENT ROM REPLACES THE LANDED ONE.  The host sends the ROM
+        // on every start (the user, 2026-09-16), and a start may change ROMs
+        // (a panel's patched image, then a stock one).  `seen` and `rom_sum`
+        // used to be kept from the card's reset, so the second ROM's bytes went
+        // in while rom_sum stayed the FIRST ROM's - the host's check failed and
+        // the machine ran whatever was left.  Chunk 0 now begins a load.
+        // `rom_word` carries a salt the task below sets, so the second ROM
+        // differs in every chunk.
+        begin
+            integer salted, bad2;
+            salt = 32'h5A5A_0000;
+            n0 = n_acks;
+            send(0, 129, 0);
+            wait_ack(n0);
+            check(!rom_ok, "a new load's chunk 0: rom_ok drops until the new ROM is whole");
+            bad2 = 0; total = 32'd0;
+            total = total + 32'(chunk_sum(0));
+            for (c = 1; c < N; c = c + 1) begin
+                n0 = n_acks;
+                send(c, 129, c);
+                wait_ack(n0);
+                if (ack_status(last_payload) != 4'd0) bad2 = bad2 + 1;
+                total = total + 32'(chunk_sum(c));
+            end
+            check(bad2 == 0 && rom_ok, "...and the whole second ROM lands");
+            check(rom_sum == total, "...with rom_sum the SECOND ROM's, not the first's");
+            salt = 32'd0;
+        end
 
         // 6. THE CARD'S EXTENDED ROM: an ABSOLUTE chunk (word 0 bit 31), whose
         //    low sixteen bits are the page it lands on rather than an index

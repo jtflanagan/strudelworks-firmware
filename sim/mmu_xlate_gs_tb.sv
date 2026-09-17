@@ -115,6 +115,8 @@ module mmu_xlate_gs_tb;
     // SHADOW is the bench's own: it is driven by writes to $C035 and nothing
     // reads it back, so the model keeps the value it wrote.
     logic [6:0] shadow = 7'd0;
+    // CYAREG's bit 4, shadow in all banks - likewise the bench's own.
+    logic cya4 = 1'b0;
     // $C02D, likewise the bench's own.  Bit n SET gives slot n's page to the
     // slot; CLEAR gives it to the internal ROM (KEGS fixup_intcx), which is
     // the opposite sense to what the name suggests and is why a IIgs comes up
@@ -200,7 +202,13 @@ module mmu_xlate_gs_tb;
                 // mirror folds to $FB00 the same way.
                 else if (isvoid) begin cls = CLS_RAM; wr = 1'b0;  fs = 1'b1; bank = 8'hFB;
                                        pg = 8'd0;                            end
-                else             begin cls = CLS_RAM; wr = !rw;   fs = 1'b1; bank = bk;      end
+                else             begin cls = CLS_RAM; wr = !rw;   fs = 1'b1; bank = bk;
+                    // Shadow in all banks (KEGS fixup_shadow_all_banks): the
+                    // odd RAM banks from $03, Super Hi-Res's window, to $E1.
+                    // $EF is the card's panel RAM, not one of them.
+                    if (!rw && cya4 && odd && bk >= 8'h03 && bk < 8'h80 &&
+                        a >= 16'h2000 && a <= 16'h9FFF && !shadow[3]) sh = 1'b1;
+                end
             end else if (shadow[6] && !mega && r >= R_IO && r <= R_LCE) begin
                 // The I/O and language-card inhibit, banks $00/$01 only.
                 cls = CLS_RAM; wr = !rw; fs = 1'b1;
@@ -287,6 +295,13 @@ module mmu_xlate_gs_tb;
     // ---- driving --------------------------------------------------------------
     integer errs = 0; longint checks = 0;
 
+    // A switch write: always in bank $00, whatever bank the test is writing
+    // in - from bank $02 up, $C0xx is plain RAM and moves nothing.
+    task automatic op_sw(input [15:0] a, input rw, input [7:0] wd);
+        logic [7:0] keep;
+        begin keep = op_bank; op_bank = 8'h00; op(a, rw, wd); op_bank = keep; end
+    endtask
+
     task automatic op(input [15:0] a, input rw, input [7:0] wd);
         begin
             @(negedge clk);
@@ -299,7 +314,11 @@ module mmu_xlate_gs_tb;
     endtask
 
     task automatic set_shadow(input [6:0] v);
-        begin shadow = v; op(16'hC035, 1'b0, {1'b0, v}); end
+        begin shadow = v; op_sw(16'hC035, 1'b0, {1'b0, v}); end
+    endtask
+
+    task automatic set_cya(input v);
+        begin cya4 = v; op_sw(16'hC036, 1'b0, v ? 8'h94 : 8'h84); end
     endtask
 
     task automatic set_sltrom(input [7:0] v);
@@ -382,7 +401,7 @@ module mmu_xlate_gs_tb;
 
     // The banks worth sweeping: both pairs, the RAM either side of the
     // populated edge, the void, and the ROM's first and last.
-    localparam int NBK = 17;
+    localparam int NBK = 19;
     logic [7:0] banks [0:NBK-1];
     initial begin
         banks[0]=8'h00; banks[1]=8'h01; banks[2]=8'h02; banks[3]=8'h10;
@@ -393,10 +412,12 @@ module mmu_xlate_gs_tb;
         // $EF the panel's RAM, $F0 void again (the ROM-disk convention).
         banks[12]=8'hDF; banks[13]=8'hE2; banks[14]=8'hEE;
         banks[15]=8'hEF; banks[16]=8'hF0;
+        // An odd and the first odd RAM bank, for shadow in all banks.
+        banks[17]=8'h07; banks[18]=8'h03;
         sl_v[0]=8'h00; sl_v[1]=8'hFF; sl_v[2]=8'h52;
     end
 
-    integer bi, pi_, si, li, sh_i, maps;
+    integer bi, pi_, si, li, sh_i, maps, cy_i;
     logic [7:0] sl_v [0:2];
     logic quick;
 
@@ -410,7 +431,10 @@ module mmu_xlate_gs_tb;
         // Phase 1: SHADOW exhaustively, over the LC states and a few switch
         // sets, on every bank and page.  This is the phase that checks the
         // duplication rules and the I/O inhibit.
+        // ...and both values of shadow-in-all-banks.
+        for (cy_i = 0; cy_i < 2; cy_i = cy_i + 1)
         for (sh_i = 0; sh_i < 128; sh_i = sh_i + (quick ? 43 : 1)) begin
+            set_cya(cy_i[0]);
             set_shadow(sh_i[6:0]);
             for (li = 0; li < 8; li = li + (quick ? 5 : 2)) begin
                 set_lc(li[2:0]);
@@ -523,6 +547,30 @@ module mmu_xlate_gs_tb;
             dup_case(16'h2077, 8'h17, 16'h0120, 16'hE120, "the aux veto alone leaves SHR's route");
             set_shadow(7'b0011010);  // aux veto + hires1 + SHR
             dup_case(16'h2077, 8'h18, 16'h0120, 16'hFFFF, "aux veto with both routes shut");
+            // Shadow in all banks: an odd bank's SHR window follows bank
+            // $01 into $E1 while CYAREG bit 4 is set, and nothing else does.
+            set_sw(7'd0);
+            set_shadow(7'd0);
+            op_bank = 8'h07;
+            set_cya(1'b0);
+            dup_case(16'h6001, 8'h21, 16'h0760, 16'hFFFF, "bank $07 SHR, all-banks off");
+            set_cya(1'b1);
+            dup_case(16'h6001, 8'h22, 16'h0760, 16'hE160, "bank $07 SHR, all-banks on -> $E1");
+            dup_case(16'h2000, 8'h23, 16'h0720, 16'hE120, "bank $07 $2000, the window's first page");
+            dup_case(16'h9FFF, 8'h24, 16'h079F, 16'hE19F, "bank $07 $9FFF, its last");
+            dup_case(16'h1FFF, 8'h25, 16'h071F, 16'hFFFF, "bank $07 below the window");
+            dup_case(16'hA000, 8'h26, 16'h07A0, 16'hFFFF, "bank $07 above the window");
+            dup_case(16'h0455, 8'h27, 16'h0704, 16'hFFFF, "bank $07 text page: SHR only");
+            op_bank = 8'h06;
+            dup_case(16'h6001, 8'h28, 16'h0660, 16'hFFFF, "an even bank does not shadow");
+            op_bank = 8'h03;
+            dup_case(16'h6001, 8'h29, 16'h0360, 16'hE160, "bank $03, the first odd bank");
+            op_bank = 8'h07;
+            set_shadow(7'b0001000);
+            dup_case(16'h6001, 8'h2A, 16'h0760, 16'hFFFF, "bank $07 with SHR inhibited");
+            op_bank = 8'h00;
+            set_shadow(7'd0);
+            set_cya(1'b0);
             checks = checks + 1;
             if (shd_drops !== 8'd0) begin
                 errs = errs + 1;

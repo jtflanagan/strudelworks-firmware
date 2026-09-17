@@ -335,6 +335,22 @@ module rom_loader #(
                     // the host can check the bytes it sent.
                     if (dr_abs) begin
                         xlanded <= xlanded + 8'd1;
+                    end else if (dr_chunk == '0) begin
+                        // CHUNK 0 BEGINS A LOAD.  `seen` and `rom_sum` used to
+                        // be kept from the card's reset on, adding a chunk only
+                        // the first time it landed - so a second load of the
+                        // SAME ROM verified (its sums matched the first), and a
+                        // DIFFERENT ROM could never replace it: the bytes went
+                        // in and the sum stayed the old ROM's.  The host sends
+                        // the ROM on every start (the user, 2026-09-16), so a
+                        // start that changed ROMs failed its check and the
+                        // machine ran whatever was left.  The host sends chunks
+                        // in order and waits for each ack, so chunk 0 repeats
+                        // only before chunk 1 exists: starting over here is
+                        // exact.  `rom_ok` is low until the new load completes,
+                        // which is only ever while the machine is held.
+                        seen    <= {{(N_CHUNKS-1){1'b0}}, 1'b1};
+                        rom_sum <= {15'd0, dr_sum_last};
                     end else begin
                         seen[dr_chunk] <= 1'b1;
                         if (!seen[dr_chunk]) rom_sum <= rom_sum + {15'd0, dr_sum_last};

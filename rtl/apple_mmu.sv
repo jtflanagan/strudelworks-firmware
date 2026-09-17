@@ -758,6 +758,9 @@ module apple_mmu #(
     // Main's $6000-$9FFF is not Super Hi-Res and shadows nowhere.
     wire sh_shr_m  = 1'b0;
     wire sh_shr_a  = GS && !gs_shadow[3];
+    // $C036 bit 4 carries Super Hi-Res shadowing out of bank $01 into every
+    // odd RAM bank (xlate's $02-$7F arm).
+    wire gs_allbanks = GS && gs_cyareg[4];
 
     // The table's entry carries the answer for the side ITS OWN bsel names;
     // xlate() substitutes the auxiliary answer when an odd bank is named
@@ -1044,10 +1047,22 @@ module apple_mmu #(
                     // $02-$7F, and $EF - the panel's RAM, which is a bank
                     // like any other and written like one: ordinary RAM, its
                     // own bank, no switch on it.
-                    // Shadowing is banks $00/$01's alone; $C036 bit 4's
-                    // shadow-in-all-banks is not built (docs/GS.md, later).
+                    // SHADOW IN ALL BANKS ($C036 bit 4).  With it set, an
+                    // odd bank from $03 up shadows its Super Hi-Res window
+                    // into $E1 exactly as bank $01 does - KEGS moremem.c
+                    // fixup_shadow_all_banks: banks 3, 5, 7 ... of the RAM,
+                    // $2000-$9FFF, SHR's inhibit the only veto.  The
+                    // duplicate's destination needs nothing new: it is
+                    // $E0 | the physical bank's low bit, which is 1 here.
+                    // Found on HW 2026-09-16: Arkanoid launched from the
+                    // Finder is relocated into bank $07 and draws its
+                    // playfield through this; without it, every sprite
+                    // left a trail.  The panel's $EF is not RAM the ROM
+                    // sized, so bit 23 keeps it out.
                     r = R_RAM; cls = CLS_RAM; wr = !rw; fs = 1'b1; fold = 1'b0;
-                    sh = 1'b0; bank = va[23:16]; pg = va[15:8];
+                    sh = gs_allbanks && !va[23] && va[16] && (va[23:17] != 7'd0) &&
+                         (va[15:13] != 3'd0) && (va[15:12] < 4'hA) && sh_shr_a && !rw;
+                    bank = va[23:16]; pg = va[15:8];
                 end
             end else if (va[23:16] != 8'd0) begin
                 // The IIe build: banks 2 and up are RAM no switch touches.
@@ -1263,9 +1278,11 @@ module apple_mmu #(
     // map_changed is bit-for-bit what the IIe sweep has always seen.
     // STATEREG needs no entry: its write moves the seven switches that are
     // already in sw_state.
-    logic [51:0] map_q;
+    logic [52:0] map_q;
     logic        map_s1, map_s2;
-    wire [51:0] map_now = {core_dbr, core_pbr, gs_shadow, gs_sltrom, sw_state, intc8rom, rw_bank};
+    // CYAREG's shadow-in-all-banks bit moves where a write to banks $03-$7F
+    // lands a second time, so it is part of the map like SHADOW.
+    wire [52:0] map_now = {gs_allbanks, core_dbr, core_pbr, gs_shadow, gs_sltrom, sw_state, intc8rom, rw_bank};
     always_ff @(posedge clk) begin
         map_q       <= map_now;
         map_changed <= rst || !res_sync || (map_q != map_now);
