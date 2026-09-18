@@ -856,7 +856,12 @@ module iline #(
     // is a clock further behind the program.  All harmless.
     logic cross_q0, cross_q1;
     logic        miss_q;
-    logic [11:0] miss_tag_q;
+    // The same fanout limit as want_tag/f_vtag/f_ppn above, and for the same
+    // reason: miss_tag_q is the retried miss's tag and it goes into the very
+    // same CAM comparison.  With the first three limited it became the IIgs
+    // build's worst path - miss_tag_q -> f_ppn, 14 levels, 71% of its 10.1 ns
+    // on wires, two nets on it at fanouts of 142 and 107 (2026-09-18).
+    (* max_fanout = 24 *) logic [11:0] miss_tag_q;
     always_ff @(posedge clk) begin
         if (rst) begin miss_q <= 1'b0; miss_tag_q <= 12'd0; end
         else begin
