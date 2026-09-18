@@ -399,11 +399,46 @@ ACCEL_FAST_I .. ACCEL_FAST_KBD  0x8000_00AC .. 0x8000_00C4   the census of
 Levels, like MEM_CTRL's, safe under a running machine - with **one rule**:
 mode 2 leaves the machine's own RAM stale (only its video reads it), and a
 change to any state where the core would read it again - mode 0, or serving
-off - would run stale memory. The host refuses both while in mode 2: go to
-mode 1 first, or reset. Mode 2 also turns the floating-bus serve on
+off - would run stale memory. **The staleness is a standing condition, not a
+property of the mode the card is in now**: once mode 2 has run, the machine's
+RAM is behind until the machine is reset, because nothing puts the image back
+(that is the flush walk under "Not done", and it would be DMA over the
+machine's cycles). So the host refuses mode 0 and serving off from the moment
+mode 2 starts until a reset, whatever mode the card passes through on the way.
+Mode 2 to mode 1 stays allowed - the core still reads the image there, and its
+writes go to the bus - and **the way out is: mode 1, reset, then mode 0**, the
+reset's boot writing the machine's RAM current again through mode 1.
+
+This was wrong until 2026-09-18: the check asked only whether the mode being
+LEFT was 2, so `all -> reads -> off` walked around it in two steps and handed
+the machine back its stale RAM. On the card the machine crashed on the spot -
+`Unable to load BASIC` over a screen of garbage - and `tools/accel_test.sh`
+had enshrined the two-step as the sanctioned way out (the user, who spotted
+that the premise was wrong: "if, at any point in a run, you are running in
+all, then by definition what is in the machine's real memory is stale"). Mode 2 also turns the floating-bus serve on
 (FLOATING_BUS.md): the machine's floating bus is stale there too, and the
 card's simulated byte is the right one - which needs the VBL lock. DERISK.md's
 "chosen at boot and never changes" is relaxed to that.
+
+## Full capture caps the accelerator
+
+**The rule (the user, 2026-09-18): with capture set to full, the accelerator
+carries a target, and it is 8x.** Sparse capture sends the bus's interesting
+cycles; full capture sends every one of them (BUS_CAPTURE.md), and an
+accelerator with no target runs the core as fast as the memory allows - 60x
+and more in the tests above. The two together saturate the USB3 pipe, and what
+saturation looks like is not a dropped statistic: the screen stops being drawn
+in time, and the card's telemetry sweep - which holds every read-only
+register's shadow still while it reads the map (TELEMETRY.md, `snap_hold`) -
+can be left holding them, so every read-only register reads zero and stays
+that way through a swhost restart, until the bitstream is reloaded. That was
+seen on 2026-09-18 and is what this rule exists to prevent.
+
+The host applies it wherever either setting moves - the conf at startup, the
+boot and runtime menus, and the control socket's `accel` - by taking the
+target down to 8x and saying so (`Pipeline::enforce_capture_cap`,
+`kFullCaptureCap`). Going back to sparse does not restore the old target: what
+was asked for is gone, and asking again is one command.
 
 ## Decisions, and why
 
@@ -502,7 +537,8 @@ design, its rules and its books: docs/ISTREAM.md.
 - **Pipelining the cache** past ~11x: a write-then-read bypass on the ways
   and the tag word, behind the same `present`/`decided`/`busy` interface.
 - **A flush walk** when leaving mode 2 - copying the image back into the
-  machine's RAM - so mode 0 could follow mode 2 without a reset.
+  machine's RAM - so mode 0 could follow mode 2 without a reset. This is the
+  one thing that would lift the rule above; without it the reset is the exit.
 - **A hold-off after a slot access** (a TransWarp's "slot speed", or a
   Disk II's motor): the core at the bus's pace for a while around a slot's
   I/O. Not asked for; word 41 of the register map is left for it if it is.
