@@ -426,13 +426,18 @@ card's simulated byte is the right one - which needs the VBL lock. DERISK.md's
 carries a target, and it is 8x.** Sparse capture sends the bus's interesting
 cycles; full capture sends every one of them (BUS_CAPTURE.md), and an
 accelerator with no target runs the core as fast as the memory allows - 60x
-and more in the tests above. The two together saturate the USB3 pipe, and what
-saturation looks like is not a dropped statistic: the screen stops being drawn
-in time, and the card's telemetry sweep - which holds every read-only
-register's shadow still while it reads the map (TELEMETRY.md, `snap_hold`) -
-can be left holding them, so every read-only register reads zero and stays
-that way through a swhost restart, until the bitstream is reloaded. That was
-seen on 2026-09-18 and is what this rule exists to prevent.
+and more in the tests above. The two together put far more on the USB3 pipe
+than either alone, and the rule bounds it before the pipe has to be measured.
+
+**What the rule is NOT evidence of.** Two symptoms were attributed to this on
+2026-09-18 and neither survives. The screen going blank during an acceleration
+run was the test's own `HOME` clearing it while a 20 000-iteration loop ran
+with no output - twenty-three seconds of it at the bus's pace. And "every
+read-only register reads zero until the bitstream is reloaded" was a reading
+error: the addresses asked for were truncated (`0x140` for `0x8000_0140`), and
+the card answered correctly throughout. The real fault that day was host-side,
+in how telemetry's presence was decided, and is fixed there. The cap stands as
+the user's rule, not as a fix for either of those.
 
 The host applies it wherever either setting moves - the conf at startup, the
 boot and runtime menus, and the control socket's `accel` - by taking the

@@ -69,11 +69,16 @@ reads one instant of the whole card, however long the sweep takes.
   A tick that finds the previous message still draining is skipped and counted (`drops`); `seq`
   still advances, so the host sees the gap.
 - **THE SWEEP IS BOUNDED (2026-09-18).**  `snap_hold` stops every read-only shadow on the
-  card, so a sweep that never gets an ack does not merely lose a sample - it leaves the whole
-  read-only half of the register map frozen at whatever it held, the host blind, and a swhost
-  restart does not clear it because only the card's own reset does.  That happened on hardware
-  on 2026-09-18, with a saturated USB3 pipe the suspect (full capture and an untargeted core,
-  which ACCELERATION.md now caps).  The user's standing rule is that the card never wedges, so
+  card, so a sweep that never gets an ack does not merely lose a sample - it would leave the
+  whole read-only half of the register map frozen at whatever it held, and a swhost restart
+  would not clear it because only the card's own reset does.  **This has NOT been seen on
+  hardware.**  It was reported here on 2026-09-18 and the report was wrong: the "every
+  read-only register reads zero" came from reading truncated addresses (`0x140` for
+  `0x8000_0140`), and the card was answering correctly the whole time - `0x8000_0140` read
+  `b895b637`, matching its own UART line.  What was really wrong that day was host-side and is
+  fixed there (a stale readback deciding the bitstream had no telemetry).  The bound below
+  stands anyway, because an unbounded hold on the card's own state is a wedge waiting to
+  happen and the user's standing rule is that the card never wedges:
   `telem_tx` watches itself: `WDOG_CLKS` (10 ms at 100 MHz, against a sweep of ~2.5 us) after
   a sweep leaves idle it gives up - **the hold drops first**, because that is what unfreezes
   the card, then the door once the outstanding read has acked or `WDOG_GRACE` (100 us) has
