@@ -203,6 +203,28 @@ themselves, constraining where it may go without packing it - so slice pressure 
 relieve itself through the one part of the design whose failure static timing cannot
 report.
 
+## The island is gone (2026-09-18)
+
+`constr/pt_v2/ddr3_place.xdc` is removed.  It pinned the controller and PHY
+into the two clock regions beside their IO bank, and the file's own reasoning -
+that a build pushed a region further out was the one that would not calibrate -
+was falsified the next day by a build whose wrapper sat wholly inside the
+island and failed in exactly the same way (the section below).
+
+What replaced it is rung 2: the write window is now closed by the DRAM's own
+feedback rather than by where the placer happened to put the fabric, which is
+what the island was hoping to control.  And the discipline does not fit this
+block anyway: a region constraint is the tool for a path whose time goes on
+wires, and the DDR3's paths are not those - its deepest family is twelve levels
+with nearly seven nanoseconds of slack, and no DDR3 path has ever been in the
+timing tail.  Meanwhile the IIgs build IS route-bound, three quarters of both
+its worst paths being net delay, and two clock regions reserved for a block
+that does not need them is a plausible part of why (a hypothesis, not a
+measurement - which is what removing it tests).
+
+The history stays in git, and section A/B of the forensics still say on every
+build where CK, the commands and DQS actually come out.
+
 ## Where the island's conclusion ran out: a wrapper inside it fails (2026-09-17)
 
 Two IIe builds of one RTL, hours apart, layout 2 of the telemetry map the only difference
