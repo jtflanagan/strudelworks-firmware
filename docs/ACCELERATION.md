@@ -445,6 +445,31 @@ target down to 8x and saying so (`Pipeline::enforce_capture_cap`,
 `kFullCaptureCap`). Going back to sparse does not restore the old target: what
 was asked for is gone, and asking again is one command.
 
+## Where the governor is too faithful: a synchronised loader (2026-09-18)
+
+Observed, not acted on.  The FTA XMAS demo (a IIgs title, its own title screen
+says "synchronized loader") stutters and shows visual artifacts on the card
+while it is LOADING, and is clean once loading stops.  KEGS, running the same
+image as the oracle, shows none of it - and says why: through the load KEGS is
+managing about **2.55x** effective, while the card holds a steady **2.80x**.
+
+So the card is not falling behind; it is keeping the promise too well.  On a
+real machine the processor loses time to the drive while a disk is read, and a
+loader written to synchronise against that expects to lose it.  Ours does not:
+the core runs in virtual time at the target while the 3.5" drive's data arrives
+from the host at a real drive's pace, so the relationship the loader was
+written against is not there.  The governor holding exactly 2.80 through a load
+is the symptom, not a fault in it.
+
+The user's decision (2026-09-18): leave it.  Nothing here is broken, the
+diagnosis is on the record, and the fix - if one is ever wanted - is a question
+about whether the core should lose time to a drive the way the machine it
+imitates does, which is a design decision and not a bug fix.
+
+The oracle is set up to be run by hand: `C:\temp\kegs_xmas` (the Windows KEGS
+build, the image, ROM 3 and a config that names them all relatively; `run_xmas.bat`
+starts it, F4 is its menu and changes the speed live).
+
 ## Decisions, and why
 
 **Serialised, ~14x, not pipelined.** The page cache holds one op and its
