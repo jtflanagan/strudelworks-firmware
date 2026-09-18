@@ -409,6 +409,12 @@ model's tDQSS violations go to zero:
 | CK late 400 ps | calibrates | 16 (-26 steps = -387 ps) | 0 |
 | CK late 800 ps | **never calibrates** | 0 (the bound, -625 ps: 800 is further out than the bound reaches, and -175 ps is inside the window) | 0 |
 
+**THE DEFAULT SINCE 2026-09-18 (the user).**  `CK_PHASE_SHIFT` is 1 in the RTL
+(`master_top`, `card_link`, `ddr3_wrapper`; the fork's own default stays 0, so
+the submodule is still upstream's design to anyone else who builds it).
+`build/build.sh --ck-phase 0` builds the old way with CK on the commands' clock,
+and the flag passes either value now rather than only turning the feature on.
+
 **ON THE CARD (2026-09-18, `ckphase1`, IIe, MET +0.017 / +0.044, 0/90936, max
 depth 15).**  It calibrates first time - `D=1 K=17 M=17 X=00`, no restart of any
 cause - and the machine boots, runs and reboots on it.  And D4 is the first
