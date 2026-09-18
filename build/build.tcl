@@ -49,6 +49,10 @@ set gs        0
 # started, not whenever Vivado happened to reach this line.
 set stamp_date 0
 set stamp_time 0
+# The placer's directive (UBERDDR3.md rung 4, the census that loads every build): the
+# strategy's own when empty, else e.g. ExtraNetDelay_high / AltSpreadLogic_high /
+# ExtraTimingOpt - a different placement of the same RTL, on purpose.
+set place_directive ""
 
 for {set i 0} {$i < $argc} {incr i} {
     switch -- [lindex $argv $i] {
@@ -70,6 +74,7 @@ for {set i 0} {$i < $argc} {incr i} {
         --gs    { set master 1; set gs 1 }
         -stamp-date { incr i; set stamp_date [lindex $argv $i] }
         -stamp-time { incr i; set stamp_time [lindex $argv $i] }
+        -place-directive { incr i; set place_directive [lindex $argv $i] }
         default { puts "WARNING: ignoring unknown argument [lindex $argv $i]" }
     }
 }
@@ -372,6 +377,10 @@ if {$snoop || $master} {
 # ---- run -----------------------------------------------------------------
 set_property strategy Flow_PerfOptimized_high [get_runs synth_1]
 set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
+if {$place_directive ne ""} {
+    set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $place_directive [get_runs impl_1]
+    puts "place_design directive: $place_directive"
+}
 
 # Remove the previous run log before launching.  If the clean above was only
 # partial, a stale runme.log would make the unmatched-constraint scan below

@@ -330,7 +330,18 @@ its own bit TAGGED and PROVEN (or not) on the card; write the Status line as eac
    in the model: start index 8 then 7, "next odd", 32 taps round - bound it).  MIG's
    DIC/RTT_NOM mode-register values: does the eye of change 3 widen?  Read the eye
    (`DDR3_EYE0/1`, `ddreye0=` in `status`, `telemetry get ddreye0 ddreye1`) before and after.
-4. **Prove it on the failing tree.**  Rung 2's fix built on the `telem2` tree (IIe) and on
+4. **The census that loads every build, brought forward (2026-09-17 late).**  With the
+   instrument in, a failing draw is worth more than any design work, so the census runs
+   ahead of rung 2: `build/ddr3_census_run.sh DIRECTIVE...` builds the master tree with
+   `build/build.tcl -place-directive` (a different placement of the same RTL on purpose),
+   keeps each bit under its tag, loads it (swhost stopped), reads the UART and appends
+   one line to `build/results/ddr3_census_hw.txt`.  Draws so far, all IIe, same RTL
+   (fw df93df6): `ddr3_instr1` (the strategy's own placer, +0.000), `cen_extranetdelay_high`
+   (+0.006), `cen_altspreadlogic_high` (+0.011), `cen_extratimingopt` (+0.012) - all four
+   calibrate and all four read the same line, `D1=B895D637 D2=C0000000 D3=80249249`: lane 0 early, lane 1 late, DQS
+   tap 14, DQ tap 5.  No failure yet; the sample grows a build at a time until one fails
+   and says which side, or reads the same and points at DQ-versus-DQS.
+5. **Prove it on the failing tree.**  Rung 2's fix built on the `telem2` tree (IIe) and on
    the GS: the IIe bit must calibrate (`D=1 K=17 M=17` on the UART, `tools/telem_check.sh`
    PASS, `accel_test.sh` and `gs_cp_test.sh` where they were).  Then the census done right:
    several builds of the fixed RTL - vary `place_design -directive` in `build/build.tcl`
