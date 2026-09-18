@@ -1,6 +1,6 @@
 # UberDDR3 on the card: placement, logic depth, and the calibration that sometimes never comes
 
-Status: 2026-09-17, branch `ddr3_write_level` off master (fw 6bb1bfd / host 523ce7c). THE PBLOCK'S CONCLUSION RAN OUT TOO: a IIe bit (`telem2`, MET +0.002) whose wrapper sits 6541 of 6555 cells INSIDE X0Y2 never calibrates - `K=00 M=0E`, the same self-restart at CHECK_STARTING_DATA as 2026-09-16 - while `telem1` from the same day, 232 cells in X0Y1, calibrates. The census of 2026-09-14 (four clean builds, hours of them) and the island of 2026-09-16 were each true of the builds they looked at and neither is the cause. The write path is: the controller passes DQS training and write leveling and fails the first write-then-read, every time. PLAN BELOW ("The plan for a fresh session"): instruments first, then the failure in the bench, then write leveling on CK by the MMCM's fine phase shift.
+Status: 2026-09-17 late, branch `ddr3_write_level` off master (fw 6bb1bfd / host 523ce7c), UNCOMMITTED (fw + fork). RUNG 0 ON HARDWARE: `ddr3_instr1` (IIe, MET +0.000 / +0.035, 0/90604, max depth 15 was 22) calibrates and the UART now carries DBG1..3 whole - `D2=C0000000`: the DRAM's write-level answer is lane 0 early / lane 1 late of its CK edge, i.e. tDQSS about zero on the board as the DRAM sees it (the no-ODELAY path now samples the feedback; it steps nothing yet). The 22-level BIST compare family (the DDR3's whole deep tail) is cut to three stages. RUNG 1 DONE: `sim/ddr3_skew_sweep.sh` + `SW_ENFORCE_TDQSS` reproduce the card's restart-for-ever beyond +-625 ps either side. FOUND AND FIXED on the way: `run_mem_ddr3_tb.sh` was red - its deadline check assumed the refresh gate (now refresh-tolerant, the design measured fine around unscheduled refresh) and its fill failures were parallel runs sharing the Micron model's backing files in /tmp (every DDR3 bench run now gets its own) - see "A red bench". `mem_ddr3_tb` PASSES, two copies at once. The earlier text of this line: THE PBLOCK'S CONCLUSION RAN OUT TOO (2026-09-17): THE PBLOCK'S CONCLUSION RAN OUT TOO: a IIe bit (`telem2`, MET +0.002) whose wrapper sits 6541 of 6555 cells INSIDE X0Y2 never calibrates - `K=00 M=0E`, the same self-restart at CHECK_STARTING_DATA as 2026-09-16 - while `telem1` from the same day, 232 cells in X0Y1, calibrates. The census of 2026-09-14 (four clean builds, hours of them) and the island of 2026-09-16 were each true of the builds they looked at and neither is the cause. The write path is: the controller passes DQS training and write leveling and fails the first write-then-read, every time. PLAN BELOW ("The plan for a fresh session"): instruments first, then the failure in the bench, then write leveling on CK by the MMCM's fine phase shift.
 ## Why
 
 Three IIgs bitstreams that MET timing never calibrated the DDR3 (`gs_icache`, `gs_oprow2`,
@@ -228,6 +228,30 @@ real alignment - IR drop under a busier bit, the placement of the DQ/DQS OSERDES
 that no constraint pins - decides, and the census of the 14th could not have seen it: four
 builds that happened to land inside the margin proved nothing about the margin.
 
+## The 22-level stacks: one family, cut (2026-09-17)
+
+The user's rule is that a named chain is cut whether or not it is critical, and "deep, not
+critical" above was written before the write path turned out to be the variable.  The
+routed `telem2` checkpoint's logic-level table (`build/results/logic_depth.rpt`,
+`design_analysis.rpt`) says the DDR3's whole deep tail is ONE family: every path at 15-22
+levels in the design - 8 per level, 62 in all - runs `index_wb_data_reg ->
+{correct,wrong}_read_data_reg[n]` in the controller's BIST compare (`ddr3_controller.v`
+"test calibration"), and its 14-level `reset_from_test` is the same cone.  One cycle held the
+2:1 read-data mux (`o_wb_data_q[index_wb_data]`), the 128-bit equality against
+`correct_data`, and a 32-bit increment: bit 0 of the counter at 15 levels, bit 31 at 22, worst
+slack +1.865 ns.  Nothing else in the controller or PHY is above 11.
+
+The cut (fork `ddr3_controller.v`, "The BIST compare in three stages"): stage 0 registers the
+acked word, its expected value and the qualifier (`o_aux == 3 && o_wb_ack_uncalibrated &&
+!final_calibration_done`); stage 1 compares and keeps the wrong word; stage 2 counts and
+raises `reset_from_test`.  The restart lands two controller cycles later than before, which
+is the same restart; `repeat_test` flushes the two valid bits; the address counter still
+advances at the ack.  Behaviour-neutral, so it rides the rung-0 build rather than waiting
+for a build of its own: the point of rung 0's build is a bit that fails and says why, and
+whether it fails is a lottery draw either way.  Expected: the design's maximum depth falls
+from 22 to the 14-level families outside the DDR3, and the controller's worst BIST path to
+~9 levels.
+
 ## The plan for a fresh session (2026-09-17)
 
 Branch `ddr3_write_level`, both repos.  Rungs, each with its own bench before its build and
@@ -236,19 +260,59 @@ its own bit TAGGED and PROVEN (or not) on the card; write the Status line as eac
 0. **An instrument that works when nothing else does.**  A bit that does not calibrate
    answers no register - the ring is in the DDR3 - so DDR3_DBG1..3 (change 2) are unreadable
    exactly when they matter, and the UART line (`build/report.sh`, `rtl/card_link.sv`
-   `rpt_*`) carries only K, M and X.  Add to the UART line: DDR3_DBG2's restart counters
-   (alignment / BIST / RDY drops, the state at the last restart), the write-level feedback
-   result per lane (the DRAM's 0/1 answers from states 7-8), and the lane and taps at the
-   restart.  One build, on the failing `telem2` tree (it is checked in: master minus nothing;
-   rebuild it and it may pass - keep `master_top_telem2.bit` from 2026-09-17 19:53, which
-   fails, and load THAT).  Read it; the plan below assumes it says the write-level feedback
-   is marginal or the restart is from CHECK_STARTING_DATA's data compare - confirm or
-   redirect.
-1. **The failure in the bench.**  `sim/run_mem_ddr3_tb.sh` (the Micron model) calibrates
-   with no board skew.  Give the model a DQS-versus-CK skew parameter at the DRAM pins
-   (a `#delay` on DQS/DQ relative to CK) and sweep it: find the skew at which the bench
-   restarts at CHECK_STARTING_DATA the way the card does.  That is the reproduction, and
-   the bench every later rung is measured in.  (`CAL_TRACE` prints every state transition.)
+   `rpt_*`) carried only K, M and X.  BUILT (uncommitted, 2026-09-17 late): the line grows
+   ` D1=xxxxxxxx D2=xxxxxxxx D3=xxxxxxxx`, the three DBG words whole (PROTOCOL.md has the
+   bits: the lane and its taps, restarts by cause, the state at the last restart, the DQS
+   indices).  And the write-level feedback exists now: the no-ODELAY path of
+   `START_WRITE_LEVEL`/`WAIT_FOR_FEEDBACK` no longer skips states 7-8 but pulses DQS with
+   MR1's WL mode on (ROM steps 14-17, as the ODELAY path does) and records the DRAM's answer
+   per lane - 1 = DQS rose while CK was high (late of the edge), 0 = low (early) - in
+   `DDR3_DBG2[31:29]` = {done, lane 1, lane 0} (`DBG3[31]` = both samples settled, else a
+   bounded 256-cycle sample timed out).  Steps nothing yet; that is rung 2.  With the BIST
+   cut above, one build on the `telem2` tree (master minus nothing; rebuilding it may pass -
+   `master_top_telem2.bit` from 2026-09-17 19:53, which fails, is kept).  Load it, read the
+   UART; the plan below assumes it says the restart is CHECK_STARTING_DATA's data compare
+   and the feedback bit differs from a calibrating build's - confirm or redirect.
+   **READ 2026-09-17 21:10, `ddr3_instr1` (IIe, MET +0.000 / +0.035, 0/90604, max depth
+   15 was 22, DDR3 deepest 12):** it calibrates - the lottery's draw - `D=1 K=17 M=17
+   X=00 D1=B895D637 D2=C0000000 D3=80249249`: DONE, lane 1, DQS tap 14, DQ tap 5, RDY,
+   highest state 23, no restart of any cause, and **the write-level feedback is lane 0 = 0
+   (DQS early of the CK edge), lane 1 = 1 (late), both settled**.  The two lanes straddle
+   the DRAM's own CK edge: tDQSS is about zero on the board as the DRAM sees it, as the
+   report said on paper (and the Micron model with no skew, which answers 0/0 and warns
+   tWLH "indeterminate CK capture").  Centred on the edge is the ideal for tDQSS, so on
+   THIS build CK-versus-DQS is not what would fail; the reading that matters is the next
+   build that does not calibrate, which the same line will now describe.  Redirect to hold
+   in mind: the write side has a second window, DQ-versus-DQS at the DRAM (tDS/tDH, the
+   forensics' "DQS - DQ at the pad +0.701 ns, ideal +0.625"), which no feedback measures;
+   if a failing build reads 0/1 like this one, that is the suspect, and rung 2's stepping
+   machinery on the DQ clock instead of CK is the way to walk it.  swhost started on the
+   bit (fw stamp 20:47:25, eye `<4+7/12` both lanes), the Apple on.
+1. **The failure in the bench.**  DONE 2026-09-17: `sim/ddr3_skew_sweep.sh` (the Micron
+   bench with `SW_WRITE_SKEW_PS` = DQS and DQ late at the pins, in the fork's sim IO buffer
+   models, or `SW_CK_SKEW_PS` = CK late = DQS early; `-DCAL_TRACE`; `ENFORCE=1` adds
+   `SW_ENFORCE_TDQSS` to `testbench/ddr3.sv`: a tDQSS violation inverts the burst, because
+   the model otherwise only prints the violation and stores the data anyway - it could not
+   fail a write).  The sweep, skew in ps, the model's TDQSS window +-625:
+
+   | skew | calibrates | WL feedback L0/L1 | tDQSS violations | restarts (from state) |
+   |---|---|---|---|---|
+   | 0 | yes | 0/0 (tWLH "indeterminate" x68) | 0 | 0 |
+   | DQS late 200..600 | yes | 1/1 | 0 | 0 |
+   | DQS late 800, enforced | **no** | 1/1 | 6656 | 52 from 13 |
+   | CK late 200..400 (DQS early) | yes | 0/0 | 0 | 0 |
+   | CK late 600 | yes, but the fills mismatch (deterministic, no model error) | 0/0 | 0 | 0 |
+   | CK late 800, enforced | **no** | 0/0 | 7040 | 55 from 13 |
+
+   The CK knob moves CK against everything the FPGA drives AND against the read data
+   the DRAM returns off CK, so past ~400 ps it is measuring the read capture as much as
+   tDQSS (the 600 point calibrates - the tap search absorbs it - and then reads wrong in
+   normal operation); use it for the sign of the feedback, and the DQS knob for the
+   window.  So the feedback bit is the side of the edge, monotone, flipping at zero; the window is
+   +-625 ps as JEDEC says; and outside it the bench restarts for ever from the write/read
+   alignment search (13/14) exactly as the card does.  That is the reproduction every later
+   rung is measured in.  (The pre-enforcement sweep's late-side rows said "calibrates" at
+   800 with 142k violations - the model storing what it complained about; superseded.)
 2. **Write leveling on CK, without ODELAY.**  The Artix-7 HR banks have no ODELAY, so the
    fork's no-ODELAY branch leaves DQS-versus-CK at whatever the routing gives.  Move CK
    instead of DQS: in `rtl/clk_gen.v` give CK its own MMCM output whose phase the fabric
@@ -276,6 +340,47 @@ its own bit TAGGED and PROVEN (or not) on the card; write the Status line as eac
 
 What NOT to do again: conclude from N clean builds that a margin is closed.  The forensics
 (`build/ddr3_forensics.sh`) say where things are; only the card says whether the write lands.
+## A red bench, found on the way, and what it was (2026-09-17)
+
+`sim/run_mem_ddr3_tb.sh` was failing two of its checks, and the two had different causes.
+
+**The deadline check was wrong.**  It required every fill-plus-flush transaction inside
+its 92-clock bus cycle, an assumption from the days of the refresh gate; with refresh on
+the controller's own timer (fw 239cf02, and REFRESH_GATE had been 0 since 09-12) a refresh
+lands inside about 6 % of transactions and the controller holds the bus for its tRFC.  The
+user's rule (2026-09-17): a test that is not tolerant of refresh happening on its own is
+WRONG and gets fixed, and if the system is not designed around unscheduled refresh that
+gets fixed too.  The bench now keeps the two populations apart and judges each: a
+transaction no refresh touched must fit the cycle (critical line 60, whole 92); one a
+refresh landed inside gets the controller's refresh hold on top (`REF_COST` 42 clocks at
+the model's 8 Gb tRFC; ~23 on the real part).  Measured, 835 transactions:
+
+| | critical line worst | whole transaction worst |
+|---|---|---|
+| no refresh inside (783) | 45 clocks | 83 |
+| a refresh inside (52) | 56 | 99 (allowed 134) |
+
+So the system IS designed around unscheduled refresh: the served byte is never later than
+56 clocks against a ~91-clock latch, and a refresh-hit transaction runs ~16 clocks past
+the cycle on this model (~0 on the real part's shorter tRFC), which the accelerated
+regime already absorbs as a stall.  No design change.
+
+**The fill compare was right, and the failures were not the DDR3's.**  Chased to the
+controller's own Wishbone port with a shadow memory and then to the Micron model's own
+write/read trace: a location written with one word read back another that had been
+written to a DIFFERENT address - by another simulation.  With `MAX_MEM` the model keeps
+its DRAM in FILES named after the instance (`/tmp/mem_ddr3_tb.ddr3_dev.open_bank_file.N`
+unless `+model_data` says otherwise), so two runs of the bench at once share one memory.
+Every red run of the night had a sibling running (the sweep's parallel points, A/B
+pairs, the "baseline" beside two other runs); the one run that happened to run alone had
+zero mismatches, and so did the logs of August.  Not refresh, not the controller, not the
+bench's compare: the harness.  Fixed in `run_mem_ddr3_tb.sh`, `run_tx_ring_ddr3_tb.sh`,
+`run_latency_tb.sh` and `ddr3_skew_sweep.sh`: every run gets its own model directory.
+Proof: two copies of the bench at once, both PASS on every check.  The rung-1 sweep table
+above was re-run on the fixed script and stands (the enforced 800 ps points restart for
+ever from state 13; the calibration results never depended on memory contents beyond
+address 0, and they did not change).
+
 ## Instruments
 
 - `build/ddr3_forensics.sh TAG [WORKDIR]` / `build/ddr3_forensics.tcl`: sections A (the CK
@@ -286,8 +391,12 @@ What NOT to do again: conclude from N clean builds that a margin is closed.  The
   routed checkpoint as `build/results/<top>_routed.dcp`, and `build/run_build.sh` keeps both
   under the tag; `build/wns.sh` prints the two skew lines.
 - `CAL_TRACE` (`ifdef` in the fork's `ddr3_controller.v`): every `state_calibrate`
-  transition with lane, taps, start/target index, and every self-reset, for the iverilog
-  benches.
+  transition with lane, taps, start/target index, every self-reset, and the write-level
+  feedback per lane, for the iverilog benches.
+- The UART line (`build/report.sh`): ` K=xx M=xx X=xx D1=xxxxxxxx D2=xxxxxxxx D3=xxxxxxxx`,
+  the three DBG words whole - the only instrument on a bit whose DDR3 never calibrates.
+- `sim/ddr3_skew_sweep.sh [ps...]`, `CK=1`, `ENFORCE=1`, `SECS=`: rung 1's sweep, one line a
+  point.
 
 ## Next (the plan, in order)
 
@@ -307,8 +416,7 @@ What NOT to do again: conclude from N clean builds that a margin is closed.  The
    change 4.
 4. DONE: `gs_ddr3_center` - the DQ sample point centred (7 taps from the setup edge, was 3).
 5. DONE: the census - four builds of one RTL, four placements, one set of DDR3 numbers.
-6. Then, ranked by the numbers: MIG's DIC/RTT_NOM (does the eye widen?), a bounded tap walk
-   (the wrap seen in the model), locality constraints, the depth cuts, and write leveling
-   without ODELAY (CK on its own MMCM output with dynamic fine phase shift stepping under the
-   existing write-level feedback machine).  And the variance census: several builds of one
-   RTL, their masks and taps side by side.
+6. SUPERSEDED by "The plan for a fresh session" above: the census's conclusion did not hold
+   (the island section, then the wrapper-inside-it section).  The depth cut is done (the
+   BIST compare, the only deep family); MIG's DIC/RTT_NOM and the bounded tap walk are rung
+   3; write leveling on CK is rung 2; the census that loads every build is rung 4.

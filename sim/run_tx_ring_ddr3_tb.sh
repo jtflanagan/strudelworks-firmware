@@ -42,4 +42,11 @@ iverilog -g2012 -o "$out" -s tx_ring_ddr3_tb \
     "$uber/rtl/ddr3_controller.v" \
     "$uber/rtl/ddr3_phy.v"
 
-exec vvp -n "$out"
+# The Micron model keeps its DRAM contents in FILES (ddr3.sv, MAX_MEM), named
+# after the instance and put in /tmp unless +model_data says otherwise - so two
+# runs of this bench at once silently share one memory and corrupt each
+# other's data (found 2026-09-17: every "fill bytes differ" was that).  Each
+# run gets its own directory.
+model_dir="$(mktemp -d "${TMPDIR:-/tmp}/ddr3_model.XXXXXX")"
+trap 'rm -rf "$model_dir"' EXIT
+vvp -n "$out" +model_data+"$model_dir"

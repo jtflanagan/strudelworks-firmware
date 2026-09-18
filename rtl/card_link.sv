@@ -1712,15 +1712,22 @@ module card_link #(
     // taken as it fired (see link_cause above).  K is the DDR3 controller's
     // calibration state (two hex digits; 17 = $17 = DONE_CALIBRATE when D=1),
     // M the highest state reached, X the controller's self-restarts.
+    // D1, D2, D3 are DDR3_DBG1..3 whole (PROTOCOL.md): the lane, the taps,
+    // the restart counts by cause, the state at the last restart, the
+    // write-level feedback, the DQS indices - everything the register map
+    // holds about the calibration, on the one line that a card whose DDR3
+    // never calibrates (so whose ring, and every register, is dead) can
+    // still say (UBERDDR3.md rung 0).
     localparam [7:0] CH_C = 8'h43, CH_E = 8'h45, CH_O = 8'h4F, CH_EQ = 8'h3D;
     localparam [7:0] CH_P = 8'h50, CH_D = 8'h44, CH_T = 8'h54;
     localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
 
     localparam [7:0] CH_R = 8'h52, CH_L = 8'h4C, CH_S = 8'h53, CH_K = 8'h4B;
     localparam [7:0] CH_M = 8'h4D, CH_X = 8'h58;
+    localparam [7:0] CH_1 = 8'h31, CH_2 = 8'h32, CH_3 = 8'h33;
 
-    localparam [6:0] RPT_LAST = 7'd67;
-    localparam [6:0] RPT_IDLE = 7'd68;
+    localparam [6:0] RPT_LAST = 7'd103;
+    localparam [6:0] RPT_IDLE = 7'd104;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
@@ -1749,6 +1756,7 @@ module card_link #(
     reg [23:0] rpt_ring = 24'd0;
     reg [4:0]  rpt_cause = 5'd0;
     reg [15:0] rpt_snap  = 16'd0;
+    reg [31:0] rpt_d1 = 32'd0, rpt_d2 = 32'd0, rpt_d3 = 32'd0;
 
     always @(posedge clk_ctrl) begin
         if (!clk_locked) begin
@@ -1769,6 +1777,9 @@ module card_link #(
                 rpt_ring <= {2'd0, ring_status[21:0]};
                 rpt_cause <= link_cause;
                 rpt_snap  <= {link_snap, link_resets};
+                rpt_d1 <= ddr3_debug_w;
+                rpt_d2 <= ddr3_debug2_w;
+                rpt_d3 <= ddr3_debug3_w;
                 rpt_idx <= 7'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
@@ -1811,6 +1822,12 @@ module card_link #(
             7'd60: nib = rpt_kmax[3:0];
             7'd64: nib = rpt_krst[7:4];
             7'd65: nib = rpt_krst[3:0];
+            7'd70, 7'd71, 7'd72, 7'd73, 7'd74, 7'd75, 7'd76, 7'd77:
+                   nib = rpt_d1[{(7'd77 - rpt_idx), 2'b00} +: 4]; // high nibble first
+            7'd82, 7'd83, 7'd84, 7'd85, 7'd86, 7'd87, 7'd88, 7'd89:
+                   nib = rpt_d2[{(7'd89 - rpt_idx), 2'b00} +: 4];
+            7'd94, 7'd95, 7'd96, 7'd97, 7'd98, 7'd99, 7'd100, 7'd101:
+                   nib = rpt_d3[{(7'd101 - rpt_idx), 2'b00} +: 4];
             default: nib = 4'd0;
         endcase
     end
@@ -1856,8 +1873,20 @@ module card_link #(
             7'd61: ch = CH_SP;
             7'd62: ch = CH_X;
             7'd63: ch = CH_EQ;
-            7'd66: ch = CH_CR;
-            7'd67: ch = CH_LF;
+            7'd66: ch = CH_SP;
+            7'd67: ch = CH_D;
+            7'd68: ch = CH_1;
+            7'd69: ch = CH_EQ;
+            7'd78: ch = CH_SP;
+            7'd79: ch = CH_D;
+            7'd80: ch = CH_2;
+            7'd81: ch = CH_EQ;
+            7'd90: ch = CH_SP;
+            7'd91: ch = CH_D;
+            7'd92: ch = CH_3;
+            7'd93: ch = CH_EQ;
+            7'd102: ch = CH_CR;
+            7'd103: ch = CH_LF;
             default: ch = hex;
         endcase
     end

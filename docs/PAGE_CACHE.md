@@ -242,10 +242,14 @@ about **91 clocks**.
 
 **The critical read.** Typical 11 clocks request-to-line through the real
 controller (hardware: 10.8-11.0 cy). Worst is a refresh collision at ~37
-clocks / 370 ns with the real part's 160 ns tRFC — and the refresh gate
-already steers refreshes into the cycle's idle window (`mem_client`,
-PH_REF 30-60), so at 1 MHz even that collision is engineered away rather
-than merely tolerated. Either way: tens of clocks of margin against a
+clocks / 370 ns with the real part's 160 ns tRFC. (The refresh gate that
+once steered refreshes into the cycle's idle window is gone, 2026-09-14:
+refresh is the controller's own, wherever its timer puts it, and
+`sim/mem_ddr3_tb.sv` measures the two populations apart - 2026-09-17, on the
+8 Gb model's 42-clock hold: critical line 45 clocks worst with no refresh,
+56 with one inside; whole transaction 83 / 99. The served byte is never
+late; a refresh-hit transaction's tail runs past the cycle and is absorbed
+as a stall.) Either way: tens of clocks of margin against a
 91-clock deadline. **No manual refresh scheme is needed**, as suspected.
 
 **The whole transaction**, dirty victim, worst shape:

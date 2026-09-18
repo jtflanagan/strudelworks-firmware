@@ -18,7 +18,13 @@
 //     budget rests on (docs/PAGE_CACHE.md);
 //   - refresh keeps happening, on the controller's own tREFI timer (the
 //     refresh gate that held it to the cycle's idle tail was removed
-//     2026-09-14), and every transaction still fits its bus cycle.
+//     2026-09-14), wherever the timer puts it - and the bench TOLERATES it:
+//     a transaction that met no refresh must fit its bus cycle; one that a
+//     refresh landed inside is allowed the controller's refresh hold on top
+//     (REF_COST below), and both worst cases are reported.  Refresh is the
+//     controller's own business now, and a test that assumed it away was
+//     wrong (the user, 2026-09-17).  Data is never excused: every fill must
+//     match the image whatever refresh did.
 //
 // Transactions arrive as the page engine sends them, one per 98-clock bus
 // cycle, scored against a software image; the ring runs tx_ring_ddr3_tb's
@@ -51,6 +57,14 @@ module mem_ddr3_tb;
     // Where the removed refresh gate's window began, kept only to report how
     // many of the controller's own refreshes now fall outside it.
     localparam integer PH_REF_LO = 30;
+    // What one refresh costs a transaction it lands inside: the controller
+    // holds the bus for its tRFC at SDRAM_CAPACITY 5 (8 Gb: 350 ns = 35
+    // clocks), the precharge before it (tRP ~2 clocks) and the command
+    // pipeline either side.  Measured ~42 clocks on this model (the header);
+    // the real part's tRFC is 160 ns, so on the card the cost is ~23.
+    localparam integer REF_COST   = 42;
+    localparam integer DEADLINE   = 92;   // the whole transaction, no refresh (docs/PAGE_CACHE.md)
+    localparam integer FIRST_MAX  = 60;   // the critical line, no refresh
 
     // ---- clocks and reset ------------------------------------------------
     reg i_controller_clk = 1, i_ddr3_clk = 1, i_ref_clk = 1, i_ddr3_clk_90 = 1;
@@ -309,6 +323,9 @@ module mem_ddr3_tb;
 
     // The software image: 2 banks x NPG pages.
     reg [7:0]  img [0:2*NPG*256-1];
+    reg [7:0]  img_prev [0:2*NPG*256-1];        // what each byte held before its latest write
+    time       wr_t0 [0:2*NPG-1], wr_t1 [0:2*NPG-1];  // when each page's latest write burst was issued (first/last beat)
+    time       ref_t [0:2];                     // the last three refreshes
     function automatic integer img_ix(input [7:0] bank, input [7:0] page,
                                       input [3:0] line, input integer b);
         img_ix = {bank[0], page[2:0], line, 4'(b)};
@@ -321,6 +338,10 @@ module mem_ddr3_tb;
     reg        r_score = 1'b0;
     integer    phase = 0;
     integer    t_start = 0, lat_first = 0, lat1_sum = 0, lat1_max = 0, xacts = 0;
+    integer    refs_at_start = 0;
+    // The worst cases kept apart: transactions no refresh touched, and those
+    // one landed inside (the critical line and the whole transaction).
+    integer    lat1_max_ref = 0, tot_max_ref = 0, xacts_ref = 0, tot_t_ref = 0;
     integer    k;
     reg [3:0]  r_idx;
     always @(posedge clk) begin
@@ -328,12 +349,23 @@ module mem_ddr3_tb;
         if (pr_valid && r_score) begin
             r_idx = r_crit + 4'(resp_n);
             for (k = 0; k < 16; k = k + 1)
-                if (pr_data[8*k +: 8] !== img[img_ix(r_bank, r_page, r_idx, k)])
+                if (pr_data[8*k +: 8] !== img[img_ix(r_bank, r_page, r_idx, k)]) begin
                     fill_bad = fill_bad + 1;
+                    // The first few, with what the byte held before its latest write
+                    // and when that write went out against the last refreshes: a
+                    // "got = prev" line is a write that never landed.
+                    if (fill_bad <= 4 || (k == 0 && fill_bad <= 64)) $display("    MISMATCH t=%0t phase=%0d bank=%0d page=%0d line=%0d byte=%0d got=%02x exp=%02x prev=%02x refreshes in this xact %0d; page written %0t..%0t, last refreshes %0t %0t %0t",
+                        $time, phase, r_bank, r_page, r_idx, k, pr_data[8*k +: 8], img[img_ix(r_bank, r_page, r_idx, k)], img_prev[img_ix(r_bank, r_page, r_idx, k)], refs - refs_at_start,
+                        wr_t0[{r_bank[0], r_page[2:0]}], wr_t1[{r_bank[0], r_page[2:0]}], ref_t[0], ref_t[1], ref_t[2]);
+                end
             if (resp_n == 0) begin
                 lat_first = phase - t_start;
                 lat1_sum  = lat1_sum + lat_first;
-                if (lat_first > lat1_max) lat1_max = lat_first;
+                if (refs != refs_at_start) begin
+                    if (lat_first > lat1_max_ref) lat1_max_ref = lat_first;
+                end else begin
+                    if (lat_first > lat1_max) lat1_max = lat_first;
+                end
                 xacts = xacts + 1;
             end
             resp_n = resp_n + 1;
@@ -352,13 +384,15 @@ module mem_ddr3_tb;
             n = 0; idx = first;
             if (!we) begin
                 r_bank = bank; r_page = page; r_crit = first;
-                resp_n = 0; r_score = 1'b1; t_start = phase;
+                resp_n = 0; r_score = 1'b1; t_start = phase; refs_at_start = refs;
             end
             pq_we_r <= we;
             pq_line_r <= {bank, page, idx};
             if (we) begin
+                wr_t0[{bank[0], page[2:0]}] = $time;
                 for (b = 0; b < 16; b = b + 1) begin
                     w[8*b +: 8] = 8'($urandom);
+                    img_prev[img_ix(bank, page, idx, b)] = img[img_ix(bank, page, idx, b)];
                     img[img_ix(bank, page, idx, b)] = w[8*b +: 8];
                 end
                 pq_wdata_r <= w;
@@ -372,8 +406,10 @@ module mem_ddr3_tb;
                     if (n < 16) begin
                         pq_line_r <= {bank, page, idx};
                         if (we) begin
+                            wr_t1[{bank[0], page[2:0]}] = $time;
                             for (b = 0; b < 16; b = b + 1) begin
                                 w[8*b +: 8] = 8'($urandom);
+                                img_prev[img_ix(bank, page, idx, b)] = img[img_ix(bank, page, idx, b)];
                                 img[img_ix(bank, page, idx, b)] = w[8*b +: 8];
                             end
                             pq_wdata_r <= w;
@@ -399,6 +435,7 @@ module mem_ddr3_tb;
     always @(posedge o_ddr3_clk_p[0]) begin
         if (ck_en[0] && !cs_n[0] && !ras_n && !cas_n && we_n) begin
             refs = refs + 1;
+            ref_t[2] = ref_t[1]; ref_t[1] = ref_t[0]; ref_t[0] = $time;
             if (master_active) begin
                 refs_timed = refs_timed + 1;
                 if (phase < PH_REF_LO || phase > 95) begin
@@ -466,21 +503,37 @@ module mem_ddr3_tb;
                 if (r < 42)                       // a dirty victim: flush behind
                     beats(1'b1, 8'(1 - bk), 8'(pg), 4'd0);
                 pq_busy_r <= 1'b0;
-                if (phase > tot_max) tot_max = phase;
-                if (phase > 92) tot_t = tot_t + 1;
+                if (refs != refs_at_start) begin
+                    xacts_ref = xacts_ref + 1;
+                    if (phase > tot_max_ref) tot_max_ref = phase;
+                    if (phase > DEADLINE + (refs - refs_at_start) * REF_COST) begin
+                        tot_t_ref = tot_t_ref + 1;
+                        if (tot_t_ref <= 4) $display("    LATE with refresh: xact %0d ended at phase %0d, %s, %0d refresh(es) inside", n, phase, (r < 42) ? "fill+flush" : "fill only", refs - refs_at_start);
+                    end
+                end else begin
+                    if (phase > tot_max) tot_max = phase;
+                    if (phase > DEADLINE) begin
+                        tot_t = tot_t + 1;
+                        if (tot_t <= 4) $display("    LATE: xact %0d ended at phase %0d, %s, no refresh", n, phase, (r < 42) ? "fill+flush" : "fill only");
+                    end
+                end
             end
             gate     = ($urandom % 100) < 70;
             out_take = ($urandom % 100) < 60;
             while (phase < CYC - 2) @(negedge clk);
         end
-        $display("  %0d transactions: first line mean %0d clocks after the burst began, max %0d; whole transaction max %0d",
-                 xacts, lat1_sum / (xacts > 0 ? xacts : 1), lat1_max, tot_max);
+        $display("  %0d transactions: first line mean %0d clocks after the burst began; no refresh: first line max %0d, whole max %0d; a refresh inside (%0d of them): first line max %0d, whole max %0d (allowed %0d + %0d a refresh)",
+                 xacts, lat1_sum / (xacts > 0 ? xacts : 1), lat1_max, tot_max, xacts_ref, lat1_max_ref, tot_max_ref, DEADLINE, REF_COST);
         if (fill_bad != 0) begin $display("FAIL: %0d fill bytes differ from the image", fill_bad); errors = errors + 1; end
         else $display("  ok: every fill matches the image, critical-first, through the flushes");
-        if (lat1_max > 60 || tot_t != 0) begin
-            $display("FAIL: first line max %0d, %0d transactions past clock 92", lat1_max, tot_t);
+        if (lat1_max > FIRST_MAX || tot_t != 0) begin
+            $display("FAIL: without a refresh, first line max %0d, %0d transactions past clock %0d", lat1_max, tot_t, DEADLINE);
             errors = errors + 1;
-        end else $display("  ok: every transaction inside its bus cycle, the critical line %0d clocks at worst", lat1_max);
+        end else $display("  ok: every refresh-free transaction inside its bus cycle, the critical line %0d clocks at worst", lat1_max);
+        if (lat1_max_ref > FIRST_MAX + REF_COST || tot_t_ref != 0) begin
+            $display("FAIL: with a refresh inside, first line max %0d, %0d transactions past their refresh-extended deadline", lat1_max_ref, tot_t_ref);
+            errors = errors + 1;
+        end else $display("  ok: every refresh-hit transaction inside its extended deadline, the critical line %0d clocks at worst", lat1_max_ref);
         // Refresh is the controller's own timer: it lands wherever tREFI
         // expires, and the check is only that it keeps happening (the gate
         // that held it to the idle tail was removed 2026-09-14).
