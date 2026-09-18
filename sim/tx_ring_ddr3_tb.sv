@@ -94,6 +94,7 @@ module tx_ring_ddr3_tb;
         .i_ddr3_clk       (i_ddr3_clk),
         .i_ref_clk        (i_ref_clk),
         .i_ddr3_clk_90    (i_ddr3_clk_90),
+        .i_ddr3_clk_ck    (i_ddr3_clk),   // CK_PHASE_SHIFT off: CK on the same clock as ever
         .i_rst_n          (i_rst_n),
         .i_wb_cyc  (wb_cyc),
         .i_wb_stb  (wb_stb),

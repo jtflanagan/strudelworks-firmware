@@ -48,7 +48,11 @@ module card_link #(
     parameter bit CAN_MASTER = 1'b0,
     // Passed straight to wb_regfile: which machine this bitstream is
     // (docs/GS.md rung 4).
-    parameter bit GS = 1'b0
+    parameter bit GS = 1'b0,
+    // CK_PHASE_SHIFT = 1 (docs/UBERDDR3.md rung 2): the DDR3 controller walks
+    // the CK pin's clock phase under the DRAM's own write-level feedback.  Set
+    // by build/build.sh --ck-phase; 0 is every build to date.
+    parameter integer CK_PHASE_SHIFT = 0
 ) (
     input  wire        clk_pin,
     input  wire        rst_n,
@@ -447,17 +451,24 @@ module card_link #(
 );
 
     // ---- clocks -----------------------------------------------------------
-    wire clk_ctrl, clk_ddr3, clk_ddr3_90, clk_ref;
+    wire clk_ctrl, clk_ddr3, clk_ddr3_90, clk_ddr3_ck, clk_ref;
     wire clk_locked;
+    wire ck_ps_en, ck_ps_incdec, ck_ps_done;
 
-    clk_gen u_clk (
+    clk_gen #(.CK_FINE_PS (CK_PHASE_SHIFT)) u_clk (
         .clk_in      (clk_pin),
         .rst         (~rst_n),
         .clk_ctrl    (clk_ctrl),
         .clk_ddr3    (clk_ddr3),
         .clk_ddr3_90 (clk_ddr3_90),
+        .clk_ddr3_ck (clk_ddr3_ck),
         .clk_ref     (clk_ref),
-        .locked      (clk_locked)
+        .locked      (clk_locked),
+        // The DDR3 controller asks for the steps, on its own clock.
+        .ps_clk      (clk_ctrl),
+        .ps_en       (ck_ps_en),
+        .ps_incdec   (ck_ps_incdec),
+        .ps_done     (ck_ps_done)
     );
 
     wire ft_clk_i;
@@ -671,14 +682,14 @@ module card_link #(
     // for the UART's K, the sticky diagnostics, the DQS indices - and all
     // three as DDR3_DBG1..3 for the host, since the link answers whether or
     // not the DDR3 calibrated.
-    wire [31:0]  ddr3_debug_w, ddr3_debug2_w, ddr3_debug3_w;
+    wire [31:0]  ddr3_debug_w, ddr3_debug2_w, ddr3_debug3_w, ddr3_debug4_w;
     wire [63:0]  ddr3_eye_w; // the read data eye per lane (DDR3_EYE0/1)
 
     // BIST_MODE 0: au_top's memory test at every power-up would hold the link
     // for seconds, and the memory it tested has since done 123 million
     // accesses without an error (docs/DERISK.md).  Calibration alone is
     // milliseconds.
-    ddr3_wrapper #(.BIST_MODE (0)) u_ddr3 (
+    ddr3_wrapper #(.BIST_MODE (0), .CK_PHASE_SHIFT (CK_PHASE_SHIFT)) u_ddr3 (
         .clk_ctrl    (clk_ctrl),
         .clk_ddr3    (clk_ddr3),
         .clk_ddr3_90 (clk_ddr3_90),
@@ -699,6 +710,11 @@ module card_link #(
         .ddr3_debug     (ddr3_debug_w),
         .ddr3_debug2    (ddr3_debug2_w),
         .ddr3_debug3    (ddr3_debug3_w),
+        .ddr3_debug4    (ddr3_debug4_w),
+        .clk_ddr3_ck    (clk_ddr3_ck),
+        .ck_ps_en       (ck_ps_en),
+        .ck_ps_incdec   (ck_ps_incdec),
+        .ck_ps_done     (ck_ps_done),
         .ddr3_eye       (ddr3_eye_w),
         .user_self_refresh (1'b0),
         .ddr3_addr   (ddr3_addr),
@@ -1287,6 +1303,7 @@ module card_link #(
         .ddr3_dbg1         (ddr3_debug_w),
         .ddr3_dbg2         (ddr3_debug2_w),
         .ddr3_dbg3         (ddr3_debug3_w),
+        .ddr3_dbg4         (ddr3_debug4_w),
         .ddr3_eye0         (ddr3_eye_w[31:0]),
         .ddr3_eye1         (ddr3_eye_w[63:32]),
         .audio_on          (audio_on),
@@ -1712,7 +1729,7 @@ module card_link #(
     // taken as it fired (see link_cause above).  K is the DDR3 controller's
     // calibration state (two hex digits; 17 = $17 = DONE_CALIBRATE when D=1),
     // M the highest state reached, X the controller's self-restarts.
-    // D1, D2, D3 are DDR3_DBG1..3 whole (PROTOCOL.md): the lane, the taps,
+    // D1..D4 are DDR3_DBG1..4 whole (PROTOCOL.md): the lane, the taps,
     // the restart counts by cause, the state at the last restart, the
     // write-level feedback, the DQS indices - everything the register map
     // holds about the calibration, on the one line that a card whose DDR3
@@ -1724,10 +1741,10 @@ module card_link #(
 
     localparam [7:0] CH_R = 8'h52, CH_L = 8'h4C, CH_S = 8'h53, CH_K = 8'h4B;
     localparam [7:0] CH_M = 8'h4D, CH_X = 8'h58;
-    localparam [7:0] CH_1 = 8'h31, CH_2 = 8'h32, CH_3 = 8'h33;
+    localparam [7:0] CH_1 = 8'h31, CH_2 = 8'h32, CH_3 = 8'h33, CH_4 = 8'h34;
 
-    localparam [6:0] RPT_LAST = 7'd103;
-    localparam [6:0] RPT_IDLE = 7'd104;
+    localparam [7:0] RPT_LAST = 8'd115;
+    localparam [7:0] RPT_IDLE = 8'd116;
 
     wire [7:0] uart_data;
     wire       uart_valid, uart_ready;
@@ -1743,7 +1760,7 @@ module card_link #(
     // every 1.4 ms", these can (docs/UBERDDR3.md).
 
     reg [21:0] rpt_div  = 22'd0;
-    reg [6:0]  rpt_idx  = RPT_IDLE;
+    reg [7:0]  rpt_idx  = RPT_IDLE;
     reg [31:0] rpt_cnt  = 32'd0;
     reg        rpt_en   = 1'b0;
     reg        rpt_ovf  = 1'b0;
@@ -1756,7 +1773,7 @@ module card_link #(
     reg [23:0] rpt_ring = 24'd0;
     reg [4:0]  rpt_cause = 5'd0;
     reg [15:0] rpt_snap  = 16'd0;
-    reg [31:0] rpt_d1 = 32'd0, rpt_d2 = 32'd0, rpt_d3 = 32'd0;
+    reg [31:0] rpt_d1 = 32'd0, rpt_d2 = 32'd0, rpt_d3 = 32'd0, rpt_d4 = 32'd0;
 
     always @(posedge clk_ctrl) begin
         if (!clk_locked) begin
@@ -1780,10 +1797,11 @@ module card_link #(
                 rpt_d1 <= ddr3_debug_w;
                 rpt_d2 <= ddr3_debug2_w;
                 rpt_d3 <= ddr3_debug3_w;
-                rpt_idx <= 7'd0;
+                rpt_d4 <= ddr3_debug4_w;
+                rpt_idx <= 8'd0;
             end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
                 if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
-                else                     rpt_idx <= rpt_idx + 7'd1;
+                else                     rpt_idx <= rpt_idx + 8'd1;
             end
         end
     end
@@ -1791,43 +1809,45 @@ module card_link #(
     reg [3:0] nib;
     always @(*) begin
         case (rpt_idx)
-            7'd2:  nib = rpt_cnt[31:28];
-            7'd3:  nib = rpt_cnt[27:24];
-            7'd4:  nib = rpt_cnt[23:20];
-            7'd5:  nib = rpt_cnt[19:16];
-            7'd6:  nib = rpt_cnt[15:12];
-            7'd7:  nib = rpt_cnt[11:8];
-            7'd8:  nib = rpt_cnt[7:4];
-            7'd9:  nib = rpt_cnt[3:0];
-            7'd13: nib = {3'b000, rpt_en};
-            7'd17: nib = {3'b000, rpt_ovf};
-            7'd21: nib = {3'b000, rpt_phi};
-            7'd25: nib = {3'b000, rpt_cal};
-            7'd29: nib = {3'b000, rpt_torn};
-            7'd33: nib = rpt_ring[23:20];
-            7'd34: nib = rpt_ring[19:16];
-            7'd35: nib = rpt_ring[15:12];
-            7'd36: nib = rpt_ring[11:8];
-            7'd37: nib = rpt_ring[7:4];
-            7'd38: nib = rpt_ring[3:0];
-            7'd42: nib = {3'd0, rpt_cause[4]};
-            7'd43: nib = rpt_cause[3:0];
-            7'd47: nib = rpt_snap[15:12];
-            7'd48: nib = rpt_snap[11:8];
-            7'd49: nib = rpt_snap[7:4];
-            7'd50: nib = rpt_snap[3:0];
-            7'd54: nib = {3'b000, rpt_kal[4]};
-            7'd55: nib = rpt_kal[3:0];
-            7'd59: nib = {3'b000, rpt_kmax[4]};
-            7'd60: nib = rpt_kmax[3:0];
-            7'd64: nib = rpt_krst[7:4];
-            7'd65: nib = rpt_krst[3:0];
-            7'd70, 7'd71, 7'd72, 7'd73, 7'd74, 7'd75, 7'd76, 7'd77:
-                   nib = rpt_d1[{(7'd77 - rpt_idx), 2'b00} +: 4]; // high nibble first
-            7'd82, 7'd83, 7'd84, 7'd85, 7'd86, 7'd87, 7'd88, 7'd89:
-                   nib = rpt_d2[{(7'd89 - rpt_idx), 2'b00} +: 4];
-            7'd94, 7'd95, 7'd96, 7'd97, 7'd98, 7'd99, 7'd100, 7'd101:
-                   nib = rpt_d3[{(7'd101 - rpt_idx), 2'b00} +: 4];
+            8'd2:  nib = rpt_cnt[31:28];
+            8'd3:  nib = rpt_cnt[27:24];
+            8'd4:  nib = rpt_cnt[23:20];
+            8'd5:  nib = rpt_cnt[19:16];
+            8'd6:  nib = rpt_cnt[15:12];
+            8'd7:  nib = rpt_cnt[11:8];
+            8'd8:  nib = rpt_cnt[7:4];
+            8'd9:  nib = rpt_cnt[3:0];
+            8'd13: nib = {3'b000, rpt_en};
+            8'd17: nib = {3'b000, rpt_ovf};
+            8'd21: nib = {3'b000, rpt_phi};
+            8'd25: nib = {3'b000, rpt_cal};
+            8'd29: nib = {3'b000, rpt_torn};
+            8'd33: nib = rpt_ring[23:20];
+            8'd34: nib = rpt_ring[19:16];
+            8'd35: nib = rpt_ring[15:12];
+            8'd36: nib = rpt_ring[11:8];
+            8'd37: nib = rpt_ring[7:4];
+            8'd38: nib = rpt_ring[3:0];
+            8'd42: nib = {3'd0, rpt_cause[4]};
+            8'd43: nib = rpt_cause[3:0];
+            8'd47: nib = rpt_snap[15:12];
+            8'd48: nib = rpt_snap[11:8];
+            8'd49: nib = rpt_snap[7:4];
+            8'd50: nib = rpt_snap[3:0];
+            8'd54: nib = {3'b000, rpt_kal[4]};
+            8'd55: nib = rpt_kal[3:0];
+            8'd59: nib = {3'b000, rpt_kmax[4]};
+            8'd60: nib = rpt_kmax[3:0];
+            8'd64: nib = rpt_krst[7:4];
+            8'd65: nib = rpt_krst[3:0];
+            8'd70, 8'd71, 8'd72, 8'd73, 8'd74, 8'd75, 8'd76, 8'd77:
+                   nib = rpt_d1[{(8'd77 - rpt_idx), 2'b00} +: 4]; // high nibble first
+            8'd82, 8'd83, 8'd84, 8'd85, 8'd86, 8'd87, 8'd88, 8'd89:
+                   nib = rpt_d2[{(8'd89 - rpt_idx), 2'b00} +: 4];
+            8'd94, 8'd95, 8'd96, 8'd97, 8'd98, 8'd99, 8'd100, 8'd101:
+                   nib = rpt_d3[{(8'd101 - rpt_idx), 2'b00} +: 4];
+            8'd106, 8'd107, 8'd108, 8'd109, 8'd110, 8'd111, 8'd112, 8'd113:
+                   nib = rpt_d4[{(8'd113 - rpt_idx), 2'b00} +: 4];
             default: nib = 4'd0;
         endcase
     end
@@ -1838,55 +1858,59 @@ module card_link #(
     reg [7:0] ch;
     always @(*) begin
         case (rpt_idx)
-            7'd0:  ch = CH_C;
-            7'd1:  ch = CH_EQ;
-            7'd10: ch = CH_SP;
-            7'd11: ch = CH_E;
-            7'd12: ch = CH_EQ;
-            7'd14: ch = CH_SP;
-            7'd15: ch = CH_O;
-            7'd16: ch = CH_EQ;
-            7'd18: ch = CH_SP;
-            7'd19: ch = CH_P;
-            7'd20: ch = CH_EQ;
-            7'd22: ch = CH_SP;
-            7'd23: ch = CH_D;
-            7'd24: ch = CH_EQ;
-            7'd26: ch = CH_SP;
-            7'd27: ch = CH_T;
-            7'd28: ch = CH_EQ;
-            7'd30: ch = CH_SP;
-            7'd31: ch = CH_R;
-            7'd32: ch = CH_EQ;
-            7'd39: ch = CH_SP;
-            7'd40: ch = CH_L;
-            7'd41: ch = CH_EQ;
-            7'd44: ch = CH_SP;
-            7'd45: ch = CH_S;
-            7'd46: ch = CH_EQ;
-            7'd51: ch = CH_SP;
-            7'd52: ch = CH_K;
-            7'd53: ch = CH_EQ;
-            7'd56: ch = CH_SP;
-            7'd57: ch = CH_M;
-            7'd58: ch = CH_EQ;
-            7'd61: ch = CH_SP;
-            7'd62: ch = CH_X;
-            7'd63: ch = CH_EQ;
-            7'd66: ch = CH_SP;
-            7'd67: ch = CH_D;
-            7'd68: ch = CH_1;
-            7'd69: ch = CH_EQ;
-            7'd78: ch = CH_SP;
-            7'd79: ch = CH_D;
-            7'd80: ch = CH_2;
-            7'd81: ch = CH_EQ;
-            7'd90: ch = CH_SP;
-            7'd91: ch = CH_D;
-            7'd92: ch = CH_3;
-            7'd93: ch = CH_EQ;
-            7'd102: ch = CH_CR;
-            7'd103: ch = CH_LF;
+            8'd0:  ch = CH_C;
+            8'd1:  ch = CH_EQ;
+            8'd10: ch = CH_SP;
+            8'd11: ch = CH_E;
+            8'd12: ch = CH_EQ;
+            8'd14: ch = CH_SP;
+            8'd15: ch = CH_O;
+            8'd16: ch = CH_EQ;
+            8'd18: ch = CH_SP;
+            8'd19: ch = CH_P;
+            8'd20: ch = CH_EQ;
+            8'd22: ch = CH_SP;
+            8'd23: ch = CH_D;
+            8'd24: ch = CH_EQ;
+            8'd26: ch = CH_SP;
+            8'd27: ch = CH_T;
+            8'd28: ch = CH_EQ;
+            8'd30: ch = CH_SP;
+            8'd31: ch = CH_R;
+            8'd32: ch = CH_EQ;
+            8'd39: ch = CH_SP;
+            8'd40: ch = CH_L;
+            8'd41: ch = CH_EQ;
+            8'd44: ch = CH_SP;
+            8'd45: ch = CH_S;
+            8'd46: ch = CH_EQ;
+            8'd51: ch = CH_SP;
+            8'd52: ch = CH_K;
+            8'd53: ch = CH_EQ;
+            8'd56: ch = CH_SP;
+            8'd57: ch = CH_M;
+            8'd58: ch = CH_EQ;
+            8'd61: ch = CH_SP;
+            8'd62: ch = CH_X;
+            8'd63: ch = CH_EQ;
+            8'd66: ch = CH_SP;
+            8'd67: ch = CH_D;
+            8'd68: ch = CH_1;
+            8'd69: ch = CH_EQ;
+            8'd78: ch = CH_SP;
+            8'd79: ch = CH_D;
+            8'd80: ch = CH_2;
+            8'd81: ch = CH_EQ;
+            8'd90: ch = CH_SP;
+            8'd91: ch = CH_D;
+            8'd92: ch = CH_3;
+            8'd93: ch = CH_EQ;
+            8'd102: ch = CH_SP;
+            8'd103: ch = CH_D;
+            8'd104: ch = CH_4;
+            8'd105: ch = CH_EQ;
+            8'd114: ch = CH_CR;
+            8'd115: ch = CH_LF;
             default: ch = hex;
         endcase
     end

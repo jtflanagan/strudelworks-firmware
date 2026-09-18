@@ -25,6 +25,53 @@ endmodule
 module BUFG (output wire O, input wire I);
 endmodule
 
+module MMCME2_ADV #(
+    parameter BANDWIDTH = "OPTIMIZED",
+    parameter COMPENSATION = "ZHOLD",
+    parameter real CLKIN1_PERIOD = 10.0,
+    parameter real CLKIN2_PERIOD = 10.0,
+    parameter integer DIVCLK_DIVIDE = 1,
+    parameter real CLKFBOUT_MULT_F = 5.0,
+    parameter real CLKFBOUT_PHASE = 0.0,
+    parameter CLKFBOUT_USE_FINE_PS = "FALSE",
+    parameter real CLKOUT0_DIVIDE_F = 1.0,
+    parameter real CLKOUT0_PHASE = 0.0,
+    parameter real CLKOUT0_DUTY_CYCLE = 0.5,
+    parameter CLKOUT0_USE_FINE_PS = "FALSE",
+    parameter integer CLKOUT1_DIVIDE = 1,
+    parameter real CLKOUT1_PHASE = 0.0,
+    parameter real CLKOUT1_DUTY_CYCLE = 0.5,
+    parameter CLKOUT1_USE_FINE_PS = "FALSE",
+    parameter integer CLKOUT2_DIVIDE = 1,
+    parameter real CLKOUT2_PHASE = 0.0,
+    parameter real CLKOUT2_DUTY_CYCLE = 0.5,
+    parameter CLKOUT2_USE_FINE_PS = "FALSE",
+    parameter integer CLKOUT3_DIVIDE = 1,
+    parameter real CLKOUT3_PHASE = 0.0,
+    parameter real CLKOUT3_DUTY_CYCLE = 0.5,
+    parameter CLKOUT3_USE_FINE_PS = "FALSE",
+    parameter integer CLKOUT4_DIVIDE = 1,
+    parameter real CLKOUT4_PHASE = 0.0,
+    parameter real CLKOUT4_DUTY_CYCLE = 0.5,
+    parameter CLKOUT4_USE_FINE_PS = "FALSE",
+    parameter CLKOUT4_CASCADE = "FALSE",
+    parameter STARTUP_WAIT = "FALSE"
+) (
+    input  wire CLKIN1, CLKIN2, CLKINSEL, CLKFBIN, PWRDWN, RST,
+    input  wire [6:0] DADDR,
+    input  wire DCLK, DEN, DWE,
+    input  wire [15:0] DI,
+    output wire [15:0] DO,
+    output wire DRDY,
+    input  wire PSCLK, PSEN, PSINCDEC,
+    output wire PSDONE,
+    output wire CLKFBOUT, CLKFBOUTB, CLKFBSTOPPED, CLKINSTOPPED,
+    output wire CLKOUT0, CLKOUT0B, CLKOUT1, CLKOUT1B,
+    output wire CLKOUT2, CLKOUT2B, CLKOUT3, CLKOUT3B,
+    output wire CLKOUT4, CLKOUT5, CLKOUT6, LOCKED
+);
+endmodule
+
 module MMCME2_BASE #(
     parameter BANDWIDTH = "OPTIMIZED",
     parameter real CLKIN1_PERIOD = 10.0,
@@ -92,6 +139,8 @@ module ddr3_top #(
     parameter integer WB2_DATA_BITS = 32,
     parameter integer DUAL_RANK_DIMM = 0,
     parameter integer CK_OSERDES = 1,
+    parameter integer CK_PHASE_SHIFT = 0,
+    parameter integer CK_PS_STEPS_PER_CK = 168,
     parameter integer SPEED_BIN = 0,
     parameter integer SDRAM_CAPACITY = 0,
     parameter integer MICRON_SIM = 0,
@@ -104,6 +153,8 @@ module ddr3_top #(
     parameter integer SELF_REFRESH = 0
 ) (
     input  wire i_controller_clk, i_ddr3_clk, i_ref_clk, i_ddr3_clk_90, i_rst_n,
+    input  wire i_ddr3_clk_ck, i_ck_ps_done,
+    output wire o_ck_ps_en, o_ck_ps_incdec,
     input  wire i_wb_cyc, i_wb_stb, i_wb_we,
     input  wire [ROW_BITS+COL_BITS+BA_BITS-1:0] i_wb_addr,
     input  wire [BYTE_LANES*64-1:0] i_wb_data,
@@ -129,6 +180,7 @@ module ddr3_top #(
     output wire [31:0] o_debug1,
     output wire [31:0] o_debug2,
     output wire [31:0] o_debug3,
+    output wire [31:0] o_debug4,
     output wire [32*BYTE_LANES-1:0] o_calib_eye,
     input  wire i_user_self_refresh,
     output wire uart_tx

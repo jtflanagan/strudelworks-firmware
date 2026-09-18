@@ -60,6 +60,11 @@ module ddr3_wrapper #(
     // CK_OSERDES = 1 (our fork of UberDDR3) sends CK through an OSERDES too
     // (docs/UBERDDR3.md).
     parameter CK_OSERDES = 1,
+    // CK_PHASE_SHIFT = 1 (docs/UBERDDR3.md rung 2): CK's OSERDES runs from the
+    // MMCM's phase-shiftable copy of the DDR3 clock and the controller walks it
+    // under the DRAM's write-level feedback.  0 leaves CK on the same clock net
+    // as the commands, exactly as every build to date.
+    parameter CK_PHASE_SHIFT = 0,
 
     // BIST_MODE 1 = walk the whole address space once at the end of calibration.
     // Costs seconds at boot; keep it on until the board is trusted, then move to
@@ -78,6 +83,12 @@ module ddr3_wrapper #(
     input  wire clk_ctrl,
     input  wire clk_ddr3,
     input  wire clk_ddr3_90,
+    // CK's own copy of the DDR3 clock and the MMCM's phase-shift handshake
+    // (clk_gen.v): used only when CK_PHASE_SHIFT is 1.
+    input  wire clk_ddr3_ck,
+    output wire ck_ps_en,
+    output wire ck_ps_incdec,
+    input  wire ck_ps_done,
     input  wire clk_ref,
     input  wire rst_n,          // synchronous, active low
 
@@ -104,6 +115,7 @@ module ddr3_wrapper #(
     output wire [31:0] ddr3_debug,
     output wire [31:0] ddr3_debug2,
     output wire [31:0] ddr3_debug3,
+    output wire [31:0] ddr3_debug4,
     // The read data eye of each lane (the fork's EYE_SWEEP): bit t of a
     // lane's word is 1 when the alignment pattern still read back with the
     // lane's DQ IDELAY at tap t (78 ps each).  Lane 0 low word, lane 1 high.
@@ -132,6 +144,16 @@ module ddr3_wrapper #(
     inout  wire [1:0]  ddr3_dqs_n
 );
 
+    // CK's serdes clock: the phase-shiftable copy only when we mean to walk it.
+    wire ddr3_clk_ck_sel;
+    generate
+        if (CK_PHASE_SHIFT) begin : gen_ck_shifted
+            assign ddr3_clk_ck_sel = clk_ddr3_ck;
+        end else begin : gen_ck_plain
+            assign ddr3_clk_ck_sel = clk_ddr3;
+        end
+    endgenerate
+
     ddr3_top #(
         .CONTROLLER_CLK_PERIOD (CONTROLLER_CLK_PERIOD),
         .DDR3_CLK_PERIOD       (DDR3_CLK_PERIOD),
@@ -148,6 +170,7 @@ module ddr3_wrapper #(
         .MICRON_SIM            (0),
         .ODELAY_SUPPORTED      (ODELAY_SUPPORTED),
         .CK_OSERDES            (CK_OSERDES),
+        .CK_PHASE_SHIFT        (CK_PHASE_SHIFT),
         .SECOND_WISHBONE       (0),
         .DLL_OFF               (0),
         .WB_ERROR              (0),
@@ -159,6 +182,10 @@ module ddr3_wrapper #(
         .i_ddr3_clk       (clk_ddr3),
         .i_ref_clk        (clk_ref),
         .i_ddr3_clk_90    (clk_ddr3_90),
+        .i_ddr3_clk_ck    (ddr3_clk_ck_sel),
+        .o_ck_ps_en       (ck_ps_en),
+        .o_ck_ps_incdec   (ck_ps_incdec),
+        .i_ck_ps_done     (ck_ps_done),
         .i_rst_n          (rst_n),
 
         .i_wb_cyc         (wb_cyc),
@@ -205,6 +232,7 @@ module ddr3_wrapper #(
         .o_debug1         (ddr3_debug),
         .o_debug2         (ddr3_debug2),
         .o_debug3         (ddr3_debug3),
+        .o_debug4         (ddr3_debug4),
         .o_calib_eye      (ddr3_eye),
 
         .i_user_self_refresh (user_self_refresh),

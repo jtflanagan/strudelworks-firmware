@@ -313,7 +313,9 @@ its own bit TAGGED and PROVEN (or not) on the card; write the Status line as eac
    alignment search (13/14) exactly as the card does.  That is the reproduction every later
    rung is measured in.  (The pre-enforcement sweep's late-side rows said "calibrates" at
    800 with 142k violations - the model storing what it complained about; superseded.)
-2. **Write leveling on CK, without ODELAY.**  The Artix-7 HR banks have no ODELAY, so the
+2. **Write leveling on CK, without ODELAY.**  BUILT AND PROVEN IN THE BENCH
+   2026-09-18, not yet on the card (`CK_PHASE_SHIFT`, default 0).  How it works
+   and what it cost is below, under "Rung 2 as built".  The original sketch:  The Artix-7 HR banks have no ODELAY, so the
    fork's no-ODELAY branch leaves DQS-versus-CK at whatever the routing gives.  Move CK
    instead of DQS: in `rtl/clk_gen.v` give CK its own MMCM output whose phase the fabric
    can shift at run time (MMCME2's PSCLK/PSEN/PSINCDEC/PSDONE, VCO 1200 MHz = 14.9 ps a
@@ -351,6 +353,68 @@ its own bit TAGGED and PROVEN (or not) on the card; write the Status line as eac
 
 What NOT to do again: conclude from N clean builds that a margin is closed.  The forensics
 (`build/ddr3_forensics.sh`) say where things are; only the card says whether the write lands.
+## Rung 2 as built: the card write-levels its own CK (2026-09-18)
+
+**The mechanism.**  `rtl/clk_gen.v` becomes an `MMCME2_ADV` (the `_BASE` does not
+bring the phase-shift pins out) with a fifth output, `clk_ddr3_ck`, carrying
+`CLKOUT4_USE_FINE_PS`: the fabric walks that one clock's phase at run time
+through PSEN/PSINCDEC/PSDONE, 1/56 of the VCO period a step - 14.88 ps at
+1200 MHz, 168 steps in a 2500 ps CK period - and nothing else moves with it.
+`ddr3_wrapper` hands it to the fork's PHY as `i_ddr3_clk_ck`, which clocks the CK
+OSERDES (change 1) and nothing else; the commands, DQ and DQS stay on the clocks
+they were always on.  The fork's controller drives the steps from its own
+write-level machine and reports where it parked in `o_debug4` (DDR3_DBG4,
+`0x8000_0184`, and ` D4=` on the UART line).
+
+**Why it is safe to move a serdes clock at run time.**  An OSERDES needs its CLK
+and CLKDIV in a fixed relationship because data crosses between them - but THIS
+OSERDES's parallel inputs are the constants 0,1,0,1.  Nothing crosses; the CK
+pin's pattern is the same whatever the phase.  Static timing does not see the
+shift either (Vivado times `clk_ddr3_ck` at its CLKOUT4_PHASE), which is exactly
+why nothing else may hang off that clock, and nothing does.
+
+**The algorithm, and the trap in it.**  At ROM step 17 the DRAM is in MR1's
+write-level mode: on each DQS rising edge it samples CK and drives the level on
+DQ.  The machine sweeps CK half a period - a quarter period below the phase it
+came in on, then up - sampling every lane at every step, and parks at the mean of
+the lanes' crossings.  A pair of lanes on one CK cannot both be centred (the DRAM
+centres per lane with ODELAY, which this board has none of); the mean is the best
+one CK can do, and it is what the hardware already shows the board wanting - lane
+0 early, lane 1 late, straddling.  **The trap:** one sweep passes CK's rising edge
+AND its falling edge, and the falling edge is the worst place there is.  The
+first version recorded "any change" and parked 1250 ps out on the bench's 800 ps
+case.  The feedback is 1 while a lane's DQS sits in CK's high half, and the sweep
+walks CK later, which walks DQS earlier through CK: so the rising edge is the
+1 -> 0 transition and the falling edge the 0 -> 1.  Recording only 1 -> 0 fixes
+it.  A lane that never crosses inside the bound is further out than half a sweep
+can reach; the machine then parks at the bound on the side the feedback AT THE
+ENTRY PHASE points to (the far end's answer points the wrong way exactly when
+this fallback is needed), and the next calibration attempt sweeps again from
+there and finds the crossing - convergence over restarts rather than a hunt.
+
+**Bounded on purpose.**  A quarter period either way: the tDQSS window, the
+widest excursion in which the feedback has one transition per lane, and a bound
+on what the move costs the command bus, which is launched from the unshifted
+clock (CK later by X is X less command setup; the forensics have 1.302 ns of it
+at the slow corner).
+
+**The bench (rung 1's sweep, `PHASE=1`).**  Every point calibrates, and the
+model's tDQSS violations go to zero:
+
+| skew | CK off | CK on: parked (entry 42 of 84) | tDQSS violations on |
+|---|---|---|---|
+| none | calibrates | 43 | 0 |
+| DQS late 400 ps | calibrates | 69 (+27 steps = +402 ps) | 0 |
+| DQS late 800 ps | **never calibrates** | 54, after one restart: the first attempt parks at the bound, the second finds the crossing | 0 |
+| CK late 400 ps | calibrates | 16 (-26 steps = -387 ps) | 0 |
+| CK late 800 ps | **never calibrates** | 0 (the bound, -625 ps: 800 is further out than the bound reaches, and -175 ps is inside the window) | 0 |
+
+**What is not proven.**  Anything on the card.  `CK_PHASE_SHIFT` is 0 in every
+build so far; `build/build.sh --ck-phase 1` (through `build/build.tcl`'s generic)
+turns it on.  The reading to take from the first such build is D4 on the UART:
+the parked step against the 42 it came in on says how far this board's CK was
+out, and it is the first measurement of that number this project has.
+
 ## A red bench, found on the way, and what it was (2026-09-17)
 
 `sim/run_mem_ddr3_tb.sh` was failing two of its checks, and the two had different causes.

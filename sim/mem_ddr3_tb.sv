@@ -78,6 +78,40 @@ module mem_ddr3_tb;
         forever #(DDR3_CLK_PERIOD/2) i_ddr3_clk_90 = !i_ddr3_clk_90;
     end
 
+    // ---- the CK pin's own clock, and the MMCM's fine phase shift ------------
+    // CK_PHASE_SHIFT (UBERDDR3.md rung 2) gives the CK OSERDES a clock of its
+    // own that the controller can walk in fine steps.  Here it is a clock like
+    // the others whose phase moves by CK_PS_STEP_PS every PSEN, exactly as
+    // MMCME2_ADV's fine phase shift does: one half period is lengthened or
+    // shortened by the step, which IS the shift.  PSDONE comes back a dozen
+    // controller clocks later, as the hardware's does.
+    localparam real CK_PS_STEP_PS = 14.88;   // 1/56 of the 1200 MHz VCO period
+`ifdef SW_CK_PHASE_SHIFT
+    localparam CK_PHASE_SHIFT = 1;
+`else
+    localparam CK_PHASE_SHIFT = 0;
+`endif
+    reg  i_ddr3_clk_ck = 1;
+    wire ck_ps_en, ck_ps_incdec;
+    reg  ck_ps_done = 0;
+    real ck_ps_want = 0.0, ck_ps_have = 0.0;   // the phase asked for and applied, ps
+    integer ck_ps_extra = 0;
+    integer ck_ps_shifts = 0;
+    always begin
+        ck_ps_extra = $rtoi(ck_ps_want - ck_ps_have);   // whole ps this half period
+        ck_ps_have  = ck_ps_have + ck_ps_extra;
+        #(DDR3_CLK_PERIOD/2 + ck_ps_extra) i_ddr3_clk_ck = !i_ddr3_clk_ck;
+    end
+    always @(posedge i_controller_clk) begin
+        ck_ps_done <= 1'b0;
+        if (ck_ps_en) begin
+            ck_ps_want  = ck_ps_want + (ck_ps_incdec ? CK_PS_STEP_PS : -CK_PS_STEP_PS);
+            ck_ps_shifts = ck_ps_shifts + 1;
+            repeat (12) @(posedge i_controller_clk);
+            ck_ps_done <= 1'b1;
+        end
+    end
+
     wire clk = i_controller_clk;
     reg  rst = 1;
     integer errors = 0;
@@ -120,12 +154,17 @@ module mem_ddr3_tb;
         .DUAL_RANK_DIMM        (0),
         .DLL_OFF               (0),
         .SPEED_BIN             (3),
-        .SDRAM_CAPACITY        (SDRAM_CAPACITY)
+        .SDRAM_CAPACITY        (SDRAM_CAPACITY),
+        .CK_PHASE_SHIFT        (CK_PHASE_SHIFT)
     ) u_ddr3 (
         .i_controller_clk (i_controller_clk),
         .i_ddr3_clk       (i_ddr3_clk),
         .i_ref_clk        (i_ref_clk),
         .i_ddr3_clk_90    (i_ddr3_clk_90),
+        .i_ddr3_clk_ck    (i_ddr3_clk_ck),
+        .o_ck_ps_en       (ck_ps_en),
+        .o_ck_ps_incdec   (ck_ps_incdec),
+        .i_ck_ps_done     (ck_ps_done),
         .i_rst_n          (i_rst_n),
         .i_wb_cyc  (wb_cyc),
         .i_wb_stb  (wb_stb),

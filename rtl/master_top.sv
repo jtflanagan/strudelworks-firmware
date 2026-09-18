@@ -88,7 +88,8 @@ module master_top #(
     // the chipset's registers, the map and the ROM in the 24-bit space.
     // build/build.sh --gs sets it; the plain build must stay bit-identical
     // at GS = 0, which the IIe battery is the parity check on.
-    parameter bit GS = 1'b0
+    parameter bit GS = 1'b0,
+    parameter integer CK_PHASE_SHIFT = 0  // 1 = write-level the DDR3's CK (docs/UBERDDR3.md rung 2)
 ) (
     input  wire        clk_pin,
     input  wire        rst_n,
@@ -461,7 +462,8 @@ module master_top #(
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
         .CAN_MASTER (1'b1),
-        .GS (GS)
+        .GS (GS),
+        .CK_PHASE_SHIFT (CK_PHASE_SHIFT)
     ) u_card (
         .clk_pin (clk_pin), .rst_n (rst_n), .led (led),
         .usb_rx (usb_rx), .usb_tx (usb_tx),

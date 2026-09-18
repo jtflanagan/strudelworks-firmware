@@ -353,6 +353,7 @@ module wb_regfile #(
     input  wire [31:0]     ddr3_dbg1,
     input  wire [31:0]     ddr3_dbg2,
     input  wire [31:0]     ddr3_dbg3,
+    input  wire [31:0]     ddr3_dbg4,
     // DDR3_EYE0/1: the read data eye of byte lane 0 and 1, one bit per DQ
     // IDELAY tap, measured by the controller after every calibration.
     input  wire [31:0]     ddr3_eye0,
@@ -501,6 +502,7 @@ module wb_regfile #(
     localparam [13:0] R_DDR3_DBG1       = 'd80; // 0x8000_0140, RO UberDDR3 o_debug1 (calibration state, lane, taps, max state)
     localparam [13:0] R_DDR3_DBG2       = 'd81; // 0x8000_0144, RO UberDDR3 o_debug2 (sticky restart counters)
     localparam [13:0] R_DDR3_DBG3       = 'd82; // 0x8000_0148, RO UberDDR3 o_debug3 (DQS indices)
+    localparam [13:0] R_DDR3_DBG4       = 'd97; // 0x8000_0184, RO UberDDR3 o_debug4 (the CK phase the write leveling parked at)
     localparam [13:0] R_DDR3_EYE0       = 'd83; // 0x8000_014C, RO lane 0's read data eye, one bit per DQ IDELAY tap
     localparam [13:0] R_DDR3_EYE1       = 'd84; // 0x8000_0150, RO lane 1's
     localparam [13:0] R_GS_CLOCK        = 'd85; // 0x8000_0154, RO the IIgs clock chip (rtl/gs_clock.sv stat)
@@ -610,6 +612,7 @@ module wb_regfile #(
     logic [23:0] telem_stat_s;
     logic [31:0] wide_u2_cmds_s, wide_u2_rx_s, wide_prn_writes_s, wide_hd_execs_s,
                  wide_panel_dmas_s, wide_audio_sent_s;
+    logic [31:0] ddr3_dbg4_s;
     logic [31:0] ring_status_s, link_stat_s, ddr3_dbg1_s, ddr3_dbg2_s, ddr3_dbg3_s,
                  ddr3_eye0_s, ddr3_eye1_s, audio_stat_s;
 
@@ -1702,6 +1705,7 @@ module wb_regfile #(
                         R_DDR3_DBG1:      wb_dat_r <= ddr3_dbg1_s;
                         R_DDR3_DBG2:      wb_dat_r <= ddr3_dbg2_s;
                         R_DDR3_DBG3:      wb_dat_r <= ddr3_dbg3_s;
+                        R_DDR3_DBG4:      wb_dat_r <= ddr3_dbg4_s;
                         R_DDR3_EYE0:      wb_dat_r <= ddr3_eye0_s;
                         R_DDR3_EYE1:      wb_dat_r <= ddr3_eye1_s;
                         R_GS_CLOCK:       wb_dat_r <= gs_clock_stat_s;
@@ -1971,6 +1975,7 @@ module wb_regfile #(
             ddr3_dbg1_s           <= ddr3_dbg1;
             ddr3_dbg2_s           <= ddr3_dbg2;
             ddr3_dbg3_s           <= ddr3_dbg3;
+            ddr3_dbg4_s           <= ddr3_dbg4;
             ddr3_eye0_s           <= ddr3_eye0;
             ddr3_eye1_s           <= ddr3_eye1;
             audio_stat_s          <= audio_stat;
