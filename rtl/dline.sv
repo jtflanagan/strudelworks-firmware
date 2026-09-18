@@ -387,8 +387,24 @@ module dline #(
     // can duplicate a write of: text pages 1 and 2, hires pages 1 and 2,
     // the Super Hi-Res range).  Six address bits and a class code, into
     // registers, like the address itself; no bank byte is compared live.
-    logic        dq_b0, dq_d, dq_wsh;
-    logic        dq_kbd;      // the candidate is a read of $C000 in the pair (the keyboard)
+    // RETIMED ACROSS THE CAPTURE (the user, 2026-09-18).  These four used to be
+    // COMPUTED from d_pred at capture time, which put their decodes on the one
+    // cone that cannot afford them: d_pred settles late (it inherits din's
+    // timing, see below) and the capture registers own the design's worst
+    // paths - 15 levels and a tenth of a nanosecond to dq_kbd.  They are all
+    // read in the cycle AFTER capture, where the data register's own paths
+    // carry more than a nanosecond of slack, so the decode belongs there.  What
+    // is captured now is the raw material - the address, the core's class code
+    // and the DBR-is-zero flag AS IT WAS AT CAPTURE - and the flags are wires
+    // off it.  Same values, same cycle, one cone lighter.
+    logic [1:0]  dq_bcls;     // d_pred_bcls, captured
+    logic        dq_dbrz;     // dbr_z_q at the capture, so dq_b0 means what it meant
+    wire         dq_b0  = !GS || (dq_bcls == BCLS_ZERO) || (dq_bcls == BCLS_DBR && dq_dbrz);
+    wire         dq_d   = GS && (dq_bcls == BCLS_DBR);
+    wire         dq_wsh = GS && ((dq_addr[15:10] == 6'b000001) || (dq_addr[15:10] == 6'b000010) ||
+                                 (dq_addr[15:13] == 3'b001) || (dq_addr[15:13] == 3'b010) ||
+                                 (dq_addr[15:13] == 3'b011) || (dq_addr[15:13] == 3'b100));
+    wire         dq_kbd = GS && (dq_addr[15:0] == 16'hC000);   // a read of $C000 in the pair (the keyboard)
     // Fanout copies of the byte index (2026-09-06): dq_addr[3:0] drove 165
     // loads - every row mux of the shadow and the four CAM ways, plus the
     // compares - and its first hop alone was 1.27 ns on the worst path.
@@ -420,12 +436,8 @@ module dline #(
         end
         if (cyc_en) begin
             dq_addr   <= d_pred;
-            dq_b0     <= !GS || (d_pred_bcls == BCLS_ZERO) || (d_pred_bcls == BCLS_DBR && dbr_z_q);
-            dq_d      <= GS && (d_pred_bcls == BCLS_DBR);
-            dq_wsh    <= GS && ((d_pred[15:10] == 6'b000001) || (d_pred[15:10] == 6'b000010) ||
-                                (d_pred[15:13] == 3'b001) || (d_pred[15:13] == 3'b010) ||
-                                (d_pred[15:13] == 3'b011) || (d_pred[15:13] == 3'b100));
-            dq_kbd    <= GS && (d_pred[15:0] == 16'hC000);
+            dq_bcls   <= d_pred_bcls;   // the flags off it are wires, above
+            dq_dbrz   <= dbr_z_q;
             dq_ix_sh     <= d_pred[3:0];
             dq_ix_cam[0] <= d_pred[3:0];
             dq_ix_cam[1] <= d_pred[3:0];
