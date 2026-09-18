@@ -201,6 +201,32 @@ module telem_tb;
         .stat (telem_stat)
     );
 
+    // ---- THE WATCHDOG: a sweep against a front that never acks -------------------
+    // The card must not be left still by its own telemetry (rtl/telem_tx.sv,
+    // "the watchdog"): a sweep that never gets its ack holds snap_hold up, and
+    // with it every read-only register's shadow, until the card is reset - which
+    // is what happened on hardware on 2026-09-18 and is the wedge this bounds.
+    // Here the door is granted at once and the ack never comes: the sweep must
+    // let the hold go within WDOG_CLKS, the door within WDOG_GRACE after that,
+    // count the sample as a drop, and be ready to try again.
+    localparam integer WD_CLKS  = 200;
+    localparam integer WD_GRACE = 20;
+    wire        wd_stb, wd_req, wd_hold, wd_valid;
+    wire [15:0] wd_off;
+    wire [31:0] wd_word;
+    wire [23:0] wd_stat;
+    wire [7:0]  wd_sel;
+    telem_tx #(.TICK_CYCLES (TICK), .US_CYCLES (USC), .DEBOUNCE (16), .MASK_LOG2 (8),
+               .WDOG_CLKS (WD_CLKS), .WDOG_GRACE (WD_GRACE)) u_telem_wdog (
+        .clk (clk), .rst (rst), .enable (1'b1), .apple_res_q (1'b1),
+        .dbg_sel_host (8'd0), .dbg_sel (wd_sel),
+        .t_req (wd_req), .t_gnt (1'b1),          // the door is ours at once
+        .t_stb (wd_stb), .t_off (wd_off), .t_ack (1'b0),   // ...and nothing ever acks
+        .t_dat (32'd0), .snap_hold (wd_hold),
+        .word (wd_word), .valid (wd_valid), .take (1'b0),
+        .stat (wd_stat)
+    );
+
     // ---- the message bus: the reply, the sender, a capture played here ----------
     reg  [31:0] cap_mem [0:63];
     integer     cap_n = 0, cap_i = 0;
@@ -560,6 +586,28 @@ module telem_tb;
         check(last_reply_data[0] == 1'b0 && last_reply_data[15:8] == t_w0[n0][31:24] &&
               last_reply_data[31:24] == 8'(n_telem),
               "TELEM_CTRL reads back the epoch and the count sent");
+
+        // 10 ---- the watchdog: a sweep that never gets its ack lets go anyway
+        begin
+            integer held_for, waited, drops_before;
+            drops_before = wd_stat[15:8];
+            waited = 0;
+            while (!wd_hold && waited < 4 * TICK) begin @(posedge clk); waited = waited + 1; end
+            check(wd_hold, "the watchdog bench: a sweep starts and the hold goes up");
+            held_for = 0;
+            while (wd_hold && held_for < 4 * WD_CLKS) begin @(posedge clk); held_for = held_for + 1; end
+            check(!wd_hold && held_for <= 2 * WD_CLKS,
+                  "...and a front that never acks does not hold the card: snap_hold drops on the watchdog");
+            waited = 0;
+            while (wd_req && waited < 4 * (WD_GRACE + 16)) begin @(posedge clk); waited = waited + 1; end
+            check(!wd_req, "...the door goes too, once the grace is up");
+            check(wd_stat[15:8] != drops_before, "...and the abandoned sample is counted as a drop");
+            // It must be able to try again: that needs the abandoned words
+            // drained out of the FIFO (clear), so this also proves the drain.
+            waited = 0;
+            while (!wd_hold && waited < 4 * TICK) begin @(posedge clk); waited = waited + 1; end
+            check(wd_hold, "...and the next tick starts a new sweep, so the FIFO was drained");
+        end
 
         if (unknown_valid) errors = errors + 1;
         if (errors == 0) $display("PASS");

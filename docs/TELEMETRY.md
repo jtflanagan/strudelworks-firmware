@@ -68,6 +68,21 @@ reads one instant of the whole card, however long the sweep takes.
   reset mid-message leaves `msg_master` holding CYC with no words, and that wedges `msg_arb`).
   A tick that finds the previous message still draining is skipped and counted (`drops`); `seq`
   still advances, so the host sees the gap.
+- **THE SWEEP IS BOUNDED (2026-09-18).**  `snap_hold` stops every read-only shadow on the
+  card, so a sweep that never gets an ack does not merely lose a sample - it leaves the whole
+  read-only half of the register map frozen at whatever it held, the host blind, and a swhost
+  restart does not clear it because only the card's own reset does.  That happened on hardware
+  on 2026-09-18, with a saturated USB3 pipe the suspect (full capture and an untargeted core,
+  which ACCELERATION.md now caps).  The user's standing rule is that the card never wedges, so
+  `telem_tx` watches itself: `WDOG_CLKS` (10 ms at 100 MHz, against a sweep of ~2.5 us) after
+  a sweep leaves idle it gives up - **the hold drops first**, because that is what unfreezes
+  the card, then the door once the outstanding read has acked or `WDOG_GRACE` (100 us) has
+  passed.  The words already in the FIFO are drained, the sample is counted in `drops` and the
+  host sees it in the next header, and an abandoned baseline is re-owed and marked late.  A
+  front that never acks is already broken; keeping the door shut behind it is worse than
+  letting it go.  `sim/telem_tb.sv` runs a second sender against a door that is granted at once
+  and an ack that never comes: five checks, and with the watchdog's trigger tied off three of
+  them fail.
 - NOTHING IS CUT SHORT, a release included.  The plan had a release abort a sweep in progress;
   built, it does not: the front may only be let go with no read outstanding (an ack that came
   home after the door changed hands would go to the bridge), the sweep is 260 clocks, and the

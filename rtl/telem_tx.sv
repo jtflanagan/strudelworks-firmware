@@ -63,7 +63,13 @@ module telem_tx #(
     parameter integer TICK_CYCLES = 100_000_000,   // one second of clk
     parameter integer US_CYCLES   = 100,           // one microsecond of clk
     parameter integer DEBOUNCE    = 16,
-    parameter integer MASK_LOG2   = 20
+    parameter integer MASK_LOG2   = 20,
+    // The watchdog (see "the watchdog" below): how long a sweep may hold the
+    // card still before it is abandoned, and how long the door is left for an
+    // outstanding read to ack after that.  A whole sweep is tens of
+    // microseconds when the front is answering.
+    parameter integer WDOG_CLKS   = 1_000_000,     // 10 ms at 100 MHz
+    parameter integer WDOG_GRACE  = 10_000         // 100 us
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -192,7 +198,8 @@ module telem_tx #(
         W_READ,      // a strobe - or, for a debug item, the selector goes out
         W_SETTLE,    // ...and three clocks for the item to reach DBG_VAL's shadow
         W_WAIT,      // ...and its ack
-        W_DONE       // everything is in: let the front and the hold go
+        W_DONE,      // everything is in: let the front and the hold go
+        W_ABORT      // the watchdog gave up: the hold is down, let the rest go
     } wstate_t;
     wstate_t wstate = W_IDLE;
 
@@ -215,6 +222,30 @@ module telem_tx #(
     wire         reader_idle;
     wire         clear = reader_idle && fifo_empty;   // the last message is wholly gone
 
+    // ---- the watchdog --------------------------------------------------------
+    // A sweep raises snap_hold - every read-only register's shadow stops moving,
+    // so that one sample is one instant of the card - and holds the debug door
+    // while it reads the map.  If a read never acks, both stay up and the CARD
+    // IS WEDGED: every read-only register reads back what it held when the hold
+    // went up, the host is blind, and a swhost restart does not clear it because
+    // only the card's own reset does.  That happened on 2026-09-18, and the
+    // suspect is a saturated USB3 pipe - full capture with an untargeted core,
+    // which docs/ACCELERATION.md now caps for the same reason.
+    //
+    // The user's standing rule is that the card never wedges, so the sweep is
+    // bounded.  WDOG_CLKS after it leaves W_IDLE it gives up: the HOLD DROPS
+    // FIRST, because that is what unfreezes the card, and the door goes once the
+    // outstanding read has acked or WDOG_GRACE has passed (a front that never
+    // acks is already broken; keeping the door shut behind it is worse than
+    // letting it go).  The words already in the FIFO are drained, and the sample
+    // is counted as a drop - which is what it is, and the host sees it in the
+    // next message's header.  `want` is cleared so the next attempt waits for
+    // the next tick rather than looping on a link that is still busy; a baseline
+    // that was abandoned is re-owed, and marked late.
+    localparam integer WDW = $clog2(WDOG_CLKS + 1);
+    logic [WDW-1:0] wdog;
+    logic           sweep_base;     // the sample under way is a baseline
+
     always_ff @(posedge clk) begin
         if (rst) begin
             wstate    <= W_IDLE;
@@ -233,6 +264,8 @@ module telem_tx #(
             settle    <= 2'd0;
             dbg_mine  <= 1'b0;
             dbg_sel   <= 8'd0;
+            wdog      <= '0;
+            sweep_base <= 1'b0;
         end else begin
             // The selector: the sender's while it holds the door and is on a
             // debug item, the host's otherwise - and never the sender's
@@ -262,10 +295,34 @@ module telem_tx #(
                 end
             end
 
+            // The watchdog's clock: it runs whenever a sweep is under way.
+            if (wstate == W_IDLE) wdog <= '0;
+            else if (wdog != WDW'(WDOG_CLKS)) wdog <= wdog + 1'b1;
+
+            if (wstate != W_IDLE && wstate != W_ABORT && wdog == WDW'(WDOG_CLKS)) begin
+                // Give up.  The hold first: that is what has the card still.
+                snap_hold <= 1'b0;
+                dbg_mine  <= 1'b0;
+                t_stb     <= 1'b0;
+                drops     <= drops + 8'd1;
+                want      <= 1'b0;             // the next tick owes the next one
+                want_base <= sweep_base;       // a lost baseline is still owed
+                late      <= sweep_base;
+                wdog      <= '0;               // ...and times the grace
+                wstate    <= W_ABORT;
+            end else
             case (wstate)
                 W_IDLE: if (want && enable && clear) begin
                     t_req  <= 1'b1;
                     wstate <= W_DOOR;
+                end
+
+                W_ABORT: begin
+                    // The hold is already down and the FIFO is draining below.
+                    // Let the door go when the read we were waiting on acks, or
+                    // when the grace is up.
+                    if (t_ack || wdog == WDW'(WDOG_GRACE)) t_req <= 1'b0;
+                    if (!t_req && fifo_empty) wstate <= W_IDLE;
                 end
 
                 W_DOOR: if (t_gnt) begin
@@ -278,9 +335,10 @@ module telem_tx #(
                     want      <= released;        // a release THIS clock is still owed
                     want_base <= released;
                     late      <= released;
-                    stamp_i   <= 2'd0;
-                    idx       <= 8'd0;
-                    wstate    <= W_STAMP;
+                    stamp_i    <= 2'd0;
+                    idx        <= 8'd0;
+                    sweep_base <= want_base;   // for the watchdog, if this one is abandoned
+                    wstate     <= W_STAMP;
                 end
 
                 W_STAMP: begin
@@ -368,7 +426,8 @@ module telem_tx #(
     assign reader_idle = !in_hdr && !in_body && !owed && !msg_go;
     assign word    = in_hdr ? hdr : fifo_dout;
     assign valid   = in_hdr || (in_body && !fifo_empty);
-    assign fifo_rd = in_body && take;
+    // The reader's, or the watchdog's drain of an abandoned sample.
+    assign fifo_rd = (in_body && take) || (wstate == W_ABORT && !fifo_empty);
 
     always_ff @(posedge clk) begin
         if (rst) begin
