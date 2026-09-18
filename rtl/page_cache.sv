@@ -280,6 +280,15 @@ module page_cache #(
     // across it, exactly the contract rtl/mem_cache.sv had and
     // rtl/accel_seq.sv still honours (its fast_ok carries mem_invalidating).
     // A reset walks it too, which is why nothing may be served during one.
+    // A NOTE ON A WARNING THAT LOOKS LIKE A FAULT AND IS NOT (2026-09-18).
+    // Synthesis says a hundred times a build that `ram_style = "distributed"`
+    // is ignored for `dir[n][m]`, "not inferred as ram due to incorrect
+    // usage".  It is talking about the individual slices of the two-dimensional
+    // array, not the array: the mapping report lists all eight ways as
+    // 128 x 18 distributed memory, by User Attribute, in exactly the builds
+    // that print the warning.  Restructuring it into one array per way silences
+    // the warning, maps identically (LUT-as-memory and register counts do not
+    // move at all) and cost timing, so it was reverted.  Leave it be.
     localparam integer DW = 18;               // {valid, dirty, tag[15:0]}
     (* ram_style = "distributed" *) logic [DW-1:0]    dir [WAYS][SETS];
     (* ram_style = "distributed" *) logic [NODES-1:0] plr [SETS];
