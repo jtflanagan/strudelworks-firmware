@@ -65,6 +65,46 @@
 > in bank zero outside the regions SHADOW duplicates.  The IIe's netlist is
 > unchanged (`GS = 0` folds every bank to zero).
 
+## The fronts' timing is a draw, not a design (2026-09-18)
+
+Seven IIgs builds in an afternoon, chasing the last tenth of a nanosecond, and
+the finding is about the chase rather than the changes.  The first three moved
+the worst path for reasons the reports gave:
+
+| what the source held | worst slack | failing |
+|---|---|---|
+| CK write leveling on, the DDR3 island, no fanout limits | -0.359 | 22 |
+| + a fanout limit on the iline's CAM registers (want_tag, f_vtag, f_ppn) | -0.183 | 89 |
+| + the DDR3 island removed | -0.097 | 9 |
+| + a fanout limit on the dline's sh_we / sh_waddr | **+0.001** | **0** |
+| + four dline decodes retimed behind the capture | -0.042 | 5 |
+| + the page cache's directory split per way | -0.105 | 3 |
+| **the same source as the +0.001 build, built again** | **-0.131** | 18 |
+
+**The last row is the point.**  One source, two builds, either side of the
+line.  So +0.001 was a draw and the two changes after it were reverted on
+evidence that cannot carry the claim - everything from the island's removal
+onward sits in a band about a tenth of a nanosecond wide, which is narrower
+than the difference between two builds of one thing.  What IS supported: the
+fanout limits and the island's removal took the worst path from -0.359 to
+about -0.1, and both worst paths at every stage were three quarters ROUTE, in
+different modules, which says congestion rather than depth.
+
+**What that means for the next attempt.**  Either accept a draw for the IIgs
+until there is real margin, or stop letting placement be the variable - a
+region constraint for the fronts is the tool the numbers keep pointing at, and
+it is the opposite of what was done for the DDR3 (docs/UBERDDR3.md "The island
+is gone": that block's paths were never route-bound and never in the tail).
+A structural cut is the third way and wants to be worth more than a tenth of a
+nanosecond to be worth the risk.
+
+**Two warnings that are not faults.**  The page cache's `ram_style` complaint is
+cosmetic (rtl/page_cache.sv says why, and the mapping report proves it).  And
+physopt's "very high fanout net ... is not considered" for the dline's sh_we and
+sh_waddr IS real - it names the remedy and the remedy worked - so read those
+messages, but check the mapping report before believing a ram_style one.
+
+
 Status: 2026-09-14, branch `woz_support`: the decimal adjust is out of the serve cone (core-side, "The decimal adjust out of the serve cone" below) - IIe build `dec_defer` TIMING MET +0.046, Total Replay 46.1x on hardware.  Before that: **rungs 1-3 and 5 DONE and ON HARDWARE** (rung 5: 2026-09-07,
 branch `dline_capacity`, fw 52dc698 plus the margin cuts; 72.3x on the
 animated Nox map from 63.4x, wave.dsk 83x drawing / 97x flipping; build
