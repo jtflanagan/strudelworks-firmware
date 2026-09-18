@@ -333,8 +333,17 @@ module dline #(
     logic [127:0] shrow [0:31];
     logic [31:0]  shv;
 
-    logic        sh_we;
-    logic [4:0]  sh_waddr;
+    // FANOUT (2026-09-18).  These two reach every one of the 32 rows above, so
+    // Vivado sees them at ~345 loads and says in the build log that it will
+    // NOT replicate them - "the fanout considered is changed from 348 to 47
+    // due to a timing constraint or macro primitives that prevent optimization
+    // on all of the loads".  Left alone they are why this front owns the worst
+    // path the moment the instruction front's CAM stops owning it: its
+    // spl_off8 -> rows path was 75% route.  A synthesis-time limit replicates
+    // the driver before placement, which is the half of the job physopt was
+    // declining to do.
+    (* max_fanout = 32 *) logic        sh_we;
+    (* max_fanout = 32 *) logic [4:0]  sh_waddr;
     logic [127:0] sh_wdata;
     always_ff @(posedge clk) if (sh_we) shrow[sh_waddr] <= sh_wdata;
 
