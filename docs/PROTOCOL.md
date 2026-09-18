@@ -1,6 +1,6 @@
 # FT601 link protocol
 
-Status: 2026-09-17, branch `telemetry` (not committed; GS bit `gs_telem1` MET wns +0.004, `reg_map_tb` 130 checks, `telem_tb` 23; not on hardware yet): type `0x39` TELEMETRY and `0x8000_0168` TELEM_CTRL added (TELEMETRY.md); the tables brought level with the RTL - types `0x33`, `0x34`, `0x37`, `0x38` and registers `0x8000_0100`-`0x8000_012C`, `0x8000_0160`, `0x8000_0164` were in `rtl/` and the host's `protocol.hpp` but not here.  `rtl/wb_regfile.sv`'s map and the `T_*` localparams are authoritative; this file follows them.
+Status: 2026-09-17, fw 6bb1bfd / host 523ce7c, merged to master; GS bit `gs_telem1` MET wns +0.004, `reg_map_tb` 130 checks, `telem_tb` 23; not on hardware yet): type `0x39` TELEMETRY and `0x8000_0168` TELEM_CTRL added (TELEMETRY.md); the tables brought level with the RTL - types `0x33`, `0x34`, `0x37`, `0x38` and registers `0x8000_0100`-`0x8000_012C`, `0x8000_0160`, `0x8000_0164` were in `rtl/` and the host's `protocol.hpp` but not here.  `rtl/wb_regfile.sv`'s map and the `T_*` localparams are authoritative; this file follows them.
 
 The message framing carried over the FT601, both directions. This is the
 framing DERISK.md milestone 3 deliberately left undesigned; the constraint it

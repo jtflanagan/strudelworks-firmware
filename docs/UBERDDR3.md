@@ -1,22 +1,6 @@
 # UberDDR3 on the card: placement, logic depth, and the calibration that sometimes never comes
 
-Status: 2026-09-16, branch `gs_control_panel`, fw c041e30 / host dce72d2 + the pblock below.
-The census's "placement no longer matters" ran out on 2026-09-16: a MET build whose DDR3
-forensics were identical to the calibrating ones never reached D=1, because slice pressure
-had pushed 261 wrapper cells out of X0Y2/X0Y3 ("Where the census's conclusion ran out").
-`constr/pt_v2/ddr3_place.xdc` pins the island to those two regions.
-Forensics, the ODELAY answer, the CK_OSERDES fix, the instrumentation, the eye sweep and the
-centred DQ tap are DONE and on hardware (bits `gs_ddr3_ckserdes`, `gs_ddr3_dbg`, `gs_ddr3_eye`,
-`gs_ddr3_center`, all MET); the fork is at d728e6a (four commits, unpushed).  UberDDR3 now comes from the fork
-`jtflanagan/UberDDR3`, branch `strudelworks-research` (upstream `4a51b96` is the merge base).
-First change on it: `CK_OSERDES` (the DDR3 clock pin through an OSERDES): build
-`gs_ddr3_ckserdes` MET +0.011 / WHS +0.054, 0/95362; on the routed design CK - CMD went from
-+1.65 ns to +0.05 ns (command setup 0.40 -> 1.30 ns, tDQSS +0.92 -> +0.02 ns); ON HARDWARE the
-DDR3 calibrates (`ddr=1`, image ready, fw 2026-09-14 09:58:30) and Arkanoid boots from slot 7
-at 62x unlimited.  Not yet a proof of reliability - one bit, one card, one day; the variance
-census across builds and the instrumentation are what make it one.  `build/ddr3_forensics.sh` + `build/results/ddr3_forensics_*.txt`
-are the instruments; every build now keeps its routed checkpoint (`build/results/*_routed.dcp`).
-
+Status: 2026-09-17, branch `ddr3_write_level` off master (fw 6bb1bfd / host 523ce7c). THE PBLOCK'S CONCLUSION RAN OUT TOO: a IIe bit (`telem2`, MET +0.002) whose wrapper sits 6541 of 6555 cells INSIDE X0Y2 never calibrates - `K=00 M=0E`, the same self-restart at CHECK_STARTING_DATA as 2026-09-16 - while `telem1` from the same day, 232 cells in X0Y1, calibrates. The census of 2026-09-14 (four clean builds, hours of them) and the island of 2026-09-16 were each true of the builds they looked at and neither is the cause. The write path is: the controller passes DQS training and write leveling and fails the first write-then-read, every time. PLAN BELOW ("The plan for a fresh session"): instruments first, then the failure in the bench, then write leveling on CK by the MMCM's fine phase shift.
 ## Why
 
 Three IIgs bitstreams that MET timing never calibrated the DDR3 (`gs_icache`, `gs_oprow2`,
@@ -219,6 +203,79 @@ themselves, constraining where it may go without packing it - so slice pressure 
 relieve itself through the one part of the design whose failure static timing cannot
 report.
 
+## Where the island's conclusion ran out: a wrapper inside it fails (2026-09-17)
+
+Two IIe builds of one RTL, hours apart, layout 2 of the telemetry map the only difference
+(TELEMETRY.md), both MET, both with `ddr3_place.xdc` in force and sections A and B identical
+(CK - CMD +0.052 ns, tDQSS +0.016 ns, CK from `OLOGIC_X0Y108`):
+
+| build | WNS | calibrates | wrapper cells by clock region | PHY |
+|---|---|---|---|---|
+| `telem1` | +0.058 | yes | X0Y2 6291, X0Y1 232, X1Y2 8, X0Y3 16 | X0Y2 197 |
+| `telem2` | +0.002 | **no**: `K=00 M=0E X=FF` | **X0Y2 6541, X0Y1 6** | X0Y2 197 |
+
+The GS build of the same tree (`gs_telem2`, +0.011) calibrates.  So a wrapper that stays
+wholly inside the island fails as one that left it did on the 16th, and the 16th's table
+reads the other way round today: 232 cells outside calibrate, 6 inside do not.  Section D is
+not the variable either.  What IS constant across every failure: `M=0E` = state 14,
+`CHECK_STARTING_DATA` - the controller gets through the DQS pattern search, the read-side
+calibration and write leveling (states 1-8), issues its first write and read (9-13), finds
+the read-back wrong and restarts from 0, forever.  The read side works, or 14 is never
+reached.  What the card writes is not landing as written: a write-path margin the static
+numbers put at +0.016 ns of a +-0.625 ns window and cannot actually see (no ODELAY, no
+write leveling on this board, DERISK.md's blind spot).  Build-to-build variation of the
+real alignment - IR drop under a busier bit, the placement of the DQ/DQS OSERDES clocking
+that no constraint pins - decides, and the census of the 14th could not have seen it: four
+builds that happened to land inside the margin proved nothing about the margin.
+
+## The plan for a fresh session (2026-09-17)
+
+Branch `ddr3_write_level`, both repos.  Rungs, each with its own bench before its build and
+its own bit TAGGED and PROVEN (or not) on the card; write the Status line as each lands.
+
+0. **An instrument that works when nothing else does.**  A bit that does not calibrate
+   answers no register - the ring is in the DDR3 - so DDR3_DBG1..3 (change 2) are unreadable
+   exactly when they matter, and the UART line (`build/report.sh`, `rtl/card_link.sv`
+   `rpt_*`) carries only K, M and X.  Add to the UART line: DDR3_DBG2's restart counters
+   (alignment / BIST / RDY drops, the state at the last restart), the write-level feedback
+   result per lane (the DRAM's 0/1 answers from states 7-8), and the lane and taps at the
+   restart.  One build, on the failing `telem2` tree (it is checked in: master minus nothing;
+   rebuild it and it may pass - keep `master_top_telem2.bit` from 2026-09-17 19:53, which
+   fails, and load THAT).  Read it; the plan below assumes it says the write-level feedback
+   is marginal or the restart is from CHECK_STARTING_DATA's data compare - confirm or
+   redirect.
+1. **The failure in the bench.**  `sim/run_mem_ddr3_tb.sh` (the Micron model) calibrates
+   with no board skew.  Give the model a DQS-versus-CK skew parameter at the DRAM pins
+   (a `#delay` on DQS/DQ relative to CK) and sweep it: find the skew at which the bench
+   restarts at CHECK_STARTING_DATA the way the card does.  That is the reproduction, and
+   the bench every later rung is measured in.  (`CAL_TRACE` prints every state transition.)
+2. **Write leveling on CK, without ODELAY.**  The Artix-7 HR banks have no ODELAY, so the
+   fork's no-ODELAY branch leaves DQS-versus-CK at whatever the routing gives.  Move CK
+   instead of DQS: in `rtl/clk_gen.v` give CK its own MMCM output whose phase the fabric
+   can shift at run time (MMCME2's PSCLK/PSEN/PSINCDEC/PSDONE, VCO 1200 MHz = 14.9 ps a
+   step, 168 steps a CK period); clock `CK_OSERDES` (change 1) from it; keep CMD, DQ and
+   DQS on the unshifted clocks.  Drive the stepping from the controller's own write-level
+   machine (`START_WRITE_LEVEL` / `WAIT_FOR_FEEDBACK`, fork `ddr3_controller.v`: the DRAM
+   samples CK on DQS's rising edge and answers 0/1 on DQ): step until the answer flips,
+   note the edge, step on until it flips back or the range ends, park CK midway.  A
+   parameter (`CK_PHASE_SHIFT`, default 0 until proven) so the tree still builds the old
+   way.  Bench it in rung 1's sweep: every skew the model can produce inside a period
+   calibrates.  Then the mode register's tDQSS is the DRAM's own window and the board's
+   alignment is closed on the board, not on a report.
+3. **Two smaller pieces that ride the same builds.**  A bounded DQS tap walk (the wrap seen
+   in the model: start index 8 then 7, "next odd", 32 taps round - bound it).  MIG's
+   DIC/RTT_NOM mode-register values: does the eye of change 3 widen?  Read the eye
+   (`DDR3_EYE0/1`, `ddreye0=` in `status`, `telemetry get ddreye0 ddreye1`) before and after.
+4. **Prove it on the failing tree.**  Rung 2's fix built on the `telem2` tree (IIe) and on
+   the GS: the IIe bit must calibrate (`D=1 K=17 M=17` on the UART, `tools/telem_check.sh`
+   PASS, `accel_test.sh` and `gs_cp_test.sh` where they were).  Then the census done right:
+   several builds of the fixed RTL - vary `place_design -directive` in `build/build.tcl`
+   for the placements - all loaded, all calibrating, their eyes and CK phases side by side
+   (`build/ddr3_census.sh` + a column for the parked phase).  A single failure is the
+   finding; there is no "known".
+
+What NOT to do again: conclude from N clean builds that a margin is closed.  The forensics
+(`build/ddr3_forensics.sh`) say where things are; only the card says whether the write lands.
 ## Instruments
 
 - `build/ddr3_forensics.sh TAG [WORKDIR]` / `build/ddr3_forensics.tcl`: sections A (the CK
