@@ -409,11 +409,54 @@ model's tDQSS violations go to zero:
 | CK late 400 ps | calibrates | 16 (-26 steps = -387 ps) | 0 |
 | CK late 800 ps | **never calibrates** | 0 (the bound, -625 ps: 800 is further out than the bound reaches, and -175 ps is inside the window) | 0 |
 
-**What is not proven.**  Anything on the card.  `CK_PHASE_SHIFT` is 0 in every
-build so far; `build/build.sh --ck-phase 1` (through `build/build.tcl`'s generic)
-turns it on.  The reading to take from the first such build is D4 on the UART:
-the parked step against the 42 it came in on says how far this board's CK was
-out, and it is the first measurement of that number this project has.
+**ON THE CARD (2026-09-18, `ckphase1`, IIe, MET +0.017 / +0.044, 0/90936, max
+depth 15).**  It calibrates first time - `D=1 K=17 M=17 X=00`, no restart of any
+cause - and the machine boots, runs and reboots on it.  And D4 is the first
+measurement this project has of where its CK actually sits:
+
+```
+D4=572C2528   parked at step 40, lane 0 crosses at 37, lane 1 at 44, both found
+```
+
+The sweep came in at step 42 (the phase every build to date has had) and a step
+is 14.88 ps, so, against the phase the routing gave:
+
+| | step | from the entry phase |
+|---|---|---|
+| byte lane 0's DQS crosses CK | 37 | **-74 ps** (its DQS is early of CK) |
+| byte lane 1's DQS crosses CK | 44 | **+30 ps** (late) |
+| CK parked at their mean | 40 | -30 ps |
+
+The two lanes' DQS edges are **104 ps apart** and they straddle CK, which is
+what DDR3_DBG2's feedback said in words on every build tonight (lane 0 early,
+lane 1 late) and what the routed report's tDQSS of +16 ps said on paper.  Two
+instruments and a static report agree.  Parking at the mean moves the worse lane
+from 74 ps off CK to 60.
+
+**So this board never needed much of a correction, and that is the point.**  The
+lottery is not about this board's typical 20 ps; it is about the build whose
+routing lands 300 or 700 ps out, which is the build that never calibrates - and
+the bench says those are exactly the ones this fixes.  What the hardware adds is
+that the mechanism runs, converges and costs nothing when there is nothing to
+correct.
+
+**The acceleration test, and what it does NOT say.**  `tools/accel_test.sh` on
+the `ckphase1` bit fails two checks - and so does the control.  Runs tonight:
+
+| bit | tree | beam slip in mode all 4 | "the program did not run after leaving acceleration" |
+|---|---|---|---|
+| `telem1` | master before this session (fw 6bb1bfd) | no | **FAIL** |
+| `ddr3_instr1` run 1 | fw df93df6, CK phase off | no | **FAIL** |
+| `ddr3_instr1` run 2 | same | **FAIL** 20 -> 201 | **FAIL** |
+| `ckphase1` run 1 | fw 7389139, CK phase ON | **FAIL** 19 -> 163 | **FAIL** |
+| `ckphase1` run 2 | same | **FAIL** 24 -> 169 | **FAIL** |
+
+The ways-out failure is on the bitstream this session began with, so it predates
+every commit of it: an existing red check on master, not rung 2's (the screen
+says `Unable to load BASIC` / `ram too large` after `all -> reads -> off`).  The
+beam slip is intermittent and happens with the phase shift and without it.
+Neither is attributable to CK stepping; both are findings of their own, and the
+ways-out one wants chasing before the next acceleration claim.
 
 ## A red bench, found on the way, and what it was (2026-09-17)
 

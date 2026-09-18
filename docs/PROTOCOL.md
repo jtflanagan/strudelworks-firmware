@@ -245,7 +245,7 @@ protocol.
 | `0x8000_0178` | WIDE_HD_EXECS | RO | ...HD_SLOT's execs |
 | `0x8000_017C` | WIDE_PANEL_DMAS | RO | ...PANEL_STAT's dmas |
 | `0x8000_0180` | WIDE_AUDIO_SENT | RO | ...AUDIO_STAT's samples sent |
-| `0x8000_0184` | DDR3_DBG4 | RO | UberDDR3 `o_debug4` (our fork), the CK write leveling of UBERDDR3.md rung 2, zero unless the bitstream was built with `CK_PHASE_SHIFT`: `[7:0]` the fine phase-shift step CK is parked at, `[15:8]` byte lane 0's crossing of CK's rising edge, `[23:16]` lane 1's, `[24]`/`[25]` whether each lane crossed inside the sweep, `[26]` the write leveling finished, `[31:27]` the sweep's half width in steps (so the step numbers have a scale: the sweep runs 0..2x that, and the phase it came in on is the middle). A step is 1/56 of the VCO period, 14.88 ps at 1200 MHz
+| `0x8000_0184` | DDR3_DBG4 | RO | UberDDR3 `o_debug4` (our fork), the CK write leveling of UBERDDR3.md rung 2, zero unless the bitstream was built with `CK_PHASE_SHIFT`: `[6:0]` the fine phase-shift step CK is parked at, `[13:7]` byte lane 0's crossing of CK's rising edge, `[20:14]` lane 1's, `[21]`/`[22]` whether each lane crossed inside the sweep, `[23]` the write leveling finished, `[29:24]` the sweep's half width in steps (so the step numbers have a scale: the sweep runs 0..2x that, and the phase it came in on is the middle). A step is 1/56 of the VCO period, 14.88 ps at 1200 MHz
 
 **Every read-only field is read through a shadow flop** (the register cut,
 TELEMETRY.md rung 0): a read is one clock older than it was, and a master that

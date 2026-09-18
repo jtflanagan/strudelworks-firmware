@@ -18,7 +18,7 @@ set -euo pipefail
 # here by SHA as before.
 REPO="https://github.com/jtflanagan/UberDDR3.git"
 # Pinned 2026-09-14: fork commit d728e6a on strudelworks-research.
-SHA="6964a50d5e9b078518e810437d08a34e29df1412"
+SHA="c2caf89dc78b12554820a01fde9c0b04de793ef4"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 dst="$here/UberDDR3"
