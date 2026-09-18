@@ -53,9 +53,12 @@ set stamp_time 0
 # strategy's own when empty, else e.g. ExtraNetDelay_high / AltSpreadLogic_high /
 # ExtraTimingOpt - a different placement of the same RTL, on purpose.
 set place_directive ""
-# CK_PHASE_SHIFT as a top-level generic (docs/UBERDDR3.md rung 2): 1 makes the
-# DDR3 controller write-level the CK pin by walking the MMCM's fine phase shift.
-set ck_phase 0
+# CK_PHASE_SHIFT as a top-level generic (docs/UBERDDR3.md rung 2): the DDR3
+# controller write-levels the CK pin by walking the MMCM's fine phase shift.
+# The RTL's own default is 1 since 2026-09-18, so this is only passed when it
+# is asked for either way - -1 means "not asked", and `-ck-phase 0` builds the
+# old way.
+set ck_phase -1
 
 for {set i 0} {$i < $argc} {incr i} {
     switch -- [lindex $argv $i] {
@@ -319,8 +322,8 @@ if {$gs} {
     set_property generic [concat [get_property generic [current_fileset]] \
                                  [list GS=1]] [current_fileset]
 }
-if {$ck_phase} {
-    puts "CK_PHASE_SHIFT = $ck_phase (the DDR3 write-levels its own CK)"
+if {$ck_phase >= 0} {
+    puts "CK_PHASE_SHIFT = $ck_phase ([expr {$ck_phase ? "the DDR3 write-levels its own CK" : "asked for OFF: CK on the commands' clock"}])"
     set_property generic [concat [get_property generic [current_fileset]] \
                                  [list CK_PHASE_SHIFT=$ck_phase]] [current_fileset]
 }

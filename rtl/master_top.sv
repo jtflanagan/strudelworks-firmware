@@ -89,7 +89,7 @@ module master_top #(
     // build/build.sh --gs sets it; the plain build must stay bit-identical
     // at GS = 0, which the IIe battery is the parity check on.
     parameter bit GS = 1'b0,
-    parameter integer CK_PHASE_SHIFT = 0  // 1 = write-level the DDR3's CK (docs/UBERDDR3.md rung 2)
+    parameter integer CK_PHASE_SHIFT = 1  // write-level the DDR3's CK (docs/UBERDDR3.md rung 2; the default since 2026-09-18)
 ) (
     input  wire        clk_pin,
     input  wire        rst_n,

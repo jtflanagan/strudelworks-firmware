@@ -60,11 +60,13 @@ module ddr3_wrapper #(
     // CK_OSERDES = 1 (our fork of UberDDR3) sends CK through an OSERDES too
     // (docs/UBERDDR3.md).
     parameter CK_OSERDES = 1,
-    // CK_PHASE_SHIFT = 1 (docs/UBERDDR3.md rung 2): CK's OSERDES runs from the
+    // CK_PHASE_SHIFT (docs/UBERDDR3.md rung 2): CK's OSERDES runs from the
     // MMCM's phase-shiftable copy of the DDR3 clock and the controller walks it
-    // under the DRAM's write-level feedback.  0 leaves CK on the same clock net
-    // as the commands, exactly as every build to date.
-    parameter CK_PHASE_SHIFT = 0,
+    // under the DRAM's write-level feedback, parking CK where the lanes' DQS
+    // edges cross it.  THE DEFAULT SINCE 2026-09-18 (the user), proven on the
+    // IIe and the IIgs; 0 leaves CK on the same clock net as the commands, as
+    // every build before that, and `build/build.sh --ck-phase 0` asks for it.
+    parameter CK_PHASE_SHIFT = 1,
 
     // BIST_MODE 1 = walk the whole address space once at the end of calibration.
     // Costs seconds at boot; keep it on until the board is trusted, then move to

@@ -49,10 +49,10 @@ module card_link #(
     // Passed straight to wb_regfile: which machine this bitstream is
     // (docs/GS.md rung 4).
     parameter bit GS = 1'b0,
-    // CK_PHASE_SHIFT = 1 (docs/UBERDDR3.md rung 2): the DDR3 controller walks
-    // the CK pin's clock phase under the DRAM's own write-level feedback.  Set
-    // by build/build.sh --ck-phase; 0 is every build to date.
-    parameter integer CK_PHASE_SHIFT = 0
+    // CK_PHASE_SHIFT (docs/UBERDDR3.md rung 2): the DDR3 controller walks the
+    // CK pin's clock phase under the DRAM's own write-level feedback.  The
+    // default since 2026-09-18; `build/build.sh --ck-phase 0` builds without it.
+    parameter integer CK_PHASE_SHIFT = 1
 ) (
     input  wire        clk_pin,
     input  wire        rst_n,
