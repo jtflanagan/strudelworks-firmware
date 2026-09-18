@@ -738,7 +738,15 @@ module iline #(
     // ---- the wants and the fill engine --------------------------------------
     // A want is a line a slot should hold; the engine serves one at a time.
     logic        want_v   [0:1];
-    logic [11:0] want_tag [0:1];
+    // FANOUT (2026-09-18).  These three are compared against every way of the
+    // retention CAM and every set within it, so one bit of them reaches a
+    // hundred and more LUTs: the IIgs build's worst path was want_tag ->
+    // f_ppn at -0.359, and of its 10.3 ns only 3.3 was logic - 7.0 was route,
+    // across twenty rows of the die, with two nets on it at fanouts of 157 and
+    // 104.  A limit lets Vivado keep a local copy for each group of readers,
+    // which is the cheapest thing that shortens a route-bound path: no cycle,
+    // no restructure, a few dozen flops.
+    (* max_fanout = 24 *) logic [11:0] want_tag [0:1];
 
     localparam [2:0] F_IDLE = 3'd0, F_REQ = 3'd1, F_W1 = 3'd2, F_W2 = 3'd3,
                      F_CAM = 3'd4;    // the promote's own beat
@@ -746,10 +754,10 @@ module iline #(
     logic [IWW-1:0] cam_pidx;         // the way a promote is copying (its set is f_vtag[2:0])
     logic        f_slot;
     logic        f_cam;               // a CAM-only fill: the scanner's, no slot
-    logic [11:0] f_vtag;
+    (* max_fanout = 24 *) logic [11:0] f_vtag;
     // ...and the identity the filled line will carry.  The line-row request
     // speaks the physical space now: the page, and the line in it.
-    logic [15:0] f_ppn;
+    (* max_fanout = 24 *) logic [15:0] f_ppn;
     logic [3:0]  f_reg;
     logic        f_fold;
     logic [7:0]  f_vbank;

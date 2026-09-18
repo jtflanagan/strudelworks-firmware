@@ -13,7 +13,13 @@ sits at a later line than the block's start.  Exit 1 on any hit.
 """
 import re, sys, pathlib
 root = pathlib.Path(__file__).resolve().parent.parent
-decl_re = re.compile(r'^\s*(?:wire|logic|reg)\b[^;=]*?\b([A-Za-z_]\w*)\s*(?:,\s*([A-Za-z_]\w*)\s*)*(?:=[^;]*)?;', re.M)
+# A declaration may carry a synthesis attribute in front of it -
+# `(* max_fanout = 24 *) logic [11:0] f_vtag;` - and it is still a
+# declaration.  Without this the scanner does not see the name at all and
+# reports the first USE of it as a forward reference into a generate scope,
+# which is what it did for iline's f_vtag on 2026-09-18.
+attr = r'(?:\(\*[^*]*\*\)\s*)*'
+decl_re = re.compile(r'^\s*' + attr + r'(?:wire|logic|reg)\b[^;=]*?\b([A-Za-z_]\w*)\s*(?:,\s*([A-Za-z_]\w*)\s*)*(?:=[^;]*)?;', re.M)
 bad = 0
 for f in sorted(root.glob('rtl/*.sv')):
     src = f.read_text()
@@ -22,7 +28,7 @@ for f in sorted(root.glob('rtl/*.sv')):
     decl = {}
     for i, l in enumerate(lines, 1):
         s = l.split('//')[0]
-        m = re.match(r'^\s*(?:wire|logic|reg)\b\s*(?:\[[^\]]*\]\s*)*(.*);\s*$', s)
+        m = re.match(r'^\s*' + attr + r'(?:wire|logic|reg)\b\s*(?:\[[^\]]*\]\s*)*(.*);\s*$', s)
         if not m: continue
         for part in m.group(1).split(','):
             name = part.strip().split('=')[0].strip().split('[')[0].strip()
