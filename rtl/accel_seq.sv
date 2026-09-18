@@ -336,7 +336,30 @@ module accel_seq #(
     // one-to-one with debits, so the long-run ratio is exact as before.
     logic [19:0] credit;
     logic        grant_q, spent_q, unl_q;
-    wire  [19:0] cap = {2'b00, target, 2'b00};          // 4 * target
+    // THE BUCKET'S DEPTH (2026-09-18).  It was four bus cycles' worth - 4 *
+    // target - which is fine for a DDR3 miss (well under one bus cycle) and
+    // useless for what actually costs the rate: a STRETCH of bus-bound work,
+    // a slot access, the 80-column firmware, a disk.  Through one of those the
+    // core spends about one op a bus cycle while the bucket earns `target`, so
+    // the surplus is (target - 1) an cycle - 1.8 at a target of 2.8 - and four
+    // cycles' worth of reservoir (11 ops there) fills in six.  Everything after
+    // that is thrown away and never made up, so the achieved rate sits under
+    // the asked-for one: a GS asking 2.8 settles near 2.3 (the user).
+    //
+    // So the depth has a FLOOR of CAP_FLOOR ops, and the old scaled term is
+    // kept for when it is larger.  1024 ops is about 360 bus cycles of
+    // bus-bound work at a target of 2.8 - a third of a millisecond - and the
+    // burst it allows afterwards is at most 1024 ops, which this machine's
+    // unlimited rate clears in under twenty bus cycles.  A constant, not a
+    // setting: there is nothing here to set wrong.  The ceiling is the credit
+    // register's own: 20 bits of 8.8 is 4096 ops.
+    //
+    // This does not touch the governor's rule (docs/ACCELERATION.md, the user
+    // 2026-09-03): credit still accrues strictly on real-cycle time, stalls
+    // stay on the core side as not-ready terms, and mode 0 never asks.
+    localparam [19:0] CAP_FLOOR = 20'd262_144;          // 1024 ops, 8.8
+    wire  [19:0] cap_scaled = {2'b00, target, 2'b00};   // 4 * target, as before
+    wire  [19:0] cap = (cap_scaled > CAP_FLOOR) ? cap_scaled : CAP_FLOOR;
     // Registered: target lives in the regfile a clock region away, and a
     // live ==0 compare in can_pay would put it right back in the verdict
     // cone.  A target change taking effect a clock late is invisible.
