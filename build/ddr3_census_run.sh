@@ -13,6 +13,10 @@
 #   build/ddr3_census_run.sh ExtraNetDelay_high AltSpreadLogic_high ExtraTimingOpt
 #   PREFIX=cen2 build/ddr3_census_run.sh ...     # tags PREFIX_<directive, lower case>
 #
+# COMMIT FIRST AND DO NOT EDIT THE TREE WHILE IT RUNS: each build synthesises
+# whatever the sources say when IT starts, so a tree edited underneath produces
+# rows of no named commit (2026-09-18).
+#
 # swhost must be stopped (build/load_card.sh refuses otherwise).  The card is
 # left holding the LAST build; start swhost on a calibrating one afterwards.
 set -uo pipefail
@@ -27,7 +31,8 @@ for d in "$@"; do
     log="$root/build/master_build_$tag.log"
     # The verdict is what build/wns.sh says of the results just written (run_build.sh
     # prints it to its stdout, not into the log); the log has Vivado's own numbers.
-    verdict="$(cd "$root" && build/wns.sh 2>/dev/null | grep -m1 -o 'TIMING MET wns=[-+0-9.]*\|TIMING MISS wns=[-+0-9.]*' || echo 'NO VERDICT')"
+    verdict="$(cd "$root" && build/wns.sh 2>/dev/null | grep -o 'TIMING MET wns=[-+0-9.]*\|TIMING MISS wns=[-+0-9.]*' | head -1)"
+    [ -n "$verdict" ] || verdict="NO VERDICT"
     wns="$(sed 's/.*wns=//' <<<"$verdict")"; [ "$verdict" = "NO VERDICT" ] && wns="none"
     depth="$(grep -m1 -A3 'End Point Clock' "$root/build/results/design_analysis.rpt" 2>/dev/null | grep clk_ctrl_raw | awk -F'|' '{n=0; for(i=4;i<=NF;i++) if($i+0>0) n=i-4; print n}')"
     fx="$root/build/results/ddr3_forensics_$tag.txt"
@@ -39,8 +44,15 @@ for d in "$@"; do
     card="not loaded"
     if grep -q 'TIMING MET' <<<"$verdict"; then
         if "$root/build/load_card.sh" "$bit" > "$root/build/results/load_$tag.log" 2>&1; then
-            sleep 4
-            line="$("$root/build/report.sh" -n 2 2>/dev/null | grep -m1 'K=' || true)"
+            # The card needs a moment after a load, and one read can miss the
+            # 1 Hz line: try three times before calling the UART silent (a
+            # false "silent" cost a census row on 2026-09-18).
+            line=""
+            for try in 1 2 3; do
+                sleep 5
+                line="$("$root/build/report.sh" -n 2 2>/dev/null | grep -m1 'K=' || true)"
+                [ -n "$line" ] && break
+            done
             if [ -n "$line" ]; then
                 d2="$(sed -n 's/.* D2=\([0-9A-F]*\).*/\1/p' <<<"$line")"
                 wl="?"
