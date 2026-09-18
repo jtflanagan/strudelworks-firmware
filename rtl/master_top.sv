@@ -360,6 +360,10 @@ module master_top #(
     // The debug pair (rtl/wb_regfile.sv DBG_SEL/DBG_VAL, docs/GS.md rung 6).
     wire [7:0]  dbg_sel;
     wire [31:0] dbg_val, il_dbg, dl_dbg, dl_dbg2, pc_dbg;
+    // The register cut's hold (docs/TELEMETRY.md): while the telemetry sender
+    // sweeps, the top's debug snapshot words and the clock histogram's copies
+    // stand still too, so a sample's histogram sums to its own CLOCKS.
+    wire        tm_snap_hold;
     // The game port in the dummies (rtl/game_port.sv).
     wire [15:0] game_park_addr;
     wire        game_pb_ok, game_pdl_ok;
@@ -566,7 +570,7 @@ module master_top #(
         .accel_swint_dis (accel_swint_dis),
         .accel_game_dis (accel_game_dis),
         .accel_fronts_dis (accel_fronts_dis),
-        .dbg_sel (dbg_sel), .dbg_val (dbg_val),
+        .dbg_sel (dbg_sel), .dbg_val (dbg_val), .snap_hold (tm_snap_hold),
         .game_pb (game_pb), .game_pb_ok (game_pb_ok), .game_pdl_ok (game_pdl_ok),
         .game_pdl0 (game_pdl0), .game_pdl1 (game_pdl1), .game_pdl2 (game_pdl2), .game_pdl3 (game_pdl3),
         .game_meas (game_meas),
@@ -1511,7 +1515,12 @@ module master_top #(
     // the WNS of gs_null at +0.171 - a debug read setting the clock).  Two
     // clocks old is what a snapshot wants to be.
     logic [31:0] top_w0_q, top_w1_q, top_w2_q, top_w3_q, top_w4_q;
-    always_ff @(posedge apple_clk) begin
+    // ...and the histogram behind copies of its own, so a sweep under the
+    // hold reads twelve buckets of one instant; the mux reads the copies.
+    logic [31:0] h_cnt_s [12];
+    always_ff @(posedge apple_clk)
+        if (!tm_snap_hold) for (int hs = 0; hs < 12; hs++) h_cnt_s[hs] <= h_cnt[hs];
+    always_ff @(posedge apple_clk) if (!tm_snap_hold) begin
         top_w0_q <= {seq_state, turbo_en, turbo_ok, turbo_claim, d_claim_w, d_pending_w,
                      cyc_internal, map_settling, cpu_bank_wr, ev_fast_room, ev_fast_room_w,
                      mem_serve, mem_inval, mem_invalidating, cpu_cyc_is_i, cpu_rw, cpu_sync,
@@ -1556,8 +1565,8 @@ module master_top #(
                           (dbg_sel[3:0] == 4'd4) ? top_w4_q :
                           // 5..14: the clock histogram's buckets 0..9 (RETIRE first);
                           // 15: CLOCKS.  OTHER (bucket 10) is CLOCKS less the rest.
-                          (dbg_sel[3:0] == 4'd15)  ? h_cnt[11] :
-                          (dbg_sel[3:0] >= 4'd5)   ? h_cnt[dbg_sel[3:0] - 4'd5] :
+                          (dbg_sel[3:0] == 4'd15)  ? h_cnt_s[11] :
+                          (dbg_sel[3:0] >= 4'd5)   ? h_cnt_s[dbg_sel[3:0] - 4'd5] :
                                                    accel_maps;
     // REGISTERED: the top word muxes the core's combinational prediction and
     // din, and unregistered it was the IIe build's binding path into the

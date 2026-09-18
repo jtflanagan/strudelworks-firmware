@@ -1,5 +1,7 @@
 # FT601 link protocol
 
+Status: 2026-09-17, branch `telemetry` (not committed; GS bit `gs_telem1` MET wns +0.004, `reg_map_tb` 130 checks, `telem_tb` 23; not on hardware yet): type `0x39` TELEMETRY and `0x8000_0168` TELEM_CTRL added (TELEMETRY.md); the tables brought level with the RTL - types `0x33`, `0x34`, `0x37`, `0x38` and registers `0x8000_0100`-`0x8000_012C`, `0x8000_0160`, `0x8000_0164` were in `rtl/` and the host's `protocol.hpp` but not here.  `rtl/wb_regfile.sv`'s map and the `T_*` localparams are authoritative; this file follows them.
+
 The message framing carried over the FT601, both directions. This is the
 framing DERISK.md milestone 3 deliberately left undesigned; the constraint it
 was designed around — the 1024-byte termination errata, and the decision that
@@ -88,7 +90,12 @@ host reads; the receiver carries parser state across all of them.
 | `0x32` | FD35_SEEK | Card→host, **unsolicited**. Payload `[{seq, 0, qtr, 0}]`: the 3.5" head is on a track the card does not hold; answer with the FD35_TRACK chunks carrying `seq`.  Asked again after 40 ms if nothing landed. |
 | `0x35` | START_HELD | Card→host, **unsolicited, not gated on the capture**. Header only; `free[0]` = held by the card's own reset (power-on, a bitstream load, the link's reset or its watchdog), `free[1]` = held by a RES' the hold did not cause, `free[15:8]` = the count of holds since the card's reset. The whole machine is held - the card drives RES' low - until the host has run its startup checklist and writes START bit 0. Sent on every rising edge of `pending`; a host that attaches to a hold already in place reads START. See CLEAN_START.md. |
 | `0x36` | MEM_ROM_ACK | Card→host, **unsolicited**, one per MEM_ROM. Header `{0, 0x36, len=1}`; payload `{sum16[31:16], status[15:12], chunk[11:0]}`. `status` 0 OK - the chunk's 512 bytes have drained into the image and `sum16` is their sum mod 2^16 - 1 OVERRUN (arrived while another chunk drained; dropped, counted in MEM_ROM_STAT), 2 NOT_HELD (the machine is running: a ROM never lands under it; refused), 3 BAD_LEN, 4 BAD_INDEX (the chunk number is past the ROM). A refusal is acked at once. The host sends one chunk, waits for its ack, retries on a timeout or a refusal, and compares ROM_SUM with its own file once rom_loaded is set. See CLEAN_START.md CS2. |
-| `0x31`–`0xFF` | — | Application, unassigned. |
+| `0x33` | PANEL_DMA | Host→card. The host's reply to a request our 65816 panel left in its own RAM, carried into the machine by the HD card's DMA write: payload `[{count, addr}] [{0, bank, 0}] [bytes…]`, HD_DONE's shape but not a disk command. Taken only with the HD card idle and nothing of the disk's outstanding; a refusal is counted in PANEL_STAT. See GS_CONTROL_PANEL.md R4. |
+| `0x34` | PANEL_BELL | Reserved beside PANEL_DMA for the panel's bell; not decoded. |
+| `0x37` | FD35_DIRTY | Card→host, **unsolicited**. A 3.5" track the machine WROTE, going home: payload `[{seq, chunk, qtr, 0}] [{chunks, 0, nibbles}]` then up to 252 words - FD35_TRACK's shape in the other direction. See IWM35.md. |
+| `0x38` | FD35_EJECT | Card→host, **unsolicited**. Header only: the MACHINE asked for its 3.5" disk back (the Finder, the ROM's control call). It follows any FD35_DIRTY the card owes, in the same stream. See IWM35.md. |
+| `0x39` | TELEMETRY | Card→host, **unsolicited once asked** (TELEM_CTRL enable). The card's registers, once a second, read in one instant under the register cut's hold; the first sample of a run is taken as the Apple's RES' lets go. `free` = `{drops[7:0], layout[7:0]}`; payload `[{epoch[7:0], flags[7:0], 16'd0}] [seq] [microseconds]` then the words of `rtl/telem_map.vh` in its order: registers, and - layout 2 - the debug space's items, each read through DBG_VAL with the sender's own selector on the top's muxes while the host's DBG_SEL stands (85 words in layout 1, `len` = 88; 171 in layout 2, `len` = 174). `flags[0]` RES' was low at the sweep, `flags[1]` a baseline that had to wait for a message already going out. `epoch` counts RES' releases, `seq` seconds since the last one (0 is the run's baseline), `drops` samples skipped because the previous message had not finished. Port 11 of the message bus: above the capture, below the sound. See TELEMETRY.md. |
+| `0x3A`–`0xFF` | — | Application, unassigned. |
 
 ### The event record (wire format v6, 2026-09-08)
 
@@ -205,6 +212,18 @@ protocol.
 | `0x8000_00F8` | AUDIO_STAT | RO | `[15:0]` samples sent, `[23:16]` samples dropped for a full FIFO, `[24]` the FIFO full now |
 | `0x8000_00FC` | PRINTER_SLOT | RW bits 2:0 | the printer card's slot, 0 = off; latched at RES', never any other card's; `[16]` rom loaded, `[31:24]` $C0n0 writes seen — see PRINTER.md |
 | `0x8000_00C4` | ACCEL_FAST_KBD | RO | the census of ACCEL_FAST, the dispatcher's ~8-clock ops (ACCELERATION.md "The census"): the internalized keyboard reads ($C00x from the parked-dummy latch). The seven sum to ACCEL_FAST |
+| `0x8000_0100` | ACCEL_MAPS | RO | MMU map changes (`rtl/apple_mmu.sv` map_changed); cleared with the ACCEL_* counters |
+| `0x8000_0104` | ACCEL_IDROP | RO | instruction-front lines a map change took out of service |
+| `0x8000_0108` | ACCEL_IREVIVE | RO | ...and lines a later one put back |
+| `0x8000_010C` | ACCEL_DDROP | RO | the same pair for the data front |
+| `0x8000_0110` | ACCEL_DREVIVE | RO | |
+| `0x8000_0114` | MEM_FILLS | RO | pages the page cache filled from the DDR3 — see PAGE_CACHE.md |
+| `0x8000_0118` | MEM_FLUSHES | RO | ...and dirty pages written back |
+| `0x8000_011C` | MEM_DECLINES | RO | line requests a page was not resident for |
+| `0x8000_0120` | MEM_ROM | RO | the ROM load's flow control: `[0]` a chunk is draining, `[15:8]` chunks dropped for arriving during one, `[23:16]` absolute (extended-ROM) chunks landed, `[31:24]` the IIgs shadow duplicate's drops (must be 0) |
+| `0x8000_0124` | GS_ADB | RO | the ADB micro's mouse path, `rtl/gs_adb.sv` dbg_stat; zero on a IIe |
+| `0x8000_0128` | ACCEL_CORE_CYC | RO | core cycles (vbeam's ticks): the PLAIN acceleration ratio's numerator. Can tick twice a clock: wraps in 21 s at worst |
+| `0x8000_012C` | ACCEL_BUS_CYC | RO | raw bus cycles: its denominator |
 | `0x8000_0130` | DBG_SEL | RW bits 7:0 | the debug pair's select (GS.md rung 6): `[5:4]` the module - 0 the instruction front, 1 the data front, 2 the page cache, 3 the dispatcher and the top - and `[3:0]` the item; the item lists are the `dbg_val` muxes in rtl/iline.sv, rtl/dline.sv, rtl/page_cache.sv and rtl/master_top.sv.  `[7:6]` = 1 the bank census, 2 the data front's bank table, 3 the IIgs battery RAM (`[5:0]` = k, bytes 4k..4k+3) |
 | `0x8000_0134` | DBG_VAL | RO | the selected counter or state snapshot.  From swhost's control socket: `regw 80000130 SEL` then `reg 80000134` |
 | `0x8000_0138` | FD35_DRIVE | RW bits 1:0 | the 3.5" drive on the IIgs's IWM, live like FD_DRIVE1: `inserted` (its 0->1 edge is the insertion), `wp`; back: `[8]` stale, `[15:9]` track, `[16]` side, `[17]` the drive's motor, `[18]` the IWM's ENABLE, `[31:24]` seeks — see IWM35.md |
@@ -217,8 +236,25 @@ protocol.
 | `0x8000_0154` | GS_CLOCK_STAT | RO | the IIgs clock chip (rtl/gs_clock.sv): `[31]` bram_ok (a whole GS_BRAM landed), `[30:28]` the chip's state (0 idle, 1 time, 2 internal, 3 bram1, 4 bram2), `[27:16]` the machine's battery RAM writes (cleared only by a link reset), `[15:8]` bad strobes, `[7:0]` strobes (both since RES'); zero on a IIe.  Its 256-byte store reads through the debug pair: DBG_SEL `$C0 + k` gives bytes 4k..4k+3, low byte first — see GS_CONTROL_PANEL.md R0B |
 | `0x8000_0158` | START | W1 bit 0 | the start hold (rtl/start_hold.sv): `[0]` pending - RES' is driven low, the whole machine waits for the host's checklist; writing 1 releases it - `[1]` cause the card's reset, `[2]` cause a RES' the hold did not cause, `[31:24]` holds since the card's reset.  Values latched at RES' latch at its release too, so what the checklist writes is taken as the hold lets go — see CLEAN_START.md |
 | `0x8000_015C` | ROM_SUM | RO | the sum of every system-ROM chunk's bytes as they drained into the image, counted on each chunk's FIRST landing only (a retry after a lost ack does not add); cleared with rom_loaded by a link reset.  The host compares it with its own file once MEM_STAT rom_loaded is set — see CLEAN_START.md CS2 |
+| `0x8000_0160` | PANEL_STAT | RO | the host's replies to our 65816 panel (PANEL_DMA): `[3:0]` blocks written into the machine, `[7:4]` messages dropped because the HD card's DMA was busy; four bits each, wrapping — see GS_CONTROL_PANEL.md R4 |
+| `0x8000_0164` | FD35_WSTAT | RO | the 3.5" write path (`rtl/gs_iwm.sv`): `[7:0]` loads, `[15:8]` lands, `[23:16]` why the last flush, `[31:24]` flushes — see IWM35.md |
+| `0x8000_0168` | TELEM_CTRL | RW bit 0 | `[0]` send a TELEMETRY message a second; clear at the card's reset (silent until asked), and a host that wants a run's baseline sets it BEFORE it releases START. RO `[15:8]` epoch (RES' releases seen), `[23:16]` samples skipped, `[31:24]` messages sent. A bitstream older than telemetry reads 0 here after the write, which is how a host knows to keep polling — see TELEMETRY.md |
+| `0x8000_016C` | WIDE_U2_CMDS | RO | 32-bit totals of the event counts that can wrap inside a second (TELEMETRY.md layout 2), each following its narrow source a clock behind by `(now - before) mod 2^n`, cleared with it by the card's reset: U2_SLOT's cmds |
+| `0x8000_0170` | WIDE_U2_RX | RO | ...U2_SLOT's rx chunks |
+| `0x8000_0174` | WIDE_PRN_WRITES | RO | ...PRINTER_SLOT's writes |
+| `0x8000_0178` | WIDE_HD_EXECS | RO | ...HD_SLOT's execs |
+| `0x8000_017C` | WIDE_PANEL_DMAS | RO | ...PANEL_STAT's dmas |
+| `0x8000_0180` | WIDE_AUDIO_SENT | RO | ...AUDIO_STAT's samples sent |
 
-Both are stamped at synthesis by `build/build.sh` through `build.tcl`'s
+**Every read-only field is read through a shadow flop** (the register cut,
+TELEMETRY.md rung 0): a read is one clock older than it was, and a master that
+raises the hold and sweeps the map - the telemetry sender - reads one instant
+of all of it. What the host wrote reads straight from the register. DBG_VAL's
+shadow alone follows through the hold: the sweep reads the debug space through
+it while the hold is up, and what the hold freezes there is the words behind
+the top's debug mux - its snapshot words and the clock histogram's copies.
+
+Both BUILD words are stamped at synthesis by `build/build.sh` through `build.tcl`'s
 `-generic`, so they describe the bitstream rather than whenever it was loaded.
 **Zero means unstamped** — a GUI build, or gateware older than this map, which
 never answers at all. Either way the host reports "unknown" rather than

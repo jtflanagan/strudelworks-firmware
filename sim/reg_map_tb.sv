@@ -120,6 +120,8 @@ module reg_map_tb;
     wire       res_drive;
     reg        hd_rom_loaded = 1'b0, hd_busy = 1'b0;
     reg  [7:0] hd_execs = 8'd0;
+    // The register cut's hold (rtl/wb_regfile.sv): the telemetry sender's on the card.
+    reg        snap_hold = 1'b0;
     // The floppy's side of FD_SLOT, FD_DRIVE1/2 and FD_STAT: the tb plays
     // the controller.
     wire [2:0]  fd_slot_active;
@@ -252,6 +254,8 @@ module reg_map_tb;
         .ring_status (32'h0200_1234), .link_stat (32'h0103_A50B),
         .audio_on (audio_on), .audio_realtime (audio_realtime), .audio_rate (audio_rate),
         .audio_stat (32'h0107_4242),
+        .snap_hold (snap_hold),
+        .telem_stat (24'h03_02_01),
         .wb_cyc (wb_cyc), .wb_stb (wb_stb), .wb_we (wb_we),
         .wb_adr (wb_adr), .wb_dat_w (wb_dat_w), .wb_sel (wb_sel),
         .wb_ack (wb_ack), .wb_stall (wb_stall), .wb_dat_r (wb_dat_r)
@@ -1642,6 +1646,45 @@ module reg_map_tb;
             $display("FAIL: FB_PEEK (text) reads %08x", out_mem[base+2]);
             errors = errors + 1;
         end else $display("  ok: FB_PEEK's bit 14 picks the text copy");
+
+        // ---- the register cut's hold ------------------------------------------
+        // Every read-only readback is read through a shadow; snap_hold stops the
+        // shadows.  A source that moves under the hold must not move in the
+        // readback, a field the host WROTE still reads as written (it is not
+        // shadowed), and the shadows catch up the moment the hold drops.
+        vbl_pos = 32'h1111_2222; hd_execs = 8'd5;
+        repeat (4) @(posedge clk);
+        snap_hold = 1'b1;
+        @(posedge clk);
+        vbl_pos = 32'h3333_4444; hd_execs = 8'd6;
+        base = out_n;
+        do_read(32'h8000_0038);
+        if (out_mem[base+2] !== 32'h1111_2222) begin
+            $display("FAIL: VBL_POS under the hold reads %08x, expected the held 11112222", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: a source that moves under snap_hold does not move in the readback");
+        base = out_n;
+        do_read(32'h8000_0014);
+        if (out_mem[base+2][31:24] !== 8'd5) begin
+            $display("FAIL: HD_SLOT's execs under the hold read %0d, expected the held 5", out_mem[base+2][31:24]);
+            errors = errors + 1;
+        end else $display("  ok: ...nor does a field inside a composed word");
+        do_write(32'h8000_0020, 32'h0000_0015);
+        base = out_n;
+        do_read(32'h8000_0020);
+        if (out_mem[base+2][5:0] !== 6'h15) begin
+            $display("FAIL: BUTTONS written under the hold reads %08x", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: a field the host wrote is not shadowed: it reads as written under the hold");
+        do_write(32'h8000_0020, 32'h0000_0000);
+        snap_hold = 1'b0;
+        base = out_n;
+        do_read(32'h8000_0038);
+        if (out_mem[base+2] !== 32'h3333_4444) begin
+            $display("FAIL: VBL_POS after the hold reads %08x, expected 33334444", out_mem[base+2]);
+            errors = errors + 1;
+        end else $display("  ok: the shadows catch up when the hold drops");
+        vbl_pos = 32'd0; hd_execs = 8'd0;
 
         if (errors == 0) $display("PASS");
         else             $display("FAIL: %0d error(s)", errors);

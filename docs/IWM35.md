@@ -460,7 +460,9 @@ off` in the GS confs until a SmartPort with zero units declines its boot.
 **The instruments that answered it**, none of which needed a rebuild:
 `swctl reg 0x80000138` (FD35_DRIVE: inserted, wp, stale, track, side, motor,
 seeks) and `reg 0x8000013C` (FD35_STAT: fill_max, ctl = {phases, q7, q6,
-drive_sel, apple35_sel}, late).  A boot the ROM never attempted reads ctl = 0
+drive_sel, apple35_sel}, late) - both in every telemetry sample since
+2026-09-17 as `d35 d35wp d35stale d35track d35side d35motor d35card` and
+`d35late d35ctl d35fill` (`swctl telemetry get ...`, TELEMETRY.md).  A boot the ROM never attempted reads ctl = 0
 and the motor off; a boot it attempted reads the motor on and the seek count
 climbing.  `accel`'s fast-by-kind census names a wait: the machine that had
 "partly loaded" was 209 M keyboard reads in thirty seconds with I, RAM and ROM

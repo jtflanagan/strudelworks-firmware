@@ -162,6 +162,8 @@ if {$snoop || $master} {
         [file join $root rtl wb_regfile.sv] \
         [file join $root rtl start_hold.sv] \
         [file join $root rtl reg_bridge.sv] \
+        [file join $root rtl reg_front.sv] \
+        [file join $root rtl telem_tx.sv] \
         [file join $root rtl msg_arb.sv] \
         [file join $root rtl reply_stream.sv] \
         [file join $root rtl msg_master.sv] \

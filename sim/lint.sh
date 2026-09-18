@@ -65,6 +65,8 @@ run event_merge   rtl/event_merge.sv
 run synchronizer  rtl/synchronizer.sv
 run wb_regfile    rtl/wb_regfile.sv rtl/fast_census.sv rtl/start_hold.sv
 run reg_bridge    rtl/reg_bridge.sv
+run reg_front     rtl/reg_front.sv
+run telem_tx      -Irtl rtl/telem_tx.sv rtl/sync_fifo.sv
 run msg_arb       rtl/msg_arb.sv
 run reply_stream  rtl/reply_stream.sv
 run msg_master    rtl/msg_master.sv

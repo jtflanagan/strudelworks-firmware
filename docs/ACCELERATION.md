@@ -346,6 +346,12 @@ the closed regime".
 
 ## The census (2026-09-02)
 
+(Read it, since 2026-09-17, from telemetry - TELEMETRY.md: the seven buckets
+and ACCEL_FAST are in every sample, of one instant, and `swctl telemetry
+delta N afast afast_i afast_dram afast_dlc afast_drom afast_dcx afast_wr
+afast_kbd` is the census over the last N seconds with no arithmetic of your
+own.  `accel status` still reports them, fed from the same samples.)
+
 At 58x on hardware (Nox, moving about the map) the counters put 92% of
 the ops at one clock and the dispatcher's fast ops - 7.6% of the ops at
 ~8 clocks each - at 36% of all clocks, bus ops (two cycles each) at 9%;

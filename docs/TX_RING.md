@@ -300,6 +300,13 @@ rather than a starvation trap:
 > the card** — a host request it is answering, a bus event it is reporting —
 > so it can never saturate. The one continuous source, the capture, is last.
 
+**Thirteen ports today** (`rtl/card_link.sv`, 2026-09-17): the register reply, the
+CPU_HOLD, KBD_EVENT, UNKNOWN_TYPE and START_HELD notices, the ROM loader's
+acks, the top's application message (the disk's), the floppy's, the 3.5"
+drive's, the Uthernet II's, the sound's, **the telemetry sample (port 11,
+TELEMETRY.md)** and the capture (port 12). Telemetry sits where the sound does
+and for the sound's reason: one message a second, bounded by the wall clock.
+
 That is the old `tx_arb` order — reply, notice, application, capture — kept,
 and it stays true of anything on the roadmap: a video snapshot is bounded by
 the frame rate, a sync record by the event count. If a second *continuous*

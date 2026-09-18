@@ -864,9 +864,14 @@ In the order the counters rank them on the animated map:
    using the spare bucket code 3'd7, so item 2's figure is exact
    without a trace.  Trivial, but it is a build.
 
-Measurement discipline for whichever comes first: `swctl accel status`
-twice N seconds apart, deltas mod 2^32 (the turbo counter wraps every
-~75 s at 60x), clocks = 98 x cycles; a sparse trace for the bus side.
+Measurement discipline for whichever comes first (as of 2026-09-17,
+TELEMETRY.md): `swctl telemetry delta N aturbo adline afast abus acycles
+afast_i afast_dram afast_dlc afast_drom afast_dcx afast_wr afast_kbd` - the
+last N seconds of the card's own counters, of one instant a sample, the wrap
+already paid for; or `telemetry mark m` / `telemetry since m ...` around a
+run.  (Before that: `swctl accel status` twice N seconds apart, deltas mod
+2^32 - the turbo counter wraps every ~75 s at 60x.)  Clocks = 98 x cycles; a
+sparse trace for the bus side.
 
 ## The keyboard read at one clock: built on the IIgs first (2026-09-11)
 

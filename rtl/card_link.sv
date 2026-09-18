@@ -304,6 +304,8 @@ module card_link #(
     output wire         accel_fronts_dis,   // ACCEL_CTRL[29]: the fronts bypassed (IIgs diagnosis)
     // The debug pair (rtl/wb_regfile.sv DBG_SEL/DBG_VAL): the top's mux answers.
     output wire [7:0]   dbg_sel,
+    // ...and the register cut's hold, for the top's own snapshot words.
+    output wire         snap_hold,
     input  wire [31:0]  dbg_val,
     output wire [15:0]  accel_target,
     output wire         accel_cnt_clr,
@@ -1067,6 +1069,25 @@ module card_link #(
     wire        rwb_cyc, rwb_stb, rwb_we, rwb_ack, rwb_stall;
     wire [31:0] rwb_adr, rwb_dat_w, rwb_dat_r;
     wire [3:0]  rwb_sel;
+    // TWO MASTERS NOW (docs/TELEMETRY.md): the bridge above, and the telemetry
+    // sender, which reads the whole map once a second.  rtl/reg_front.sv is the
+    // registered door between them and the register file; the s_* wires are
+    // the register file's side of it.  Read data and the bridge's write data
+    // do not pass through it.
+    wire        tm_req, tm_gnt, tm_stb, tm_ack, tm_snap_hold;
+    // THE DEBUG SELECTOR IS THE SENDER'S DURING ITS SWEEP (layout 2): the
+    // register file's DBG_SEL is the host's, and what reaches the top's muxes
+    // is the sender's while it walks the debug space, the host's otherwise.
+    // The host's own DBG_SEL/DBG_VAL pair is untouched - the bridge is stalled
+    // for the whole sweep, so it never reads through the other selector.
+    wire [7:0]  dbg_sel_host;
+    wire [15:0] tm_off;
+    wire        srw_cyc, srw_stb, srw_we, srw_ack;
+    wire [31:0] srw_adr;
+    wire        telem_on, apple_res_q;
+    wire [23:0] telem_stat;
+    wire [31:0] tm_word;
+    wire        tm_valid, tm_take;
 
     reg_bridge u_reg_bridge (
         .clk       (clk_ctrl),
@@ -1220,7 +1241,7 @@ module card_link #(
         .accel_swint_dis   (accel_swint_dis),
         .accel_game_dis    (accel_game_dis),
         .accel_fronts_dis  (accel_fronts_dis),
-        .dbg_sel           (dbg_sel),
+        .dbg_sel           (dbg_sel_host),
         .dbg_val           (dbg_val),
         .accel_target      (accel_target),
         .accel_cnt_clr     (accel_cnt_clr),
@@ -1272,15 +1293,65 @@ module card_link #(
         .audio_realtime    (audio_realtime),
         .audio_rate        (audio_rate),
         .audio_stat        (audio_stat),
-        .wb_cyc   (rwb_cyc),
-        .wb_stb   (rwb_stb),
-        .wb_we    (rwb_we),
-        .wb_adr   (rwb_adr),
+        // The register cut's hold, raised by the telemetry sender for its sweep.
+        .snap_hold         (tm_snap_hold),
+        .telem_on          (telem_on),
+        .telem_stat        (telem_stat),
+        .apple_res_q       (apple_res_q),
+        .wb_cyc   (srw_cyc),
+        .wb_stb   (srw_stb),
+        .wb_we    (srw_we),
+        .wb_adr   (srw_adr),
         .wb_dat_w (rwb_dat_w),
         .wb_sel   (rwb_sel),
-        .wb_ack   (rwb_ack),
-        .wb_stall (rwb_stall),
+        .wb_ack   (srw_ack),
+        .wb_stall (),
         .wb_dat_r (rwb_dat_r)
+    );
+
+    reg_front u_reg_front (
+        .clk     (clk_ctrl),
+        .rst     (rst),
+        .b_cyc   (rwb_cyc),
+        .b_stb   (rwb_stb),
+        .b_we    (rwb_we),
+        .b_adr   (rwb_adr),
+        .b_ack   (rwb_ack),
+        .b_stall (rwb_stall),
+        .t_req   (tm_req),
+        .t_gnt   (tm_gnt),
+        .t_stb   (tm_stb),
+        .t_off   (tm_off),
+        .t_ack   (tm_ack),
+        .s_cyc   (srw_cyc),
+        .s_stb   (srw_stb),
+        .s_we    (srw_we),
+        .s_adr   (srw_adr),
+        .s_ack   (srw_ack)
+    );
+
+    // ---- telemetry ---------------------------------------------------------------
+    // The card's registers to the host, once a second from the Apple's reset
+    // (rtl/telem_tx.sv, docs/TELEMETRY.md).  Port 11 of the message bus.
+    assign snap_hold = tm_snap_hold;
+    telem_tx u_telem (
+        .clk         (clk_ctrl),
+        .rst         (rst),
+        .enable      (telem_on),
+        .apple_res_q (apple_res_q),
+        .dbg_sel_host (dbg_sel_host),
+        .dbg_sel     (dbg_sel),
+        .t_req       (tm_req),
+        .t_gnt       (tm_gnt),
+        .t_stb       (tm_stb),
+        .t_off       (tm_off),
+        .t_ack       (tm_ack),
+        .t_dat       (rwb_dat_r),
+        .snap_hold   (tm_snap_hold),
+        .word        (tm_word),
+        .valid       (tm_valid),
+        .take        (tm_take),
+        .stat        (telem_stat)
     );
 
     // ---- the CPU_HOLD notice --------------------------------------------------
@@ -1369,10 +1440,11 @@ module card_link #(
     );
 
     // ---- the message bus ---------------------------------------------------
-    // A 32-bit Wishbone with ten masters, in priority order: a register
+    // A 32-bit Wishbone with thirteen masters, in priority order: a register
     // reply, the CPU_HOLD notice, the KBD_EVENT notice, the UNKNOWN_TYPE
-    // notice, the top's application message (the disk's), the floppy's, the
-    // 3.5" drive's, the Uthernet II's, the sound's, the capture.  Each
+    // notice, START_HELD, the ROM loader's acks, the top's application message
+    // (the disk's), the floppy's, the 3.5" drive's, the Uthernet II's, the
+    // sound's, the telemetry sample, the capture.  Each
     // source is a stream, and msg_master makes it a master that holds CYC
     // across its message; msg_arb grants per CYC; tx_ring is the one slave.
     // Everything above the capture is rate-bounded by the host or the bus -
@@ -1411,7 +1483,7 @@ module card_link #(
     // the bulk traffic (aux, the floppies, the network, audio, the capture),
     // so a busy capture cannot starve it; the ROM loader's acks come next,
     // for the same reason - the startup checklist waits on them.
-    localparam integer N_SRC = 12;
+    localparam integer N_SRC = 13;
 
     wire [N_SRC-1:0]    mb_cyc, mb_stb, mb_we, mb_stall, mb_ack;
     wire [N_SRC*32-1:0] mb_adr, mb_dat;
@@ -1486,9 +1558,15 @@ module card_link #(
     assign ms_valid[10]         = au_valid;
     assign au_take              = ms_take[10];
 
-    assign ms_word[11*32 +: 32] = cap_word;
-    assign ms_valid[11]         = cap_valid;
-    assign cap_take             = ms_take[11];
+    // Telemetry: one message a second, bounded by the wall clock as the sound
+    // is, so it may sit above the capture (rtl/msg_arb.sv's condition).
+    assign ms_word[11*32 +: 32] = tm_word;
+    assign ms_valid[11]         = tm_valid;
+    assign tm_take              = ms_take[11];
+
+    assign ms_word[12*32 +: 32] = cap_word;
+    assign ms_valid[12]         = cap_valid;
+    assign cap_take             = ms_take[12];
 
     genvar gm;
     generate

@@ -364,6 +364,19 @@ module wb_regfile #(
     output wire            audio_realtime,
     output wire [31:0]     audio_rate,
     input  wire [31:0]     audio_stat,
+    // THE REGISTER CUT's hold (below, "the register cut"): while high the
+    // shadows every read-only readback is read through stop following their
+    // sources, so a sweep of the map reads ONE instant.  The telemetry
+    // sender raises it for its sweep and nobody else reads meanwhile; a top
+    // without one ties it low.
+    input  wire            snap_hold,
+    // TELEMETRY (rtl/telem_tx.sv, docs/TELEMETRY.md): TELEM_CTRL's enable out,
+    // the sender's counts back, and RES' as THIS file's flop holds it - the
+    // sender's release detector taps the flop rather than put another load
+    // on the synchroniser's net, which the core's reset hangs from.
+    output wire            telem_on,
+    input  wire [23:0]     telem_stat,      // {sent, drops, epoch}
+    output wire            apple_res_q,
     input  wire            wb_cyc,
     input  wire            wb_stb,
     input  wire            wb_we,
@@ -397,6 +410,18 @@ module wb_regfile #(
     localparam [13:0] R_ROM_SUM    = 'd87;  // 0x8000_015C, RO, the ROM's sum of first landings
     localparam [13:0] R_PANEL_STAT      = 'd88; // 0x8000_0160, RO the panel's DMA: {drops, dmas}
     localparam [13:0] R_FD35_WSTAT      = 'd89; // 0x8000_0164, RO the 3.5" write path
+    localparam [13:0] R_TELEM_CTRL      = 'd90; // 0x8000_0168, RW bit 0: the telemetry message
+    // THE WIDE COUNTERS (docs/TELEMETRY.md layout 2): 32-bit totals kept here
+    // of the narrow event counts that can wrap inside a second - so a sample
+    // a second apart never loses a wrap.  Each follows its source a clock
+    // behind, adding (now - before) mod 2^n; cleared with the source, by the
+    // card's reset alone.
+    localparam [13:0] R_WIDE_U2_CMDS    = 'd91; // 0x8000_016C, RO U2_SLOT's cmds, 32 bits
+    localparam [13:0] R_WIDE_U2_RX      = 'd92; // 0x8000_0170, RO U2_SLOT's rx chunks
+    localparam [13:0] R_WIDE_PRN_WRITES = 'd93; // 0x8000_0174, RO PRINTER_SLOT's writes
+    localparam [13:0] R_WIDE_HD_EXECS   = 'd94; // 0x8000_0178, RO HD_SLOT's execs
+    localparam [13:0] R_WIDE_PANEL_DMAS = 'd95; // 0x8000_017C, RO PANEL_STAT's dmas
+    localparam [13:0] R_WIDE_AUDIO_SENT = 'd96; // 0x8000_0180, RO AUDIO_STAT's samples sent
     localparam [13:0] R_KBD_INJECT = 'd7;   // 0x8000_001C, W bits 6:0, W1 bits 7-8
     localparam [13:0] R_BUTTONS    = 'd8;   // 0x8000_0020, RW bits 5:0
     localparam [13:0] R_RING_STATUS = 'd9;  // 0x8000_0024, RO
@@ -480,6 +505,114 @@ module wb_regfile #(
     localparam [13:0] R_DDR3_EYE1       = 'd84; // 0x8000_0150, RO lane 1's
     localparam [13:0] R_GS_CLOCK        = 'd85; // 0x8000_0154, RO the IIgs clock chip (rtl/gs_clock.sv stat)
 
+    // ---- the register cut ---------------------------------------------------
+    // EVERY READ-ONLY READBACK IS READ THROUGH A SHADOW FLOP (the user,
+    // 2026-09-17).  The counters and status words below come from all over
+    // the design - the fronts, the page cache, the sequencer, the drives -
+    // and read live they ended at the ninety-way read mux: a debug read
+    // setting the clock, which this file's mux has done twice
+    // (rtl/master_top.sv's dbg_val_q says how).  Behind a shadow a source ends
+    // at a bare D pin, and the mux starts from flops that sit beside it.  A
+    // read is one clock older, which is what a snapshot wants to be.
+    //
+    // WHAT THE HOST WROTE IS NOT SHADOWED.  The RW fields are this file's own
+    // flops already, so there is nothing to cut, and a write's reply goes on
+    // showing them exactly as it did.
+    //
+    // snap_hold STOPS THE SHADOWS, all of them at one edge: a master that
+    // holds the bus and sweeps the map then reads one instant of the whole
+    // card, however long the sweep takes - the census beside the total it
+    // sums to, the numerator beside its denominator.  The shadows are data,
+    // not control: no reset (they follow their sources from the first clock).
+    //
+    // The `_s` names are declared here, ahead of the readback words that use
+    // them; the flops themselves are at the foot of the file, below everything
+    // they copy.
+    logic        cpu_src_active_s;
+    logic [7:0]  cpu_src_latches_s;
+    logic [2:0]  mb_slot_active_s;
+    logic        mb_phasor_active_s;
+    logic [7:0]  boot_holds_s;
+    logic        boot_held_s, hold_runtime_s;
+    logic [7:0]  menu_count_s;
+    logic [2:0]  hd_slot_active_s;
+    logic        hd_rom_loaded_s, hd_busy_s;
+    logic [7:0]  hd_execs_s;
+    logic [2:0]  fd_slot_active_s;
+    logic        fd_rom_loaded_s;
+    logic [7:0]  fd_seeks_s;
+    logic [1:0]  fd_stale_s, fd_dirty_s;
+    logic [13:0] fd_phase_s;
+    logic [3:0]  fd_ctl_s;
+    logic [7:0]  fd_late_s;
+    logic [15:0] fd_fill_max_s;
+    logic        fd35_stale_s, fd35_side_s, fd35_motor35_s, fd35_motor_s;
+    logic [6:0]  fd35_track_s;
+    logic [7:0]  fd35_ctl_s, fd35_seeks_s, fd35_late_s;
+    logic [31:0] fd35_wstat_s;
+    logic [15:0] fd35_fill_max_s;
+    logic [2:0]  vidhd_slot_active_s;
+    logic        vidhd_rom_loaded_s;
+    logic [2:0]  mouse_slot_active_s;
+    logic        mouse_rom_loaded_s, mouse_irq_s;
+    logic [3:0]  mouse_mode_s;
+    logic [1:0]  mouse_buttons_s;
+    logic [7:0]  mouse_moves_s;
+    logic [15:0] mouse_x_s, mouse_y_s;
+    logic [2:0]  u2_slot_active_s;
+    logic [3:0]  u2_sock_open_s;
+    logic        u2_cmd_dropped_s;
+    logic [7:0]  u2_cmds_s, u2_rx_chunks_s;
+    logic [15:0] u2_s0_rsr_s, u2_s0_fsr_s;
+    logic [2:0]  printer_slot_active_s;
+    logic        printer_rom_loaded_s;
+    logic [7:0]  printer_writes_s;
+    logic        nsc_time_loaded_s, nsc_ring_en_s, nsc_wr_en_s;
+    logic [5:0]  nsc_cmp_idx_s, nsc_ring_idx_s;
+    logic [7:0]  nsc_unlocks_s;
+    logic [63:0] nsc_now_s;
+    logic [2:0]  kbd_flags_s;
+    logic [31:0] kbd_counts_s;
+    logic [2:0]  pb_hw_s;
+    logic [3:0]  vbl_state_s, vbl_err_s;
+    logic        vbl_locked_s, vbl_pal_s, vbl_busy_s;
+    logic [31:0] vbl_stat_s, vbl_pos_s;
+    logic [11:0] mem_sw_s;
+    logic [7:0]  mem_rw_bank_s;
+    logic        mem_image_ready_s, mem_invalidating_s, mem_rom_loaded_s, mem_intc8rom_s;
+    logic [7:0]  mem_late_fills_s, mem_fifo_drops_s;
+    logic [31:0] mem_fills_s, mem_flushes_s, mem_declines_s;
+    logic        mem_rom_busy_s;
+    logic [31:0] mem_rom_sum_s;
+    logic [7:0]  mem_rom_over_s, mem_rom_xland_s, mem_shd_drops_s;
+    logic [31:0] gs_adb_stat_s, gs_clock_stat_s;
+    logic [3:0]  panel_dmas_s, panel_drops_s;
+    logic [31:0] cnt_core_cyc_s, cnt_bus_cyc_s;
+    logic [31:0] dbg_val_s;
+    logic [31:0] mem_hits_s, mem_misses_s, mem_mismatch_s, mem_served_s, mem_last_s,
+                 mem_diverted_s;
+    logic [2:0]  game_pb_s;
+    logic        game_pb_ok_s, game_pdl_ok_s;
+    logic [11:0] game_pdl0_s, game_pdl1_s, game_pdl2_s, game_pdl3_s;
+    logic [7:0]  game_meas_s;
+    logic [31:0] accel_stat_s, accel_fast_s, accel_bus_s, accel_cycles_s, accel_wait_s,
+                 accel_turbo_s, accel_dline_s, accel_maps_s, accel_ddrop_s, accel_drevive_s,
+                 accel_idrop_s, accel_irevive_s;
+    logic [31:0] accel_fast_i_s, accel_fast_dram_s, accel_fast_dlc_s, accel_fast_drom_s,
+                 accel_fast_dcx_s, accel_fast_wr_s, accel_fast_kbd_s;
+    logic [6:0]  fb_mode_s;
+    logic [31:0] fb_compared_s, fb_mismatch_s, fb_last_s, fb_last2_s, fb_other_s;
+    logic [7:0]  fb_peek_data_s;
+    logic        res_pulsing_s;
+    logic [7:0]  res_pulses_s;
+    logic        start_pending_s, start_cause_card_s, start_cause_res_s;
+    logic [7:0]  start_count_s;
+    logic [23:0] telem_stat_s;
+    logic [31:0] wide_u2_cmds_s, wide_u2_rx_s, wide_prn_writes_s, wide_hd_execs_s,
+                 wide_panel_dmas_s, wide_audio_sent_s;
+    logic [31:0] ring_status_s, link_stat_s, ddr3_dbg1_s, ddr3_dbg2_s, ddr3_dbg3_s,
+                 ddr3_eye0_s, ddr3_eye1_s, audio_stat_s;
+
     // ---- CPU_SOURCE ---------------------------------------------------------
     //
     //   [0]      desired   RW   0 = the native 6502 (default), 1 = the soft core
@@ -521,6 +654,7 @@ module wb_regfile #(
     wire res_release = !res_prev && apple_res_sync;
 
     assign cpu_source_active = cpu_src_active;
+    assign apple_res_q       = res_prev;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -543,8 +677,8 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] cpu_source_rd = {cpu_src_latches, 6'd0, GS, CAN_MASTER,
-                                 7'd0, cpu_src_active, 7'd0, cpu_src_desired};
+    wire [31:0] cpu_source_rd = {cpu_src_latches_s, 6'd0, GS, CAN_MASTER,
+                                 7'd0, cpu_src_active_s, 7'd0, cpu_src_desired};
 
     // ---- MB_SLOT ------------------------------------------------------------
     //
@@ -593,7 +727,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] mb_slot_rd = {20'd0, mb_phasor_active_q, mb_slot_active_q,
+    wire [31:0] mb_slot_rd = {20'd0, mb_phasor_active_s, mb_slot_active_s,
                               4'd0, mb_phasor_desired, mb_slot_desired};
 
     // ---- BOOT_HOLD ----------------------------------------------------------
@@ -641,7 +775,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] boot_hold_rd = {boot_holds, 14'd0, hold_runtime, boot_held, 7'd0, boot_arm_q};
+    wire [31:0] boot_hold_rd = {boot_holds_s, 14'd0, hold_runtime_s, boot_held_s, 7'd0, boot_arm_q};
 
     // ---- MENU_HOLD ----------------------------------------------------------
     //
@@ -681,7 +815,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] menu_hold_rd = {menu_count, 16'd0, menu_hotkey, menu_en};
+    wire [31:0] menu_hold_rd = {menu_count_s, 16'd0, menu_hotkey, menu_en};
 
     // ---- HD_SLOT ------------------------------------------------------------
     //
@@ -717,8 +851,8 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] hd_slot_rd = {hd_execs, 6'd0, hd_busy, hd_rom_loaded,
-                              5'd0, hd_slot_active_q, 5'd0, hd_slot_desired};
+    wire [31:0] hd_slot_rd = {hd_execs_s, 6'd0, hd_busy_s, hd_rom_loaded_s,
+                              5'd0, hd_slot_active_s, 5'd0, hd_slot_desired};
 
     // ---- FD_SLOT ------------------------------------------------------------
     //
@@ -751,8 +885,8 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] fd_slot_rd = {fd_seeks, 7'd0, fd_rom_loaded,
-                              5'd0, fd_slot_active_q, 5'd0, fd_slot_desired};
+    wire [31:0] fd_slot_rd = {fd_seeks_s, 7'd0, fd_rom_loaded_s,
+                              5'd0, fd_slot_active_s, 5'd0, fd_slot_desired};
 
     // ---- VIDHD_SLOT ---------------------------------------------------------
     //
@@ -785,8 +919,8 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] vidhd_slot_rd = {8'd0, 7'd0, vidhd_rom_loaded,
-                                 5'd0, vidhd_slot_active_q, 5'd0, vidhd_slot_desired};
+    wire [31:0] vidhd_slot_rd = {8'd0, 7'd0, vidhd_rom_loaded_s,
+                                 5'd0, vidhd_slot_active_s, 5'd0, vidhd_slot_desired};
 
     // ---- MOUSE_SLOT ---------------------------------------------------------
     //
@@ -822,10 +956,10 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] mouse_slot_rd = {mouse_moves, mouse_mode, mouse_buttons, mouse_irq, mouse_rom_loaded,
-                                 5'd0, mouse_slot_active_q, 5'd0, mouse_slot_desired};
+    wire [31:0] mouse_slot_rd = {mouse_moves_s, mouse_mode_s, mouse_buttons_s, mouse_irq_s, mouse_rom_loaded_s,
+                                 5'd0, mouse_slot_active_s, 5'd0, mouse_slot_desired};
     // MOUSE_STAT: {y[15:0], x[15:0]}, the position as the card holds it.
-    wire [31:0] mouse_stat_rd = {mouse_y, mouse_x};
+    wire [31:0] mouse_stat_rd = {mouse_y_s, mouse_x_s};
 
     // ---- U2_SLOT ------------------------------------------------------------
     //
@@ -865,10 +999,10 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] u2_slot_rd = {u2_rx_chunks, u2_cmds, u2_sock_open, u2_cmd_dropped,
-                              u2_slot_active_q, 5'd0, u2_slot_desired};
+    wire [31:0] u2_slot_rd = {u2_rx_chunks_s, u2_cmds_s, u2_sock_open_s, u2_cmd_dropped_s,
+                              u2_slot_active_s, 5'd0, u2_slot_desired};
     // U2_STAT: {Sn_RX_RSR, Sn_TX_FSR} of socket 0.
-    wire [31:0] u2_stat_rd = {u2_s0_rsr, u2_s0_fsr};
+    wire [31:0] u2_stat_rd = {u2_s0_rsr_s, u2_s0_fsr_s};
 
     // ---- PRINTER_SLOT -------------------------------------------------------
     //
@@ -904,8 +1038,8 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] printer_slot_rd = {printer_writes, 7'd0, printer_rom_loaded,
-                                   5'd0, printer_slot_active_q, 5'd0, printer_slot_desired};
+    wire [31:0] printer_slot_rd = {printer_writes_s, 7'd0, printer_rom_loaded_s,
+                                   5'd0, printer_slot_active_s, 5'd0, printer_slot_desired};
 
     // ---- NSC_CTRL -----------------------------------------------------------
     //
@@ -927,8 +1061,8 @@ module wb_regfile #(
         else if (wr_nsc_ctrl) nsc_enable_q <= wb_dat_w[0];
     end
     assign nsc_enable = nsc_enable_q;
-    wire [31:0] nsc_ctrl_rd = {nsc_unlocks, 2'd0, nsc_ring_idx, 2'd0, nsc_cmp_idx,
-                               4'd0, nsc_wr_en, nsc_ring_en, nsc_time_loaded, nsc_enable_q};
+    wire [31:0] nsc_ctrl_rd = {nsc_unlocks_s, 2'd0, nsc_ring_idx_s, 2'd0, nsc_cmp_idx_s,
+                               4'd0, nsc_wr_en_s, nsc_ring_en_s, nsc_time_loaded_s, nsc_enable_q};
 
     // ---- AUDIO_CTRL / AUDIO_RATE / AUDIO_STAT -------------------------------
     // AUDIO_CTRL: [0] the sample stream on (silent until asked), [1] the AYs
@@ -951,6 +1085,51 @@ module wb_regfile #(
     assign audio_realtime = audio_ctrl_q[1];
     assign audio_rate     = audio_rate_q;
     wire [31:0] audio_ctrl_rd = {15'd0, audio_ctrl_q[0], 14'd0, audio_ctrl_q};
+
+    // ---- TELEM_CTRL -----------------------------------------------------------
+    //
+    //   [0]      enable    RW   send a TELEMETRY message a second (docs/TELEMETRY.md)
+    //   [15:8]   epoch     RO   RES' releases the sender has seen, wrapping
+    //   [23:16]  drops     RO   samples skipped: the last message was still going out
+    //   [31:24]  sent      RO   messages sent, wrapping
+    //
+    // Silent until asked (docs/PROTOCOL.md): clear at the card's reset - the
+    // watchdog's included - so a host that has gone is not talked at.  A host
+    // that wants a run's baseline sets it BEFORE it releases the start hold.
+    // A bitstream older than this reads 0 here and goes on reading 0 after
+    // the write, which is how a host knows to keep polling.
+    logic telem_on_q;
+    always_ff @(posedge clk) begin
+        if (rst)                telem_on_q <= 1'b0;
+        else if (wr_telem_ctrl) telem_on_q <= wb_dat_w[0];
+    end
+    assign telem_on = telem_on_q;
+    wire [31:0] telem_ctrl_rd = {telem_stat_s, 7'd0, telem_on_q};
+
+    // ---- the wide counters (R_WIDE_*) ---------------------------------------
+    // (now - before) mod 2^n a clock, into 32 bits.  A narrow count moves by
+    // at most a few a clock, so the difference is never ambiguous.
+    logic [7:0]  wu2c_p, wu2r_p, wprn_p, whd_p;
+    logic [3:0]  wpan_p;
+    logic [15:0] wau_p;
+    logic [31:0] wide_u2_cmds, wide_u2_rx, wide_prn_writes, wide_hd_execs, wide_panel_dmas,
+                 wide_audio_sent;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            wu2c_p <= 8'd0; wu2r_p <= 8'd0; wprn_p <= 8'd0; whd_p <= 8'd0; wpan_p <= 4'd0;
+            wau_p  <= 16'd0;
+            wide_u2_cmds <= 32'd0; wide_u2_rx <= 32'd0; wide_prn_writes <= 32'd0;
+            wide_hd_execs <= 32'd0; wide_panel_dmas <= 32'd0; wide_audio_sent <= 32'd0;
+        end else begin
+            wu2c_p <= u2_cmds;        wide_u2_cmds    <= wide_u2_cmds    + {24'd0, u2_cmds - wu2c_p};
+            wu2r_p <= u2_rx_chunks;   wide_u2_rx      <= wide_u2_rx      + {24'd0, u2_rx_chunks - wu2r_p};
+            wprn_p <= printer_writes; wide_prn_writes <= wide_prn_writes + {24'd0, printer_writes - wprn_p};
+            whd_p  <= hd_execs;       wide_hd_execs   <= wide_hd_execs   + {24'd0, hd_execs - whd_p};
+            wpan_p <= panel_dmas;     wide_panel_dmas <= wide_panel_dmas + {28'd0, panel_dmas - wpan_p};
+            wau_p  <= audio_stat[15:0];
+            wide_audio_sent <= wide_audio_sent + {16'd0, audio_stat[15:0] - wau_p};
+        end
+    end
 
     // ---- FD_DRIVE1 / FD_DRIVE2 ----------------------------------------------
     //
@@ -994,9 +1173,9 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] fd_drive1_rd = {fd_phase[6:0], fd_dirty[0], fd_stale[0], 1'b0,
+    wire [31:0] fd_drive1_rd = {fd_phase_s[6:0], fd_dirty_s[0], fd_stale_s[0], 1'b0,
                                 fd_tracks[5:0], fd_nibbles[12:0], 1'b0, fd_wp[0], fd_inserted[0]};
-    wire [31:0] fd_drive2_rd = {fd_phase[13:7], fd_dirty[1], fd_stale[1], 1'b0,
+    wire [31:0] fd_drive2_rd = {fd_phase_s[13:7], fd_dirty_s[1], fd_stale_s[1], 1'b0,
                                 fd_tracks[11:6], fd_nibbles[25:13], 1'b0, fd_wp[1], fd_inserted[1]};
 
     // ---- FD_STAT ------------------------------------------------------------
@@ -1054,11 +1233,11 @@ module wb_regfile #(
             fd35_fill_clr <= wr_fd35_stat && wb_dat_w[1];
         end
     end
-    wire [31:0] fd35_drive_rd = {fd35_seeks, 5'd0, fd35_motor, fd35_motor35, fd35_side,
-                                 fd35_track, fd35_stale, 6'd0, fd35_wp, fd35_inserted};
-    wire [31:0] fd35_stat_rd  = {fd35_fill_max, fd35_ctl, fd35_late};
+    wire [31:0] fd35_drive_rd = {fd35_seeks_s, 5'd0, fd35_motor_s, fd35_motor35_s, fd35_side_s,
+                                 fd35_track_s, fd35_stale_s, 6'd0, fd35_wp, fd35_inserted};
+    wire [31:0] fd35_stat_rd  = {fd35_fill_max_s, fd35_ctl_s, fd35_late_s};
 
-    wire [31:0] fd_stat_rd = {fd_fill_max, fd_late, 4'd0, fd_ctl};
+    wire [31:0] fd_stat_rd = {fd_fill_max_s, fd_late_s, 4'd0, fd_ctl_s};
 
     // ---- MEM_CTRL -----------------------------------------------------------
     //
@@ -1095,7 +1274,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] mem_ctrl_rd = {4'd0, 4'(MEM_PAGES_LOG2), mem_rw_bank, 15'd0, mem_serve};
+    wire [31:0] mem_ctrl_rd = {4'd0, 4'(MEM_PAGES_LOG2), mem_rw_bank_s, 15'd0, mem_serve};
 
     // ---- MEM_STAT -----------------------------------------------------------
     //
@@ -1112,9 +1291,9 @@ module wb_regfile #(
     // MEM_ROM (a word of its own) carries the ROM load's flow control: the
     // loader turns a MEM_ROM chunk into 512 physical writes and the host must
     // not send the next chunk until they have drained.
-    wire [31:0] mem_stat_rd = {mem_fifo_drops, mem_late_fills, mem_rom_loaded,
-                               mem_invalidating, mem_intc8rom, mem_image_ready, mem_sw};
-    wire [31:0] mem_rom_rd  = {mem_shd_drops, mem_rom_xland, mem_rom_over, 7'd0, mem_rom_busy};
+    wire [31:0] mem_stat_rd = {mem_fifo_drops_s, mem_late_fills_s, mem_rom_loaded_s,
+                               mem_invalidating_s, mem_intc8rom_s, mem_image_ready_s, mem_sw_s};
+    wire [31:0] mem_rom_rd  = {mem_shd_drops_s, mem_rom_xland_s, mem_rom_over_s, 7'd0, mem_rom_busy_s};
 
     // ---- ACCEL_CTRL ---------------------------------------------------------
     // (ACCEL_STAT, read straight through from the sequencer: [0] accelerating,
@@ -1183,8 +1362,8 @@ module wb_regfile #(
     //   GAME_STAT   [2:0] the buttons' levels PB0..PB2; [3] pb_ok; [4] pdl_ok;
     //               [19:8] paddle 0's sample, bus cycles; [31:20] paddle 1's
     //   GAME_STAT2  [11:0] paddle 2's; [23:12] paddle 3's; [31:24] measurements, wrapping
-    wire [31:0] game_stat_rd  = {game_pdl1, game_pdl0, 3'd0, game_pdl_ok, game_pb_ok, game_pb};
-    wire [31:0] game_stat2_rd = {game_meas, game_pdl3, game_pdl2};
+    wire [31:0] game_stat_rd  = {game_pdl1_s, game_pdl0_s, 3'd0, game_pdl_ok_s, game_pb_ok_s, game_pb_s};
+    wire [31:0] game_stat2_rd = {game_meas_s, game_pdl3_s, game_pdl2_s};
 
     // ---- FB_CTRL ------------------------------------------------------------
     //
@@ -1218,14 +1397,14 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] fb_ctrl_rd = {9'd0, fb_mode, 15'd0, fb_serve};
+    wire [31:0] fb_ctrl_rd = {9'd0, fb_mode_s, 15'd0, fb_serve};
 
     // ---- FB_PEEK ------------------------------------------------------------
     //
     //   [14:0]   addr       RW   [14] 0 = the text copy, [10:0] from $0400;
     //                            1 = the hi-res copy, [13:0] from $2000
     //   [23:16]  data       RO   the copy's byte there
-    wire [31:0] fb_peek_rd = {8'd0, fb_peek_data, 1'b0, fb_peek_addr};
+    wire [31:0] fb_peek_rd = {8'd0, fb_peek_data_s, 1'b0, fb_peek_addr};
 
     // ---- RESET --------------------------------------------------------------
     //
@@ -1270,7 +1449,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] reset_rd = {res_pulses, 23'd0, res_pulsing};
+    wire [31:0] reset_rd = {res_pulses_s, 23'd0, res_pulsing_s};
 
     // ---- START --------------------------------------------------------------
     //
@@ -1294,7 +1473,7 @@ module wb_regfile #(
         .count          (start_count),
         .hold_drive     (start_hold_drive)
     );
-    wire [31:0] start_rd = {start_count, 21'd0, start_cause_res, start_cause_card, start_pending};
+    wire [31:0] start_rd = {start_count_s, 21'd0, start_cause_res_s, start_cause_card_s, start_pending_s};
 
     // ---- KBD_INJECT ---------------------------------------------------------
     //
@@ -1330,7 +1509,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] kbd_inject_rd = {kbd_counts[7:0], 6'd0, kbd_flags[1:0], 16'd0};
+    wire [31:0] kbd_inject_rd = {kbd_counts_s[7:0], 6'd0, kbd_flags_s[1:0], 16'd0};
 
     // ---- KBD_CTRL -----------------------------------------------------------
     //
@@ -1365,7 +1544,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] kbd_ctrl_rd = {kbd_counts[31:8], kbd_flags[2], 5'd0,
+    wire [31:0] kbd_ctrl_rd = {kbd_counts_s[31:8], kbd_flags_s[2], 5'd0,
                                kbd_notify, kbd_lock};
 
     // ---- BUTTONS ------------------------------------------------------------
@@ -1388,7 +1567,7 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] buttons_rd = {13'd0, pb_hw, 10'd0, pb_override};
+    wire [31:0] buttons_rd = {13'd0, pb_hw_s, 10'd0, pb_override};
 
     // ---- VBL_CTRL / VBL_STAT / VBL_POS ------------------------------------
     //
@@ -1427,8 +1606,8 @@ module wb_regfile #(
         end
     end
 
-    wire [31:0] vbl_ctrl_rd = {vbl_probe_addr, vbl_err, 1'b0, vbl_busy, vbl_pal, vbl_locked,
-                               vbl_state, 1'b0, vbl_notify, 2'b00};
+    wire [31:0] vbl_ctrl_rd = {vbl_probe_addr, vbl_err_s, 1'b0, vbl_busy_s, vbl_pal_s, vbl_locked_s,
+                               vbl_state_s, 1'b0, vbl_notify, 2'b00};
 
     assign wb_stall = 1'b0;
 
@@ -1455,86 +1634,93 @@ module wb_regfile #(
                         R_HD_SLOT:    wb_dat_r <= hd_slot_rd;
                         R_RESET:      wb_dat_r <= reset_rd;
                         R_START:      wb_dat_r <= start_rd;
-                        R_ROM_SUM:    wb_dat_r <= mem_rom_sum;
+                        R_ROM_SUM:    wb_dat_r <= mem_rom_sum_s;
                         R_KBD_INJECT: wb_dat_r <= kbd_inject_rd;
                         R_BUTTONS:    wb_dat_r <= buttons_rd;
-                        R_RING_STATUS: wb_dat_r <= ring_status;
+                        R_RING_STATUS: wb_dat_r <= ring_status_s;
                         R_KBD_CTRL:   wb_dat_r <= kbd_ctrl_rd;
                         R_MENU_HOLD:  wb_dat_r <= menu_hold_rd;
                         R_VBL_CTRL:   wb_dat_r <= vbl_ctrl_rd;
-                        R_VBL_STAT:   wb_dat_r <= vbl_stat;
-                        R_VBL_POS:    wb_dat_r <= vbl_pos;
+                        R_VBL_STAT:   wb_dat_r <= vbl_stat_s;
+                        R_VBL_POS:    wb_dat_r <= vbl_pos_s;
                         R_FD_SLOT:    wb_dat_r <= fd_slot_rd;
                         R_FD_DRIVE1:  wb_dat_r <= fd_drive1_rd;
                         R_FD_DRIVE2:  wb_dat_r <= fd_drive2_rd;
                         R_FD_STAT:    wb_dat_r <= fd_stat_rd;
                         R_MEM_CTRL:   wb_dat_r <= mem_ctrl_rd;
                         R_MEM_STAT:   wb_dat_r <= mem_stat_rd;
-                        R_MEM_HITS:   wb_dat_r <= mem_hits;
-                        R_MEM_MISSES: wb_dat_r <= mem_misses;
-                        R_MEM_MISMATCH: wb_dat_r <= mem_mismatch;
-                        R_MEM_SERVED: wb_dat_r <= mem_served;
-                        R_MEM_LAST:   wb_dat_r <= mem_last;
-                        R_MEM_DIVERTED: wb_dat_r <= mem_diverted;
+                        R_MEM_HITS:   wb_dat_r <= mem_hits_s;
+                        R_MEM_MISSES: wb_dat_r <= mem_misses_s;
+                        R_MEM_MISMATCH: wb_dat_r <= mem_mismatch_s;
+                        R_MEM_SERVED: wb_dat_r <= mem_served_s;
+                        R_MEM_LAST:   wb_dat_r <= mem_last_s;
+                        R_MEM_DIVERTED: wb_dat_r <= mem_diverted_s;
                         R_VIDHD_SLOT: wb_dat_r <= vidhd_slot_rd;
                         R_MOUSE_SLOT: wb_dat_r <= mouse_slot_rd;
                         R_MOUSE_STAT: wb_dat_r <= mouse_stat_rd;
                         R_NSC_CTRL:   wb_dat_r <= nsc_ctrl_rd;
-                        R_NSC_TIME:   wb_dat_r <= nsc_now[31:0];
-                        R_NSC_DATE:   wb_dat_r <= nsc_now[63:32];
+                        R_NSC_TIME:   wb_dat_r <= nsc_now_s[31:0];
+                        R_NSC_DATE:   wb_dat_r <= nsc_now_s[63:32];
                         R_U2_SLOT:    wb_dat_r <= u2_slot_rd;
                         R_PRINTER_SLOT: wb_dat_r <= printer_slot_rd;
                         R_U2_STAT:    wb_dat_r <= u2_stat_rd;
-                        R_LINK_STAT:  wb_dat_r <= link_stat;
+                        R_LINK_STAT:  wb_dat_r <= link_stat_s;
                         R_AUDIO_CTRL: wb_dat_r <= audio_ctrl_rd;
                         R_AUDIO_RATE: wb_dat_r <= audio_rate_q;
-                        R_AUDIO_STAT: wb_dat_r <= audio_stat;
+                        R_AUDIO_STAT: wb_dat_r <= audio_stat_s;
                         R_FB_CTRL:    wb_dat_r <= fb_ctrl_rd;
-                        R_FB_COMPARED: wb_dat_r <= fb_compared;
-                        R_FB_MISMATCH: wb_dat_r <= fb_mismatch;
-                        R_FB_LAST:    wb_dat_r <= fb_last;
-                        R_FB_LAST2:   wb_dat_r <= fb_last2;
-                        R_FB_OTHER:   wb_dat_r <= fb_other;
+                        R_FB_COMPARED: wb_dat_r <= fb_compared_s;
+                        R_FB_MISMATCH: wb_dat_r <= fb_mismatch_s;
+                        R_FB_LAST:    wb_dat_r <= fb_last_s;
+                        R_FB_LAST2:   wb_dat_r <= fb_last2_s;
+                        R_FB_OTHER:   wb_dat_r <= fb_other_s;
                         R_FB_PEEK:    wb_dat_r <= fb_peek_rd;
                         R_ACCEL_CTRL: wb_dat_r <= accel_ctrl_rd;
-                        R_ACCEL_STAT: wb_dat_r <= accel_stat;
-                        R_ACCEL_FAST: wb_dat_r <= accel_fast;
-                        R_ACCEL_BUS:  wb_dat_r <= accel_bus;
-                        R_ACCEL_CYCLES: wb_dat_r <= accel_cycles;
-                        R_ACCEL_WAIT: wb_dat_r <= accel_wait;
-                        R_ACCEL_TURBO: wb_dat_r <= accel_turbo;
-                        R_ACCEL_DLINE: wb_dat_r <= accel_dline;
-                        R_ACCEL_MAPS: wb_dat_r <= accel_maps;
-                        R_ACCEL_IDROP: wb_dat_r <= accel_idrop;
-                        R_ACCEL_IREVIVE: wb_dat_r <= accel_irevive;
-                        R_ACCEL_DDROP: wb_dat_r <= accel_ddrop;
-                        R_ACCEL_DREVIVE: wb_dat_r <= accel_drevive;
-                        R_MEM_FILLS:    wb_dat_r <= mem_fills;
-                        R_MEM_FLUSHES:  wb_dat_r <= mem_flushes;
-                        R_MEM_DECLINES: wb_dat_r <= mem_declines;
+                        R_ACCEL_STAT: wb_dat_r <= accel_stat_s;
+                        R_ACCEL_FAST: wb_dat_r <= accel_fast_s;
+                        R_ACCEL_BUS:  wb_dat_r <= accel_bus_s;
+                        R_ACCEL_CYCLES: wb_dat_r <= accel_cycles_s;
+                        R_ACCEL_WAIT: wb_dat_r <= accel_wait_s;
+                        R_ACCEL_TURBO: wb_dat_r <= accel_turbo_s;
+                        R_ACCEL_DLINE: wb_dat_r <= accel_dline_s;
+                        R_ACCEL_MAPS: wb_dat_r <= accel_maps_s;
+                        R_ACCEL_IDROP: wb_dat_r <= accel_idrop_s;
+                        R_ACCEL_IREVIVE: wb_dat_r <= accel_irevive_s;
+                        R_ACCEL_DDROP: wb_dat_r <= accel_ddrop_s;
+                        R_ACCEL_DREVIVE: wb_dat_r <= accel_drevive_s;
+                        R_MEM_FILLS:    wb_dat_r <= mem_fills_s;
+                        R_MEM_FLUSHES:  wb_dat_r <= mem_flushes_s;
+                        R_MEM_DECLINES: wb_dat_r <= mem_declines_s;
                         R_MEM_ROM:      wb_dat_r <= mem_rom_rd;
-                        R_GS_ADB:       wb_dat_r <= gs_adb_stat;
-                        R_ACCEL_CORE_CYC: wb_dat_r <= cnt_core_cyc;
-                        R_ACCEL_BUS_CYC:  wb_dat_r <= cnt_bus_cyc;
+                        R_GS_ADB:       wb_dat_r <= gs_adb_stat_s;
+                        R_ACCEL_CORE_CYC: wb_dat_r <= cnt_core_cyc_s;
+                        R_ACCEL_BUS_CYC:  wb_dat_r <= cnt_bus_cyc_s;
                         R_DBG_SEL:        wb_dat_r <= {24'd0, dbg_sel};
-                        R_DBG_VAL:        wb_dat_r <= dbg_val;
+                        R_DBG_VAL:        wb_dat_r <= dbg_val_s;
                         R_FD35_DRIVE:     wb_dat_r <= fd35_drive_rd;
                         R_FD35_STAT:      wb_dat_r <= fd35_stat_rd;
-                        R_DDR3_DBG1:      wb_dat_r <= ddr3_dbg1;
-                        R_DDR3_DBG2:      wb_dat_r <= ddr3_dbg2;
-                        R_DDR3_DBG3:      wb_dat_r <= ddr3_dbg3;
-                        R_DDR3_EYE0:      wb_dat_r <= ddr3_eye0;
-                        R_DDR3_EYE1:      wb_dat_r <= ddr3_eye1;
-                        R_GS_CLOCK:       wb_dat_r <= gs_clock_stat;
-                        R_PANEL_STAT:     wb_dat_r <= {24'd0, panel_drops, panel_dmas};
-                        R_FD35_WSTAT:     wb_dat_r <= fd35_wstat;
-                        R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i;
-                        R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram;
-                        R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc;
-                        R_ACCEL_FAST_DROM: wb_dat_r <= accel_fast_drom;
-                        R_ACCEL_FAST_DCX: wb_dat_r <= accel_fast_dcx;
-                        R_ACCEL_FAST_WR: wb_dat_r <= accel_fast_wr;
-                        R_ACCEL_FAST_KBD: wb_dat_r <= accel_fast_kbd;
+                        R_DDR3_DBG1:      wb_dat_r <= ddr3_dbg1_s;
+                        R_DDR3_DBG2:      wb_dat_r <= ddr3_dbg2_s;
+                        R_DDR3_DBG3:      wb_dat_r <= ddr3_dbg3_s;
+                        R_DDR3_EYE0:      wb_dat_r <= ddr3_eye0_s;
+                        R_DDR3_EYE1:      wb_dat_r <= ddr3_eye1_s;
+                        R_GS_CLOCK:       wb_dat_r <= gs_clock_stat_s;
+                        R_PANEL_STAT:     wb_dat_r <= {24'd0, panel_drops_s, panel_dmas_s};
+                        R_FD35_WSTAT:     wb_dat_r <= fd35_wstat_s;
+                        R_TELEM_CTRL:     wb_dat_r <= telem_ctrl_rd;
+                        R_WIDE_U2_CMDS:    wb_dat_r <= wide_u2_cmds_s;
+                        R_WIDE_U2_RX:      wb_dat_r <= wide_u2_rx_s;
+                        R_WIDE_PRN_WRITES: wb_dat_r <= wide_prn_writes_s;
+                        R_WIDE_HD_EXECS:   wb_dat_r <= wide_hd_execs_s;
+                        R_WIDE_PANEL_DMAS: wb_dat_r <= wide_panel_dmas_s;
+                        R_WIDE_AUDIO_SENT: wb_dat_r <= wide_audio_sent_s;
+                        R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i_s;
+                        R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram_s;
+                        R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc_s;
+                        R_ACCEL_FAST_DROM: wb_dat_r <= accel_fast_drom_s;
+                        R_ACCEL_FAST_DCX: wb_dat_r <= accel_fast_dcx_s;
+                        R_ACCEL_FAST_WR: wb_dat_r <= accel_fast_wr_s;
+                        R_ACCEL_FAST_KBD: wb_dat_r <= accel_fast_kbd_s;
                         R_GAME_STAT:      wb_dat_r <= game_stat_rd;
                         R_GAME_STAT2:     wb_dat_r <= game_stat2_rd;
                         default:      wb_dat_r <= 32'd0;
@@ -1610,6 +1796,8 @@ module wb_regfile #(
                          (word == R_ACCEL_CTRL);
     wire wr_dbg_sel    = access && !wb_ack && in_region && wb_we &&
                          (word == R_DBG_SEL);
+    wire wr_telem_ctrl = access && !wb_ack && in_region && wb_we &&
+                         (word == R_TELEM_CTRL);
     always_ff @(posedge clk) begin
         if (rst)            dbg_sel <= 8'd0;
         else if (wr_dbg_sel) dbg_sel <= wb_dat_w[7:0];
@@ -1624,6 +1812,170 @@ module wb_regfile #(
     // that moved under it would be the mid-run changeover this file exists
     // to prevent.
     wire boot_relatch  = wr_boot_hold && wb_dat_w[16] && !hold_runtime;
+
+    // ---- the register cut's flops -------------------------------------------
+    // (Declared and explained at the head of the file, "the register cut".)
+    // One edge for all of them, and one enable: what snap_hold holds is one
+    // instant of the whole card.  DBG_VAL alone follows THROUGH the hold: the
+    // telemetry sweep reads the debug space through it while the hold is up,
+    // item by item, and what the hold freezes is the words behind the
+    // debug mux (rtl/master_top.sv), not the mux's output.
+    always_ff @(posedge clk) dbg_val_s <= dbg_val;
+    always_ff @(posedge clk) begin
+        if (!snap_hold) begin
+            cpu_src_active_s      <= cpu_src_active;
+            cpu_src_latches_s     <= cpu_src_latches;
+            mb_slot_active_s      <= mb_slot_active_q;
+            mb_phasor_active_s    <= mb_phasor_active_q;
+            boot_holds_s          <= boot_holds;
+            boot_held_s           <= boot_held;
+            hold_runtime_s        <= hold_runtime;
+            menu_count_s          <= menu_count;
+            hd_slot_active_s      <= hd_slot_active_q;
+            hd_rom_loaded_s       <= hd_rom_loaded;
+            hd_busy_s             <= hd_busy;
+            hd_execs_s            <= hd_execs;
+            fd_slot_active_s      <= fd_slot_active_q;
+            fd_rom_loaded_s       <= fd_rom_loaded;
+            fd_seeks_s            <= fd_seeks;
+            fd_stale_s            <= fd_stale;
+            fd_dirty_s            <= fd_dirty;
+            fd_phase_s            <= fd_phase;
+            fd_ctl_s              <= fd_ctl;
+            fd_late_s             <= fd_late;
+            fd_fill_max_s         <= fd_fill_max;
+            fd35_stale_s          <= fd35_stale;
+            fd35_side_s           <= fd35_side;
+            fd35_motor35_s        <= fd35_motor35;
+            fd35_motor_s          <= fd35_motor;
+            fd35_track_s          <= fd35_track;
+            fd35_ctl_s            <= fd35_ctl;
+            fd35_seeks_s          <= fd35_seeks;
+            fd35_late_s           <= fd35_late;
+            fd35_wstat_s          <= fd35_wstat;
+            fd35_fill_max_s       <= fd35_fill_max;
+            vidhd_slot_active_s   <= vidhd_slot_active_q;
+            vidhd_rom_loaded_s    <= vidhd_rom_loaded;
+            mouse_slot_active_s   <= mouse_slot_active_q;
+            mouse_rom_loaded_s    <= mouse_rom_loaded;
+            mouse_irq_s           <= mouse_irq;
+            mouse_mode_s          <= mouse_mode;
+            mouse_buttons_s       <= mouse_buttons;
+            mouse_moves_s         <= mouse_moves;
+            mouse_x_s             <= mouse_x;
+            mouse_y_s             <= mouse_y;
+            u2_slot_active_s      <= u2_slot_active_q;
+            u2_sock_open_s        <= u2_sock_open;
+            u2_cmd_dropped_s      <= u2_cmd_dropped;
+            u2_cmds_s             <= u2_cmds;
+            u2_rx_chunks_s        <= u2_rx_chunks;
+            u2_s0_rsr_s           <= u2_s0_rsr;
+            u2_s0_fsr_s           <= u2_s0_fsr;
+            printer_slot_active_s <= printer_slot_active_q;
+            printer_rom_loaded_s  <= printer_rom_loaded;
+            printer_writes_s      <= printer_writes;
+            nsc_time_loaded_s     <= nsc_time_loaded;
+            nsc_ring_en_s         <= nsc_ring_en;
+            nsc_wr_en_s           <= nsc_wr_en;
+            nsc_cmp_idx_s         <= nsc_cmp_idx;
+            nsc_ring_idx_s        <= nsc_ring_idx;
+            nsc_unlocks_s         <= nsc_unlocks;
+            nsc_now_s             <= nsc_now;
+            kbd_flags_s           <= kbd_flags;
+            kbd_counts_s          <= kbd_counts;
+            pb_hw_s               <= pb_hw;
+            vbl_state_s           <= vbl_state;
+            vbl_err_s             <= vbl_err;
+            vbl_locked_s          <= vbl_locked;
+            vbl_pal_s             <= vbl_pal;
+            vbl_busy_s            <= vbl_busy;
+            vbl_stat_s            <= vbl_stat;
+            vbl_pos_s             <= vbl_pos;
+            mem_sw_s              <= mem_sw;
+            mem_rw_bank_s         <= mem_rw_bank;
+            mem_image_ready_s     <= mem_image_ready;
+            mem_invalidating_s    <= mem_invalidating;
+            mem_rom_loaded_s      <= mem_rom_loaded;
+            mem_intc8rom_s        <= mem_intc8rom;
+            mem_late_fills_s      <= mem_late_fills;
+            mem_fifo_drops_s      <= mem_fifo_drops;
+            mem_fills_s           <= mem_fills;
+            mem_flushes_s         <= mem_flushes;
+            mem_declines_s        <= mem_declines;
+            mem_rom_busy_s        <= mem_rom_busy;
+            mem_rom_sum_s         <= mem_rom_sum;
+            mem_rom_over_s        <= mem_rom_over;
+            mem_rom_xland_s       <= mem_rom_xland;
+            mem_shd_drops_s       <= mem_shd_drops;
+            gs_adb_stat_s         <= gs_adb_stat;
+            gs_clock_stat_s       <= gs_clock_stat;
+            panel_dmas_s          <= panel_dmas;
+            panel_drops_s         <= panel_drops;
+            cnt_core_cyc_s        <= cnt_core_cyc;
+            cnt_bus_cyc_s         <= cnt_bus_cyc;
+            mem_hits_s            <= mem_hits;
+            mem_misses_s          <= mem_misses;
+            mem_mismatch_s        <= mem_mismatch;
+            mem_served_s          <= mem_served;
+            mem_last_s            <= mem_last;
+            mem_diverted_s        <= mem_diverted;
+            game_pb_s             <= game_pb;
+            game_pb_ok_s          <= game_pb_ok;
+            game_pdl_ok_s         <= game_pdl_ok;
+            game_pdl0_s           <= game_pdl0;
+            game_pdl1_s           <= game_pdl1;
+            game_pdl2_s           <= game_pdl2;
+            game_pdl3_s           <= game_pdl3;
+            game_meas_s           <= game_meas;
+            accel_stat_s          <= accel_stat;
+            accel_fast_s          <= accel_fast;
+            accel_bus_s           <= accel_bus;
+            accel_cycles_s        <= accel_cycles;
+            accel_wait_s          <= accel_wait;
+            accel_turbo_s         <= accel_turbo;
+            accel_dline_s         <= accel_dline;
+            accel_maps_s          <= accel_maps;
+            accel_ddrop_s         <= accel_ddrop;
+            accel_drevive_s       <= accel_drevive;
+            accel_idrop_s         <= accel_idrop;
+            accel_irevive_s       <= accel_irevive;
+            accel_fast_i_s        <= accel_fast_i;
+            accel_fast_dram_s     <= accel_fast_dram;
+            accel_fast_dlc_s      <= accel_fast_dlc;
+            accel_fast_drom_s     <= accel_fast_drom;
+            accel_fast_dcx_s      <= accel_fast_dcx;
+            accel_fast_wr_s       <= accel_fast_wr;
+            accel_fast_kbd_s      <= accel_fast_kbd;
+            fb_mode_s             <= fb_mode;
+            fb_compared_s         <= fb_compared;
+            fb_mismatch_s         <= fb_mismatch;
+            fb_last_s             <= fb_last;
+            fb_last2_s            <= fb_last2;
+            fb_other_s            <= fb_other;
+            fb_peek_data_s        <= fb_peek_data;
+            res_pulsing_s         <= res_pulsing;
+            res_pulses_s          <= res_pulses;
+            start_pending_s       <= start_pending;
+            start_cause_card_s    <= start_cause_card;
+            start_cause_res_s     <= start_cause_res;
+            start_count_s         <= start_count;
+            telem_stat_s          <= telem_stat;
+            wide_u2_cmds_s        <= wide_u2_cmds;
+            wide_u2_rx_s          <= wide_u2_rx;
+            wide_prn_writes_s     <= wide_prn_writes;
+            wide_hd_execs_s       <= wide_hd_execs;
+            wide_panel_dmas_s     <= wide_panel_dmas;
+            wide_audio_sent_s     <= wide_audio_sent;
+            ring_status_s         <= ring_status;
+            link_stat_s           <= link_stat;
+            ddr3_dbg1_s           <= ddr3_dbg1;
+            ddr3_dbg2_s           <= ddr3_dbg2;
+            ddr3_dbg3_s           <= ddr3_dbg3;
+            ddr3_eye0_s           <= ddr3_eye0;
+            ddr3_eye1_s           <= ddr3_eye1;
+            audio_stat_s          <= audio_stat;
+        end
+    end
 
     // wb_adr[1:0] are byte lanes within a word and are deliberately not decoded.
     wire _unused_ok = &{1'b0, wb_dat_w[31:1], wb_sel, wb_adr[1:0], 1'b0};

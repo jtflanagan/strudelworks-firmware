@@ -1442,7 +1442,9 @@ because both were said out loud before they were checked.  The pattern in both
 was the same: a counter at zero was taken for a mechanism failing, when the
 mechanism was fine and the zero meant something narrower.
 
-**1. THE RUNAWAY.**  Two samples of `accel status` a minute apart:
+**1. THE RUNAWAY.**  (Today one line: `swctl telemetry delta 60 afast_i
+afast_dram afast_wr abus afast_kbd` - TELEMETRY.md.)  Two samples of `accel
+status` a minute apart:
 instruction fetches frozen at 2,530,109, RAM at 90,972 and writes at 158,667 -
 all three UNCHANGED - while bus ops went from 67.9M to 124.6M and keyboard
 polls from 9.26M to 17.0M.  A core that executes no new on-card fetch but

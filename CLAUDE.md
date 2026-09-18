@@ -20,6 +20,11 @@ session: `git status` both repos and get old work committed before editing.
 - Verilator-first: `sim/suite.sh quick|cpu|battery|boot`; iverilog only with
   `--iverilog` or when asked. Monitor long benches by their progress counters
   (`sim/progress.sh`), never timeout-and-retry; abort on bad/mism > 0.
+- A readable register is read through the register cut (`rtl/wb_regfile.sv`:
+  a `_s` shadow, a line in the flop block) and, if a host should see it move,
+  added to `rtl/telem_map.vh` - with the layout number bumped and the host's
+  `src/telemetry_map.hpp` changed in the same commit pair
+  (`../strudelworks-host/tools/check_telem_map.py`). docs/TELEMETRY.md.
 - Explain the change and the expected result before every test run.
 - Every `docs/*.md` opens with a `Status:` line (date, branch, WNS, check
   count); update it when a change lands. `docs/BOOT_BENCH.md` and
