@@ -92,9 +92,11 @@ run bank_census   rtl/gs/bank_census.sv
 run l1i           rtl/a2/l1i.sv
 run l1d           rtl/a2/l1d.sv
 run tlb           rtl/a2/tlb.sv
-# The 65816 card's L1 is still iline + iscan + dline (its own copies).
-run iline         rtl/gs/iline.sv rtl/gs/iscan.sv
-run dline         -Irtl/common -Irtl/gs rtl/gs/dline.sv
+# The 65816 card's L1: l1i and l1d over its own tlb (docs/CORE_REFACTOR_65816.md).
+LINT_LABEL=gs_l1i run l1i rtl/gs/l1i.sv rtl/gs/iscan.sv
+LINT_LABEL=gs_iscan run iscan rtl/gs/iscan.sv
+LINT_LABEL=gs_l1d run l1d -Irtl/common -Irtl/gs rtl/gs/l1d.sv
+LINT_LABEL=gs_tlb run tlb rtl/gs/tlb.sv
 run boot_hold     rtl/common/boot_hold.sv
 run kbd_inject    rtl/common/kbd_inject.sv
 run kbd_notice    rtl/common/kbd_notice.sv

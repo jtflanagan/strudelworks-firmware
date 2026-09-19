@@ -155,6 +155,7 @@ module cpu65816 #(
     // from memory (long addressing) or carried across a bank edge by an
     // index - it rides the dispatcher, counted.
     output wire  [1:0]  d_pred_bcls,
+    output wire         d_pred_vpb,  // ...and it is a vector pull (the board redirects its bank)
     output wire  [7:0]  p_flags,    // {N,V,M,X,D,I,Z,C} register-direct: what
                                     // a branch will test (rtl/iline.sv)
     output wire  [7:0]  dbr_o,      // the data bank register, for the data
@@ -980,6 +981,7 @@ module cpu65816 #(
     assign d_pred_bcls = d_bcls_mux;
     // A data access next cycle: VDA without VPA (UC_BUS_D), and not slot 0.
     assign d_pred_v    = !f_sync && (n_bus == UC_BUS_D) && (n_asel != UC_ADDR_PC);
+    assign d_pred_vpb  = (n_asel == UC_ADDR_VEC) || (n_asel == UC_ADDR_VEC1);
     assign d_pred_rw   = n_rw | in_rst_n;
 
 `ifndef SYNTHESIS

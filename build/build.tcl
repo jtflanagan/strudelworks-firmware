@@ -272,21 +272,16 @@ if {$snoop || $master} {
             [file join $root rtl $card apple_mmu.sv] \
             [file join $root rtl $card rom_loader.sv] \
         ]
-        # L1: the 65C02 card's is l1i + l1d over the tlb (rungs 4-5); the
-        # 65816 card still carries iline + iscan + dline.
-        if {$card eq "a2"} {
-            add_files -norecurse [list \
-                [file join $root rtl a2 l1i.sv] \
-                [file join $root rtl a2 l1d.sv] \
-                [file join $root rtl a2 tlb.sv] \
-            ]
-        } else {
-            add_files -norecurse [list \
-                [file join $root rtl gs iline.sv] \
-                [file join $root rtl gs iscan.sv] \
-                [file join $root rtl gs dline.sv] \
-            ]
-        }
+        # L1: each card's own l1i + l1d over its own tlb (the a2 card's rungs
+        # 4-5, docs/CORE_REFACTOR_65C02.md; the gs card's rungs 2-3,
+        # docs/CORE_REFACTOR_65816.md).
+        add_files -norecurse [list \
+            [file join $root rtl $card l1i.sv] \
+            [file join $root rtl $card l1d.sv] \
+            [file join $root rtl $card tlb.sv] \
+        ]
+        # The gs card's branch scanner (docs/CORE_REFACTOR_65816.md rung 4).
+        if {$card eq "gs"} { add_files -norecurse [list [file join $root rtl gs iscan.sv]] }
     } else {
         add_files -norecurse [list [file join $root rtl common snoop_top.sv]]
     }

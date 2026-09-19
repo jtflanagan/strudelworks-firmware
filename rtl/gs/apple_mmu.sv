@@ -360,6 +360,7 @@ module apple_mmu #(
     // switch, so its word can stay off a sparse stream (a vapor-lock poll of
     // $C054 at the core's pace would flood the link otherwise).
     input  wire        swi_on,        // the closed-regime level, chicken bit included
+    input  wire        slot_on,       // the on-card hard disk's slot answered fast (the IIgs build: docs/CORE_REFACTOR_65816.md rung 4)
     input  wire        swi_kbd_ok,    // the keyboard latch holds a byte
     input  wire        swi_fb_ok,     // fb_sim can answer a floating read
     input  wire        swi_vbl_ok,    // the VBL lock stands
@@ -1154,11 +1155,25 @@ module apple_mmu #(
     function automatic slot_dev(input [2:0] n);
         slot_dev = (n != 3'd0) && qi_io && q_addr[7] && (q_addr[6:4] == n);
     endfunction
-    assign q_slot = swi_on && (slot_dev(swi_hd_slot) || slot_dev(swi_fd_slot) || slot_dev(swi_mouse_slot) ||
-                               slot_dev(swi_u2_slot) || slot_dev(swi_prn_slot) ||
-                               slot_page(swi_hd_slot) || slot_page(swi_fd_slot) || slot_page(swi_mb_slot) ||
-                               slot_page(swi_mouse_slot) || slot_page(swi_prn_slot));
-    assign q_swi = swi_on && ((qi_io && (q_rw ? qi_rd : qi_wr)) || q_slot);
+    // THE IIgs's HARD DISK SLOT, FAST (2026-09-19, the user: "all $Cxxx is
+    // slow" was only ever a temporary rule; what the card knows is safe to
+    // accelerate, it accelerates).  GS/OS runs the card's own SmartPort
+    // firmware at $C7xx for every block, and on this build every fetch of it
+    // rode a real bus cycle: 277 k of the first 6 M instructions' 472 k slow
+    // fetches, a sixth of all clocks.  The slot's ROM page while SLOTROMSEL
+    // gives it to the card and INTCXROM is clear (exactly when the classifier
+    // calls it BUS), and its DEVICE SELECT, in the four banks whose $Cxxx is
+    // the I/O window (not the fast pair under SHADOW bit 6); the sequencer's
+    // fast path serves them as it does on the IIe (accel_seq sl_win).
+    wire q_pair_io = GS && ((q_addr[23:17] == 7'h70) || ((q_addr[23:17] == 7'd0) && !gs_flat));
+    wire q_hd_fast = slot_on && q_pair_io &&
+                     ((slot_page(swi_hd_slot) && gs_sltrom[swi_hd_slot]) || slot_dev(swi_hd_slot));
+    assign q_slot = (swi_on && (slot_dev(swi_hd_slot) || slot_dev(swi_fd_slot) || slot_dev(swi_mouse_slot) ||
+                                slot_dev(swi_u2_slot) || slot_dev(swi_prn_slot) ||
+                                slot_page(swi_hd_slot) || slot_page(swi_fd_slot) || slot_page(swi_mb_slot) ||
+                                slot_page(swi_mouse_slot) || slot_page(swi_prn_slot))) ||
+                    q_hd_fast;
+    assign q_swi = (swi_on && qi_io && (q_rw ? qi_rd : qi_wr)) || q_slot;
     assign q_nsc = ((q_addr[15:8] == 8'hC3) && (intcxrom || !slotc3rom)) ||
                    ((q_addr[15:8] == 8'hC8) && (intcxrom || intc8rom));
     // Quiet: a $C050-$C057 op, or a $C00x write, whose switch already holds

@@ -8,6 +8,7 @@
 #
 #   sim/run_boot_gs_tb.sh [options]
 #     --instrs=N       run length in INSTRUCTIONS (default 20000)
+#     --tlb=N          the TLB's entries (default 16; docs/CORE_REFACTOR_65816.md's census lever)
 #     --clks=N         hard ceiling in 100 MHz clocks (default 400000000)
 #     --mode=N         accel mode (default 2)
 #     --target=N       governor target, 8.8 fixed point (0 = unlimited)
@@ -61,7 +62,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/boot_work"
 mkdir -p "$work"
 
-instrs=20000 clks=400000000 mode=2 target=0 ddrlat=12 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0 keyhold=20000 btnat=0 btnhold=2000000 mirror="" pagewatch=0
+tlbn=16 instrs=20000 clks=400000000 mode=2 target=0 ddrlat=12 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0 keyhold=20000 btnat=0 btnhold=2000000 mirror="" pagewatch=0
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport_gs.bin"
 hdv=""
@@ -70,6 +71,7 @@ trace=""
 for a in "$@"; do
     case "$a" in
         --instrs=*) instrs="${a#*=}" ;;
+        --tlb=*) tlbn="${a#*=}" ;;
         --clks=*) clks="${a#*=}" ;;
         --mode=*) mode="${a#*=}" ;;
         --target=*) target="${a#*=}" ;;
@@ -178,7 +180,7 @@ xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
 srcs=(
     "$root/sim/boot_gs_tb.sv"
     "$root/rtl/gs/cpu65816.sv" "$root/rtl/gs/accel_seq.sv"
-    "$root/rtl/gs/iline.sv" "$root/rtl/gs/iscan.sv" "$root/rtl/gs/dline.sv" "$root/rtl/gs/bank_census.sv"
+    "$root/rtl/gs/l1i.sv" "$root/rtl/gs/iscan.sv" "$root/rtl/gs/tlb.sv" "$root/rtl/gs/l1d.sv" "$root/rtl/gs/bank_census.sv"
     "$root/rtl/common/synchronizer.sv" "$root/rtl/common/apple_bus_read.sv" "$root/rtl/common/apple_bus_write.sv"
     "$root/rtl/gs/gs_io.sv" "$root/rtl/gs/gs_adb.sv" "$root/rtl/gs/gs_doc.sv" "$root/rtl/gs/gs_clock.sv" "$root/rtl/gs/gs_intc.sv" "$root/rtl/gs/gs_iwm.sv"
     "$root/rtl/gs/apple_mmu.sv" "$root/rtl/gs/rom_loader.sv" "$root/rtl/gs/page_cache.sv"
@@ -201,6 +203,7 @@ if [ "$vl" = 1 ]; then
         -GTARGET="$target" \
         -GDDR_LAT="$ddrlat" \
         -GMAX_INSTRS="$instrs" \
+        -GTLB_N="$tlbn" \
         -GMAX_CLKS="$clks" \
         -GHDROMF="\"$work/hdrom.hex\"" \
         -GGS_HD_ROM=$gs_hd_rom \

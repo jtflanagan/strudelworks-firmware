@@ -50,6 +50,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     parameter integer MODE = 2,
                     parameter integer TARGET = 0,
                     parameter integer MAX_INSTRS = 200000,
+                    parameter integer TLB_N = 16,        // the TLB's entries (--tlb=N: a census lever)
                     parameter integer MAX_CLKS = 400000000,
                     parameter integer PHI0_HIGH = 49,
                     // What the IIe backplane puts on the data pins when
@@ -275,6 +276,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        cpu_cyc_is_i, cpu_d_pred_v, cpu_d_pred_rw, cpu_bank_wr;
     wire [23:0] cpu_pc24, cpu_d_pred;
     wire [1:0]  cpu_d_pred_bcls;
+    wire        cpu_d_pred_vpb;
     wire [7:0]  cpu_p_flags, cpu_dbr, i_din_w, d_din_w, seq_din;
     wire [7:0]  cpu_din = cpu_cyc_is_i ? i_din_w : d_din_w;
 
@@ -282,7 +284,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_a24), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (d_din_w),
         .cyc_is_i (cpu_cyc_is_i), .pc_addr (cpu_pc24), .d_pred (cpu_d_pred),
-        .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls),
+        .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls), .d_pred_vpb (cpu_d_pred_vpb),
         .p_flags (cpu_p_flags), .dbr_o (cpu_dbr), .bank_wr (cpu_bank_wr),
         // The chipset's one interrupt line, active low into the core.
         .irq_n (!gsio_irq), .nmi_n (1'b1),
@@ -362,7 +364,23 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        gsio_irq;
     wire        q_swi = q_swi_mmu || gsio_claim;
     // The byte mux follows the REGISTERED op, exactly as master_top's does.
-    wire [7:0]  swi_byte = gsio_u_claim ? gsio_byte : mmu_swi_stat;
+    wire [7:0]  swi_byte = seq_slot_q ? hd_rd_data : gsio_u_claim ? gsio_byte : mmu_swi_stat;
+    integer sl_trace_n = 0;
+    always @(posedge clk) if (swi_commit && seq_slot_q && sl_trace_n < 24) begin
+        sl_trace_n = sl_trace_n + 1;
+        $display("    slot fast: $%02x/%04x %s byte=$%02x claim=%0d pc=$%02x/%04x", u_bank, u_addr, u_rw ? "rd" : "wr", swi_byte, hd_rd_claim, cpu_pc24[23:16], cpu_pc24[15:0]);
+    end
+    integer hd_trace_n = 0;
+    always @(posedge clk) if ((u_hd.arm_write || u_hd.exec_read) && hd_trace_n < 24) begin
+        hd_trace_n = hd_trace_n + 1;
+        $display("    hd card: %s idx=%0d din=$%02x at instruction %0d", u_hd.exec_read ? "EXEC" : "arm", u_hd.idx, u_hd.din, trace_instrs);
+    end
+    logic       sl_claim_fast = 1'b0;
+    always_ff @(posedge clk) begin
+        if (rst)                                     sl_claim_fast <= 1'b0;
+        else if (u_present && seq_slot_q)            sl_claim_fast <= 1'b1;
+        else if (op_present && !sl_win)              sl_claim_fast <= 1'b0;
+    end
     wire        map_changed, map_settling;
 
     // The fronts, as master_top chains them (rung 6): the sequencer's cyc_en
@@ -371,21 +389,39 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        seq_cyc_en, iline_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync;
     wire        turbo_claim, turbo_wr, turbo_tick, dline_tick, seq_fast_tick;
     wire        d_commit_w, d_claim_w, d_pending_w;
-    wire        front_settling = map_settling || cpu_bank_wr;
+    wire        l1_settling = map_settling || cpu_bank_wr;
     wire        tev_valid, tev_sync, dev_valid, dev_rw;
     wire [15:0] tev_addr, dev_addr;
     wire [7:0]  tev_data, dev_data, tev_bank, dev_bank;
     wire [23:0] p_addr_w, dq_addr_w;
     wire        dq_rw_w;
-    wire        il_req, il_ack, il_done, il_ok, dl_req_w;
-    wire [15:0] il_ppn_w, dl_ppn_w;
-    wire [3:0]  il_line_w, dl_line_w;
+    wire        il_ack, il_done, il_ok;
     wire [127:0] il_row;
     wire        pw_valid_w, ws_valid_w;
     wire [15:0] pw_ppn_w, ws_ppn_w;
     wire [7:0]  pw_off_w, pw_data_w, ws_off8_w;
-    logic il_src_q;
-    always_ff @(posedge clk) if (il_ack) il_src_q <= !il_req;
+    // The TLB and the direct way read (docs/CORE_REFACTOR_65816.md rung 2), as gs_top wires them.
+    wire [15:0] la_vpage_w, la_ppn_w, fi_vpage_w, fi_ppn_w, lb_vpage_w, lb_ppn_w, fj_vpage_w, fj_ppn_w;
+    wire [15:0] kill_ppn_w, op_place_ppn_w;
+    wire [6:0]  la_set_w, fi_set_w, lb_set_w, fj_set_w, op_place_set_w, evict_set_w, ref_set_w, dr_set_w, dr_set_i, dr_set_d;
+    wire [2:0]  la_way_w, fi_way_w, lb_way_w, fj_way_w, op_place_way_w, evict_way_w, ref_way_w, dr_way_w, dr_way_i, dr_way_d;
+    wire        la_hit_w, lb_hit_w, fi_v_w, fi_busy_w, fj_v_w, fj_ack_w, kill_v_w;
+    wire        op_place_v_w, evict_v_w, ref_v_w, ref_on_w;
+    wire [3:0]  fi_reg_w, fj_reg_w, dr_line_w, dr_line_i, dr_line_d;
+    wire        fi_fold_w, fj_fold_w;
+    wire        dr_req_w, dr_ack_w, dr_done_w, dr_req_i, dr_ack_i, dr_done_i, dr_req_d, dr_ack_d, dr_done_d;
+    wire [127:0] dr_row_w;
+    wire [31:0] tlb_fills_w, tlb_deaths_w;
+    assign dr_req_w  = dr_req_d | dr_req_i;
+    assign dr_set_w  = dr_req_d ? dr_set_d  : dr_set_i;
+    assign dr_way_w  = dr_req_d ? dr_way_d  : dr_way_i;
+    assign dr_line_w = dr_req_d ? dr_line_d : dr_line_i;
+    assign dr_ack_d  = dr_ack_w &&  dr_req_d;
+    assign dr_ack_i  = dr_ack_w && !dr_req_d;
+    logic [1:0] dr_src_sr = 2'd0;
+    always_ff @(posedge clk) dr_src_sr <= rst ? 2'd0 : {dr_src_sr[0], dr_req_d};
+    assign dr_done_d = dr_done_w &&  dr_src_sr[1];
+    assign dr_done_i = dr_done_w && !dr_src_sr[1];
     // THE MERGE'S BACK-PRESSURE, modelled as sim/accel_tb.sv models it: the
     // fronts' room comes and goes in bursts (an xorshift LFSR), the write
     // room a clock behind the read room as the real merge registers it.
@@ -432,7 +468,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .fev_valid (fev_valid), .fev_addr (fev_addr), .fev_bank (fev_bank), .fev_rw (fev_rw),
         .fev_data (fev_data), .fev_sync (fev_sync),
         .accel_on (accel_on), .held_governor (), .state_o (seq_state), .reset_seq_o (),
-        .fast_ops (fast_ops), .map_changed (map_changed), .map_settling (front_settling),
+        .fast_ops (fast_ops), .map_changed (map_changed), .map_settling (l1_settling),
         .maps (accel_maps), .cen_v (), .cen_sel (), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
         .cycles (cycles), .wait_clocks (wait_clocks), .retries (retries),
         .fronts_dis (1'b0)
@@ -441,7 +477,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // ---- the fronts (rtl/iline.sv, rtl/dline.sv at GS = 1) ---------------------
     // The instruction front: two lines of the program stream ahead of the
     // sequencer, in the program's bank.
-    iline #(.GS (1'b1)) u_iline (
+    l1i u_l1i (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .pc_addr (cpu_pc24[15:0]), .pc_bank (cpu_pc24[23:16]),
         .cpu_rw (cpu_rw_eff), .cpu_sync (cpu_sync),
@@ -455,17 +491,39 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .tev_sync (tev_sync), .tev_bank (tev_bank), .ev_room (room_q),
         .p_addr (p_addr_w),
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
-        .cl_ppn (cl_ppn_w), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
-        .map_settling (front_settling), .idrop_o (), .irevive_o (),
-        .map_changed (map_changed), .intc8rom (intc8rom),
-        .il_req (il_req), .il_ppn (il_ppn_w), .il_line (il_line_w),
-        .il_ack (il_ack && il_req), .il_done (il_done && !il_src_q),
-        .il_ok (il_ok), .il_row (il_row),
-        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
-        .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
+        .map_changed (map_changed), .map_settling (l1_settling), .intc8rom (intc8rom),
+        .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
+        .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
+        .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
+        .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
+        .dr_req (dr_req_i), .dr_set (dr_set_i), .dr_way (dr_way_i), .dr_line (dr_line_i),
+        .dr_ack (dr_ack_i), .dr_done (dr_done_i), .dr_row (dr_row_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_ppn (cl_ppn_w), .cl_off (cl_off),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .serve (serve), .inval (1'b0),
         .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
+    );
+    // The sequencer-served program fetches by {bank, page}, for the summary.
+    integer slow_pg [0:65535];
+    initial for (int q = 0; q < 65536; q = q + 1) slow_pg[q] = 0;
+    always @(posedge clk) if (seq_cyc_en && cpu_cyc_is_i && cpu_rw_eff)
+        slow_pg[{cpu_pc24[23:16], cpu_pc24[15:8]}] = slow_pg[{cpu_pc24[23:16], cpu_pc24[15:8]}] + 1;
+    tlb #(.N (TLB_N)) u_tlb (
+        .clk (clk), .rst (rst), .serve (serve), .inval (1'b0),
+        .map_changed (map_changed), .rt_rd_flat (rt_rd_flat),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
+        .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
+        .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
+        .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
+        .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
+        .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
+        .ref_v (ref_v_w), .ref_set (ref_set_w), .ref_way (ref_way_w), .ref_on (ref_on_w),
+        .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
+        .cnt_fills (tlb_fills_w), .cnt_deaths (tlb_deaths_w)
     );
 
     // The data front, chained after it: its cyc_en is the core's.
@@ -475,14 +533,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [247:0] gsio_fr_vec;
     reg  [247:0] io_vec_q = 248'd0;
     always @(posedge clk) io_vec_q <= gsio_fr_vec;
-    dline #(.GS (1'b1)) u_dline (
-        // The keyboard read at one clock, from the ADB micro's own byte.
+    l1d u_l1d (
         .kbd_en (1'b1), .kbd_byte (gs_c000_byte), .kbd_rd (dl_kbd_rd),
         .io_flat (gs_shadow_w[6]), .io_vec (io_vec_q), .swi_busy (swi_commit),
         .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
-        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
-        .d_pred_bcls (cpu_d_pred_bcls), .dbr (cpu_dbr),
+        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb),
         .cpu_addr (cpu_addr_eff), .cpu_bank (cpu_bank_eff), .cyc_int (cyc_internal),
         .cpu_rw (cpu_rw_eff), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (iline_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (seq_din), .i_din (i_din_w),
@@ -493,13 +549,17 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .dev_bank (dev_bank),
         .ev_room (room_q), .ev_room_w (room_w_q),
         .altzp (sw_state[3]),
-        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_off (doff_w),
+        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w),
         .rw_bank (rw_bank), .map_changed (map_changed),
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
-        .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w), .map_settling (front_settling),
-        .dl_req (dl_req_w), .dl_ppn (dl_ppn_w), .dl_line (dl_line_w),
-        .dl_ack (il_ack && !il_req), .dl_done (il_done && il_src_q),
-        .dl_ok (il_ok), .dl_row (il_row),
+        .map_settling (l1_settling),
+        .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
+        .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
+        .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
+        .dr_req (dr_req_d), .dr_set (dr_set_d), .dr_way (dr_way_d), .dr_line (dr_line_d),
+        .dr_ack (dr_ack_d), .dr_done (dr_done_d), .dr_row (dr_row_w),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
         .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata),
         .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
@@ -507,12 +567,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .inval (1'b0),
         .cnt_clr (1'b0),
-        .cnt_serves (dl_serves), .cnt_claims (), .cnt_splices (),
-        .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (dl_posts), .cnt_post_waits (),
-        .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
-        .fill_busy (), .dbg_sel (4'd0), .dbg_val (), .dbg_val2 ()
+        .cnt_serves (dl_serves), .cnt_l2_serves (), .cnt_tlb_fills (),
+        .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
     );
-    wire [31:0] dl_serves, dl_posts;
+    wire [31:0] dl_posts = u_l1d.cnt_posts;
+    wire [31:0] dl_serves;
 
     // The posted-write seam, shared with the ROM loader as in master_top.
     wire        pw_any_valid = pw_valid_w || rl_pw_valid;
@@ -528,7 +587,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .drv_sync (drv_sync), .cyc_en (drv_cyc_done), .cpu_din (drv_din),
         .op_addr (op_addr), .op_rw (op_rw), .op_wdata (op_wdata),
         .op_present (op_present), .op_commit (op_commit),
-        .slot_rd_claim (hd_rd_claim), .slot_rd_data (hd_rd_data),
+        // A read the sequencer's slot window claimed fast is not the bus's
+        // to claim as well (gs_top's sl_claim_fast).
+        .slot_rd_claim (hd_rd_claim && !sl_claim_fast), .slot_rd_data (hd_rd_data),
         .din_sub_en (sub_en), .din_sub_data (sub_data),
         .ovr_en (hd_ovr_en), .ovr_addr (hd_ovr_addr), .ovr_rw (hd_ovr_rw),
         .ovr_wdata (hd_ovr_wdata),
@@ -599,8 +660,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     hd_card #(.GS (1)) u_hd (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .res_sync (res_sync),
         .master_active (master_active), .slot_assign (3'(HD_SLOT)),
-        .op_addr (op_addr), .op_rw (op_rw), .op_present (op_present),
-        .op_commit (op_commit), .op_ovr (op_ovr), .op_bank (drv_bank), .din (drv_din),
+        // Under the sequencer's slot window the card is shown the unified op,
+        // as gs_top's p_* mux shows it (the fast path for its own ROM and
+        // device select); otherwise the driver's.
+        .op_addr (hp_addr), .op_rw (hp_rw), .op_present (hp_present), .op_commit (hp_commit),
+        .op_ovr (hp_ovr), .op_bank (hp_bank), .din (hp_wdata),
         .ovr_en (hd_ovr_en), .ovr_addr (hd_ovr_addr), .ovr_rw (hd_ovr_rw),
         .ovr_wdata (hd_ovr_wdata), .ovr_bank (hd_ovr_bank),
         .rd_claim (hd_rd_claim), .rd_data (hd_rd_data),
@@ -616,6 +680,18 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // AN OVERRIDE BRINGS ITS OWN BANK, formed exactly as master_top forms it:
     // the DMA buffer's while the hard disk drives the bus, zero otherwise.
     wire [7:0]  drv_bank = hd_ovr_en ? hd_ovr_bank : cpu_bank_eff;
+    // THE PERIPHERALS' VIEW OF THE STREAM, as gs_top's p_* mux forms it: the
+    // unified op under the sequencer's slot window (the hard disk's ROM and
+    // device select served fast), the driver's op otherwise.  The host
+    // model below taps the same view, as the real host taps the capture's
+    // bus words and fast words alike.
+    wire        hp_present = sl_win ? (u_present && seq_slot_q) : op_present;
+    wire        hp_commit  = sl_win ? (swi_commit && seq_slot_q) : op_commit;
+    wire        hp_ovr     = sl_win ? 1'b0 : op_ovr;
+    wire        hp_rw      = sl_win ? u_rw : op_rw;
+    wire [15:0] hp_addr    = sl_win ? u_addr : op_addr;
+    wire [7:0]  hp_bank    = sl_win ? u_bank : drv_bank;
+    wire [7:0]  hp_wdata   = sl_win ? u_wdata : drv_din;
 
     // ---- the memory path, on the unified stream ----------------------------------
     wire        cl_valid, cl_rw, cl_wr_image, cl_aux, cl_posted, cl_sh, intc8rom;
@@ -687,10 +763,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .q_addr ({drv_bank, nxt_addr}), .q_divert (q_divert), .q_rw (cpu_rw_eff), .q_cls (q_cls),
         // Nothing is internalized on the GS build yet: $C0xx is BUS class and
         // rides a real cycle until rtl/gs_io.sv answers it (rung 3b).
-        .swi_on (1'b0), .swi_kbd_ok (1'b0), .swi_fb_ok (1'b0),
+        .swi_on (1'b0), .slot_on (accel_on), .swi_kbd_ok (1'b0), .swi_fb_ok (1'b0),
         .swi_vbl_ok (1'b0), .swi_vbl_bar (1'b1), .swi_kbd_low (7'd0),
         .swi_pb_ok (1'b0), .swi_pdl_ok (1'b0),
-        .swi_hd_slot (3'd0), .swi_fd_slot (3'd0), .swi_mb_slot (3'd0),
+        .swi_hd_slot (3'(HD_SLOT)), .swi_fd_slot (3'd0), .swi_mb_slot (3'd0),
         .swi_mouse_slot (3'd0), .swi_u2_slot (3'd0), .swi_prn_slot (3'd0),
         .q_nsc (), .q_slot (q_slot), .q_swi (q_swi_mmu), .q_swi_quiet (q_swi_quiet),
         .swi_stat_byte (mmu_swi_stat), .swi_stat_bits (mmu_stat_bits),
@@ -1017,8 +1093,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .mw_stb (), .mw_addr (tb_mw_addr), .mw_byte (tb_mw_byte), .mwx_stb (tb_mwx_stb), .mw_bank (tb_mw_bank),
-        .il_req (il_req | dl_req_w), .il_ppn (il_req ? il_ppn_w : dl_ppn_w),
-        .il_line (il_req ? il_line_w : dl_line_w), .il_src (!il_req),
+        .ref_v (ref_v_w), .ref_set (ref_set_w), .ref_way (ref_way_w), .ref_on (ref_on_w),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w), .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
+        .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
+        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w),
+        .il_req (1'b0), .il_ppn (16'd0), .il_line (4'd0), .il_src (1'b1),
         .il_ack (il_ack), .il_done (il_done), .il_ok (il_ok), .il_row (il_row),
         .serve (serve), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
@@ -1277,7 +1357,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         bcq_v    <= cpu_d_pred_v;
         bcq_rw   <= cpu_d_pred_rw;
         bcq_cls  <= cpu_d_pred_bcls;
-        bcq_cand <= u_dline.dq_addr;
+        bcq_cand <= u_l1d.dq_addr;
     end
     bank_census u_bank_census (
         .clk (clk), .rst (!boot_go), .clr (1'b0),
@@ -1615,7 +1695,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                         for (k = 0; k < 512; k = k + 1)
                             q_blk[qw % QN][k] = blk_card_byte(hm_membank[r], hm_memblock[r], k,
                                                               sw_state[8], sw_state[3]);
-                        if (u_dline.pending)
+                        if (u_l1d.pending)
                             $display("    disk: WRITE of block %0d captured with posted writes in flight at instruction %0d",
                                      hm_diskblock[r], trace_instrs);
                     end
@@ -1633,10 +1713,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // ops, and the on-card slot ops served fast in the closed regime - as
     // the real host taps the capture (bus words and fast words alike).
     always @(posedge clk) begin
-        if (op_present && !op_ovr && !op_rw && op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
-            hm_io_write(op_addr[3:0], op_wdata);
-        if (op_commit && !op_ovr && op_rw && op_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
-            if (op_addr[3:0] == 4'h0) hm_io_read0();
+        if (hp_present && !hp_ovr && !hp_rw && hp_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
+            hm_io_write(hp_addr[3:0], hp_wdata);
+        if (hp_commit && !hp_ovr && hp_rw && hp_addr[15:4] == {8'hC0, 4'h8 + 4'(HD_SLOT)})
+            if (hp_addr[3:0] == 4'h0) hm_io_read0();
     end
     // ---- rung 3e: the block number, byte by byte, on its way to the card ----------
     // The third read asks for block $0203 where it means $0003, so the two
@@ -2068,7 +2148,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             (cl_ppn_w == 16'h0007 || cl_ppn_w == 16'hE007))
             $display("    BYTE WATCH %0d clk %0d instr: $%04X%02X <= $%02X  posted=%0d sh=%0d  op %02X/%04X %0s SHADOW=$%02X pending=%0d",
                      now, trace_instrs, cl_ppn_w, cl_off[7:0], cl_wdata, cl_posted, cl_sh,
-                     u_bank, u_addr, u_rw ? "rd" : "wr", gs_shadow_w, u_dline.pending);
+                     u_bank, u_addr, u_rw ? "rd" : "wr", gs_shadow_w, u_l1d.pending);
     reg [255:0] wr_text_sh [0:3];
     initial for (pgi = 0; pgi < 4; pgi = pgi + 1) wr_text_sh[pgi] = 256'd0;
     always @(posedge clk)
@@ -2940,14 +3020,29 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                  now, bus_cycles, trace_instrs);
         $display("    counters: fast_ops %0d bus_ops %0d cycles %0d maps %0d retries %0d turbo %0d dline %0d posts %0d",
                  fast_ops, bus_ops, cycles, accel_maps, retries, turbo_ops, dl_serves, dl_posts);
-        // The bank table (docs/LONG_DATA.md rung 1): OTHER-memory read
-        // candidates, how many found their bank settled in the table, how
-        // many the ways served through it, how many anything here served.
-        $display("    bank table: OTHER-memory reads %0d, bank in the table %0d, served by the ways %0d (%s%%), by the front at all %0d (%s%%), loads %0d, table $%02X $%02X; writes posted into $02-$7F %0d; chipset fast reads %0d",
-                 u_dline.cnt_ob_cand, u_dline.cnt_ob_known,
-                 u_dline.cnt_ob_serves, bc_pct(longint'(u_dline.cnt_ob_serves), longint'(u_dline.cnt_ob_cand)),
-                 u_dline.cnt_ob_any, bc_pct(longint'(u_dline.cnt_ob_any), longint'(u_dline.cnt_ob_cand)),
-                 u_dline.cnt_ob_loads, u_dline.ob[0], u_dline.ob[1], u_dline.cnt_post_hi, u_dline.cnt_io_serves);
+        // L1-D's books (docs/CORE_REFACTOR_65816.md rung 3): the L2 reads
+        // launched and served, the TLB fills from the data side, the posts.
+        $display("    L1-D: L2 reads launched %0d served %0d aborted %0d; TLB fills %0d (waits %0d); last row %0d last byte %0d keyboard %0d chipset %0d; posts %0d into $02-$7F %0d duplicates %0d; internal cycles %0d; TLB entries filled %0d died %0d",
+                 u_l1d.cnt_l2_launch, u_l1d.cnt_l2_serves, u_l1d.cnt_l2_abort,
+                 u_l1d.cnt_tlb_fills, u_l1d.cnt_tlb_waits,
+                 u_l1d.cnt_lr_serves, u_l1d.cnt_lb_serves, u_l1d.cnt_kb_serves, u_l1d.cnt_io_serves,
+                 u_l1d.cnt_posts, u_l1d.cnt_post_hi, u_l1d.cnt_dups, u_l1d.cnt_null,
+                 tlb_fills_w, tlb_deaths_w);
+        $display("    L1-I: fetches the sequencer served %0d (the bubbles); line fills %0d (prefetches %0d, of them the scanner's %0d, TLB waits %0d), kills %0d, unservable %0d; turbo (one-clock) fetches %0d",
+                 u_l1i.cnt_slow_i, u_l1i.cnt_fills, u_l1i.cnt_prefetch, u_l1i.cnt_scan, u_l1i.cnt_tlb_waits,
+                 u_l1i.cnt_kills, u_l1i.cnt_unserv, turbo_ops);
+        begin : slow_hist
+            // The slow fetches by {bank, page}: where the bubbles live.
+            integer k, best, bi;
+            for (k = 0; k < 8; k = k + 1) begin
+                best = 0; bi = -1;
+                for (int q = 0; q < 65536; q = q + 1) if (slow_pg[q] > best) begin best = slow_pg[q]; bi = q; end
+                if (bi >= 0) begin
+                    $display("    slow fetches: $%02x/%02xxx  %0d", bi[15:8], bi[7:0], best);
+                    slow_pg[bi] = 0;
+                end
+            end
+        end
         $display("    cache: hits %0d misses %0d fills %0d flushes %0d declines %0d late %0d drops %0d",
                  hits, misses, mem_fills, mem_flushes, mem_declines, late_fills, fifo_drops);
         $display("    last PC $%02X/%04X", last_sync[23:16], last_sync[15:0]);

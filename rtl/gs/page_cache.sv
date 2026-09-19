@@ -74,6 +74,31 @@
 // machine itself has (physical banks 0 and 1), against the bus's byte;
 // unwritten memory is garbage so the count PLATEAUS rather than reads zero.
 //////////////////////////////////////////////////////////////////////////////////
+// RUNG 3 OF THE 65C02 CARD (docs/CORE_REFACTOR_65C02.md, 2026-09-19), SHARED
+// BACK TO THE 65816 CARD AS ITS RUNG 1.  Three
+// additions for an L1 whose TLB carries the L2 way (docs/L1_RETHINK.md):
+//   - THE REFERENCED WAYS.  L1 says which way it points at (ref_v); a
+//     referenced way is not the victim while any other way in the set will
+//     do, and when one is taken anyway the engine names it on evict_v the
+//     clock it starts, so the pointer dies before the fill can land.  The
+//     invalidate walk clears the references with the directory.
+//   - THE PLACEMENT.  op_place_v names the set and way an op's page sits in,
+//     on a hit's decision or a fill's retag: a TLB is filled from the
+//     ordinary lookup, once per page, never per line.
+//   - THE DIRECT WAY READ.  dr_req names a set, a way and a line; with the
+//     engine idle port B reads that one way and dr_done stands with the row
+//     two clocks after dr_ack - no directory, no compare, no way mux.  It is
+//     refused on the clock a write lands in the same row of the same way
+//     (the block RAM leaves a cross-port collision undefined) and while a
+//     posted write is short of the cache: the P+2 law, one term.
+// THE 65816 CARD'S COPY (docs/CORE_REFACTOR_65816.md rung 1, 2026-09-19): the
+// module is one source shared back from the 65C02 card's rung 3 - the
+// geometry is the parameters' (gs_top builds 128 sets x 8 ways, 64 RAMB36,
+// the Pt's block RAM; a 50T build would set 128 x 4), the shadow duplicate's
+// entrant (shd_take, docs/GS.md rung 3e) and the any-bank write tap (mwx_stb)
+// are this card's, and the three additions above are what its TLB and L1
+// (rtl/gs/tlb.sv, l1i.sv, l1d.sv) are built on.
+//////////////////////////////////////////////////////////////////////////////////
 module page_cache #(
     parameter integer SETS = 128,
     parameter integer WAYS = 8
@@ -160,6 +185,39 @@ module page_cache #(
     output wire        il_done,
     output logic       il_ok,
     output logic [127:0] il_row,
+    // ---- THE REFERENCED WAYS (docs/CORE_REFACTOR_65C02.md rung 3) ----------
+    // L1's TLB points at the way a page sits in; while it does, the way is
+    // not a victim if any other way in the set will do.  ref_v sets or clears
+    // one reference; the invalidate walk clears them all.  When a victim is
+    // taken anyway - every way of the set referenced, or a page nobody
+    // referenced - evict_v names it for one clock, and a TLB that pointed at
+    // it drops the pointer.
+    input  wire                    ref_v,
+    input  wire [$clog2(SETS)-1:0] ref_set,
+    input  wire [$clog2(WAYS)-1:0] ref_way,
+    input  wire                    ref_on,
+    output logic                   evict_v,
+    output logic [$clog2(SETS)-1:0] evict_set,
+    output logic [$clog2(WAYS)-1:0] evict_way,
+    // ---- THE PLACEMENT (rung 3): where the op's page sits, so a TLB can be
+    // filled from the ordinary lookup - one clock, on a hit's decision or on
+    // a fill's retag.
+    output logic                   op_place_v,
+    output logic [15:0]            op_place_ppn,
+    output logic [$clog2(SETS)-1:0] op_place_set,
+    output logic [$clog2(WAYS)-1:0] op_place_way,
+    // ---- THE DIRECT WAY READ (rung 3): one row of one known way, on port B
+    // while the engine is idle: no directory, no compare, dr_done with the
+    // row TWO clocks after dr_ack.  Refused on the clock a write lands in
+    // that row (a cross-port collision the block RAM leaves undefined) and
+    // while a posted write is short of the cache.
+    input  wire                    dr_req,
+    input  wire [$clog2(SETS)-1:0] dr_set,
+    input  wire [$clog2(WAYS)-1:0] dr_way,
+    input  wire [3:0]              dr_line,
+    output wire                    dr_ack,
+    output logic                   dr_done,
+    output logic [127:0]           dr_row,
 
     // ---- control and status ------------------------------------------------
     input  wire        serve,
@@ -292,6 +350,9 @@ module page_cache #(
     localparam integer DW = 18;               // {valid, dirty, tag[15:0]}
     (* ram_style = "distributed" *) logic [DW-1:0]    dir [WAYS][SETS];
     (* ram_style = "distributed" *) logic [NODES-1:0] plr [SETS];
+    // The referenced bits, one word per set: L1's writer and the walk's.
+    logic [WAYS-1:0] refb [SETS];
+    initial for (int i = 0; i < SETS; i = i + 1) refb[i] = '0;
 
     logic            iv_run;
     logic [SIDX-1:0] iv_k;
@@ -303,6 +364,10 @@ module page_cache #(
             iv_k <= iv_k + {{(SIDX-1){1'b0}}, 1'b1};
             if (iv_k == SIDX'(SETS-1)) iv_run <= 1'b0;
         end
+    end
+    always_ff @(posedge clk) begin
+        if (iv_run)     refb[iv_k] <= '0;
+        else if (ref_v) refb[ref_set][ref_way] <= ref_on;
     end
 
     // ---- P0: the entrant ---------------------------------------------------
@@ -339,6 +404,15 @@ module page_cache #(
     logic [15:0]     wl_addr;
 
     logic [WAYS-1:0] e_way;          // the engine's way, one-hot
+
+    // The direct way read: granted only with the engine idle (port B is its),
+    // never on the clock a write lands in the same row of the same way, and
+    // never while a posted write is short of the cache.
+    wire [AW-1:0] dr_row_addr = {dr_set, dr_line};
+    wire          dr_clash    = wl_v && wl_way[dr_way] && (wl_row == dr_row_addr);
+    assign dr_ack = dr_req && eng_idle && !iv_run && !pw_pending && !dr_clash && !rst;
+    logic [1:0]     dr_sr;
+    logic [LEV-1:0] dr_way_q;
     logic            eb_en;
     logic [15:0]     eb_we;
     logic [AW-1:0]   eb_addr;
@@ -358,9 +432,9 @@ module page_cache #(
                 .a_addr  (land ? wl_row : en_row),
                 .a_wdata (wl_data),
                 .a_rdata (a_row[gw]),
-                .b_en    (eb_en && e_way[gw]),
-                .b_we    (eb_we),
-                .b_addr  (eb_addr),
+                .b_en    ((eb_en && e_way[gw]) || (dr_ack && dr_way == LEV'(gw))),
+                .b_we    (dr_ack ? 16'd0 : eb_we),
+                .b_addr  (dr_ack ? dr_row_addr : eb_addr),
                 .b_wdata (eb_wdata),
                 .b_rdata (b_row[gw])
             );
@@ -375,6 +449,7 @@ module page_cache #(
     logic [15:0]      tq   [WAYS];
     logic [WAYS-1:0]  tq_v, tq_d;
     logic [NODES-1:0] tq_p;
+    logic [WAYS-1:0]  tq_r;
 
     always_ff @(posedge clk) begin
         e1_v  <= e_any && !rst;
@@ -385,6 +460,7 @@ module page_cache #(
             e1_set  <= en_set;
             e1_line <= en_ln;
             tq_p <= plr[en_set];
+            tq_r <= refb[en_set];
             for (int i = 0; i < WAYS; i = i + 1) begin
                 tq[i]   <= dir[i][en_set][15:0];
                 tq_v[i] <= dir[i][en_set][17];
@@ -412,8 +488,15 @@ module page_cache #(
     endgenerate
     wire c_hit = |c_hit_w;
 
-    wire [WAYS-1:0] free_w = ~tq_v;
-    wire [WAYS-1:0] c_vic  = (|free_w) ? lowest_bit(free_w) : plru_victim(tq_p);
+    // The victim: a free way first; else the tree's pick if nobody references
+    // it; else the lowest unreferenced way (the tree is a hint, a reference
+    // is a promise); else the tree's pick after all, and evict_v says so.
+    wire [WAYS-1:0] free_w  = ~tq_v;
+    wire [WAYS-1:0] plru_w  = plru_victim(tq_p);
+    wire [WAYS-1:0] unref_w = ~tq_r;
+    wire [WAYS-1:0] c_vic  = (|free_w)            ? lowest_bit(free_w) :
+                             (|(plru_w & unref_w)) ? plru_w :
+                             (|unref_w)            ? lowest_bit(unref_w) : plru_w;
 
     logic [15:0] c_vtag;
     always_comb begin
@@ -495,6 +578,16 @@ module page_cache #(
         if (il_sr[1]) il_ok    <= il_hit_q;
     end
 
+    // ---- the direct read's completion --------------------------------------
+    // ack at T: port B reads at T, its register holds the row through T+1,
+    // dr_row and dr_done stand at T+2.
+    always_ff @(posedge clk) begin
+        dr_sr <= rst ? 2'd0 : {dr_sr[0], dr_ack};
+        if (dr_ack)   dr_way_q <= dr_way;
+        if (dr_sr[0]) dr_row   <= b_row[dr_way_q];
+        dr_done <= dr_sr[0] && !rst;
+    end
+
     // ---- the engine --------------------------------------------------------
     logic [15:0]     e_ppn, e_old, e_addr;
     logic [SIDX-1:0] e_set;
@@ -573,14 +666,15 @@ module page_cache #(
     logic [31:0] cnt_il_i, cnt_il_d, cnt_iv_block;
     // The posted writes, and those that found their page absent and had to
     // fill it: the data front's drain must be able to do that.
-    logic [31:0] cnt_posted, cnt_posted_miss;
+    logic [31:0] cnt_posted, cnt_posted_miss, cnt_dr;
     always_ff @(posedge clk) begin
         if (rst) begin
             cnt_land_clash <= 32'd0; cnt_ppn_clash <= 32'd0;
             cnt_hit_uc <= 32'd0; cnt_decline <= 32'd0;
             cnt_il_i <= 32'd0; cnt_il_d <= 32'd0; cnt_iv_block <= 32'd0;
-            cnt_posted <= 32'd0; cnt_posted_miss <= 32'd0;
+            cnt_posted <= 32'd0; cnt_posted_miss <= 32'd0; cnt_dr <= 32'd0;
         end else begin
+            if (dr_ack)                           cnt_dr         <= cnt_dr + 32'd1;
             if (il_ack && !il_src)                cnt_il_i       <= cnt_il_i + 32'd1;
             if (il_ack &&  il_src)                cnt_il_d       <= cnt_il_d + 32'd1;
             if (wl_v && e_any)                    cnt_land_clash <= cnt_land_clash + 32'd1;
@@ -602,6 +696,19 @@ module page_cache #(
     wire eng_go = (dec_read || dec_write) && !dec_block && !s_hit && image_ready;
     wire plru_op = s_v && s_hit && !dec_block && (dec_read || dec_write);
     wire plru_il = e1_il && c_hit;
+
+    // The placement, one clock: a hit's decision (read, write or posted) or a
+    // fill's retag.  The eviction, one clock: the engine taking its victim.
+    always_ff @(posedge clk) begin
+        op_place_v <= (plru_op || eng_retag) && !rst;
+        if (plru_op) begin
+            op_place_ppn <= s_ppn; op_place_set <= s_set; op_place_way <= way_enc(s_way);
+        end else if (eng_retag) begin
+            op_place_ppn <= e_ppn; op_place_set <= e_set; op_place_way <= way_enc(e_way);
+        end
+        evict_v <= eng_go && !rst;
+        if (eng_go) begin evict_set <= s_set; evict_way <= way_enc(s_vic); end
+    end
 
     wire            plru_we  = eng_retag || plru_op || plru_il;
     wire [SIDX-1:0] plru_set = eng_retag ? e_set : plru_op ? s_set : e1_set;
@@ -827,6 +934,7 @@ module page_cache #(
             4'd11: dbg_val = mem_flushes;
             4'd12: dbg_val = cnt_posted;
             4'd13: dbg_val = cnt_posted_miss;
+            4'd14: dbg_val = cnt_dr;
             default: dbg_val = 32'hDEAD_0000;
         endcase
     end
