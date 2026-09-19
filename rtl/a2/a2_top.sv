@@ -1008,7 +1008,12 @@ module a2_top #(
     // a write on the bus - is the paddle strobe for the virtual timers.
     wire        game_strobe = (swi_commit && !seq_slot_q && (u_addr[15:4] == 12'hC07)) ||
                               (op_commit && !op_dummy && !op_ovr && !op_rw && (op_addr[15:4] == 12'hC07));
-    wire        kbd_int_rd = swi_commit && u_rw && !seq_slot_q && (u_addr[15:4] == 12'hC00);
+    // ...and L1-D's own $C000 serve (rung 6): its retire is a read of the
+    // latch too, and the latch's byte crosses the die through one register.
+    wire        dl_kbd_rd;
+    logic [7:0] kbd_byte_q;
+    always_ff @(posedge apple_clk) kbd_byte_q <= kbd_int_byte;
+    wire        kbd_int_rd = (swi_commit && u_rw && !seq_slot_q && (u_addr[15:4] == 12'hC00)) || dl_kbd_rd;
 
     // THE PERIPHERALS' VIEW OF THE OP STREAM.  The hard disk, the floppy and
     // the Mockingboard decode the driver's op (op_*) as they always did; in
@@ -1115,7 +1120,7 @@ module a2_top #(
     // its own at $C033/$C034 (rtl/gs_clock.sv) and no reason to look for one
     // hiding behind a slot ROM.
     assign cpu_din = (nsc_sub && !GS) ? {seq_din[7:1], nsc_bit} : seq_din;
-    accel_seq #(.GS (GS)) u_seq (
+    accel_seq u_seq (
         .clk           (apple_clk),
         .rst           (apple_rst),
         .cpu_rst       (cpu_rst),
@@ -1158,10 +1163,6 @@ module a2_top #(
         .cpu_dout      (cpu_dout),
         .cpu_sync      (cpu_sync),
         .cyc_is_i      (cpu_cyc_is_i),
-        // A 65C02 has no internal cycle - VDA/VPA are a 65816's - so at
-        // GS = 0 this is a constant zero and folds away.  rtl/accel_seq.sv,
-        // docs/GS.md rung 3e.
-        .cyc_int       (cyc_internal),
         .cyc_en        (seq_cyc_en),
         .cpu_din       (seq_din),
         .turbo_en      (turbo_en),
@@ -1306,6 +1307,7 @@ module a2_top #(
         .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w),
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
         .rw_bank (mem_rw_bank), .map_changed (map_changed), .map_settling (l1_settling),
+        .kbd_en (sw_int && kbd_int_ok), .kbd_byte (kbd_byte_q), .swi_busy (swi_commit), .kbd_rd (dl_kbd_rd),
         .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
         .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
         .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),

@@ -107,6 +107,19 @@ module l1d #(
     input  wire [7:0]  rw_bank,
     input  wire        map_changed,
     input  wire        map_settling,
+    // THE KEYBOARD AT ONE CLOCK (rung 6; the user's design, docs/CXXX.md): a
+    // read of $C000 is served from the parked-dummy latch's byte
+    // (rtl/common/kbd_inject.sv) instead of riding the dispatcher's
+    // internalized path at seven clocks - on the Nox map that path was 1.1 M
+    // polls a second, an eighth of every clock.  kbd_en = the latch holds a
+    // byte and the closed regime is on; the retire tells the latch a read
+    // happened (kbd_rd).  swi_busy is the dispatcher's synthetic commit: an
+    // internalized $C01x write lands on that edge and reaches the latch a
+    // clock later, so no serve across it.
+    input  wire        kbd_en,
+    input  wire [7:0]  kbd_byte,
+    input  wire        swi_busy,
+    output logic       kbd_rd,
     // The TLB (rtl/a2/tlb.sv): lookup B, and the second fill port.
     output wire [7:0]  lb_vpage,
     input  wire        lb_hit,
@@ -189,7 +202,7 @@ module l1d #(
     // Registered ONLY at edges the core moves, so it always describes the
     // LIVE cycle; the address and the prediction's validity, nothing else on
     // d_pred's cone.
-    logic dq_v, dq_wv;
+    logic dq_v, dq_wv, dq_kbd;
     (* KEEP = "TRUE" *) logic [3:0] dq_ix_sh;
     always_ff @(posedge clk) begin
         if (rst || cpu_rst || inval) begin
@@ -201,6 +214,7 @@ module l1d #(
         if (cyc_en) begin
             dq_addr  <= {8'd0, d_pred};
             dq_ix_sh <= d_pred[3:0];
+            dq_kbd   <= (d_pred == 16'hC000);
         end
     end
     assign dq_rw = !dq_wv;
@@ -208,6 +222,14 @@ module l1d #(
     wire in_sh_estate = (dq_addr[15:9] == 7'd0) && zs_main_q;
     wire sh_hit = dq_v && in_sh_estate && shv[dq_addr[8:4]];
     wire is_cx  = (dq_addr[15:12] == 4'hC);
+
+    // ---- the keyboard ---------------------------------------------------------
+    logic kbd_en_q, swi_busy_q;
+    always_ff @(posedge clk) begin
+        kbd_en_q   <= kbd_en && !rst;
+        swi_busy_q <= swi_busy && !rst;
+    end
+    wire kb_hit = dq_v && dq_kbd && kbd_en_q && !swi_busy && !swi_busy_q;
 
     // ---- the last byte ------------------------------------------------------
     logic        lb_v;
@@ -242,6 +264,10 @@ module l1d #(
 
     wire dr_done_l2 = dr_done;   // the top routes only our own completion here
 
+    // The MMU's class for the registered candidate, one clock later (fresh from
+    // the candidate's second clock): the read's servability and the write's LC.
+    logic        pc_ok_q, pq_fresh, wc_lc_q;
+
     // ---- the splice register: a write's stamp, one clock after retire -------
     logic        spl_v;
     logic [7:0]  spl_data;
@@ -250,7 +276,7 @@ module l1d #(
     logic [7:0]  spl_off8;
 
     // ---- the retire ---------------------------------------------------------
-    wire serve_hit  = sh_hit || lby_hit || lr_hit;
+    wire serve_hit  = sh_hit || lby_hit || lr_hit || kb_hit;
     wire d_cycle = !cyc_is_i &&  cpu_rw;
     wire w_cycle = !cyc_is_i && !cpu_rw;
     wire pf_near_full;
@@ -259,7 +285,19 @@ module l1d #(
         if (rst) w_room <= 1'b0;
         else     w_room <= ev_room_w && !pf_near_full;
     end
-    wire w_serv = wr_en && dq_wv && !rwb_nz_q && (dq_addr[15:14] != 2'b11);
+    // A write below $C000 retires on its first clock by a VIRTUAL verdict (RAM
+    // class under every map).  A WRITE INTO THE LANGUAGE CARD ($D000 up) retires
+    // on its SECOND clock (rung 6): the class is the MMU's answer for the
+    // registered candidate, registered once more (wc_lc_q, fresh from the
+    // second clock), so no classify cone reaches the retire - and the
+    // dispatcher is held from the first clock by w_pre, the maybe, so the two
+    // never dispatch the same write.  A write the card holds as ROM class (the
+    // language card write-protected) is released to the dispatcher a clock
+    // late.  On the Nox map those writes were 1.1 M a second at seven clocks.
+    wire w_lc   = (dq_addr[15:12] >= 4'hD);
+    wire w_serv = wr_en && dq_wv && !rwb_nz_q &&
+                  ((dq_addr[15:14] != 2'b11) || (w_lc && pq_fresh && wc_lc_q));
+    wire w_pre  = wr_en && dq_wv && !rwb_nz_q && w_lc && !pq_fresh;
 
     // The claim is REGISTERED, one clock behind the verdict; the fc_q ||
     // claim_q gate fences the one-clock window.  The three-clock read claims
@@ -271,7 +309,7 @@ module l1d #(
         end else begin
             fc_q    <= cyc_en;
             claim_q <= (turbo_en && (serve_hit || l2_ok || (l2_pend && l2_live) || l2_v_q) && d_cycle) ||
-                       (w_serv && w_cycle);
+                       ((w_serv || w_pre) && w_cycle);
         end
     end
     wire addr_match = (cpu_addr == dq_addr[15:0]) && (fc_q || claim_q);
@@ -284,7 +322,8 @@ module l1d #(
     // One flat one-hot OR (the servers never disagree: the shadow's estate is
     // never in the last row, and the last byte, when it also hits, IS that
     // byte - every write clears it), and the sequencer's byte on its own clock.
-    wire [7:0] l1_byte = ({8{sh_hit}} & dq_byte) | ({8{lby_hit}} & lb_byte) | ({8{lr_hit}} & lr_byte);
+    wire [7:0] l1_byte = ({8{sh_hit}} & dq_byte) | ({8{lby_hit}} & lb_byte) | ({8{lr_hit}} & lr_byte) |
+                         ({8{kb_hit}} & kbd_byte);
     assign d_din = seq_cyc_en ? accel_din : l1_byte;
     assign claim = claim_q;
 
@@ -364,9 +403,9 @@ module l1d #(
     always @(posedge clk)
         if (l2_v_q && !lr_hit && dq_v)
             $error("l1d: the three-clock row stands for a candidate the last row does not match");
-    logic sh_hit_q_dbg, lby_hit_q_dbg, lr_hit_q_dbg, l2_hit_q_dbg;
+    logic sh_hit_q_dbg, lby_hit_q_dbg, lr_hit_q_dbg, l2_hit_q_dbg, kb_hit_q_dbg;
     always_ff @(posedge clk) begin
-        sh_hit_q_dbg <= sh_hit; lby_hit_q_dbg <= lby_hit; lr_hit_q_dbg <= lr_hit && l2_v_q;
+        sh_hit_q_dbg <= sh_hit; lby_hit_q_dbg <= lby_hit; lr_hit_q_dbg <= lr_hit && !l2_v_q; kb_hit_q_dbg <= kb_hit;
         l2_hit_q_dbg <= l2_v_q;
     end
 `endif
@@ -405,12 +444,12 @@ module l1d #(
     // shadow's estate and $Cxxx: remembered until the page cache reports the
     // page's placement (the dispatcher's read of it), then offered to the
     // TLB until taken.  A map change or a later miss replaces it.
-    logic        pc_ok_q, pq_fresh;
     logic [15:0] p_ppn_q2;
     logic [3:0]  p_reg_q2;
     logic        p_fold_q2;
     always_ff @(posedge clk) begin
         pc_ok_q   <= (d_cls == CLS_RAM) || (d_cls == CLS_LC) || (d_cls == CLS_ROM);
+        wc_lc_q   <= (d_cls == CLS_LC);
         p_ppn_q2  <= d_ppn;
         p_reg_q2  <= d_reg;
         p_fold_q2 <= d_fold;
@@ -425,10 +464,11 @@ module l1d #(
     logic        tf_fold;
 
     logic [31:0] cnt_claims, cnt_splices, cnt_lb_serves, cnt_lr_serves, cnt_posts, cnt_post_waits,
-                 cnt_l2_launch, cnt_l2_abort, cnt_tlb_waits;
+                 cnt_l2_launch, cnt_l2_abort, cnt_tlb_waits, cnt_kb_serves, cnt_lc_posts;
     always_ff @(posedge clk) begin
         tick_q    <= retire;
         dev_valid <= retire;
+        kbd_rd    <= r_retire && dq_kbd && !rst;
         if (retire) begin
             dev_addr <= dq_addr[15:0];
             dev_data <= cpu_rw ? l1_byte : cpu_dout;
@@ -448,6 +488,7 @@ module l1d #(
                 cnt_claims <= 32'd0; cnt_splices <= 32'd0; cnt_lb_serves <= 32'd0;
                 cnt_lr_serves <= 32'd0; cnt_posts <= 32'd0; cnt_post_waits <= 32'd0;
                 cnt_l2_launch <= 32'd0; cnt_l2_abort <= 32'd0; cnt_tlb_waits <= 32'd0;
+                cnt_kb_serves <= 32'd0; cnt_lc_posts <= 32'd0;
                 dev_addr <= 16'd0; dev_data <= 8'd0; dev_rw <= 1'b1;
                 l2_ppn <= 16'd0; l2_vt <= 12'd0;
             end
@@ -459,6 +500,8 @@ module l1d #(
                 if (!sh_hit && !lby_hit && lr_hit && l2_v_q) cnt_l2_serves <= cnt_l2_serves + 32'd1;
             end
             if (w_retire) cnt_posts <= cnt_posts + 32'd1;
+            if (w_retire && w_lc) cnt_lc_posts <= cnt_lc_posts + 32'd1;
+            if (r_retire && kb_hit) cnt_kb_serves <= cnt_kb_serves + 32'd1;
             if (turbo_ok && w_serv && w_cycle && addr_match && !w_room && !cpu_rst)
                 cnt_post_waits <= cnt_post_waits + 32'd1;
             if (sp_write || lr_snp) cnt_splices <= cnt_splices + 32'd1;
@@ -559,6 +602,7 @@ module l1d #(
                 cnt_claims <= 32'd0; cnt_splices <= 32'd0; cnt_lb_serves <= 32'd0;
                 cnt_lr_serves <= 32'd0; cnt_posts <= 32'd0; cnt_post_waits <= 32'd0;
                 cnt_l2_launch <= 32'd0; cnt_l2_abort <= 32'd0; cnt_tlb_waits <= 32'd0;
+                cnt_kb_serves <= 32'd0; cnt_lc_posts <= 32'd0;
             end
         end
     end
@@ -575,6 +619,8 @@ module l1d #(
             4'd7:  dbg_val = cnt_l2_abort;
             4'd8:  dbg_val = cnt_tlb_fills;
             4'd9:  dbg_val = cnt_tlb_waits;
+            4'd10: dbg_val = cnt_kb_serves;
+            4'd11: dbg_val = cnt_lc_posts;
             4'd12: dbg_val = cnt_lr_serves;
             4'd13: dbg_val = {cst, pending, dq_v, dq_wv, zs_main_q, turbo_en, wr_en,
                               l2_pend, l2_v_q, claim_q, fc_q, tf_v, fj_v, l2_live, 1'b0, shv[15:0]};

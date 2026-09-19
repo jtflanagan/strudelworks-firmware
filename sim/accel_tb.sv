@@ -262,7 +262,10 @@ module accel_tb #(parameter integer SWINT = 1,
     wire sw_int = accel_on && (mode == 2'd2) && serve && !swint_dis && !held;
     wire        swi_commit, kbd_int_ok;
     wire [7:0]  kbd_int_byte;
-    wire        kbd_int_rd = swi_commit && u_rw && (u_addr[15:4] == 12'hC00);
+    wire        dl_kbd_rd;
+    logic [7:0] kbd_byte_q;
+    always_ff @(posedge clk) kbd_byte_q <= kbd_int_byte;
+    wire        kbd_int_rd = (swi_commit && u_rw && (u_addr[15:4] == 12'hC00)) || dl_kbd_rd;
     // ...and the rest of the internalized reads (docs/CXXX.md), as
     // master_top wires them.  No fb_sim here: the machine's floating byte
     // is the model's constant (FLOAT, 8'hA5), and $C019 stays on the bus
@@ -343,7 +346,6 @@ module accel_tb #(parameter integer SWINT = 1,
         .mem_serve (serve), .mem_image_ready (mem_image_ready), .mem_invalidating (mem_invalidating),
         .q_cls (q_cls),
         .cpu_addr (cpu_addr), .cpu_bank (cpu_bank), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cpu_sync (cpu_sync), .cyc_is_i (cpu_cyc_is_i),
-        .cyc_int (1'b0),   // a 65C02 has no internal cycle: rtl/accel_seq.sv
         .cyc_en (seq_cyc_en), .cpu_din (cpu_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok),
         .turbo_commit (turbo_commit), .d_commit (d_commit_w),
@@ -436,6 +438,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w),
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
         .rw_bank (rw_bank), .map_changed (map_changed), .map_settling (map_settling),
+        .kbd_en (sw_int && kbd_int_ok), .kbd_byte (kbd_byte_q), .swi_busy (swi_commit), .kbd_rd (dl_kbd_rd),
         .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
         .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
         .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
@@ -1169,7 +1172,9 @@ module accel_tb #(parameter integer SWINT = 1,
                                              u_l1d.lr_v, u_l1d.lr_addr, u_l1d.lr_ppn, u_l1d.cst);
             end
         end else dline_writes = dline_writes + 1;
-        if (dev_addr[15:12] == 4'hC) dline_bad = dline_bad + 1;
+        // $Cxxx is never L1-D's - except the $C000 keyboard poll, served from
+        // the parked-dummy latch since rung 6 (a read of $C000 moves nothing).
+        if (dev_addr[15:12] == 4'hC && !(dev_rw && dev_addr == 16'hC000)) dline_bad = dline_bad + 1;
     end
     // The posted seam has TWO producers now: the data front's retired writes
     // and the ROM load's 16384 (rtl/rom_loader.sv).  Only the front's are the

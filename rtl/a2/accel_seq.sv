@@ -96,12 +96,10 @@
 // after that, the first opcode fetch, is decided normally; an armed boot
 // hold takes it through the override path as before.
 //////////////////////////////////////////////////////////////////////////////////
-module accel_seq #(
-    // THE MACHINE, as apple_mmu takes it (docs/GS.md).  0 = the Apple IIe;
-    // 1 = the IIgs the soft 65816 runs.  The one thing it changes here is
-    // the reset sequence: see reset_seq below.
-    parameter bit GS = 1'b0
-) (
+// THE 65C02 CARD'S COPY (rung 6, 2026-09-19): no GS parameter, no internal
+// cycle (S_NULL), no IIgs map registers in the settle; the 65816 card's
+// rtl/gs/accel_seq.sv keeps them.
+module accel_seq (
     input  wire        clk,
     input  wire        rst,             // the card's
     input  wire        cpu_rst,         // the core's: the card's OR RES'
@@ -133,14 +131,6 @@ module accel_seq #(
     input  wire [7:0]  cpu_dout,
     input  wire        cpu_sync,
     input  wire        cyc_is_i,       // the core's cycle is an instruction-stream fetch (the census)
-    // THE CORE'S CYCLE IS INTERNAL: VDA and VPA BOTH LOW, which is the
-    // 65816's own encoding for a cycle that touches nothing.  It still takes
-    // a cycle of the machine's time - so it is charged for like any other -
-    // but it must not become an op: the address on the pins is whatever the
-    // last address step left there, and both directions of taking it at face
-    // value cost the IIgs bench a boot (docs/GS.md rung 3e).  Only read at
-    // GS = 1; a 65C02 has no such cycle and its callers tie this low.
-    input  wire        cyc_int,
     output wire        cyc_en,
     output wire [7:0]  cpu_din,
 
@@ -296,8 +286,7 @@ module accel_seq #(
         S_DECIDE,   // the core has an op up; dispatch it when it can go
         S_FAST,     // on the card; waiting for the cache's decision
         S_BUS,      // offered to the driver; waiting for its cycle to end
-        S_HELD,     // the bus is an override's; waiting for it to let go
-        S_NULL      // the core's internal cycle: paid for, and nothing else
+        S_HELD      // the bus is an override's; waiting for it to let go
     } state_t;
     state_t st;
     assign state_o = {1'b0, st};
@@ -462,19 +451,9 @@ module accel_seq #(
     // ...exactly the ops that can move a switch: a $C00x write, a $C05x or
     // $C08x access.  Not the keyboard or status page, not the speaker ($C03x,
     // a toggle and nothing of the map's), not a slot's.
-    // ...and on the IIgs, THREE MORE REGISTERS MOVE THE MAP, so an
-    // internalized write to any of them holds exactly as a switch does:
-    // $C02D SLOTROMSEL (which $Cnxx pages are the internal ROM's), $C035
-    // SHADOW (where a write lands a second time, and in bit 6 whether the
-    // fast pair has I/O at all), and $C068 STATEREG (seven switches at
-    // once).  $C036 CYAREG is NOT among them - the map does not read it.
-    // Reads of all four move nothing.
-    wire gs_map_wr = GS && !u_rw && ((u_addr[7:0] == 8'h2D) ||
-                                     (u_addr[7:0] == 8'h35) ||
-                                     (u_addr[7:0] == 8'h68));
     wire swi_change = swi_commit && !quiet_q && !slot_q && (u_addr[15:8] == 8'hC0) &&
                       ((!u_rw && u_addr[7:4] == 4'h0) || (u_addr[7:4] == 4'h5) ||
-                       (u_addr[7:4] == 4'h8) || gs_map_wr);
+                       (u_addr[7:4] == 4'h8));
     always_ff @(posedge clk) swi_sq <= rst ? 4'd0 : {swi_sq[2:0], swi_change};
     wire swi_settling = swi_change || (|swi_sq);
 
@@ -487,9 +466,8 @@ module accel_seq #(
 
     // What the dispatcher will charge for on this edge, for the governor's
     // one writer: exactly the two dispatching branches below.
-    wire go_null  = GS && cyc_int;
     wire disp_pay = (st == S_DECIDE) && settled && !d_pending && !dq_ovr && !turbo_claim && !stall_q &&
-                    can_pay && (go_null || needs_bus || fast_ok) && !off &&
+                    can_pay && (needs_bus || fast_ok) && !off &&
                     !cpu_rst && master_active;
 
     // A fast op's decision: the byte is there, or it is not.  An
@@ -531,7 +509,7 @@ module accel_seq #(
 
     // ---- the core's side ----------------------------------------------------
     assign cyc_en     = off_q ? cyc_done : (st == S_BUS) ? cyc_done
-                      : (fast_hit || (st == S_NULL));
+                      : fast_hit;
     assign cpu_din    = (off_q || st == S_BUS) ? drv_din
                       : swi_q ? swi_byte_q : mem_sub_data;
     assign bus_owns   = off_q || bus_owns_q;
@@ -565,20 +543,12 @@ module accel_seq #(
 
         // From reset until $FFFD has ridden the bus (see the header).  Cleared
         // in mode 0 too, where it could not be observed but must not stick.
-        // THE IIgs HAS NO SUCH SEQUENCE TO RIDE.  The reason the IIe's seven
-        // reset cycles go out on the bus is that the motherboard's MMU
-        // infers a reset from them and only then restores its own switches
-        // (the header).  On the IIgs the card holds the whole memory map
-        // itself, the motherboard's is not the machine's, and the vector at
-        // $00/FFFC is the GS ROM's - which is on the card.  Sending it to
-        // the bus would fetch the IIe's vector instead and start the core in
-        // the wrong ROM entirely.  So the sequence is over before it begins.
-        if (cpu_rst)                 reset_seq <= !GS;
+        if (cpu_rst)                 reset_seq <= 1'b1;
         else if (vector_done || off) reset_seq <= 1'b0;
 
         if (rst) begin
             st <= S_RST;
-            reset_seq <= !GS;
+            reset_seq <= 1'b1;
             settled <= 1'b0;
             bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0; quiet_q <= 1'b0; slot_q <= 1'b0;
             credit <= 20'd0; grant_q <= 1'b0; spent_q <= 1'b0;
@@ -674,15 +644,6 @@ module accel_seq #(
                             // hold, bounded by its fill.
                         end else if (!can_pay) begin
                             // Wait for credit.
-                        end else if (go_null) begin
-                            // AN INTERNAL CYCLE IS NOT AN ACCESS.  It has
-                            // been paid for above like any other cycle of
-                            // the machine's time, and that is all it gets:
-                            // no op on the stream, no bus cycle, no read or
-                            // write of anything.  See cyc_int.
-                            st <= S_NULL;
-                            bus_owns_q   <= 1'b0;
-                            core_valid_q <= 1'b0;
                         end else if (needs_bus) begin
                             st <= S_BUS;
                             bus_owns_q   <= 1'b1;
@@ -708,10 +669,6 @@ module accel_seq #(
                             u_ovr     <= 1'b0;
                             u_divert  <= 1'b0;
                         end
-                    end
-
-                    S_NULL: begin
-                        st <= S_DECIDE;
                     end
 
                     S_FAST: begin
