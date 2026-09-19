@@ -403,12 +403,12 @@ module a2_top #(
     wire [7:0]  drv_din;
     wire        mem_decided, mem_busy, mem_intc8rom;
     wire [1:0]  q_cls;
-    // The instruction front (rtl/iline.sv) and its seams.
+    // L1-I (rtl/a2/l1i.sv) and its seams.
     wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim, seq_fast_tick;
     wire        seq_mem_served;   // the dispatcher's read served by the page cache, this clock
-    // The data front, chained after the instruction front (rtl/dline.sv).
-    wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
-    wire        il_fill_busy, dl_fill_busy;   // the fronts' fills in flight (the clock histogram)
+    // L1-D, chained after L1-I (rtl/dline.sv).
+    wire        l1i_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
+    wire        il_fill_busy, dl_fill_busy;   // L1's fills in flight (the clock histogram)
     // The dispatcher's read, whole, from the page cache to the data front
     // (docs/DLINE.md "the miss's read fills the line").
     wire         mem_op_row_v;
@@ -451,10 +451,20 @@ module a2_top #(
     wire        p_aux_w, map_changed;
     wire [23:0] p_addr_w;
     wire [15:0] p_off_w;
-    wire         il_req, il_ack, il_done, il_ok;
-    wire [15:0]  il_ppn_w;
-    wire [3:0]   il_line_w;
+    wire         il_ack, il_done, il_ok;      // the line port: L1-D's alone since rung 4
     wire [127:0] il_row;
+    localparam integer L2_SIDX = $clog2(MEM_SETS);
+    localparam integer L2_LEV  = $clog2(MEM_WAYS);
+    // The TLB's and the direct way read's seams (rung 4).
+    wire        la_hit_w, fi_v_w, fi_busy_w, fi_fold_w, kill_v_w;
+    wire [7:0]  la_vpage_w, fi_vpage_w;
+    wire [15:0] la_ppn_w, fi_ppn_w, kill_ppn_w, op_place_ppn_w;
+    wire [L2_SIDX-1:0] la_set_w, fi_set_w, op_place_set_w, evict_set_w, ref_set_w, dr_set_w;
+    wire [L2_LEV-1:0]  la_way_w, fi_way_w, op_place_way_w, evict_way_w, ref_way_w, dr_way_w;
+    wire [3:0]  fi_reg_w, dr_line_w;
+    wire        op_place_v_w, evict_v_w, ref_v_w, ref_on_w, dr_req_w, dr_ack_w, dr_done_w;
+    wire [127:0] dr_row_w;
+    wire [31:0] tlb_fills_w, tlb_deaths_w;
     wire        cpu_cyc_is_i;
     wire [15:0] cpu_pc_addr;
     wire        app_msg_valid, app_pay_valid;
@@ -697,9 +707,6 @@ module a2_top #(
     wire        shd_take_w;
     wire [15:0] shd_ppn_w;
     wire [7:0]  shd_off_w;
-    // The line-row port's source, iline's or dline's, for the answer three
-    // clocks later (assigned beside the page cache below).
-    logic il_src_q;
 
     // ---- the soft CPU -------------------------------------------------------
     // Held in reset while the machine is, so it starts where the machine does.
@@ -771,7 +778,7 @@ module a2_top #(
         .d_din  (d_din_w),          // the data front's, or the sequencer's through it
         .cyc_is_i (cpu_cyc_is_i),
         .i_addr (),
-        .i_pred (),                 // the front predicts for itself (rtl/iline.sv)
+        .i_pred (),                 // L1-I predicts for itself (rtl/a2/l1i.sv)
         .pc_addr (cpu_pc_addr),
         .d_addr (),
         .d_rw   (),
@@ -1228,71 +1235,53 @@ module a2_top #(
     // block keeps its name so the depth census's paths keep theirs.
     generate if (1) begin : g_l1
 
-    // ---- the instruction front ----------------------------------------------
-    // Two lines of the program stream ahead of the sequencer: a fetch that
-    // lands in them retires in one clock.  See rtl/iline.sv and
-    // docs/ISTREAM.md.
-    iline #(.GS (GS)) u_iline (
-        .clk           (apple_clk),
-        .rst           (apple_rst),
-        .cpu_rst       (cpu_rst),
-        .pc_addr       (cpu_pc_addr),
-        .pc_bank       (cpu_pc_bank),
-        .cpu_rw        (cpu_rw),
-        .cpu_sync      (cpu_sync),
-        .cyc_is_i      (cpu_cyc_is_i),
-        .p_flags       (cpu_p_flags),
-        .cyc_en        (iline_cyc_en),
-        .i_din         (i_din_w),
-        .accel_cyc_en  (seq_cyc_en),
-        .accel_din     (cpu_din),
-        .turbo_en      (turbo_en),
-        .turbo_ok      (turbo_ok),
-        .claim         (turbo_claim),
-        .turbo_commit  (turbo_commit),
-        .turbo_sync    (turbo_sync),
-        .tick_q        (turbo_tick),
-        .tev_valid     (tev_valid),
-        .tev_addr      (tev_addr),
-        .tev_data      (tev_data),
-        .tev_sync      (tev_sync),
-        .tev_bank      (tev_bank),
-        .ev_room       (ev_fast_room),
-        .p_addr        (p_addr_w),
-        .p_ppn         (p_ppn_w),
-        .p_reg         (p_reg_w),
-        .p_fold        (p_fold_w),
-        .p_fs          (p_fs_w),
-        .cl_ppn        (cl_ppn_w),
-        .rt_rd_flat    (rt_rd_flat),
-        .rwb_p1        (rwb_p1_w),
-        .map_settling  (l1_settling),
-        .idrop_o       (accel_idrop),
-        .irevive_o     (accel_irevive),
-        .map_changed   (map_changed),
-        .intc8rom      (mem_intc8rom),
-        .il_req        (il_req),
-        .il_ppn        (il_ppn_w),
-        .il_line       (il_line_w),
-        .il_ack        (il_ack && il_req),
-        .il_done       (il_done && !il_src_q),
-        .il_ok         (il_ok),
-        .il_row        (il_row),
-        .cl_valid      (cl_valid),
-        .cl_rw         (cl_rw),
-        .cl_wr_image   (cl_wr_image),
-        .cl_aux        (cl_aux),
-        .cl_bank       (cl_bank),
-        .cl_off        (cl_off),
-        .ws_valid      (ws_valid_w),
-        .ws_ppn        (ws_ppn_w),
-        .ws_off8       (ws_off8_w),
-        .serve         (mem_serve),
-        .inval         (mem_inval),
-        .dbg_sel       (dbg_sel[3:0]),
-        .dbg_val       (il_dbg),
-        .fill_busy     (il_fill_busy)
+    // ---- L1-I -----------------------------------------------------------------
+    // Two line buffers filled by DIRECT WAY READS of the page cache through
+    // the TLB (rtl/a2/l1i.sv, rtl/a2/tlb.sv, docs/L1_RETHINK.md): a fetch
+    // that lands in them retires in one clock.
+    l1i #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
+        .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst),
+        .pc_addr (cpu_pc_addr), .cpu_rw (cpu_rw), .cpu_sync (cpu_sync),
+        .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
+        .cyc_en (l1i_cyc_en), .i_din (i_din_w),
+        .accel_cyc_en (seq_cyc_en), .accel_din (cpu_din),
+        .turbo_en (turbo_en), .turbo_ok (turbo_ok), .claim (turbo_claim),
+        .turbo_commit (turbo_commit), .turbo_sync (turbo_sync), .tick_q (turbo_tick),
+        .tev_valid (tev_valid), .tev_addr (tev_addr), .tev_data (tev_data), .tev_sync (tev_sync),
+        .ev_room (ev_fast_room),
+        .p_addr (p_addr_w), .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
+        .map_changed (map_changed), .map_settling (l1_settling), .intc8rom (mem_intc8rom),
+        .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
+        .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
+        .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
+        .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
+        .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
+        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_ppn (cl_ppn_w), .cl_off (cl_off),
+        .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
+        .serve (mem_serve), .inval (mem_inval),
+        .dbg_sel (dbg_sel[3:0]), .dbg_val (il_dbg), .fill_busy (il_fill_busy)
     );
+    // The TLB: eight pages, each naming the set and way L2 holds it in.
+    tlb #(.SIDX (L2_SIDX), .LEV (L2_LEV), .N (8)) u_tlb (
+        .clk (apple_clk), .rst (apple_rst), .serve (mem_serve), .inval (mem_inval),
+        .map_changed (map_changed), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
+        .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
+        .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
+        .lb_vpage (8'd0), .lb_hit (), .lb_ppn (), .lb_set (), .lb_way (),   // rung 5: the data side
+        .ref_v (ref_v_w), .ref_set (ref_set_w), .ref_way (ref_way_w), .ref_on (ref_on_w),
+        .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
+        .cnt_fills (tlb_fills_w), .cnt_deaths (tlb_deaths_w)
+    );
+    assign tev_bank      = 8'd0;
+    // ACCEL_IDROP / ACCEL_IREVIVE carry the TLB's deaths and fills now (rung 4).
+    assign accel_idrop   = tlb_deaths_w;
+    assign accel_irevive = tlb_fills_w;
 
     // ---- the data front -----------------------------------------------------
     // The shadow, the CAM and the last byte between the instruction front
@@ -1315,7 +1304,7 @@ module a2_top #(
         .cpu_rw        (cpu_rw),
         .cpu_dout      (cpu_dout),
         .cyc_is_i      (cpu_cyc_is_i),
-        .il_cyc_en     (iline_cyc_en), .seq_cyc_en (seq_cyc_en),
+        .il_cyc_en     (l1i_cyc_en), .seq_cyc_en (seq_cyc_en),
         .accel_din     (cpu_din),
         .i_din         (i_din_w),
         .cyc_en        (cpu_cyc_en),
@@ -1361,8 +1350,8 @@ module a2_top #(
         .dl_req        (dl_req_w),
         .dl_ppn        (dl_ppn_w),
         .dl_line       (dl_line_w),
-        .dl_ack        (il_ack && !il_req),
-        .dl_done       (il_done && il_src_q),
+        .dl_ack        (il_ack),
+        .dl_done       (il_done),
         .dl_ok         (il_ok),
         .dl_row        (il_row),
         .cl_valid      (cl_valid),
@@ -1897,12 +1886,6 @@ module a2_top #(
     wire [7:0]  pw_any_off   = pw_valid_w ? pw_off_w  : rl_pw_off;
     wire [7:0]  pw_any_data  = pw_valid_w ? pw_data_w : rl_pw_data;
 
-    // Which front owns the line transaction in flight, so the cache's one
-    // `done` reaches the one that asked.  A new grant can land on the done's
-    // own clock; this register is read before it is written, so that is the
-    // old transaction's source, which is right.
-    always_ff @(posedge apple_clk) if (il_ack) il_src_q <= !il_req;
-
     page_cache #(.SETS (MEM_SETS), .WAYS (MEM_WAYS)) u_cache (
         .clk         (apple_clk),
         .rst         (apple_rst),
@@ -1940,23 +1923,22 @@ module a2_top #(
         .mw_byte     (fb_mw_byte),
         .mwx_stb     (fb_mwx_stb),
         .mw_bank     (fb_mw_bank),
-        // The line-row port carries iline's request when it has one, else the
-        // data front's - iline first, always: its fills serve the running
-        // fetch stream, the shadow's claims can only be early.
-        .il_req      (il_req | dl_req_w),
-        .il_ppn      (il_req ? il_ppn_w  : dl_ppn_w),
-        .il_line     (il_req ? il_line_w : dl_line_w),
-        .il_src      (!il_req),
+        // The line-row port is L1-D's alone since rung 4: L1-I reads its
+        // lines by the direct way read below.
+        .il_req      (dl_req_w),
+        .il_ppn      (dl_ppn_w),
+        .il_line     (dl_line_w),
+        .il_src      (1'b1),
         .il_ack      (il_ack),
         .il_done     (il_done),
         .il_ok       (il_ok),
         .il_row      (il_row),
-        // Rung 3's ports, tied until rung 4 gives L1 a TLB to drive them.
-        .ref_v       (1'b0), .ref_set ('0), .ref_way ('0), .ref_on (1'b0),
-        .evict_v     (), .evict_set (), .evict_way (),
-        .op_place_v  (), .op_place_ppn (), .op_place_set (), .op_place_way (),
-        .dr_req      (1'b0), .dr_set ('0), .dr_way ('0), .dr_line (4'd0),
-        .dr_ack      (), .dr_done (), .dr_row (),
+        // The TLB's references and the direct way read (rung 4).
+        .ref_v (ref_v_w), .ref_set (ref_set_w), .ref_way (ref_way_w), .ref_on (ref_on_w),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w), .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
+        .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
+        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w),
         .serve       (mem_serve),
         .inval       (mem_inval),
         .dbg_sel     (dbg_sel[3:0]),

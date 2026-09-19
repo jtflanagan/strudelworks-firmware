@@ -203,8 +203,8 @@ module accel_tb #(parameter integer SWINT = 1,
     // master_top.
     wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim;
     wire        turbo_tick, tev_valid, tev_sync;
-    // The data front between iline and the core, as in master_top.
-    wire        iline_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
+    // L1-D between L1-I and the core, as in a2_top.
+    wire        l1i_cyc_en, d_commit_w, d_claim_w, dline_tick, dev_valid, dev_rw;
     wire        d_pending_w, turbo_wr, dq_rw_w, cl_posted;
     wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w;
     wire [7:0]  pw_data_w, cl_wdata;
@@ -220,7 +220,7 @@ module accel_tb #(parameter integer SWINT = 1,
     wire         seq_mem_served_w;
     wire [127:0] op_row_w;
     wire [15:0]  op_row_ppn_w;
-    wire [69:0] rt_rd_flat;
+    wire [103:0] rt_rd_flat;   // NREG * RT_W = 13 * 8 (it was 70 bits: regions 9-12 never revalidated here)
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
     wire         dl_req_w;
@@ -238,10 +238,18 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [31:0] accel_maps;   // ACCEL_MAPS: map changes, the revalidation's denominator
     wire [23:0] p_addr_w;
     wire [15:0] p_off_w;
-    wire         il_req, il_ack, il_done, il_ok;
-    wire [15:0]  il_ppn_w;
-    wire [3:0]   il_line_w;
+    wire         il_ack, il_done, il_ok;      // the line port: L1-D's alone since rung 4
     wire [127:0] il_row;
+    // The TLB's and the direct way read's seams (rung 4).
+    wire        la_hit_w, fi_v_w, fi_busy_w, fi_fold_w, kill_v_w;
+    wire [7:0]  la_vpage_w, fi_vpage_w;
+    wire [15:0] la_ppn_w, fi_ppn_w, kill_ppn_w, op_place_ppn_w;
+    wire [6-1:0] la_set_w, fi_set_w, op_place_set_w, evict_set_w, ref_set_w, dr_set_w;
+    wire [3-1:0]  la_way_w, fi_way_w, op_place_way_w, evict_way_w, ref_way_w, dr_way_w;
+    wire [3:0]  fi_reg_w, dr_line_w;
+    wire        op_place_v_w, evict_v_w, ref_v_w, ref_on_w, dr_req_w, dr_ack_w, dr_done_w;
+    wire [127:0] dr_row_w;
+    wire [31:0] tlb_fills_w, tlb_deaths_w;
 
     // ---- the keyboard in the dummies, as master_top gates it -----------------
     // SWINT = 0 is the chicken bit: dummies park at $0000, $C00x rides the bus.
@@ -355,36 +363,53 @@ module accel_tb #(parameter integer SWINT = 1,
         .l1_dis (1'b0)
     );
 
-    iline u_iline (
+    // ---- L1-I -----------------------------------------------------------------
+    // Two line buffers filled by DIRECT WAY READS of the page cache through
+    // the TLB (rtl/a2/l1i.sv, rtl/a2/tlb.sv, docs/L1_RETHINK.md): a fetch
+    // that lands in them retires in one clock.
+    l1i #(.SIDX (6), .LEV (3)) u_l1i (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
-        .pc_addr (cpu_pc_addr), .pc_bank (8'd0), .cpu_rw (cpu_rw), .cpu_sync (cpu_sync),
+        .pc_addr (cpu_pc_addr), .cpu_rw (cpu_rw), .cpu_sync (cpu_sync),
         .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
-        .cyc_en (iline_cyc_en), .i_din (i_din_w),
+        .cyc_en (l1i_cyc_en), .i_din (i_din_w),
         .accel_cyc_en (seq_cyc_en), .accel_din (cpu_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok), .claim (turbo_claim),
-        .turbo_commit (turbo_commit), .turbo_sync (turbo_sync),
-        .tick_q (turbo_tick),
-        .tev_valid (tev_valid), .tev_addr (tev_addr), .tev_data (tev_data),
-        .tev_sync (tev_sync), .tev_bank (), .ev_room (1'b1),
-        .p_addr (p_addr_w),
-        .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
-        .cl_ppn (cl_ppn_w), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
-        .map_settling (map_settling), .idrop_o (), .irevive_o (),
-        .map_changed (map_changed), .intc8rom (intc8rom),
-        .il_req (il_req), .il_ppn (il_ppn_w), .il_line (il_line_w),
-        .il_ack (il_ack && il_req), .il_done (il_done && !il_src_q),
-        .il_ok (il_ok), .il_row (il_row),
-        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image),
-        .cl_aux (cl_aux), .cl_bank (cl_bank), .cl_off (cl_off),
+        .turbo_commit (turbo_commit), .turbo_sync (turbo_sync), .tick_q (turbo_tick),
+        .tev_valid (tev_valid), .tev_addr (tev_addr), .tev_data (tev_data), .tev_sync (tev_sync),
+        .ev_room (1'b1),
+        .p_addr (p_addr_w), .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
+        .map_changed (map_changed), .map_settling (map_settling), .intc8rom (intc8rom),
+        .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
+        .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
+        .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
+        .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
+        .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
+        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_ppn (cl_ppn_w), .cl_off (cl_off),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .serve (serve), .inval (inval),
-        .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
+        .dbg_sel (4'd0), .dbg_val (), .fill_busy ()
+    );
+    // The TLB: eight pages, each naming the set and way L2 holds it in.
+    tlb #(.SIDX (6), .LEV (3), .N (8)) u_tlb (
+        .clk (clk), .rst (rst), .serve (serve), .inval (inval),
+        .map_changed (map_changed), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
+        .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
+        .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
+        .lb_vpage (8'd0), .lb_hit (), .lb_ppn (), .lb_set (), .lb_way (),   // rung 5: the data side
+        .ref_v (ref_v_w), .ref_set (ref_set_w), .ref_way (ref_way_w), .ref_on (ref_on_w),
+        .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
+        .cnt_fills (tlb_fills_w), .cnt_deaths (tlb_deaths_w)
     );
 
-    // The data front, chained after the instruction front exactly as in
-    // master_top: its cyc_en is the core's, its byte is d_din, its books ride
-    // the sequencer's d_commit, and its row claims take the line port only on
-    // clocks iline is not asking.
+    // L1-D, chained after L1-I exactly as in a2_top: its cyc_en is the
+    // core's, its byte is d_din, its books ride the sequencer's d_commit, and
+    // the line port is its alone.
     dline u_dline (
         .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (), .io_flat (1'b0), .io_vec (248'd0), .swi_busy (1'b0),
         .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
@@ -393,7 +418,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .d_pred_bcls (2'd0), .dbr (8'd0),
         .cpu_addr (cpu_addr), .cpu_bank (8'd0), .cyc_int (1'b0),
         .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
-        .il_cyc_en (iline_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
+        .il_cyc_en (l1i_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
         .cyc_en (cpu_cyc_en), .d_din (d_din_w),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok), .wr_en (turbo_wr),
         .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick), .pending (d_pending_w),
@@ -406,7 +431,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
         .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w), .map_settling (map_settling),
         .dl_req (dl_req_w), .dl_ppn (dl_ppn_w), .dl_line (dl_line_w),
-        .dl_ack (il_ack && !il_req), .dl_done (il_done && il_src_q),
+        .dl_ack (il_ack), .dl_done (il_done),
         .dl_ok (il_ok), .dl_row (il_row),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
         .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata),
@@ -571,9 +596,9 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [15:0] pw_any_ppn   = pw_valid_w ? pw_ppn_w  : rl_pw_ppn;
     wire [7:0]  pw_any_off   = pw_valid_w ? pw_off_w  : rl_pw_off;
     wire [7:0]  pw_any_data  = pw_valid_w ? pw_data_w : rl_pw_data;
-    logic il_src_q;
-    always_ff @(posedge clk) if (il_ack) il_src_q <= !il_req;
-    page_cache u_cache (
+    // The card's geometry (rtl/a2/a2_top.sv MEM_SETS x MEM_WAYS): the IIe's
+    // 576 pages do not fit 384 ways, so this bench evicts, as the card does.
+    page_cache #(.SETS (64), .WAYS (6)) u_cache (
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_ppn (cl_ppn_w), .cl_off (cl_off[7:0]),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_wdata (cl_wdata), .cl_posted (cl_posted),
@@ -586,8 +611,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .mw_stb (), .mw_addr (), .mw_byte (), .mwx_stb (), .mw_bank (),
-        .il_req (il_req | dl_req_w), .il_ppn (il_req ? il_ppn_w : dl_ppn_w),
-        .il_line (il_req ? il_line_w : dl_line_w), .il_src (!il_req),
+        .il_req (dl_req_w), .il_ppn (dl_ppn_w), .il_line (dl_line_w), .il_src (1'b1),
         .il_ack (il_ack), .il_done (il_done), .il_ok (il_ok), .il_row (il_row),
         .serve (serve), .inval (inval), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
@@ -597,10 +621,11 @@ module accel_tb #(parameter integer SWINT = 1,
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data),
-        .ref_v (1'b0), .ref_set ('0), .ref_way ('0), .ref_on (1'b0),
-        .evict_v (), .evict_set (), .evict_way (),
-        .op_place_v (), .op_place_ppn (), .op_place_set (), .op_place_way (),
-        .dr_req (1'b0), .dr_set ('0), .dr_way ('0), .dr_line (4'd0), .dr_ack (), .dr_done (), .dr_row (),
+        .ref_v (ref_v_w), .ref_set (ref_set_w), .ref_way (ref_way_w), .ref_on (ref_on_w),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w), .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
+        .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
+        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w),
         .dbg_sel (4'd0), .dbg_val ()
     );
 
@@ -1192,8 +1217,8 @@ module accel_tb #(parameter integer SWINT = 1,
     always @(posedge clk) if (now % 2_000_000 == 1_999_999)
         $display("    ...%0d clocks, %0d reads (%0d fast), fast_ops %0d turbo %0d bus_ops %0d cycles %0d, state %0d, pc $%04X is_i %b exp $%04X lhit %b claim %b tok %b vwant %b%b v %b%b fst %0d mm %0d last %08x",
                  now + 1, reads, fast_reads, fast_ops, turbo_ops, bus_ops, cycles, seq_state,
-                 cpu_addr, cpu_cyc_is_i, u_iline.exp_q, u_iline.lhit_q, turbo_claim, turbo_ok,
-                 u_iline.want_v[0], u_iline.want_v[1], u_iline.v[0], u_iline.v[1], u_iline.fst,
+                 cpu_addr, cpu_cyc_is_i, u_l1i.exp_q, u_l1i.lhit_q, turbo_claim, turbo_ok,
+                 u_l1i.ew_v, u_l1i.dr_req, u_l1i.v[0], u_l1i.v[1], u_l1i.fst,
                  mismatches, last_mismatch);
 
     // ---- helpers -----------------------------------------------------------------------
@@ -1312,7 +1337,7 @@ module accel_tb #(parameter integer SWINT = 1,
     // the way that holds it - else the page is not resident and the DDR3 has
     // it.  A generate instance cannot be indexed by a variable, so the eight
     // ways are named; the geometry sweep lives in sim/page_cache_tb.sv.
-    localparam integer MEM_SETS = 128, MEM_WAYS = 8;
+    localparam integer MEM_SETS = 64, MEM_WAYS = 6;   // the card's (u_cache above)
     localparam integer SIDX = $clog2(MEM_SETS);
     function automatic [7:0] card_byte(input [15:0] ppn, input [7:0] off);
         int st, w, hit;
@@ -1330,8 +1355,6 @@ module accel_tb #(parameter integer SWINT = 1,
                 3: row = u_cache.g_way[3].u_way.mem[{st[SIDX-1:0], off[7:4]}];
                 4: row = u_cache.g_way[4].u_way.mem[{st[SIDX-1:0], off[7:4]}];
                 5: row = u_cache.g_way[5].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                6: row = u_cache.g_way[6].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                7: row = u_cache.g_way[7].u_way.mem[{st[SIDX-1:0], off[7:4]}];
                 default: ;
             endcase
             card_byte = (hit >= 0) ? row[8 * off[3:0] +: 8] : smem[{ppn, off}];
@@ -1439,6 +1462,19 @@ module accel_tb #(parameter integer SWINT = 1,
     reg [7:0] prog [0:4095];
     integer a, c, n0, n1, r0, resets, gaps0, fast0;
     integer bp_prom0, bp_pin0, bp_scan0, bp_fill0, bp_serv0, bp_tgt0, bp_slow0;
+    // The TLB across a map change: the clock after its revalidation, does any
+    // entry still stand?
+    integer tlb_revals = 0, tlb_reval_alive = 0;
+    logic   tlb_rq_d = 1'b0;
+    always @(posedge clk) begin
+        tlb_rq_d <= u_tlb.reval_q;
+        if (tlb_rq_d) begin
+            tlb_revals = tlb_revals + 1;
+            if (u_tlb.e_v[0] || u_tlb.e_v[1] || u_tlb.e_v[2] || u_tlb.e_v[3] ||
+                u_tlb.e_v[4] || u_tlb.e_v[5] || u_tlb.e_v[6] || u_tlb.e_v[7])
+                tlb_reval_alive = tlb_reval_alive + 1;
+        end
+    end
     initial begin
         $readmemh(PROG, prog);
         for (a = 0; a < 65536; a = a + 1) begin main_ram[a] = 8'h00; phys_aux[a] = 8'h00; ref_main[a] = 8'h00; end
@@ -1532,10 +1568,11 @@ module accel_tb #(parameter integer SWINT = 1,
         clear_counters(); pin_ram_writes = 0; dummies = 0; cx_fast = 0;
         pin_sw_writes = 0; pin_cx_writes = 0; swi_wr_ops = 0; swi_wr_quiet = 0; swi_spk_ops = 0; pin_spk = 0;
         n0 = pass_count; check_gaps = 1; merge_gaps = 0;
-        bp_prom0 = u_iline.cnt_promotes;   bp_pin0  = u_iline.cnt_loop_hold;
-        bp_scan0 = u_iline.cnt_scan_fills; bp_fill0 = u_iline.cnt_cam_fills;
-        bp_serv0 = u_iline.cnt_cam_serves; bp_tgt0 = u_iline.cnt_tgt_serves;
-        bp_slow0 = u_iline.cnt_slow_i; turbo_c3_0 = turbo_c3;
+        bp_prom0 = u_tlb.cnt_fills;        bp_pin0  = u_l1i.cnt_prefetch;
+        bp_scan0 = u_l1i.cnt_tlb_waits;    bp_fill0 = u_l1i.cnt_fills;
+        bp_serv0 = u_l1i.cnt_kills;        bp_tgt0 = u_l1i.cnt_tgt_serves;
+        bp_slow0 = u_l1i.cnt_slow_i; turbo_c3_0 = turbo_c3;
+        tlb_revals = 0; tlb_reval_alive = 0;
         @(negedge clk); mode <= 2'd2;
         wait_passes(n0 + 3, "mode 2, unlimited");
         repeat (3 * CYCLE) @(negedge clk);
@@ -1609,26 +1646,24 @@ module accel_tb #(parameter integer SWINT = 1,
         if (ref_main[16'h0310] !== 8'hC1)
             fail($sformatf("the program stored $%02x for the injected key, wanted $C1", ref_main[16'h0310]));
         else ok("...and the program read {1, $41} off the card");
-        $display("    front: %0d promotes, %0d fill retains, %0d scan prefetches, %0d pinned crossings, %0d want-behind-scan clocks, %0d CAM serves, %0d zero-stall branches, %0d slow ifetches",
-                 u_iline.cnt_promotes, u_iline.cnt_cam_fills, u_iline.cnt_scan_fills,
-                 u_iline.cnt_loop_hold, u_iline.cnt_scan_block, u_iline.cnt_cam_serves,
-                 u_iline.cnt_tgt_serves, u_iline.cnt_slow_i);
-        // The branch-prefetch machinery must have actually fired in this
-        // phase - sim/accel.s's bptest is built to make each mechanism
-        // unavoidable.
-        if (u_iline.cnt_promotes == bp_prom0) fail("mode 2: the retention CAM never promoted a line");
-        else ok($sformatf("mode 2: %0d promotes from the retention CAM", u_iline.cnt_promotes - bp_prom0));
-        if (u_iline.cnt_loop_hold == bp_pin0) fail("mode 2: no crossing was ever pinned");
-        else ok($sformatf("mode 2: %0d crossings pinned - a held loop refetched nothing", u_iline.cnt_loop_hold - bp_pin0));
-        if (u_iline.cnt_scan_fills == bp_scan0) fail("mode 2: the scanner never prefetched a branch target");
-        else ok($sformatf("mode 2: %0d branch targets prefetched by the scanner", u_iline.cnt_scan_fills - bp_scan0));
-        if (u_iline.cnt_cam_serves == bp_serv0) fail("mode 2: no fetch was ever served from the CAM");
-        else ok($sformatf("mode 2: %0d fetches served straight from the CAM", u_iline.cnt_cam_serves - bp_serv0));
-        if (u_iline.cnt_tgt_serves == bp_tgt0) fail("mode 2: no taken branch ever served with zero stall");
-        else ok($sformatf("mode 2: %0d taken branches served with ZERO stall (resolved at the operand)", u_iline.cnt_tgt_serves - bp_tgt0));
+        $display("    L1-I: %0d line fills (%0d prefetches), %0d TLB fills, %0d TLB waits, %0d kills, %0d zero-stall branches, %0d unservable, %0d slow ifetches",
+                 u_l1i.cnt_fills, u_l1i.cnt_prefetch, u_tlb.cnt_fills, u_l1i.cnt_tlb_waits,
+                 u_l1i.cnt_kills, u_l1i.cnt_tgt_serves, u_l1i.cnt_unserv, u_l1i.cnt_slow_i);
+        // Every mechanism of the new L1-I must have fired in this phase -
+        // sim/accel.s's bptest is built to make each one unavoidable.
+        if (u_l1i.cnt_fills == bp_fill0) fail("mode 2: L1-I never filled a line by a direct way read");
+        else ok($sformatf("mode 2: %0d lines filled by direct way reads of the page cache", u_l1i.cnt_fills - bp_fill0));
+        if (u_tlb.cnt_fills == bp_prom0) fail("mode 2: the TLB never learned a page");
+        else ok($sformatf("mode 2: %0d TLB fills from the dispatcher's placement report", u_tlb.cnt_fills - bp_prom0));
+        if (u_l1i.cnt_prefetch == bp_pin0) fail("mode 2: the next line was never prefetched");
+        else ok($sformatf("mode 2: %0d next-line prefetches", u_l1i.cnt_prefetch - bp_pin0));
+        if (u_l1i.cnt_kills == bp_serv0) fail("mode 2: no line buffer was ever killed by a write (smctest writes into the running line)");
+        else ok($sformatf("mode 2: %0d line buffers killed by a write, an eviction or a TLB replacement", u_l1i.cnt_kills - bp_serv0));
+        if (u_l1i.cnt_tgt_serves == bp_tgt0) fail("mode 2: no taken branch ever served with zero stall");
+        else ok($sformatf("mode 2: %0d taken branches served with ZERO stall (resolved at the operand)", u_l1i.cnt_tgt_serves - bp_tgt0));
         $display("    mode 2 ifetch: %0d turbo, %0d slow - %.1f%% of the instruction stream at one clock",
-                 turbo_ops, u_iline.cnt_slow_i - bp_slow0,
-                 100.0 * real'(turbo_ops) / real'(turbo_ops + (u_iline.cnt_slow_i - bp_slow0)));
+                 turbo_ops, u_l1i.cnt_slow_i - bp_slow0,
+                 100.0 * real'(turbo_ops) / real'(turbo_ops + (u_l1i.cnt_slow_i - bp_slow0)));
         // The data front: the shadow owns zp/stack, the CAM RAM/LC reads
         // beyond it, the last byte the CMOS dummy re-reads.  sim/accel.s
         // lives in zero page and walks absolute memory like any 6502
@@ -1654,15 +1689,15 @@ module accel_tb #(parameter integer SWINT = 1,
         if (u_dline.cnt_rev_serves == 0)
             fail("mode 2: no read was ever served from a revived line");
         else ok($sformatf("mode 2: %0d reads served from lines that had revived", u_dline.cnt_rev_serves));
-        // ...and the instruction front's own, rung 3.  revaltest's loop runs
-        // from ROM across sixteen RAMRD flips, and ROM lines live in a region
-        // RAMRD does not touch - so they must survive every one of them.
-        $display("    I revalidation: %0d drops, %0d revives",
-                 u_iline.cnt_reval_drop, u_iline.cnt_reval_revive);
-        if (u_iline.cnt_reval_revive == 0)
-            fail("mode 2: no instruction line ever revived - the front is still flushing on every map change");
-        else ok($sformatf("mode 2: %0d instruction lines revived after a map change (%0d dropped)",
-                          u_iline.cnt_reval_revive, u_iline.cnt_reval_drop));
+        // ...and the TLB's (rung 4): revaltest's loop runs from ROM across
+        // sixteen RAMRD flips, and ROM pages live in a region RAMRD does not
+        // touch - so the TLB must keep a live entry through every one of them.
+        $display("    TLB revalidation: %0d map changes, %0d left a live entry",
+                 tlb_revals, tlb_reval_alive);
+        if (tlb_reval_alive == 0)
+            fail("mode 2: the TLB never kept an entry across a map change - it is still flushing");
+        else ok($sformatf("mode 2: the TLB kept a live entry across %0d of %0d map changes",
+                          tlb_reval_alive, tlb_revals));
         if (u_dline.cnt_cam_serves == 0)
             fail("mode 2: the CAM never served a read");
         else ok($sformatf("mode 2: %0d reads served from the CAM", u_dline.cnt_cam_serves));

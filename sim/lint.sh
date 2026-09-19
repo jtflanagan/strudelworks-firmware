@@ -89,9 +89,11 @@ run apple_bus_write rtl/common/apple_bus_write.sv
 run accel_seq     rtl/a2/accel_seq.sv
 run fast_census   rtl/a2/fast_census.sv
 run bank_census   rtl/gs/bank_census.sv
-run iline         rtl/a2/iline.sv rtl/a2/iscan.sv
+run l1i           rtl/a2/l1i.sv
+run tlb           rtl/a2/tlb.sv
 run dline         -Irtl/common -Irtl/a2 rtl/a2/dline.sv
-run iscan         rtl/a2/iscan.sv
+# The 65816 card's L1-I is still iline + iscan (its own copies).
+run iline         rtl/gs/iline.sv rtl/gs/iscan.sv
 run boot_hold     rtl/common/boot_hold.sv
 run kbd_inject    rtl/common/kbd_inject.sv
 run kbd_notice    rtl/common/kbd_notice.sv

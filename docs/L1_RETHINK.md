@@ -1,6 +1,6 @@
 # The L1 rethink: a TLB that points into L2
 
-Status: **DESIGN DISCUSSION OPENED 2026-09-18, branch `core_refactor`, nothing built.** The
+Status: **L1-I BUILT 2026-09-19 (rung 4, rtl/a2/tlb.sv + rtl/a2/l1i.sv, sims green, 1,237 LUTs for the pair; L1-D is rung 5); design opened 2026-09-18, branch `core_refactor`.** The
 requirements it answers to are docs/REQ_65C02.md and docs/REQ_65816.md; this note is the first
 design conversation, not a plan of record. The two cards decide their L1 and L2 separately (the
 user, 2026-09-18); this idea is offered to both.
