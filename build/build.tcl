@@ -262,23 +262,24 @@ if {$snoop || $master} {
         add_files -norecurse [list \
             [file join $root rtl $card accel_seq.sv] \
             [file join $root rtl $card fast_census.sv] \
-            [file join $root rtl $card dline.sv] \
             [file join $root rtl $card page_cache.sv] \
             [file join $root rtl $card way_ram.sv] \
             [file join $root rtl $card apple_mmu.sv] \
             [file join $root rtl $card rom_loader.sv] \
         ]
-        # L1-I: the 65C02 card's is l1i + tlb (rung 4); the 65816 card still
-        # carries iline + iscan.
+        # L1: the 65C02 card's is l1i + l1d over the tlb (rungs 4-5); the
+        # 65816 card still carries iline + iscan + dline.
         if {$card eq "a2"} {
             add_files -norecurse [list \
                 [file join $root rtl a2 l1i.sv] \
+                [file join $root rtl a2 l1d.sv] \
                 [file join $root rtl a2 tlb.sv] \
             ]
         } else {
             add_files -norecurse [list \
                 [file join $root rtl gs iline.sv] \
                 [file join $root rtl gs iscan.sv] \
+                [file join $root rtl gs dline.sv] \
             ]
         }
     } else {

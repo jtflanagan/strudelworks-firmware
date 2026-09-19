@@ -14,8 +14,9 @@ session: `git status` both repos and get old work committed before editing.
   chipset, its own copies of L1/L2/sequencer, `gs_top.sv`).  The two cards'
   cache decisions are independent (docs/REQ_65C02.md, docs/REQ_65816.md); a
   change in `rtl/common` is built by both tops.  The layer between the core
-  and the page cache is L1: on the a2 card L1-I = `l1i` + `tlb` (rung 4, the TLB
-  points into L2), L1-D = `dline`; on the gs card still iline + iscan + dline.
+  and the page cache is L1: on the a2 card L1-I = `l1i` and L1-D = `l1d` over
+  `tlb` (rungs 4-5, the TLB points into L2); on the gs card still iline + iscan
+  + dline.
   "front" is retired and its identifiers are renamed as modules are touched.
 - The card design is `build/build.sh --master` (a2_top) or `--gs` (gs_top); the bit is
   `build/results/master_top.bit`, loaded with `build/load.sh build/results/master_top.bit`

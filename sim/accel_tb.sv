@@ -223,9 +223,6 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [103:0] rt_rd_flat;   // NREG * RT_W = 13 * 8 (it was 70 bits: regions 9-12 never revalidated here)
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
-    wire         dl_req_w;
-    wire [15:0]  dl_ppn_w;
-    wire [3:0]   dl_line_w;
     wire [23:0] dq_addr_w;
     wire [15:0] doff_w;
     wire [1:0]  dcls_w;
@@ -238,8 +235,16 @@ module accel_tb #(parameter integer SWINT = 1,
     wire [31:0] accel_maps;   // ACCEL_MAPS: map changes, the revalidation's denominator
     wire [23:0] p_addr_w;
     wire [15:0] p_off_w;
-    wire         il_ack, il_done, il_ok;      // the line port: L1-D's alone since rung 4
+    wire         il_ack, il_done, il_ok;      // the line port: unused since rung 5
     wire [127:0] il_row;
+    // L1-D's seams to the TLB and the shared direct way read (rung 5).
+    wire        lb_hit_w, fj_v_w, fj_fold_w, fj_ack_w;
+    wire [7:0]  lb_vpage_w, fj_vpage_w;
+    wire [15:0] lb_ppn_w, fj_ppn_w;
+    wire [6-1:0] lb_set_w, fj_set_w, dr_set_d, dr_set_i;
+    wire [3-1:0]  lb_way_w, fj_way_w, dr_way_d, dr_way_i;
+    wire [3:0]  fj_reg_w, dr_line_d, dr_line_i;
+    wire        dr_req_d, dr_req_i, dr_ack_d, dr_ack_i, dr_done_d, dr_done_i;
     // The TLB's and the direct way read's seams (rung 4).
     wire        la_hit_w, fi_v_w, fi_busy_w, fi_fold_w, kill_v_w;
     wire [7:0]  la_vpage_w, fi_vpage_w;
@@ -383,8 +388,8 @@ module accel_tb #(parameter integer SWINT = 1,
         .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
         .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
         .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
-        .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
-        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w),
+        .dr_req (dr_req_i), .dr_set (dr_set_i), .dr_way (dr_way_i), .dr_line (dr_line_i),
+        .dr_ack (dr_ack_i), .dr_done (dr_done_i), .dr_row (dr_row_w),
         .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
         .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
@@ -401,7 +406,9 @@ module accel_tb #(parameter integer SWINT = 1,
         .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
         .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
         .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
-        .lb_vpage (8'd0), .lb_hit (), .lb_ppn (), .lb_set (), .lb_way (),   // rung 5: the data side
+        .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
+        .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
+        .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
         .ref_v (ref_v_w), .ref_set (ref_set_w), .ref_way (ref_way_w), .ref_on (ref_on_w),
         .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
         .cnt_fills (tlb_fills_w), .cnt_deaths (tlb_deaths_w)
@@ -410,41 +417,55 @@ module accel_tb #(parameter integer SWINT = 1,
     // L1-D, chained after L1-I exactly as in a2_top: its cyc_en is the
     // core's, its byte is d_din, its books ride the sequencer's d_commit, and
     // the line port is its alone.
-    dline u_dline (
-        .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (), .io_flat (1'b0), .io_vec (248'd0), .swi_busy (1'b0),
-        .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
+    // ---- L1-D -----------------------------------------------------------------
+    // The shadow, the last row and the last byte at one clock; every other
+    // read a TLB hit serves from the page cache's row at three clocks
+    // (rtl/a2/l1d.sv).  Its cyc_en is the core's, its byte is d_din, its
+    // books ride the sequencer's d_commit.
+    l1d #(.SIDX (6), .LEV (3)) u_l1d (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
-        .d_pred ({8'd0, cpu_d_pred}), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
-        .d_pred_bcls (2'd0), .dbr (8'd0),
-        .cpu_addr (cpu_addr), .cpu_bank (8'd0), .cyc_int (1'b0),
-        .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
+        .d_pred (cpu_d_pred[15:0]), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
+        .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (l1i_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
         .cyc_en (cpu_cyc_en), .d_din (d_din_w),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok), .wr_en (turbo_wr),
         .d_commit (d_commit_w), .claim (d_claim_w), .tick_q (dline_tick), .pending (d_pending_w),
         .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data), .dev_rw (dev_rw),
-        .dev_bank (),
         .ev_room (1'b1), .ev_room_w (ev_room_w_tb),
         .altzp (sw_state[3]),
-        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_off (doff_w),
-        .rw_bank (rw_bank), .map_changed (map_changed),
-        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
-        .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w), .map_settling (map_settling),
-        .dl_req (dl_req_w), .dl_ppn (dl_ppn_w), .dl_line (dl_line_w),
-        .dl_ack (il_ack), .dl_done (il_done),
-        .dl_ok (il_ok), .dl_row (il_row),
+        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w),
+        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
+        .rw_bank (rw_bank), .map_changed (map_changed), .map_settling (map_settling),
+        .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
+        .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
+        .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
+        .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
+        .dr_req (dr_req_d), .dr_set (dr_set_d), .dr_way (dr_way_d), .dr_line (dr_line_d),
+        .dr_ack (dr_ack_d), .dr_done (dr_done_d), .dr_row (dr_row_w),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
         .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata),
         .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
         .pw_data (pw_data_w), .pw_take (pw_take_w && pw_valid_w),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .inval (inval),
-        .cnt_clr (cnt_clr),
-        .cnt_serves (), .cnt_claims (), .cnt_splices (),
-        .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits (),
-        .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
-        .fill_busy (), .dbg_sel (4'd0), .dbg_val (), .dbg_val2 ()
+        .dbg_sel (4'd0), .dbg_val (), .fill_busy (),
+        .cnt_clr (cnt_clr), .cnt_serves (), .cnt_l2_serves (), .cnt_tlb_fills ()
     );
+    // THE DIRECT WAY READ, SHARED: L1-D first (its read is the live cycle's),
+    // L1-I's waits; the source rides a two-deep shift register so each side
+    // sees only its own completion two clocks after its ack.
+    assign dr_req_w  = dr_req_d | dr_req_i;
+    assign dr_set_w  = dr_req_d ? dr_set_d  : dr_set_i;
+    assign dr_way_w  = dr_req_d ? dr_way_d  : dr_way_i;
+    assign dr_line_w = dr_req_d ? dr_line_d : dr_line_i;
+    assign dr_ack_d  = dr_ack_w &&  dr_req_d;
+    assign dr_ack_i  = dr_ack_w && !dr_req_d;
+    logic [1:0] dr_src_sr;   // 1 = L1-D's
+    always_ff @(posedge clk) dr_src_sr <= rst ? 2'd0 : {dr_src_sr[0], dr_req_d};
+    assign dr_done_d = dr_done_w &&  dr_src_sr[1];
+    assign dr_done_i = dr_done_w && !dr_src_sr[1];
 
     assign prog_wr    = (u_present && !u_rw) || (dev_valid && !dev_rw);
     assign prog_waddr = u_present ? u_addr  : dev_addr;
@@ -611,7 +632,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
         .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .mw_stb (), .mw_addr (), .mw_byte (), .mwx_stb (), .mw_bank (),
-        .il_req (dl_req_w), .il_ppn (dl_ppn_w), .il_line (dl_line_w), .il_src (1'b1),
+        .il_req (1'b0), .il_ppn (16'd0), .il_line (4'd0), .il_src (1'b1),
         .il_ack (il_ack), .il_done (il_done), .il_ok (il_ok), .il_row (il_row),
         .serve (serve), .inval (inval), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
@@ -1142,10 +1163,10 @@ module accel_tb #(parameter integer SWINT = 1,
             reads = reads + 1; dline_reads = dline_reads + 1;
             if (dev_data !== exp_read(dev_addr)) begin
                 dline_bad = dline_bad + 1; reads_bad = reads_bad + 1;
-                if (reads_bad <= 5) $display("    dline read $%04X: core got %02x, the reference says %02x", dev_addr, dev_data, exp_read(dev_addr));
-                if (reads_bad <= 5) $display("      (served by: sh %0d cam %0d lb %0d lr %0d kb %0d; lr_v %0d lr_addr %05X lr_ppn %04X; cst %0d)",
-                                             u_dline.sh_hit_q_dbg, u_dline.cam_hit_q_dbg, u_dline.lb_hit_q_dbg, u_dline.lr_hit_q_dbg, u_dline.kb_hit_q_dbg,
-                                             u_dline.lr_v, u_dline.lr_addr, u_dline.lr_ppn, u_dline.cst);
+                if (reads_bad <= 5) $display("    L1-D read $%04X: core got %02x, the reference says %02x", dev_addr, dev_data, exp_read(dev_addr));
+                if (reads_bad <= 5) $display("      (served by: sh %0d lb %0d lr %0d l2 %0d; lr_v %0d lr_addr %03X lr_ppn %04X; cst %0d)",
+                                             u_l1d.sh_hit_q_dbg, u_l1d.lby_hit_q_dbg, u_l1d.lr_hit_q_dbg, u_l1d.l2_hit_q_dbg,
+                                             u_l1d.lr_v, u_l1d.lr_addr, u_l1d.lr_ppn, u_l1d.cst);
             end
         end else dline_writes = dline_writes + 1;
         if (dev_addr[15:12] == 4'hC) dline_bad = dline_bad + 1;
@@ -1428,12 +1449,12 @@ module accel_tb #(parameter integer SWINT = 1,
             // Every op the governor charged: the dispatcher's, the instruction
             // front's, and the data front's - the last counted by the front
             // itself (rtl/dline.sv), charged through d_commit.
-            got = real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles);
+            got = real'(fast_ops + bus_ops + turbo_ops + u_l1d.cnt_serves) / real'(cycles);
             if (cycles == 0) fail($sformatf("%0s: no bus cycles counted", what));
             else if (got < want * 0.95 || got > want * 1.05)
-                fail($sformatf("%0s: %0d ops over %0d cycles = %.2f per cycle, wanted %.2f", what, fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves, cycles, got, want));
+                fail($sformatf("%0s: %0d ops over %0d cycles = %.2f per cycle, wanted %.2f", what, fast_ops + bus_ops + turbo_ops + u_l1d.cnt_serves, cycles, got, want));
             else ok($sformatf("%0s: %.2f ops per bus cycle (wanted %.2f; %0d turbo, %0d fast, %0d dline, %0d bus over %0d cycles)",
-                              what, got, want, turbo_ops, fast_ops, u_dline.cnt_serves, bus_ops, cycles));
+                              what, got, want, turbo_ops, fast_ops, u_l1d.cnt_serves, bus_ops, cycles));
         end
     endtask
 
@@ -1542,9 +1563,9 @@ module accel_tb #(parameter integer SWINT = 1,
         common_checks("mode 1");
         if (fast_ops + turbo_ops == 0 || dummies == 0) fail("mode 1: no fast ops or no dummies");
         else ok($sformatf("mode 1: %0d fast ops, %0d bus ops, %0d bus cycles, %0d dummies", fast_ops, bus_ops, cycles, dummies));
-        check_ratio(real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles), "mode 1 measured");
-        if (fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves < 3 * cycles) fail("mode 1: less than 3x");
-        else ok($sformatf("mode 1: %.1fx", real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles)));
+        check_ratio(real'(fast_ops + bus_ops + turbo_ops + u_l1d.cnt_serves) / real'(cycles), "mode 1 measured");
+        if (fast_ops + bus_ops + turbo_ops + u_l1d.cnt_serves < 3 * cycles) fail("mode 1: less than 3x");
+        else ok($sformatf("mode 1: %.1fx", real'(fast_ops + bus_ops + turbo_ops + u_l1d.cnt_serves) / real'(cycles)));
         if (turbo_ops == 0) fail("mode 1: no fetch was served in one clock");
         else ok($sformatf("mode 1: %0d fetches served in one clock by the line front", turbo_ops));
         if (phys_diff(1) != 0) fail("mode 1: the machine's memory differs from the reference - a write missed the bus");
@@ -1580,8 +1601,8 @@ module accel_tb #(parameter integer SWINT = 1,
         common_checks("mode 2");
         if (pin_ram_writes != 0) fail($sformatf("mode 2: %0d RAM writes reached the pins", pin_ram_writes));
         else ok("mode 2: no RAM write reached the pins");
-        if (fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves < 6 * cycles) fail($sformatf("mode 2: only %.1fx", real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles)));
-        else ok($sformatf("mode 2: %.1fx (%0d turbo, %0d fast, %0d dline, %0d bus over %0d cycles)", real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles), turbo_ops, fast_ops, u_dline.cnt_serves, bus_ops, cycles));
+        if (fast_ops + bus_ops + turbo_ops + u_l1d.cnt_serves < 6 * cycles) fail($sformatf("mode 2: only %.1fx", real'(fast_ops + bus_ops + turbo_ops + u_l1d.cnt_serves) / real'(cycles)));
+        else ok($sformatf("mode 2: %.1fx (%0d turbo, %0d fast, %0d dline, %0d bus over %0d cycles)", real'(fast_ops + bus_ops + turbo_ops + u_l1d.cnt_serves) / real'(cycles), turbo_ops, fast_ops, u_l1d.cnt_serves, bus_ops, cycles));
         if (turbo_ops == 0) fail("mode 2: no fetch was served in one clock");
         else ok($sformatf("mode 2: %0d fetches served in one clock by the line front", turbo_ops));
         if (turbo_c3 == turbo_c3_0) fail("mode 2: no $C3xx fetch was served in one clock");
@@ -1669,26 +1690,25 @@ module accel_tb #(parameter integer SWINT = 1,
         // lives in zero page and walks absolute memory like any 6502
         // program, so a server that never fires is a wiring failure, not a
         // workload property.
-        if (u_dline.cnt_serves < 100)
-            fail($sformatf("mode 2: the data front served only %0d reads", u_dline.cnt_serves));
-        else ok($sformatf("mode 2: %0d data reads served in one clock by the data front (%0d line claims, %0d splices)",
-                          u_dline.cnt_serves, u_dline.cnt_claims, u_dline.cnt_splices));
-        // ---- the revalidation (docs/MEMORY_REFACTOR.md, rung 2) -----------
-        // sim/accel.s's revaltest flips RAMRD over one address sixteen
-        // times, writes a line while it is out of service, and moves the
-        // RamWorks register away and back.  A front that FLUSHED on a map
-        // change could never revive a line, so a non-zero revive count is
-        // proof the lines survived; a serve from a revived line is proof
-        // they came back usable rather than being refilled behind our back.
-        $display("    revalidation: %0d drops, %0d revives, %0d serves from a revived line",
-                 u_dline.cnt_reval_drop, u_dline.cnt_reval_revive, u_dline.cnt_rev_serves);
-        if (u_dline.cnt_reval_revive == 0)
-            fail("mode 2: no data line ever revived - the cache is still flushing on every map change");
-        else ok($sformatf("mode 2: %0d data lines revived after a map change (%0d dropped)",
-                          u_dline.cnt_reval_revive, u_dline.cnt_reval_drop));
-        if (u_dline.cnt_rev_serves == 0)
-            fail("mode 2: no read was ever served from a revived line");
-        else ok($sformatf("mode 2: %0d reads served from lines that had revived", u_dline.cnt_rev_serves));
+        if (u_l1d.cnt_serves < 100)
+            fail($sformatf("mode 2: L1-D served only %0d reads", u_l1d.cnt_serves));
+        else ok($sformatf("mode 2: %0d data reads served by L1-D (%0d line claims, %0d splices)",
+                          u_l1d.cnt_serves, u_l1d.cnt_claims, u_l1d.cnt_splices));
+        // ---- the three-clock read (rung 5) --------------------------------
+        // Every read outside the shadow's estate that the one-clock servers
+        // do not hold is served from the page cache's row through the TLB;
+        // sim/accel.s walks absolute memory, so the path must fire, its
+        // launches must mostly land, and the data side must have taught the
+        // TLB pages of its own.
+        $display("    L1-D three-clock reads: %0d served, %0d launched, %0d abandoned; %0d TLB fills from the data side",
+                 u_l1d.cnt_l2_serves, u_l1d.cnt_l2_launch, u_l1d.cnt_l2_abort, u_l1d.cnt_tlb_fills);
+        if (u_l1d.cnt_l2_serves == 0)
+            fail("mode 2: no read was ever served from the page cache's row through the TLB");
+        else ok($sformatf("mode 2: %0d reads served at three clocks from the page cache's row (%0d launches, %0d abandoned)",
+                          u_l1d.cnt_l2_serves, u_l1d.cnt_l2_launch, u_l1d.cnt_l2_abort));
+        if (u_l1d.cnt_tlb_fills == 0)
+            fail("mode 2: the data side never filled a TLB entry");
+        else ok($sformatf("mode 2: %0d TLB entries filled from the data side", u_l1d.cnt_tlb_fills));
         // ...and the TLB's (rung 4): revaltest's loop runs from ROM across
         // sixteen RAMRD flips, and ROM pages live in a region RAMRD does not
         // touch - so the TLB must keep a live entry through every one of them.
@@ -1698,21 +1718,21 @@ module accel_tb #(parameter integer SWINT = 1,
             fail("mode 2: the TLB never kept an entry across a map change - it is still flushing");
         else ok($sformatf("mode 2: the TLB kept a live entry across %0d of %0d map changes",
                           tlb_reval_alive, tlb_revals));
-        if (u_dline.cnt_cam_serves == 0)
-            fail("mode 2: the CAM never served a read");
-        else ok($sformatf("mode 2: %0d reads served from the CAM", u_dline.cnt_cam_serves));
-        if (u_dline.cnt_lb_serves == 0)
+        if (u_l1d.cnt_lr_serves == 0)
+            fail("mode 2: the last row never served a read");
+        else ok($sformatf("mode 2: %0d reads served from the last row", u_l1d.cnt_lr_serves));
+        if (u_l1d.cnt_lb_serves == 0)
             fail("mode 2: the last-byte register never served a dummy re-read");
-        else ok($sformatf("mode 2: %0d dummy re-reads served from the last byte", u_dline.cnt_lb_serves));
+        else ok($sformatf("mode 2: %0d dummy re-reads served from the last byte", u_l1d.cnt_lb_serves));
         if (dline_bad != 0) fail($sformatf("mode 2: %0d dline serves wrong or out of bounds", dline_bad));
         // Rung 3: writes at one clock.  sim/accel.s's wrtest pushes deeper
         // than the posted FIFO and reads fresh lines straight back; the
         // program's own stores go through the shadow and the CAM all the
         // time.  Every posted write drains through the classified stage
         // exactly once, and its event is never the one the merge drops.
-        if (u_dline.cnt_posts == 0) fail("mode 2: no write retired in one clock on the data front");
+        if (u_l1d.cnt_posts == 0) fail("mode 2: no write retired in one clock on the data front");
         else ok($sformatf("mode 2: %0d writes retired in one clock by the data front (%0d clocks waited for room, %0d aux misses at the drain)",
-                          u_dline.cnt_posts, u_dline.cnt_post_waits, u_cache.cnt_posted_miss));
+                          u_l1d.cnt_posts, u_l1d.cnt_post_waits, u_cache.cnt_posted_miss));
         if (u_cache.cnt_posted_miss == 0) fail("mode 2: no posted write ever raised the aux page engine at its drain");
         else ok($sformatf("mode 2: %0d posted writes drained through the aux miss engine", u_cache.cnt_posted_miss));
         if (merge_gaps != 0) fail($sformatf("mode 2: %0d consecutive bus ops did not ride consecutive cycles", merge_gaps));
@@ -1736,9 +1756,9 @@ module accel_tb #(parameter integer SWINT = 1,
         check_ratio(1.0, "governor at 1.0");
         @(negedge clk); target <= 16'd0; room_rand <= 1'b0;
         common_checks("the governor");
-        if (u_dline.cnt_post_waits == 0) fail("the governor: the merge's room was withheld and no write ever waited");
+        if (u_l1d.cnt_post_waits == 0) fail("the governor: the merge's room was withheld and no write ever waited");
         else ok($sformatf("the governor: writes waited %0d clocks for the merge's room and retired on the front all the same (%0d)",
-                          u_dline.cnt_post_waits, u_dline.cnt_posts));
+                          u_l1d.cnt_post_waits, u_l1d.cnt_posts));
 
         // ---- 5. a DMA, in mode 2 ---------------------------------------------------------
         ovr_cycles = 0; dma_last_hits = 0;

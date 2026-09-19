@@ -209,9 +209,6 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire [103:0] rt_rd_flat;   // NREG * RT_W = 13 * 8 (it was 70 bits: regions 9-12 never revalidated here)
     wire [15:0] dev_addr;
     wire [7:0]  dev_data;
-    wire         dl_req_w;
-    wire [15:0]  dl_ppn_w;
-    wire [3:0]   dl_line_w;
     wire [15:0] dq_addr_w, doff_w;
     wire [1:0]  dcls_w;
     wire        daux_w;
@@ -222,8 +219,16 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
     wire        p_aux_w, map_changed;
     wire [31:0] accel_maps;   // ACCEL_MAPS: map changes, the revalidation's denominator
     wire [15:0] p_addr_w, p_off_w;
-    wire         il_ack, il_done, il_ok;      // the line port: L1-D's alone since rung 4
+    wire         il_ack, il_done, il_ok;      // the line port: unused since rung 5
     wire [127:0] il_row;
+    // L1-D's seams to the TLB and the shared direct way read (rung 5).
+    wire        lb_hit_w, fj_v_w, fj_fold_w, fj_ack_w;
+    wire [7:0]  lb_vpage_w, fj_vpage_w;
+    wire [15:0] lb_ppn_w, fj_ppn_w;
+    wire [6-1:0] lb_set_w, fj_set_w, dr_set_d, dr_set_i;
+    wire [3-1:0]  lb_way_w, fj_way_w, dr_way_d, dr_way_i;
+    wire [3:0]  fj_reg_w, dr_line_d, dr_line_i;
+    wire        dr_req_d, dr_req_i, dr_ack_d, dr_ack_i, dr_done_d, dr_done_i;
     // The TLB's and the direct way read's seams (rung 4).
     wire        la_hit_w, fi_v_w, fi_busy_w, fi_fold_w, kill_v_w;
     wire [7:0]  la_vpage_w, fi_vpage_w;
@@ -351,8 +356,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
         .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
         .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
-        .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
-        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w),
+        .dr_req (dr_req_i), .dr_set (dr_set_i), .dr_way (dr_way_i), .dr_line (dr_line_i),
+        .dr_ack (dr_ack_i), .dr_done (dr_done_i), .dr_row (dr_row_w),
         .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
         .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
@@ -369,18 +374,23 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
         .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
         .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
-        .lb_vpage (8'd0), .lb_hit (), .lb_ppn (), .lb_set (), .lb_way (),   // rung 5: the data side
+        .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
+        .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
+        .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
         .ref_v (ref_v_w), .ref_set (ref_set_w), .ref_way (ref_way_w), .ref_on (ref_on_w),
         .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
         .cnt_fills (tlb_fills_w), .cnt_deaths (tlb_deaths_w)
     );
 
     // L1-D, chained after L1-I exactly as in a2_top.
-    dline u_dline (
-        .kbd_en (1'b0), .kbd_byte (8'd0), .kbd_rd (), .io_flat (1'b0), .io_vec (248'd0), .swi_busy (1'b0),
-        .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
+    // ---- L1-D -----------------------------------------------------------------
+    // The shadow, the last row and the last byte at one clock; every other
+    // read a TLB hit serves from the page cache's row at three clocks
+    // (rtl/a2/l1d.sv).  Its cyc_en is the core's, its byte is d_din, its
+    // books ride the sequencer's d_commit.
+    l1d #(.SIDX (6), .LEV (3)) u_l1d (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
-        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
+        .d_pred (cpu_d_pred[15:0]), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw),
         .cpu_addr (cpu_addr), .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (l1i_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
         .cyc_en (cpu_cyc_en), .d_din (d_din_w),
@@ -389,25 +399,39 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .dev_valid (dev_valid), .dev_addr (dev_addr), .dev_data (dev_data), .dev_rw (dev_rw),
         .ev_room (1'b1), .ev_room_w (1'b1),
         .altzp (sw_state[3]),
-        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w), .d_off (doff_w),
-        .rw_bank (rw_bank), .map_changed (map_changed),
-        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
-        .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w), .map_settling (map_settling),
-        .dl_req (dl_req_w), .dl_ppn (dl_ppn_w), .dl_line (dl_line_w),
-        .dl_ack (il_ack), .dl_done (il_done),
-        .dl_ok (il_ok), .dl_row (il_row),
+        .dq_addr (dq_addr_w), .dq_rw (dq_rw_w), .d_cls (dcls_w),
+        .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w),
+        .rw_bank (rw_bank), .map_changed (map_changed), .map_settling (map_settling),
+        .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
+        .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
+        .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
+        .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
+        .dr_req (dr_req_d), .dr_set (dr_set_d), .dr_way (dr_way_d), .dr_line (dr_line_d),
+        .dr_ack (dr_ack_d), .dr_done (dr_done_d), .dr_row (dr_row_w),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
         .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata),
         .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
         .pw_data (pw_data_w), .pw_take (pw_take_w && pw_valid_w),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .inval (inval),
-        .cnt_clr (cnt_clr),
-        .cnt_serves (), .cnt_claims (), .cnt_splices (),
-        .cnt_cam_serves (), .cnt_lb_serves (), .cnt_posts (), .cnt_post_waits (),
-        .cnt_reval_drop (), .cnt_reval_revive (), .cnt_rev_serves (),
-        .fill_busy (), .dbg_sel (4'd0), .dbg_val (), .dbg_val2 ()
+        .dbg_sel (4'd0), .dbg_val (), .fill_busy (),
+        .cnt_clr (cnt_clr), .cnt_serves (), .cnt_l2_serves (), .cnt_tlb_fills ()
     );
+    // THE DIRECT WAY READ, SHARED: L1-D first (its read is the live cycle's),
+    // L1-I's waits; the source rides a two-deep shift register so each side
+    // sees only its own completion two clocks after its ack.
+    assign dr_req_w  = dr_req_d | dr_req_i;
+    assign dr_set_w  = dr_req_d ? dr_set_d  : dr_set_i;
+    assign dr_way_w  = dr_req_d ? dr_way_d  : dr_way_i;
+    assign dr_line_w = dr_req_d ? dr_line_d : dr_line_i;
+    assign dr_ack_d  = dr_ack_w &&  dr_req_d;
+    assign dr_ack_i  = dr_ack_w && !dr_req_d;
+    logic [1:0] dr_src_sr;   // 1 = L1-D's
+    always_ff @(posedge clk) dr_src_sr <= rst ? 2'd0 : {dr_src_sr[0], dr_req_d};
+    assign dr_done_d = dr_done_w &&  dr_src_sr[1];
+    assign dr_done_i = dr_done_w && !dr_src_sr[1];
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
@@ -528,7 +552,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .mw_stb (),
         .mwx_stb (), .mw_bank (), .mw_addr (), .mw_byte (),
-        .il_req (dl_req_w), .il_ppn (dl_ppn_w), .il_line (dl_line_w), .il_src (1'b1),
+        .il_req (1'b0), .il_ppn (16'd0), .il_line (4'd0), .il_src (1'b1),
         .il_ack (il_ack), .il_done (il_done), .il_ok (il_ok), .il_row (il_row),
         .serve (serve), .inval (inval), .cnt_clr (1'b0), .image_ready (image_ready),
         .invalidating (invalidating),
@@ -1620,16 +1644,16 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
                  reads, turbo_reads, fast_reads, dline_reads, reads_bad, mismatches, last_mismatch);
         $display("    counters: fast_ops %0d turbo_ops %0d bus_ops %0d cycles %0d",
                  fast_ops, turbo_ops, bus_ops, cycles);
-        $display("    dline: %0d serves (%0d CAM, %0d last-byte), %0d claims, %0d splices; %0d writes posted (%0d clocks waited, %0d aux misses at the drain, %0d drained)",
-                 u_dline.cnt_serves, u_dline.cnt_cam_serves, u_dline.cnt_lb_serves,
-                 u_dline.cnt_claims, u_dline.cnt_splices, u_dline.cnt_posts, u_dline.cnt_post_waits,
-                 u_cache.cnt_posted_miss, drained);
+        $display("    L1-D: %0d serves (%0d three-clock, %0d last-row, %0d last-byte), %0d shadow claims, %0d splices; %0d writes posted (%0d clocks waited, %0d aux misses at the drain, %0d drained); %0d TLB fills from the data side",
+                 u_l1d.cnt_serves, u_l1d.cnt_l2_serves, u_l1d.cnt_lr_serves, u_l1d.cnt_lb_serves,
+                 u_l1d.cnt_claims, u_l1d.cnt_splices, u_l1d.cnt_posts, u_l1d.cnt_post_waits,
+                 u_cache.cnt_posted_miss, drained, u_l1d.cnt_tlb_fills);
         $display("    L1-I: %0d line fills (%0d prefetches), %0d TLB fills (%0d deaths), %0d TLB waits, %0d kills, %0d zero-stall branches, %0d unservable, %0d slow ifetches",
                  u_l1i.cnt_fills, u_l1i.cnt_prefetch, u_tlb.cnt_fills, u_tlb.cnt_deaths, u_l1i.cnt_tlb_waits,
                  u_l1i.cnt_kills, u_l1i.cnt_tgt_serves, u_l1i.cnt_unserv, u_l1i.cnt_slow_i);
         if (cycles != 0)
             $display("    measured: %.1f ops per bus cycle",
-                     real'(fast_ops + bus_ops + turbo_ops + u_dline.cnt_serves) / real'(cycles));
+                     real'(fast_ops + bus_ops + turbo_ops + u_l1d.cnt_serves) / real'(cycles));
         $display("    late_fills %0d drops %0d ddr_range_bad %0d", late_fills, fifo_drops, ddr_range_bad);
         dump_screen();
         // Hold the core (the runtime knock) and let everything settle before
@@ -1651,8 +1675,8 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         if (ddr_range_bad != 0) fail($sformatf("%0d DDR3 addresses outside the image", ddr_range_bad));
         if (hd_blocks_read == 0) fail("no block was ever read - the image did not boot");
         else ok($sformatf("%0d blocks read: the image booted", hd_blocks_read));
-        if (MODE != 0 && u_dline.cnt_serves == 0) fail("the data front never served a zp/stack read - a wiring failure");
-        if (MODE == 2 && u_dline.cnt_posts == 0) fail("mode 2: the data front never retired a write - a wiring failure");
+        if (MODE != 0 && u_l1d.cnt_serves == 0) fail("L1-D never served a read - a wiring failure");
+        if (MODE == 2 && u_l1d.cnt_posts == 0) fail("mode 2: L1-D never retired a write - a wiring failure");
         if (drained > dline_writes || dline_writes - drained > 8) fail($sformatf("%0d writes retired on the front, %0d drained through the classified stage", dline_writes, drained));
         else if (MODE == 2) ok($sformatf("every one of the %0d posted writes drained through the classified stage exactly once, beside the ROM's %0d", dline_writes, rom_drained));
         $display("%0d checks, %0d errors", checks, errors);

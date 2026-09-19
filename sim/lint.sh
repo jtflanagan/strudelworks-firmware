@@ -90,10 +90,11 @@ run accel_seq     rtl/a2/accel_seq.sv
 run fast_census   rtl/a2/fast_census.sv
 run bank_census   rtl/gs/bank_census.sv
 run l1i           rtl/a2/l1i.sv
+run l1d           rtl/a2/l1d.sv
 run tlb           rtl/a2/tlb.sv
-run dline         -Irtl/common -Irtl/a2 rtl/a2/dline.sv
-# The 65816 card's L1-I is still iline + iscan (its own copies).
+# The 65816 card's L1 is still iline + iscan + dline (its own copies).
 run iline         rtl/gs/iline.sv rtl/gs/iscan.sv
+run dline         -Irtl/common -Irtl/gs rtl/gs/dline.sv
 run boot_hold     rtl/common/boot_hold.sv
 run kbd_inject    rtl/common/kbd_inject.sv
 run kbd_notice    rtl/common/kbd_notice.sv

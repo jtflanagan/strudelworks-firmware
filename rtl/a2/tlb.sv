@@ -55,6 +55,16 @@ module tlb #(
     input  wire [3:0]        fi_reg,
     input  wire              fi_fold,
     output wire              fi_busy,
+    // The second fill port (L1-D's): a request HELD until fj_ack, taken on
+    // any clock the first port is quiet and no install is in flight.
+    input  wire              fj_v,
+    input  wire [7:0]        fj_vpage,
+    input  wire [15:0]       fj_ppn,
+    input  wire [SIDX-1:0]   fj_set,
+    input  wire [LEV-1:0]    fj_way,
+    input  wire [3:0]        fj_reg,
+    input  wire              fj_fold,
+    output wire              fj_ack,
     // Lookup A (the instruction side) and B (the data side, rung 5).
     input  wire [7:0]        la_vpage,
     output logic             la_hit,
@@ -149,9 +159,18 @@ module tlb #(
     always_comb begin
         pick = rr; pick_same = 1'b0; pick_free = 1'b0;
         for (int i = N - 1; i >= 0; i = i - 1) if (!e_r[i]) begin pick = IW'(i); pick_free = 1'b1; end
-        for (int i = N - 1; i >= 0; i = i - 1) if (e_r[i] && e_vp[i] == fi_vpage) begin pick = IW'(i); pick_same = 1'b1; end
+        for (int i = N - 1; i >= 0; i = i - 1) if (e_r[i] && e_vp[i] == tk_vpage) begin pick = IW'(i); pick_same = 1'b1; end
     end
-    wire take = fi_v && !ins_busy && serve && !inval;
+    wire take_i = fi_v && !ins_busy && serve && !inval;
+    wire take_j = fj_v && !fi_v && !ins_busy && serve && !inval;
+    wire take   = take_i || take_j;
+    assign fj_ack = take_j;
+    wire [7:0]      tk_vpage = take_i ? fi_vpage : fj_vpage;
+    wire [15:0]     tk_ppn   = take_i ? fi_ppn   : fj_ppn;
+    wire [SIDX-1:0] tk_set   = take_i ? fi_set   : fj_set;
+    wire [LEV-1:0]  tk_way   = take_i ? fi_way   : fj_way;
+    wire [3:0]      tk_reg   = take_i ? fi_reg   : fj_reg;
+    wire            tk_fold  = take_i ? fi_fold  : fj_fold;
 
     always_ff @(posedge clk) begin
         ref_v  <= 1'b0;
@@ -181,14 +200,14 @@ module tlb #(
                         end
                 // Clock 1: the replaced entry's reference goes, its lines die.
                 if (take) begin
-                    ins_idx <= pick; ins_vp <= fi_vpage; ins_ppn <= fi_ppn;
-                    ins_set <= fi_set; ins_way <= fi_way; ins_reg <= fi_reg; ins_fold <= fi_fold;
+                    ins_idx <= pick; ins_vp <= tk_vpage; ins_ppn <= tk_ppn;
+                    ins_set <= tk_set; ins_way <= tk_way; ins_reg <= tk_reg; ins_fold <= tk_fold;
                     ins_busy <= 1'b1;
                     if (e_r[pick] && !pick_same) begin
                         ref_v <= 1'b1; ref_set <= e_set[pick]; ref_way <= e_way[pick]; ref_on <= 1'b0;
                         kill_v <= 1'b1; kill_ppn <= e_ppn[pick];
                     end else if (e_r[pick] && pick_same &&
-                                 (e_set[pick] != fi_set || e_way[pick] != fi_way)) begin
+                                 (e_set[pick] != tk_set || e_way[pick] != tk_way)) begin
                         // the same page, placed elsewhere now: the old way is let go
                         ref_v <= 1'b1; ref_set <= e_set[pick]; ref_way <= e_way[pick]; ref_on <= 1'b0;
                         kill_v <= 1'b1; kill_ppn <= e_ppn[pick];
