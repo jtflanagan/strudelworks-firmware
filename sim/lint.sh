@@ -80,6 +80,7 @@ run rom_loader    rtl/a2/rom_loader.sv
 run way_ram       rtl/a2/way_ram.sv -Wno-MULTIDRIVEN
 run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN
 run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=10
+run page_cam      rtl/gs/page_cam.sv rtl/gs/way_ram.sv -Wno-MULTIDRIVEN
 run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=8
 run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=6   # the 65C02 card's
 run page_client   rtl/common/page_client.sv

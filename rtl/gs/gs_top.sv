@@ -80,8 +80,15 @@ module gs_top #(
     // occupies five of every set's eight ways.  64 x 8 is the cheap fallback
     // if the block RAM is ever wanted elsewhere; both are proven by
     // sim/run_page_cache_tb.sh's sweep.
-    parameter integer MEM_SETS = 128,
-    parameter integer MEM_WAYS = 8,
+    parameter integer MEM_SETS = 64,    // the CAM-L2's slots (rtl/gs/page_cam.sv)
+    parameter integer MEM_WAYS = 2,     // nominal: one bit of way, always zero
+    // THE 50T VARIANT (docs/CORE_REFACTOR_65816.md "The 50T candidate", 2026-09-19):
+    // the Mockingboard and the slot mouse card generated out (the IIgs's own
+    // mouse is ADB), the register file at its MINIMAL (build.tcl -gs50t sets
+    // the three, with MEM_SETS = 32).
+    parameter bit HAS_MB       = 1'b1,
+    parameter bit HAS_MOUSE    = 1'b1,
+    parameter bit MINIMAL_REGS = 1'b0,
     // THE MACHINE (docs/GS.md rung 4).  0 = the Apple IIe this board has
     // always been: a 65C02, the two fronts, the IIe's own $Cxxx apparatus.
     // 1 = the Apple IIgs: a 65816 on the dispatcher, rtl/gs_io.sv answering
@@ -289,6 +296,7 @@ module gs_top #(
     // beside the DDR3; the MMU shadow, the ROM and the page cache are here,
     // beside the core).  See docs/PAGE_CACHE.md.
     wire        pq_busy, pq_valid, pq_we, pq_ready, pr_valid;
+    wire [15:0] pq_sel;
     wire [19:0] pq_line;
     wire [127:0] pq_wdata, pr_data;
     wire        mem_image_ready, mem_cnt_clr, mem_inval, mem_invalidating, mem_rom_loaded;
@@ -397,7 +405,7 @@ module gs_top #(
     wire [7:0]  fev_data;
     wire        core_valid, op_dummy, op_inflight, drv_cyc_done;
     wire [7:0]  drv_din;
-    wire        mem_decided, mem_busy, mem_intc8rom;
+    wire        mem_decided, mem_blocked, mem_busy, mem_intc8rom;
     wire [1:0]  q_cls;
     // The instruction front (rtl/iline.sv) and its seams.
     wire        seq_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync, turbo_claim, seq_fast_tick;
@@ -456,7 +464,8 @@ module gs_top #(
     wire        aux_valid, aux_take;
 
     card_link #(
-        .MEM_PAGES_LOG2 ($clog2(MEM_SETS * MEM_WAYS)),
+        .MINIMAL_REGS (MINIMAL_REGS),
+        .MEM_PAGES_LOG2 ($clog2(MEM_SETS)),
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
         .CAN_MASTER (1'b1),
@@ -544,7 +553,7 @@ module gs_top #(
         .vbl_stat (vbl_stat), .vbl_pos (vbl_pos),
         .mem_op_present (op_present),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
-        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_sel (pq_sel), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data),
         .mem_image_ready (mem_image_ready),
         .mem_serve (mem_serve), .mem_cnt_clr (mem_cnt_clr), .mem_inval (mem_inval),
@@ -885,7 +894,13 @@ module gs_top #(
     // instead (docs/CXXX.md, "The on-card slots").  The dispatcher takes
     // the ungated level and holds as soon as it sees it.
     wire        sl_win;
-    wire        drv_ovr_en = ovr_en && !sl_win;
+    // The hard disk's block lands FAST (accel_seq S_OVR, the user's design
+    // 2026-09-19): its write override goes onto the unified stream byte by
+    // byte at the cache's pace, never to the driver; a read override (an
+    // HD_FETCH) and every other override keep the bus.
+    wire        seq_ovr_win;
+    wire        hd_ovr_fast = slot_on && hd_ovr_en && !hd_ovr_rw;
+    wire        drv_ovr_en = ovr_en && !sl_win && !hd_ovr_fast;
     wire [15:0] ovr_addr  = hd_ovr_en ? hd_ovr_addr  : vbl_ovr_gs ? vbl_ovr_addr  : boot_ovr_addr;
     // boot_hold and the vapor lock are bank zero's by construction.
     wire [7:0]  ovr_bank  = (GS && hd_ovr_en) ? hd_ovr_bank : 8'd0;
@@ -1047,17 +1062,20 @@ module gs_top #(
     // dispatch until the driver's next visible present re-registers it.
     wire        sl_present = u_present && seq_slot_q;
     wire        sl_commit  = swi_commit && seq_slot_q;
-    wire        p_present  = sl_win ? sl_present : op_present;
-    wire        p_commit   = sl_win ? sl_commit  : op_commit;
-    wire        p_dummy    = sl_win ? 1'b1       : op_dummy;
-    wire        p_ovr      = sl_win ? 1'b0       : op_ovr;
-    wire [15:0] p_addr     = sl_win ? u_addr     : op_addr;
+    // ...and under the fast override's window the peripherals see the
+    // override's byte as the op it is (hd_card steps on `ours`).
+    wire        ov_win     = seq_ovr_win;
+    wire        p_present  = sl_win ? sl_present : ov_win ? (u_present && u_ovr) : op_present;
+    wire        p_commit   = sl_win ? sl_commit  : ov_win ? 1'b0 : op_commit;
+    wire        p_dummy    = sl_win ? 1'b1       : ov_win ? 1'b0 : op_dummy;
+    wire        p_ovr      = sl_win ? 1'b0       : ov_win ? 1'b1 : op_ovr;
+    wire [15:0] p_addr     = (sl_win || ov_win) ? u_addr : op_addr;
     // ...and its bank: the retired op's in the slot window, the override's
     // for a DMA cycle, the core's otherwise - the core is held for the length
     // of its own bus cycle, so its bank is the presented op's.
-    wire [7:0]  p_bank     = sl_win ? u_bank : (op_ovr ? ovr_bank : cpu_bank);
-    wire        p_rw       = sl_win ? u_rw       : op_rw;
-    wire [7:0]  p_wdata    = sl_win ? u_wdata    : op_wdata;
+    wire [7:0]  p_bank     = (sl_win || ov_win) ? u_bank : (op_ovr ? ovr_bank : cpu_bank);
+    wire        p_rw       = (sl_win || ov_win) ? u_rw : op_rw;
+    wire [7:0]  p_wdata    = (sl_win || ov_win) ? u_wdata : op_wdata;
     logic       sl_claim_fast;
     always_ff @(posedge apple_clk) begin
         if (apple_rst)                    sl_claim_fast <= 1'b0;
@@ -1205,12 +1223,14 @@ module gs_top #(
         .drv_din       (drv_din),
         .op_inflight   (op_inflight),
         .ovr_en        (ovr_en),
+        .ovr_fast      (hd_ovr_fast), .ovr_addr (ovr_addr), .ovr_rw (ovr_rw), .ovr_wdata (ovr_wdata),
+        .ovr_win       (seq_ovr_win),
         .ovr_bank      (ovr_bank),
         .bus_owns      (bus_owns),
         .core_valid    (core_valid),
         .mem_sub_en    (mem_sub_en),
         .mem_sub_data  (mem_sub_data),
-        .decided       (mem_decided),
+        .decided       (mem_decided), .blocked (mem_blocked),
         .busy          (mem_busy),
         .mq_valid      (1'b0),          // the page engine has no request queue: busy covers it
         .bus_tick      (bus_tick),
@@ -1964,11 +1984,10 @@ module gs_top #(
         .pay_valid   (app_pay_valid),
         .op_present  (u_present),
         .image_ready (mem_image_ready),
-        .pw_valid    (rl_pw_valid),
-        .pw_ppn      (rl_pw_ppn),
-        .pw_off      (rl_pw_off),
-        .pw_data     (rl_pw_data),
-        .pw_take     (pw_take_w && !pw_valid_w),
+        .ld_valid    (rl_ld_valid),
+        .ld_line     (rl_ld_line),
+        .ld_wdata    (rl_ld_wdata),
+        .ld_take     (rl_ld_take),
         .busy        (rom_busy),
         .overruns    (rom_overruns),
         .xlanded     (rom_xlanded),
@@ -1979,9 +1998,9 @@ module gs_top #(
     // writes, and the ROM load.  The front goes first - it holds the machine
     // up (accel_seq's d_pending) while the loader never does, and the loader
     // only ever runs before the machine does.
-    wire        rl_pw_valid;
-    wire [15:0] rl_pw_ppn;
-    wire [7:0]  rl_pw_off, rl_pw_data;
+    wire         rl_ld_valid, rl_ld_take;
+    wire [19:0]  rl_ld_line;
+    wire [127:0] rl_ld_wdata;
     wire        rom_busy;
     wire [7:0]  rom_overruns;
     // Absolute chunks drained whole: the extended ROM's own count, which
@@ -1997,12 +2016,13 @@ module gs_top #(
     // The shadow duplicate's drops (docs/GS.md rung 3e), read back in
     // MEM_ROM's top byte; zero at GS = 0, where there are no duplicates.
     wire [7:0]  mem_shd_drops;
-    wire        pw_any_valid = pw_valid_w || rl_pw_valid;
-    wire [15:0] pw_any_ppn   = pw_valid_w ? pw_ppn_w  : rl_pw_ppn;
-    wire [7:0]  pw_any_off   = pw_valid_w ? pw_off_w  : rl_pw_off;
-    wire [7:0]  pw_any_data  = pw_valid_w ? pw_data_w : rl_pw_data;
+    // The posted seam is L1-D's alone since the loader writes lines (rung 6).
+    wire        pw_any_valid = pw_valid_w;
+    wire [15:0] pw_any_ppn   = pw_ppn_w;
+    wire [7:0]  pw_any_off   = pw_off_w;
+    wire [7:0]  pw_any_data  = pw_data_w;
 
-    page_cache #(.SETS (MEM_SETS), .WAYS (MEM_WAYS)) u_cache (
+    page_cam #(.N (MEM_SETS)) u_cache (
         .clk         (apple_clk),
         .rst         (apple_rst),
         .cl_valid    (cl_valid),
@@ -2033,6 +2053,7 @@ module gs_top #(
         .op_row_v    (mem_op_row_v), .op_row (mem_op_row), .op_row_ppn (mem_op_row_ppn),
         .sub_data    (mem_sub_data),
         .decided     (mem_decided),
+        .op_blocked  (mem_blocked),
         .busy        (mem_busy),
         .mw_stb      (fb_mw_stb),
         .mw_addr     (fb_mw_addr),
@@ -2074,8 +2095,9 @@ module gs_top #(
         .mem_flushes (mem_flushes),
         .mem_declines (mem_declines),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
-        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
-        .pr_valid (pr_valid), .pr_data (pr_data)
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_sel (pq_sel), .pq_ready (pq_ready),
+        .pr_valid (pr_valid), .pr_data (pr_data),
+        .ld_valid (rl_ld_valid), .ld_line (rl_ld_line), .ld_wdata (rl_ld_wdata), .ld_take (rl_ld_take)
     );
 
     // ---- the beam every consumer takes (docs/VIRTUAL_TIME.md) ---------------
@@ -2282,6 +2304,7 @@ module gs_top #(
     // Two VIAs answering for an empty slot, and since docs/AUDIO.md the AYs'
     // sound too, sampled below.  As a Phasor, the same two VIAs behind the
     // Phasor's mode register.  See rtl/mockingboard.sv.
+    generate if (HAS_MB) begin : g_mb
     mockingboard u_mb (
         .clk           (apple_clk),
         .rst           (apple_rst),
@@ -2306,6 +2329,9 @@ module gs_top #(
         .rd_data       (mb_rd_data),
         .irq           (mb_irq)
     );
+    end else begin : g_no_mb
+        assign mb_ay_out = 40'd0; assign mb_rd_claim = 1'b0; assign mb_rd_data = 8'd0; assign mb_irq = 1'b0;
+    end endgenerate
 
     // ---- the sound (docs/AUDIO.md) ---------------------------------------------
     // The speaker flip-flop on the same two doors the host toggled on, the
@@ -2359,6 +2385,7 @@ module gs_top #(
     // the Pi's mouse arriving as MOUSE_MOVE messages.  On the peripherals'
     // view like the Mockingboard, its interrupt on the short route.  See
     // rtl/mouse_card.sv and docs/MOUSE.md.
+    generate if (HAS_MOUSE) begin : g_mouse
     mouse_card u_mouse (
         .clk           (apple_clk),
         .rst           (apple_rst),
@@ -2389,6 +2416,10 @@ module gs_top #(
         .buttons_rd    (mouse_buttons),
         .moves_rd      (mouse_moves)
     );
+    end else begin : g_no_mouse
+        assign mouse_rd_claim = 1'b0; assign mouse_rd_data = 8'd0; assign mouse_irq = 1'b0; assign mouse_rom_loaded = 1'b0;
+        assign mouse_x = 16'd0; assign mouse_y = 16'd0; assign mouse_mode = 4'd0; assign mouse_buttons = 2'd0; assign mouse_moves = 8'd0;
+    end endgenerate
 
     // ---- the Uthernet II ----------------------------------------------------
     // A W5100 on the card - registers, rings, the socket machine - with the

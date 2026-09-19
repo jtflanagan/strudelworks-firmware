@@ -84,11 +84,19 @@ module rom_loader #(
     // op_present is the bus cycle's start: see THE WINDOW below.
     input  wire        op_present,
     input  wire        image_ready,
-    output wire        pw_valid,
-    output wire [15:0] pw_ppn,
-    output wire [7:0]  pw_off,
-    output wire [7:0]  pw_data,
-    input  wire        pw_take,
+    // THE LINES, TO THE DDR3 (docs/CORE_REFACTOR_65816.md, 2026-09-19): a chunk
+    // drains as thirty-two 16-byte line writes through the page cache's line
+    // port (rtl/gs/page_cache.sv ld_*), straight into the backing store and
+    // never into the cache.  Before this the bytes went through the posted
+    // seam, so every ROM page sat in the cache DIRTY for ever and paid a
+    // sixteen-beat write-back whenever a RAM page evicted it (7,100 flushes
+    // on a GS/OS boot); now a ROM page fills clean on demand and a clean
+    // victim is dropped.  A page resident when its line lands would be stale:
+    // a load only ever runs held after a card reset, with the cache empty.
+    output wire         ld_valid,
+    output wire [19:0]  ld_line,       // {physical page, line}
+    output wire [127:0] ld_wdata,
+    input  wire         ld_take,       // the cache took the line
 
     output wire        busy,          // draining: the host waits on this
     output logic [7:0] overruns,      // chunks dropped because one was draining
@@ -157,7 +165,6 @@ module rom_loader #(
     end
     wire in_window = (since_op <= 8'(WIN)) || (since_op == 8'hFF);
 
-    wire [31:0] dr_word = stage[dr_k[8:2]];
 
     always_ff @(posedge clk) begin
         if (buf_we) stage[rx_idx[6:0] - 7'd1] <= pay_data;
@@ -167,13 +174,30 @@ module rom_loader #(
     // A chunk is two 256-byte pages, so the page this byte belongs to is the
     // chunk number and the top bit of the byte index, counted from the base.
     wire [CW:0] dr_page = {dr_chunk, dr_k[8]};
-    assign pw_valid = draining && image_ready && in_window;
+    assign ld_valid = draining && image_ready && in_window && sum_ok;
     // A chunk is two pages either way; an absolute one counts from the page
     // the host named instead of from ROM_PPN0.
-    assign pw_ppn   = dr_abs ? (dr_ppn + {15'd0, dr_k[8]})
-                             : (ROM_PPN0 + {{(15 - CW){1'b0}}, dr_page});
-    assign pw_off   = dr_k[7:0];
-    assign pw_data  = dr_word[8 * dr_k[1:0] +: 8];
+    wire [15:0] dr_ppn_now = dr_abs ? (dr_ppn + {15'd0, dr_k[8]})
+                                    : (ROM_PPN0 + {{(15 - CW){1'b0}}, dr_page});
+    assign ld_line  = {dr_ppn_now, dr_k[7:4]};
+    // The line: four staging words, byte 0 of the row the lowest byte of the
+    // first (the order the posted path put them in).
+    assign ld_wdata = {stage[{dr_k[8:4], 2'd3}], stage[{dr_k[8:4], 2'd2}],
+                       stage[{dr_k[8:4], 2'd1}], stage[{dr_k[8:4], 2'd0}]};
+    // ...and its bytes' sum, for the ack the host checks its file against -
+    // REGISTERED (the 50T candidate and gs_r8 missed timing on this tree and
+    // the running sum in one clock): the line stands while it is offered, so
+    // the sum taken from it a clock earlier is the line's own on the take.
+    logic [11:0] line_sum_c, line_sum;
+    always_comb begin
+        line_sum_c = 12'd0;
+        for (int b = 0; b < 16; b = b + 1) line_sum_c = line_sum_c + {4'd0, ld_wdata[8*b +: 8]};
+    end
+    logic        sum_ok;                  // ...and not on the line's first clock, when it is the last line's
+    always_ff @(posedge clk) begin
+        line_sum <= line_sum_c;
+        sum_ok   <= !rst && !ld_take;
+    end
     assign busy     = draining;
 
     // ---- the ack --------------------------------------------------------------
@@ -231,7 +255,7 @@ module rom_loader #(
     logic [16:0] dr_sum;          // the drained chunk's bytes, summed
     // ...with this clock's byte, for the last one: what the ack carries and
     // what a first landing adds to rom_sum.
-    wire  [16:0] dr_sum_last = dr_sum + {9'd0, pw_data};
+    wire  [16:0] dr_sum_last = dr_sum + {5'd0, line_sum};
 
     always_ff @(posedge clk) begin
         ack_raise        <= 1'b0;
@@ -325,8 +349,8 @@ module rom_loader #(
                 dr_abs   <= abs_q;
                 dr_ppn   <= abs_ppn_q;
                 dr_sum   <= '0;
-            end else if (draining && pw_take) begin
-                if (dr_k == 9'd511) begin
+            end else if (draining && ld_take) begin
+                if (dr_k == 9'd496) begin       // the last of the 32 lines
                     draining       <= 1'b0;
                     // An absolute chunk satisfies nothing: `seen` and
                     // `rom_sum` are the BASE ROM's completeness, and
@@ -360,7 +384,7 @@ module rom_loader #(
                     ack_raise_chunk  <= dr_abs ? dr_ppn[11:0] : 12'(dr_chunk);
                     ack_raise_sum    <= dr_sum_last[15:0];
                 end else begin
-                    dr_k   <= dr_k + 9'd1;
+                    dr_k   <= dr_k + 9'd16;
                     dr_sum <= dr_sum_last;
                 end
             end

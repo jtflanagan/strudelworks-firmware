@@ -30,6 +30,7 @@ set board_part(au_v2) xc7a35tftg256-2
 set board_part(pt_v2) xc7a100tfgg484-2
 
 set part      ""
+set gs50t     0
 set jobs      4
 set keep_open 0
 set synth_only 0
@@ -67,6 +68,7 @@ for {set i 0} {$i < $argc} {incr i} {
         -board  -
         --board { incr i; set board [lindex $argv $i] }
         -part   { incr i; set part [lindex $argv $i] }
+        -gs50t  { set gs50t 1 }
         -outdir { incr i; set outdir [lindex $argv $i] }
         -synth_only { set synth_only 1 }
         -open   { set keep_open 1 }
@@ -267,7 +269,6 @@ if {$snoop || $master} {
         add_files -norecurse [list \
             [file join $root rtl $card accel_seq.sv] \
             [file join $root rtl $card fast_census.sv] \
-            [file join $root rtl $card page_cache.sv] \
             [file join $root rtl $card way_ram.sv] \
             [file join $root rtl $card apple_mmu.sv] \
             [file join $root rtl $card rom_loader.sv] \
@@ -280,8 +281,13 @@ if {$snoop || $master} {
             [file join $root rtl $card l1d.sv] \
             [file join $root rtl $card tlb.sv] \
         ]
-        # The gs card's branch scanner (docs/CORE_REFACTOR_65816.md rung 4).
-        if {$card eq "gs"} { add_files -norecurse [list [file join $root rtl gs iscan.sv]] }
+        # L2: the a2 card's set cache; the gs card's CAM (docs/CORE_REFACTOR_65816.md
+        # "The CAM-L2") beside its branch scanner (rung 4).
+        if {$card eq "gs"} {
+            add_files -norecurse [list [file join $root rtl gs iscan.sv] [file join $root rtl gs page_cam.sv]]
+        } else {
+            add_files -norecurse [list [file join $root rtl a2 page_cache.sv]]
+        }
     } else {
         add_files -norecurse [list [file join $root rtl common snoop_top.sv]]
     }
@@ -344,6 +350,12 @@ if {$stamp_date != 0 || $stamp_time != 0} {
 # plain build must present Vivado with exactly the source it always did, so
 # that "bit-identical at GS = 0" is a statement about the toolchain's input
 # and not only about the RTL's meaning.
+if {$gs && $gs50t} {
+    # THE 50T CANDIDATE (docs/CORE_REFACTOR_65816.md): the CAM-L2 at 32 slots,
+    # no Mockingboard, no slot mouse card, the register file at MINIMAL.
+    puts " variant: the 50T candidate (32 slots, no MB, no mouse, MINIMAL regs)"
+    set_property generic [list MEM_SETS=32 HAS_MB=0 HAS_MOUSE=0 MINIMAL_REGS=1] [current_fileset]
+}
 if {$gs} {
     # GS is a localparam of gs_top since the tree split (2026-09-18): nothing to pass.
 }

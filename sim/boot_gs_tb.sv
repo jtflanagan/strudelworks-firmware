@@ -51,6 +51,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     parameter integer TARGET = 0,
                     parameter integer MAX_INSTRS = 200000,
                     parameter integer TLB_N = 16,        // the TLB's entries (--tlb=N: a census lever)
+                    parameter integer L2_SETS = 64,      // the CAM-L2's slots (--l2=N)
+                    parameter integer L2_WAYS = 2,       // nominal: a one-bit way, always zero
+                    parameter integer FAST_DMA = 1,      // 0: the hard disk's blocks land by the bus (--slowdma)
                     parameter integer MAX_CLKS = 400000000,
                     parameter integer PHI0_HIGH = 49,
                     // What the IIe backplane puts on the data pins when
@@ -347,7 +350,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        fev_valid, fev_rw, fev_sync;
     wire [15:0] fev_addr;
     wire [7:0]  fev_bank, fev_data;
-    wire        accel_on, decided, busy;
+    wire        accel_on, decided, mem_blocked, busy;
     wire [1:0]  q_cls;
     wire [3:0]  seq_state;
     wire [31:0] fast_ops, bus_ops, cycles, wait_clocks, accel_maps, turbo_ops;
@@ -366,10 +369,70 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // The byte mux follows the REGISTERED op, exactly as master_top's does.
     wire [7:0]  swi_byte = seq_slot_q ? hd_rd_data : gsio_u_claim ? gsio_byte : mmu_swi_stat;
     integer sl_trace_n = 0;
-    always @(posedge clk) if (swi_commit && seq_slot_q && sl_trace_n < 24) begin
-        sl_trace_n = sl_trace_n + 1;
-        $display("    slot fast: $%02x/%04x %s byte=$%02x claim=%0d pc=$%02x/%04x", u_bank, u_addr, u_rw ? "rd" : "wr", swi_byte, hd_rd_claim, cpu_pc24[23:16], cpu_pc24[15:0]);
+    longint sl_present_at = 0, sl_lat_sum = 0, sl_lat_n = 0;
+    always @(posedge clk) begin
+        if (u_present && seq_slot_q) sl_present_at = now;
+        if (swi_commit && seq_slot_q) begin
+            sl_lat_sum = sl_lat_sum + (now - sl_present_at); sl_lat_n = sl_lat_n + 1;
+            if (sl_trace_n < 24) begin
+                sl_trace_n = sl_trace_n + 1;
+                $display("    slot fast: $%02x/%04x %s byte=$%02x claim=%0d pc=$%02x/%04x  %0d clocks from present", u_bank, u_addr, u_rw ? "rd" : "wr", swi_byte, hd_rd_claim, cpu_pc24[23:16], cpu_pc24[15:0], now - sl_present_at);
+            end
+        end
     end
+    // THE CLOCK CENSUS: every clock after boot_go in one bucket, by what the
+    // machine was doing or waiting on (the a2 ladder's rung-6 instrument).
+    longint cc_retire = 0, cc_ifill = 0, cc_dread = 0, cc_dserve = 0, cc_fast = 0, cc_bus = 0,
+            cc_held = 0, cc_null = 0, cc_settle = 0, cc_dpend = 0, cc_claim = 0, cc_decide = 0,
+            cc_stall = 0, cc_other = 0, cc_all = 0, cc_cl_leash = 0, cc_cl_room = 0, cc_cl_d = 0, cc_cl_i = 0, cc_ovr = 0;
+    always @(posedge clk) if (boot_go) begin
+        cc_all = cc_all + 1;
+        if (cpu_cyc_en)                                   cc_retire = cc_retire + 1;
+        else if (seq_state == 4'd3)                       cc_bus    = cc_bus + 1;   // S_BUS
+        else if (seq_state == 4'd4)                       cc_held   = cc_held + 1;   // S_HELD
+        else if (seq_state == 4'd2)                       cc_fast   = cc_fast + 1;   // S_FAST
+        else if (seq_state == 4'd5)                       cc_null   = cc_null + 1;   // S_NULL
+        else if (seq_state == 4'd6)                       cc_ovr    = cc_ovr + 1;    // S_OVR: the fast DMA
+        else if (fd35_stall)                              cc_stall  = cc_stall + 1;
+        else if (u_l1i.fill_busy || u_l1i.fst == 3'd4)    cc_ifill  = cc_ifill + 1;  // F_TLB
+        else if (u_l1d.l2_pend || u_l1d.l2_v_q)           cc_dread  = cc_dread + 1;
+        else if (u_l1d.sv_hit_q)                          cc_dserve = cc_dserve + 1;
+        else if (l1_settling)                             cc_settle = cc_settle + 1;
+        else if (d_pending_w)                             cc_dpend  = cc_dpend + 1;
+        else if (turbo_claim || d_claim_w) begin
+            cc_claim = cc_claim + 1;
+            if (!turbo_ok)            cc_cl_leash = cc_cl_leash + 1;
+            else if (!room_q)         cc_cl_room  = cc_cl_room + 1;
+            else if (d_claim_w)       cc_cl_d     = cc_cl_d + 1;
+            else                      cc_cl_i     = cc_cl_i + 1;
+        end
+        else if (seq_state == 4'd1)                       cc_decide = cc_decide + 1; // S_DECIDE
+        else                                              cc_other  = cc_other + 1;
+    end
+    // The fast override's bytes into the watched page, with the cache's verdict.
+    integer ov_trace_n = 0;
+    always @(posedge clk) if (u_present && u_ovr && u_bank == 8'h00 && u_addr[15:8] == 8'h24 && ov_trace_n < 40) begin
+        ov_trace_n = ov_trace_n + 1;
+        $display("      ovr present $%04x <= $%02x at %0d: cache state %0d busy %0d eng_idle %0d", u_addr, u_wdata, now, u_cache.state, busy, u_cache.eng_idle);
+    end
+    always @(posedge clk) if (decided && u_addr[15:8] == 8'h24 && u_bank == 8'h00 && u_ovr && ov_trace_n < 80) begin
+        ov_trace_n = ov_trace_n + 1;
+        $display("      decided $%04x at %0d: blocked %0d s_hit %0d state %0d", u_addr, now, mem_blocked, u_cache.s_hit, u_cache.state);
+    end
+    // A sequencer state that stands 200 k clocks is a deadlock: name it.
+    integer seq_stand = 0; reg [3:0] seq_state_prev = 4'd0;
+    always @(posedge clk) begin
+        if (seq_state != seq_state_prev || cpu_cyc_en) seq_stand = 0; else seq_stand = seq_stand + 1;
+        seq_state_prev = seq_state;
+        if (seq_stand == 200000)
+            $error("boot_gs_tb: the sequencer has stood in state %0d for 200k clocks: ovr_en=%0d ovr_rw=%0d ovr_fast=%0d ovr_addr=$%04x busy=%0d decided=%0d u_present=%0d op_inflight=%0d d_pending=%0d hd.st=%0d hd.pidx=%0d hd.dma_count=%0d",
+                   seq_state, hd_ovr_en, hd_ovr_rw, hd_ovr_fast, hd_ovr_addr, busy, decided, u_present, op_inflight, d_pending_w, u_hd.st, u_hd.pidx, u_hd.dma_count);
+    end
+    // The dispatcher's fast ops by {rw, bank, page}: where the dispatcher's time goes.
+    integer fast_pg [0:131071];
+    initial for (int q = 0; q < 131072; q = q + 1) fast_pg[q] = 0;
+    always @(posedge clk) if (u_present && !u_ovr)
+        fast_pg[{u_rw, u_bank, u_addr[15:8]}] = fast_pg[{u_rw, u_bank, u_addr[15:8]}] + 1;
     integer hd_trace_n = 0;
     always @(posedge clk) if ((u_hd.arm_write || u_hd.exec_read) && hd_trace_n < 24) begin
         hd_trace_n = hd_trace_n + 1;
@@ -403,8 +466,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // The TLB and the direct way read (docs/CORE_REFACTOR_65816.md rung 2), as gs_top wires them.
     wire [15:0] la_vpage_w, la_ppn_w, fi_vpage_w, fi_ppn_w, lb_vpage_w, lb_ppn_w, fj_vpage_w, fj_ppn_w;
     wire [15:0] kill_ppn_w, op_place_ppn_w;
-    wire [6:0]  la_set_w, fi_set_w, lb_set_w, fj_set_w, op_place_set_w, evict_set_w, ref_set_w, dr_set_w, dr_set_i, dr_set_d;
-    wire [2:0]  la_way_w, fi_way_w, lb_way_w, fj_way_w, op_place_way_w, evict_way_w, ref_way_w, dr_way_w, dr_way_i, dr_way_d;
+    localparam integer L2_SIDX = $clog2(L2_SETS);
+    localparam integer L2_LEV  = $clog2(L2_WAYS);
+    wire [L2_SIDX-1:0] la_set_w, fi_set_w, lb_set_w, fj_set_w, op_place_set_w, evict_set_w, ref_set_w, dr_set_w, dr_set_i, dr_set_d;
+    wire [L2_LEV-1:0]  la_way_w, fi_way_w, lb_way_w, fj_way_w, op_place_way_w, evict_way_w, ref_way_w, dr_way_w, dr_way_i, dr_way_d;
     wire        la_hit_w, lb_hit_w, fi_v_w, fi_busy_w, fj_v_w, fj_ack_w, kill_v_w;
     wire        op_place_v_w, evict_v_w, ref_v_w, ref_on_w;
     wire [3:0]  fi_reg_w, fj_reg_w, dr_line_w, dr_line_i, dr_line_d;
@@ -459,8 +524,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .op_divert (op_divert), .op_sync (drv_sync), .op_addr (op_addr), .op_rw (op_rw),
         .op_wdata (op_wdata), .cyc_done (drv_cyc_done), .drv_din (drv_din),
         .op_inflight (op_inflight), .ovr_en (hd_ovr_en), .ovr_bank (hd_ovr_en ? hd_ovr_bank : 8'd0),
+        .ovr_fast (hd_ovr_fast), .ovr_addr (hd_ovr_addr), .ovr_rw (hd_ovr_rw), .ovr_wdata (hd_ovr_wdata),
+        .ovr_win (seq_ovr_win),
         .bus_owns (bus_owns), .core_valid (core_valid),
-        .mem_sub_en (mem_sub_en), .mem_sub_data (mem_sub_data), .decided (decided), .busy (busy),
+        .mem_sub_en (mem_sub_en), .mem_sub_data (mem_sub_data), .decided (decided), .blocked (mem_blocked), .busy (busy),
         .mq_valid (1'b0),
         .bus_tick (bus_tick),
         .u_present (u_present), .u_commit (u_commit), .u_addr (u_addr), .u_bank (u_bank),
@@ -477,7 +544,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // ---- the fronts (rtl/iline.sv, rtl/dline.sv at GS = 1) ---------------------
     // The instruction front: two lines of the program stream ahead of the
     // sequencer, in the program's bank.
-    l1i u_l1i (
+    l1i #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .pc_addr (cpu_pc24[15:0]), .pc_bank (cpu_pc24[23:16]),
         .cpu_rw (cpu_rw_eff), .cpu_sync (cpu_sync),
@@ -511,7 +578,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     initial for (int q = 0; q < 65536; q = q + 1) slow_pg[q] = 0;
     always @(posedge clk) if (seq_cyc_en && cpu_cyc_is_i && cpu_rw_eff)
         slow_pg[{cpu_pc24[23:16], cpu_pc24[15:8]}] = slow_pg[{cpu_pc24[23:16], cpu_pc24[15:8]}] + 1;
-    tlb #(.N (TLB_N)) u_tlb (
+    tlb #(.SIDX (L2_SIDX), .LEV (L2_LEV), .N (TLB_N)) u_tlb (
         .clk (clk), .rst (rst), .serve (serve), .inval (1'b0),
         .map_changed (map_changed), .rt_rd_flat (rt_rd_flat),
         .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
@@ -533,7 +600,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [247:0] gsio_fr_vec;
     reg  [247:0] io_vec_q = 248'd0;
     always @(posedge clk) io_vec_q <= gsio_fr_vec;
-    l1d u_l1d (
+    l1d #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1d (
         .kbd_en (1'b1), .kbd_byte (gs_c000_byte), .kbd_rd (dl_kbd_rd),
         .io_flat (gs_shadow_w[6]), .io_vec (io_vec_q), .swi_busy (swi_commit),
         .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
@@ -574,10 +641,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [31:0] dl_serves;
 
     // The posted-write seam, shared with the ROM loader as in master_top.
-    wire        pw_any_valid = pw_valid_w || rl_pw_valid;
-    wire [15:0] pw_any_ppn   = pw_valid_w ? pw_ppn_w  : rl_pw_ppn;
-    wire [7:0]  pw_any_off   = pw_valid_w ? pw_off_w  : rl_pw_off;
-    wire [7:0]  pw_any_data  = pw_valid_w ? pw_data_w : rl_pw_data;
+    wire        pw_any_valid = pw_valid_w;
+    wire [15:0] pw_any_ppn   = pw_ppn_w;
+    wire [7:0]  pw_any_off   = pw_off_w;
+    wire [7:0]  pw_any_data  = pw_data_w;
 
     apple_bus_write #(.T_PRESENT (T_PRESENT), .T_EMIT (T_EMIT), .T_DIN (T_DIN), .T_CYCEN (T_CYCEN)) u_write (
         .clk (clk), .rst (rst), .phi0_sync (phi0_sync), .data_sync (data_sync),
@@ -591,7 +658,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // to claim as well (gs_top's sl_claim_fast).
         .slot_rd_claim (hd_rd_claim && !sl_claim_fast), .slot_rd_data (hd_rd_data),
         .din_sub_en (sub_en), .din_sub_data (sub_data),
-        .ovr_en (hd_ovr_en), .ovr_addr (hd_ovr_addr), .ovr_rw (hd_ovr_rw),
+        .ovr_en (hd_ovr_en && !hd_ovr_fast), .ovr_addr (hd_ovr_addr), .ovr_rw (hd_ovr_rw),
         .ovr_wdata (hd_ovr_wdata),
         .op_ovr (op_ovr), .op_dummy (op_dummy), .op_inflight (op_inflight),
         .nxt_addr (nxt_addr), .divert (serve && q_divert), .op_divert (op_divert),
@@ -685,13 +752,16 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // device select served fast), the driver's op otherwise.  The host
     // model below taps the same view, as the real host taps the capture's
     // bus words and fast words alike.
-    wire        hp_present = sl_win ? (u_present && seq_slot_q) : op_present;
-    wire        hp_commit  = sl_win ? (swi_commit && seq_slot_q) : op_commit;
-    wire        hp_ovr     = sl_win ? 1'b0 : op_ovr;
-    wire        hp_rw      = sl_win ? u_rw : op_rw;
-    wire [15:0] hp_addr    = sl_win ? u_addr : op_addr;
-    wire [7:0]  hp_bank    = sl_win ? u_bank : drv_bank;
-    wire [7:0]  hp_wdata   = sl_win ? u_wdata : drv_din;
+    // ...and the fast override's window (accel_seq S_OVR), as gs_top shows it.
+    wire        seq_ovr_win;
+    wire        hd_ovr_fast = (FAST_DMA != 0) && accel_on && hd_ovr_en && !hd_ovr_rw;
+    wire        hp_present = sl_win ? (u_present && seq_slot_q) : seq_ovr_win ? (u_present && u_ovr) : op_present;
+    wire        hp_commit  = sl_win ? (swi_commit && seq_slot_q) : seq_ovr_win ? 1'b0 : op_commit;
+    wire        hp_ovr     = sl_win ? 1'b0 : seq_ovr_win ? 1'b1 : op_ovr;
+    wire        hp_rw      = (sl_win || seq_ovr_win) ? u_rw : op_rw;
+    wire [15:0] hp_addr    = (sl_win || seq_ovr_win) ? u_addr : op_addr;
+    wire [7:0]  hp_bank    = (sl_win || seq_ovr_win) ? u_bank : drv_bank;
+    wire [7:0]  hp_wdata   = (sl_win || seq_ovr_win) ? u_wdata : drv_din;
 
     // ---- the memory path, on the unified stream ----------------------------------
     wire        cl_valid, cl_rw, cl_wr_image, cl_aux, cl_posted, cl_sh, intc8rom;
@@ -719,6 +789,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        pq_busy, pq_valid, pq_we, pq_ready, pr_valid;
     wire [19:0] pq_line;
     wire [127:0] pq_wdata, pr_data;
+    wire [15:0]  pq_sel;
     wire        pw_take_w, pw_ready_w;
     wire [15:0] p_ppn_w, d_ppn_w;
     wire [3:0]  p_reg_w, d_reg_w;
@@ -1065,9 +1136,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         demo_launched_at = trace_instrs;
 
     // ROM 3 is 512 chunks of 512 bytes landing at physical bank $FC page $00.
-    wire        rl_pw_valid;
-    wire [15:0] rl_pw_ppn;
-    wire [7:0]  rl_pw_off, rl_pw_data;
+    wire         rl_ld_valid, rl_ld_take;
+    wire [19:0]  rl_ld_line;
+    wire [127:0] rl_ld_wdata;
     wire        rom_busy;
     wire [7:0]  rom_overruns;
     rom_loader #(.N_CHUNKS (ROM_CHUNKS), .ROM_PPN0 (16'hFC00)) u_rom (
@@ -1075,12 +1146,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
         .pay_data (pay_data), .pay_valid (pay_valid),
         .op_present (u_present), .image_ready (image_ready),
-        .pw_valid (rl_pw_valid), .pw_ppn (rl_pw_ppn), .pw_off (rl_pw_off),
-        .pw_data (rl_pw_data), .pw_take (pw_take_w && !pw_valid_w),
+        .ld_valid (rl_ld_valid), .ld_line (rl_ld_line), .ld_wdata (rl_ld_wdata), .ld_take (rl_ld_take),
         .busy (rom_busy), .overruns (rom_overruns), .rom_ok (rom_loaded)
     );
 
-    page_cache u_cache (
+    page_cam #(.N (L2_SETS)) u_cache (
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_ppn (cl_ppn_w), .cl_off (cl_off[7:0]),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_wdata (cl_wdata), .cl_posted (cl_posted),
@@ -1090,7 +1160,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .shd_take (shd_take_w), .shd_ppn (shd_ppn_w), .shd_off (shd_off_w),
         .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
-        .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .busy (busy),
+        .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .op_blocked (mem_blocked), .busy (busy),
         .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .mw_stb (), .mw_addr (tb_mw_addr), .mw_byte (tb_mw_byte), .mwx_stb (tb_mwx_stb), .mw_bank (tb_mw_bank),
         .ref_v (ref_v_w), .ref_set (ref_set_w), .ref_way (ref_way_w), .ref_on (ref_on_w),
@@ -1107,8 +1177,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .fifo_drops (fifo_drops),
         .mem_fills (mem_fills), .mem_flushes (mem_flushes), .mem_declines (mem_declines),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
-        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_sel (pq_sel), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data),
+        .ld_valid (rl_ld_valid), .ld_line (rl_ld_line), .ld_wdata (rl_ld_wdata), .ld_take (rl_ld_take),
         .dbg_sel (4'd0), .dbg_val ()
     );
     wire [31:0] mem_fills, mem_flushes, mem_declines;
@@ -1141,7 +1212,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .master_active (master_active), .op_present (op_present),
         .accel (accel_on),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
-        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_sel (pq_sel), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data),
         .req (c_req[1]), .gnt (c_gnt[1]), .cyc (c_cyc[1]), .stb (c_stb[1]),
         .we (c_we[1]), .addr (c_addr[47:24]), .data (c_data[255:128]), .sel (c_sel[31:16]),
@@ -1759,7 +1830,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             $display("    eng %0d: fill ppn $%04X crit line %0d, victim $%04X %0s, set %0d way %02X, %0s",
                      now, u_cache.e_ppn, u_cache.e_crit, u_cache.e_old,
                      u_cache.e_dirty ? "DIRTY" : "clean",
-                     u_cache.e_set, u_cache.e_way,
+                     u_cache.e_slot, 1'b0,
                      u_cache.e_rw ? "read" : "write");
     end
 
@@ -2187,14 +2258,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         if (u_cache.wl_v && u_cache.wl_row == {7'd1, 4'd0}) begin
             pw4c = pw4c + 1;
             $display("    4c LAND: way %02x be %04x byte $%02X at %0d clocks; the entrant was ppn $%04X off $%02X",
-                     u_cache.wl_way, u_cache.wl_be, u_cache.wl_data[7:0], now,
+                     u_cache.wl_slot, u_cache.wl_be, u_cache.wl_data[7:0], now,
                      cl_ppn_w, cl_off[7:0]);
         end
         if (u_cache.eb_en && u_cache.eb_we != 16'd0 &&
             u_cache.eb_addr == {7'd1, 4'd0}) begin
             pw4c = pw4c + 1;
             $display("    4c ENG: state %0d way %02x we %04x byte $%02X at %0d clocks; e_ppn $%04X e_old $%04X",
-                     u_cache.state, u_cache.e_way, u_cache.eb_we,
+                     u_cache.state, u_cache.e_slot, u_cache.eb_we,
                      u_cache.eb_wdata[7:0], now, u_cache.e_ppn, u_cache.e_old);
         end
     end
@@ -2818,39 +2889,26 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // holds it - else the DDR3 stub has it.  The bench needs this to check
     // that a block the host DMA'd in actually landed where the machine will
     // look for it.
-    localparam integer MEM_SETS = 128, MEM_WAYS = 8;
+    localparam integer MEM_SETS = L2_SETS;
     localparam integer SIDX = $clog2(MEM_SETS);
     function automatic [7:0] card_byte(input [15:0] ppn, input [7:0] off);
-        int st, w, hit;
+        int w, hit;
         logic [127:0] row;
         begin
-            st  = int'(ppn[SIDX-1:0] ^ ppn[2*SIDX-1 -: SIDX]);
             hit = -1;
-            for (w = 0; w < MEM_WAYS; w = w + 1)
-                if (u_cache.dir[w][st][17] && u_cache.dir[w][st][15:0] == ppn) hit = w;
-            row = 128'd0;
-            case (hit)
-                0: row = u_cache.g_way[0].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                1: row = u_cache.g_way[1].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                2: row = u_cache.g_way[2].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                3: row = u_cache.g_way[3].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                4: row = u_cache.g_way[4].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                5: row = u_cache.g_way[5].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                6: row = u_cache.g_way[6].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                7: row = u_cache.g_way[7].u_way.mem[{st[SIDX-1:0], off[7:4]}];
-                default: ;
-            endcase
+            for (w = 0; w < MEM_SETS; w = w + 1)
+                if (u_cache.d_v[w] && u_cache.d_tag[w] == ppn) hit = w;
+            row = (hit >= 0) ? u_cache.u_ram.mem[{hit[SIDX-1:0], off[7:4]}] : 128'd0;
             card_byte = (hit >= 0) ? row[8 * off[3:0] +: 8] : smem[{ppn, off}];
         end
     endfunction
 
     function automatic integer card_resident(input [15:0] ppn);
-        int st, w;
+        int w;
         begin
-            st = int'(ppn[SIDX-1:0] ^ ppn[2*SIDX-1 -: SIDX]);
             card_resident = 0;
-            for (w = 0; w < MEM_WAYS; w = w + 1)
-                if (u_cache.dir[w][st][17] && u_cache.dir[w][st][15:0] == ppn) card_resident = 1;
+            for (w = 0; w < MEM_SETS; w = w + 1)
+                if (u_cache.d_v[w] && u_cache.d_tag[w] == ppn) card_resident = 1;
         end
     endfunction
 
@@ -2900,6 +2958,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     bad = bad + 1;
                     if (first < 0) first = k;
                 end
+            end
+            if (bad != 0) begin : name_them
+                integer m, shown; shown = 0;
+                for (m = 0; m < 512 && shown < 24; m = m + 1)
+                    if (blk_card_byte(pend_bank, addr, m, pend_b2, pend_azp) !== himg[blk * 512 + m]) begin
+                        $display("      wrong: +%0d got $%02X want $%02X", m, blk_card_byte(pend_bank, addr, m, pend_b2, pend_azp), himg[blk * 512 + m]);
+                        shown = shown + 1;
+                    end
             end
             if (bad != 0)
                 fail($sformatf("block %0d did not land at $%02X/%04X: %0d of 512 bytes wrong, first at +%0d (got $%02X, want $%02X)",
@@ -3028,9 +3094,27 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                  u_l1d.cnt_lr_serves, u_l1d.cnt_lb_serves, u_l1d.cnt_kb_serves, u_l1d.cnt_io_serves,
                  u_l1d.cnt_posts, u_l1d.cnt_post_hi, u_l1d.cnt_dups, u_l1d.cnt_null,
                  tlb_fills_w, tlb_deaths_w);
-        $display("    L1-I: fetches the sequencer served %0d (the bubbles); line fills %0d (prefetches %0d, of them the scanner's %0d, TLB waits %0d), kills %0d, unservable %0d; turbo (one-clock) fetches %0d",
-                 u_l1i.cnt_slow_i, u_l1i.cnt_fills, u_l1i.cnt_prefetch, u_l1i.cnt_scan, u_l1i.cnt_tlb_waits,
-                 u_l1i.cnt_kills, u_l1i.cnt_unserv, turbo_ops);
+        $display("    L1-I: fetches the sequencer served %0d (the bubbles); line fills %0d (next-line prefetches %0d, opcode-time target fetches %0d, TLB waits %0d), kills %0d, unservable %0d; targets already held %0d, branches the table did not know %0d; turbo (one-clock) fetches %0d",
+                 u_l1i.cnt_slow_i, u_l1i.cnt_fills, u_l1i.cnt_prefetch, u_l1i.cnt_bt, u_l1i.cnt_tlb_waits,
+                 u_l1i.cnt_kills, u_l1i.cnt_unserv, u_l1i.cnt_bt_held, u_l1i.cnt_bt_miss, turbo_ops);
+        $display("    slot fast ops: %0d, %0d clocks from present to commit on average", sl_lat_n, sl_lat_n == 0 ? 0 : sl_lat_sum / sl_lat_n);
+        $display("    clock census of %0d clocks: retire %0d (%s%%), ifill %0d (%s%%), dread %0d (%s%%), dserve2 %0d (%s%%), seq fast %0d (%s%%), seq bus %0d (%s%%), held %0d, null %0d, disk stall %0d (%s%%), settle %0d (%s%%), drain %0d (%s%%), claim %0d (%s%%), decide %0d (%s%%), other %0d (%s%%)",
+                 cc_all, cc_retire, bc_pct(cc_retire, cc_all), cc_ifill, bc_pct(cc_ifill, cc_all), cc_dread, bc_pct(cc_dread, cc_all),
+                 cc_dserve, bc_pct(cc_dserve, cc_all), cc_fast, bc_pct(cc_fast, cc_all), cc_bus, bc_pct(cc_bus, cc_all), cc_held, cc_null,
+                 cc_stall, bc_pct(cc_stall, cc_all), cc_settle, bc_pct(cc_settle, cc_all), cc_dpend, bc_pct(cc_dpend, cc_all),
+                 cc_claim, bc_pct(cc_claim, cc_all), cc_decide, bc_pct(cc_decide, cc_all), cc_other, bc_pct(cc_other, cc_all));
+        $display("    the claim bucket: leash low %0d, no event room %0d, data side %0d, instruction side %0d; fast DMA clocks %0d (%s%%)", cc_cl_leash, cc_cl_room, cc_cl_d, cc_cl_i, cc_ovr, bc_pct(cc_ovr, cc_all));
+        begin : fast_hist
+            integer k, best, bi;
+            for (k = 0; k < 12; k = k + 1) begin
+                best = 0; bi = -1;
+                for (int q = 0; q < 131072; q = q + 1) if (fast_pg[q] > best) begin best = fast_pg[q]; bi = q; end
+                if (bi >= 0) begin
+                    $display("    dispatcher ops: %s $%02x/%02xxx  %0d", bi[16] ? "rd" : "wr", bi[15:8], bi[7:0], best);
+                    fast_pg[bi] = 0;
+                end
+            end
+        end
         begin : slow_hist
             // The slow fetches by {bank, page}: where the bubbles live.
             integer k, best, bi;
@@ -3123,8 +3207,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         else ok($sformatf("%0d instructions executed and traced", trace_instrs));
         if (mismatches != 0)
             fail($sformatf("the cache's monitor counted %0d mismatches (last %08x)", mismatches, last_mismatch));
-        if (late_fills != 0 || fifo_drops != 0)
+        // A late fill (an op that missed into a busy engine) is RETRIED by the
+        // sequencer since 2026-09-19 (page_cache op_blocked); only a drop is a loss.
+        if (fifo_drops != 0)
             fail($sformatf("late fills %0d, drops %0d", late_fills, fifo_drops));
+        else
+            ok($sformatf("no fill was dropped (%0d blocked ops were retried)", late_fills));
         if (shd_drops != 0)
             fail($sformatf("%0d shadow duplicates were dropped", shd_drops));
         if (ddr_range_bad != 0)

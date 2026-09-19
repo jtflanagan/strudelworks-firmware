@@ -57,6 +57,7 @@ module page_client #(
     input  wire         pq_we,
     input  wire [19:0]  pq_line,
     input  wire [127:0] pq_wdata,
+    input  wire [15:0]  pq_sel,      // the lanes a write carries (a2: all; gs: a write-around's one)
     output wire         pq_ready,
     // To page_cache: a read's line, in request order.
     output logic        pr_valid,
@@ -92,7 +93,7 @@ module page_client #(
     assign we       = pq_we;
     assign addr     = line_to_wb(pq_line);
     assign data     = pq_wdata;
-    assign sel      = 16'hFFFF;
+    assign sel      = pq_sel;
 
     wire accept = stb && !stall;
 

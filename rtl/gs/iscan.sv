@@ -13,26 +13,30 @@
 // direct from the core; both read 1 in emulation), and the long, stack-
 // relative and block-move forms have their own.  For every conditional
 // branch, BRA, BRL, JMP abs, JSR abs, and a JSL or JML abs-long whose bank
-// is the program's own, it names the target's line so L1-I can fetch it
-// BEFORE the PC arrives - the branch's bubble is the fill it would have paid.
+// is the program's own, it REPORTS the transfer - the opcode's address, its
+// condition and its target - into l1i's target table, so that when the PC
+// reaches the opcode l1i already holds the target and decides from the live
+// flags whether to fetch it (the user's design, 2026-09-19: the two-line
+// L1-I; nothing is prefetched on speculation, the target line is fetched
+// only when the branch is taken, a few cycles before the PC lands on it).
 // It follows unconditional flow and falls through conditional branches; RTS,
 // RTL, RTI, BRK, COP, the indirect jumps and a transfer out of the bank end
 // the trail, and the next opcode fetch anchors a new one.
 //
 // THE SCANNER CANNOT BE WRONG, ONLY WASTEFUL (the old scanner's law): its only
-// outputs are wants, classified, filtered and snooped by the fill engine like
-// any other fill, and the loop bit.  A misdecoded stream derails the walk and
-// at worst prefetches a line nobody needs; the bytes served are always the
-// buffers' own, snooped.  A wrong M or X (a REP/SEP mid-trail the walk has not
-// executed) is the same: a derailed trail, not a wrong byte.
+// output is advice about where transfers are and where they go; l1i's fetch
+// of a target is classified, filtered and snooped like any other fill, and
+// the byte the core gets is always a buffer's own, selected by the fetch's
+// real address.  A misdecoded stream (or a wrong M or X from a REP/SEP the
+// walk has not executed) derails the trail and at worst names a transfer
+// that is not one: a wasted fill, never a wrong byte.
 //
-// THE SPLIT POINTER, THE SHADOWS, THE ANCHOR and THE LOOP BIT are the old
-// scanner's (rtl/gs/iscan.sv before this rung, in git): 4-bit arithmetic in
-// the walk beat, the next line's membership registered a beat ahead, a
-// re-anchor when execution diverges from the trail, and a transfer found from
-// one held line into the other pins the pair.  The maximum instruction length
-// is FOUR here, so a step can leave ptr_lo <= 3 and the next carry is >= 3
-// beats away: the memberships are never consumed stale.
+// THE SPLIT POINTER, THE SHADOWS and THE ANCHOR are the old scanner's
+// (rtl/gs/iscan.sv before this rung, in git): 4-bit arithmetic in the walk
+// beat, the next line's membership registered a beat ahead, a re-anchor when
+// execution diverges from the trail.  The maximum instruction length is FOUR
+// here, so a step can leave ptr_lo <= 3 and the next carry is >= 3 beats
+// away: the memberships are never consumed stale.
 //////////////////////////////////////////////////////////////////////////////////
 module iscan (
     input  wire        clk,
@@ -53,20 +57,19 @@ module iscan (
     output wire [3:0]  rd_off,
     input  wire [7:0]  rd_byte,
 
-    // The buffers' tags in the program bank: the loop bit and the held filter.
+    // The buffers' tags in the program bank: the walk's window memberships.
     input  wire        v0,
     input  wire        v1,
     input  wire [11:0] vtag0,
     input  wire [11:0] vtag1,
 
-    // The prefetch want: one line, taken (or dropped) by the fill engine.
-    output logic        sw_v,
-    output logic [11:0] sw_tag,
-    input  wire         sw_taken,
-
-    // The loop bit: a transfer from lb_slot's line into the other slot's.
-    output logic       lb_v,
-    output logic       lb_slot
+    // The report, one clock per transfer found: the opcode's address, its
+    // opcode byte (the condition bits of a relative branch; BRA/BRL/JMP/JSR/
+    // JSL/JML are always taken) and its target in this bank.
+    output logic        tb_v,
+    output logic [15:0] tb_addr,
+    output logic [7:0]  tb_op,
+    output logic [15:0] tb_tgt
 );
     // ---- the 65816's lengths, and the transfers the scan acts on ------------
     localparam [2:0] C_SEQ = 3'd0,   // continue at ptr + len
@@ -141,6 +144,8 @@ module iscan (
     logic        diverged_q;
     logic [2:0]  cls_q;
     logic [7:0]  o1_q, o2_q, o3_q;
+    logic [15:0] op_ptr;              // the transfer's own address
+    logic [7:0]  op_q;                // ...and its opcode
 
     // The window read: a 4-bit add, the carry picking the next line's
     // registered answers.  At most one crossing per step (4 <= 16).
@@ -172,32 +177,27 @@ module iscan (
 
     wire tgt_held0 = v0 && (tgt_tag == vtag0);
     wire tgt_held1 = v1 && (tgt_tag == vtag1);
+    // Targets no fetch may touch: the I/O page of a pair bank, page $C3 while
+    // INTC8ROM is clear, the $CFFx line.  Not reported.
     wire tgt_excl  = pair && ((tgt_tag[11:4] == 8'hC0) ||
                               (tgt_tag[11:4] == 8'hC3 && !intc8rom) ||
                               (tgt_tag == 12'hCFF));
-
-    logic src0, src1;
     wire issuing = (st == S_TGT) && tgt_ours;
-
-    logic        last_v;
-    logic [11:0] last_tag;
 
     wire [11:0] anchor_hi_p1 = anchor_addr[15:4] + 12'd1;
 
     always_ff @(posedge clk) begin
-        lb_v <= 1'b0;
+        tb_v <= 1'b0;
         if (rst || !enable) begin
-            st <= S_IDLE; sw_v <= 1'b0; last_v <= 1'b0;
+            st <= S_IDLE;
             ptr_hi <= 12'd0; ptr_lo <= 4'd0; ptr_hi_p1 <= 12'd1;
             cur_in0 <= 1'b0; cur_in1 <= 1'b0;
             nxt_in0 <= 1'b0; nxt_in1 <= 1'b0;
             diverged_q <= 1'b0;
             cls_q <= C_SEQ; o1_q <= 8'd0; o2_q <= 8'd0; o3_q <= 8'd0;
-            sw_tag <= 12'd0; last_tag <= 12'd0; lb_slot <= 1'b0;
-            src0 <= 1'b0; src1 <= 1'b0;
+            op_ptr <= 16'd0; op_q <= 8'd0;
+            tb_addr <= 16'd0; tb_op <= 8'd0; tb_tgt <= 16'd0;
         end else begin
-            if (sw_taken) sw_v <= 1'b0;
-
             ptr_hi_p1  <= ptr_hi + 12'd1;
             cur_in0    <= v0 && (ptr_hi    == vtag0);
             cur_in1    <= v1 && (ptr_hi    == vtag1);
@@ -209,7 +209,7 @@ module iscan (
                 S_IDLE: ;
                 S_OP: begin
                     if (!rd_held) begin
-                        st <= S_IDLE; last_v <= 1'b0;
+                        st <= S_IDLE;
                     end else case (dec_cls)
                         C_SEQ: begin
                             ptr_lo <= step_sum[3:0];
@@ -220,16 +220,17 @@ module iscan (
                                 cur_in1   <= nxt_in1;
                             end
                         end
-                        C_END: begin st <= S_IDLE; last_v <= 1'b0; end
+                        C_END: st <= S_IDLE;
                         default: begin
-                            cls_q <= dec_cls; st <= S_O1;
-                            src0 <= cur_in0; src1 <= cur_in1;
+                            cls_q  <= dec_cls; st <= S_O1;
+                            op_ptr <= {ptr_hi, ptr_lo};
+                            op_q   <= rd_byte;
                         end
                     endcase
                 end
                 S_O1: begin
                     if (!rd_held) begin
-                        st <= S_IDLE; last_v <= 1'b0;
+                        st <= S_IDLE;
                     end else if (cls_q == C_ABS || cls_q == C_LNG || cls_q == C_BRL) begin
                         o1_q <= rd_byte; st <= S_O2;
                     end else begin
@@ -249,7 +250,7 @@ module iscan (
                 end
                 S_O2: begin
                     if (!rd_held) begin
-                        st <= S_IDLE; last_v <= 1'b0;
+                        st <= S_IDLE;
                     end else if (cls_q == C_LNG) begin
                         o2_q <= rd_byte; st <= S_O3;
                     end else if (cls_q == C_BRL) begin
@@ -269,14 +270,14 @@ module iscan (
                 end
                 S_O3: begin
                     if (!rd_held) begin
-                        st <= S_IDLE; last_v <= 1'b0;
+                        st <= S_IDLE;
                     end else begin
                         o3_q <= rd_byte; st <= S_TGT;
                     end
                 end
                 S_TGT: begin
                     if (cls_q == C_LNG && !tgt_ours) begin
-                        st <= S_IDLE; last_v <= 1'b0;   // out of the bank: the trail ends
+                        st <= S_IDLE;                   // out of the bank: the trail ends
                     end else begin
                         if (cls_q != C_REL) begin      // BRA, BRL, JMP/JSR, JSL/JML followed
                             ptr_hi    <= tgt_tag;
@@ -293,16 +294,13 @@ module iscan (
                 default: st <= S_IDLE;
             endcase
 
-            if (issuing) begin
-                if (src0 && tgt_held1) begin lb_v <= 1'b1; lb_slot <= 1'b0; end
-                if (src1 && tgt_held0) begin lb_v <= 1'b1; lb_slot <= 1'b1; end
-                if (!tgt_held0 && !tgt_held1 && !tgt_excl &&
-                    !(sw_v && !sw_taken) && !(last_v && tgt_tag == last_tag)) begin
-                    sw_v     <= 1'b1;
-                    sw_tag   <= tgt_tag;
-                    last_v   <= 1'b1;
-                    last_tag <= tgt_tag;
-                end
+            // The report: every transfer found, held or not (a held target
+            // costs nothing to know), never an excluded one.
+            if (issuing && !tgt_excl) begin
+                tb_v    <= 1'b1;
+                tb_addr <= op_ptr;
+                tb_op   <= op_q;
+                tb_tgt  <= tgt;
             end
 
             if (anchor_v && (st == S_IDLE || diverged_q)) begin

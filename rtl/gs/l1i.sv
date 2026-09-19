@@ -29,6 +29,21 @@
 //     the ROM's own code and $CFFF an ordinary byte.
 //   * The retire's event carries the bank (tev_bank).
 //
+// THE TWO-LINE L1-I (the user's design, 2026-09-19): the buffers are the
+// CURRENT line and the NEXT one - the line after it, or a taken transfer's
+// target - and nothing else is kept or prefetched on speculation.  The
+// scanner (rtl/gs/iscan.sv) walks ahead of the PC and REPORTS the transfers
+// it finds into a four-entry TARGET TABLE; at every opcode fetch the table is
+// looked up by the fetch's address, a hit is decided THEN, from the live
+// flags (the previous instruction's flag write landed on the edge before
+// this cycle; checked against the operand-time truth by a simulation
+// assertion), and a taken transfer's line, if not held, is fetched into the
+// other buffer at once - about three cycles before the PC lands on it, which
+// is what the branch's own operand and internal cycles take.  When the PC
+// lands, the buffer becomes the current one.  A branch the table does not
+// know falls back to the early want at its operand, as before.  No pin: the
+// victim of any fill is the buffer the stream is not in.
+//
 // COHERENCE is the a2 module's: every image write (the classified stream's
 // and the data side's posted write) is compared by physical identity against
 // both buffers and the read in flight; a map change kills the buffers (PBR
@@ -133,7 +148,6 @@ module l1i #(
     logic [LEV-1:0]  b_way [0:1];
     logic [127:0]    ldata [0:1];
     logic            cur;             // the buffer the fetch stream is in
-    logic            pin_v, pin;      // the buffer a taken branch last landed in
 
     // ---- the INTC8ROM latch and the pair bank, registered once; the exclusions
     logic intc8rom_q, pair_q;
@@ -210,20 +224,15 @@ module l1i #(
     assign cyc_en       = accel_cyc_en || retire;
     assign i_din        = lhit_q ? i_byte_q : accel_din;
 
-    // ---- the branch scanner (rung 4, rtl/gs/iscan.sv) ---------------------------
-    // Walks the two buffers ahead of the PC by the 65816's lengths and names
-    // the lines of the transfers it finds, so a taken branch's line is here
-    // before the PC arrives.  Its window is the buffers in the program bank;
-    // its want sits behind the fetch and the early branch want; a loop it
-    // finds held whole in the pair pins the target's buffer.
+    // ---- the branch scanner and the target table (rtl/gs/iscan.sv) --------------
     wire        sc_rd_slot;
     wire [3:0]  sc_rd_off;
     wire [7:0]  sc_rd_byte = ldata[sc_rd_slot][8 * sc_rd_off +: 8];
     wire        sc_v0 = v[0] && (vtag[0][19:12] == pc_bank);
     wire        sc_v1 = v[1] && (vtag[1][19:12] == pc_bank);
-    wire        sw_v, lb_v, lb_slot;
-    wire [11:0] sw_tag;
-    wire        sw_taken;
+    wire        tb_v;
+    wire [15:0] tb_addr, tb_tgt;
+    wire [7:0]  tb_op;
     iscan u_scan (
         .clk (clk), .rst (rst || cpu_rst), .enable (turbo_en && serve && !inval),
         .intc8rom (intc8rom_q), .pair (pair_q),
@@ -231,9 +240,40 @@ module l1i #(
         .anchor_v (i_serve && cpu_sync), .anchor_addr (pc_addr),
         .rd_slot (sc_rd_slot), .rd_off (sc_rd_off), .rd_byte (sc_rd_byte),
         .v0 (sc_v0), .v1 (sc_v1), .vtag0 (vtag[0][11:0]), .vtag1 (vtag[1][11:0]),
-        .sw_v (sw_v), .sw_tag (sw_tag), .sw_taken (sw_taken),
-        .lb_v (lb_v), .lb_slot (lb_slot)
+        .tb_v (tb_v), .tb_addr (tb_addr), .tb_op (tb_op), .tb_tgt (tb_tgt)
     );
+    // Four entries {bank, opcode address, opcode, target}, replaced round-robin
+    // (an entry for the same opcode is refreshed in place), cleared with the map.
+    localparam integer TB_N = 4;
+    logic        te_v   [0:TB_N-1];
+    logic [23:0] te_addr[0:TB_N-1];
+    logic [7:0]  te_op  [0:TB_N-1];
+    logic [15:0] te_tgt [0:TB_N-1];
+    logic [1:0]  te_rr;
+    // The lookup, by the fetch's full address: register-direct pc_bank/pc_addr
+    // against registered entries, its result registered into the want.
+    logic        th_hit;
+    logic [7:0]  th_op;
+    logic [15:0] th_tgt;
+    always_comb begin
+        th_hit = 1'b0; th_op = 8'd0; th_tgt = 16'd0;
+        for (int i = 0; i < TB_N; i = i + 1)
+            if (te_v[i] && te_addr[i] == {pc_bank, pc_addr}) begin
+                th_hit = 1'b1; th_op = te_op[i]; th_tgt = te_tgt[i];
+            end
+    end
+    // The decision, from the live flags: a relative branch by its condition
+    // bits, everything else the scanner reports is always taken.
+    wire th_rel   = (th_op[4:0] == 5'b10000) && (th_op != 8'h80);
+    wire th_flag  = (th_op[7:6] == 2'b00) ? p_flags[7] :
+                    (th_op[7:6] == 2'b01) ? p_flags[6] :
+                    (th_op[7:6] == 2'b10) ? p_flags[0] : p_flags[1];
+    wire th_taken = !th_rel || (th_flag == th_op[5]);
+    wire th_held  = (v[0] && vtag[0] == {pc_bank, th_tgt[15:4]}) || (v[1] && vtag[1] == {pc_bank, th_tgt[15:4]});
+    wire th_go    = i_serve && cpu_sync && turbo_en && th_hit && th_taken;
+    logic        bt_v;                // the taken target's line, wanted
+    logic [11:0] bt_tag;
+    logic        bt_dec_v, bt_dec;    // the opcode-time decision, for the check at the operand
 
     // ---- the wants ------------------------------------------------------------
     wire want_fetch = turbo_en && cyc_is_i && cpu_rw && !ihit && !cpu_rst;
@@ -241,12 +281,11 @@ module l1i #(
     logic [11:0] ew_tag;
     wire [11:0]  nx_tag = exp_q[15:4] + 12'd1;
     wire nx_held = (v[0] && vtag[0] == {pc_bank, nx_tag}) || (v[1] && vtag[1] == {pc_bank, nx_tag});
-    wire pin_blocks = pin_v && pin == !cur;         // the pinned buffer is not a prefetch's victim
-    wire want_next = turbo_en && lhit_q && exp_q[3:2] == 2'b11 && !nx_held && !pin_blocks;
-    wire want_scan = sw_v && !pin_blocks;
-    wire want_any  = want_fetch || ew_v || want_scan || want_next;
-    wire [11:0] want_tag = want_fetch ? pc_addr[15:4] : ew_v ? ew_tag : want_scan ? sw_tag : nx_tag;
+    wire want_next = turbo_en && lhit_q && exp_q[3:2] == 2'b11 && !nx_held;
+    wire want_any  = want_fetch || bt_v || ew_v || want_next;
+    wire [11:0] want_tag = want_fetch ? pc_addr[15:4] : bt_v ? bt_tag : ew_v ? ew_tag : nx_tag;
     wire        want_is_fetch = want_fetch;
+    wire        want_held = (v[0] && vtag[0] == {pc_bank, want_tag}) || (v[1] && vtag[1] == {pc_bank, want_tag});
 
     // ---- the engine --------------------------------------------------------
     localparam [2:0] F_IDLE = 3'd0, F_DR = 3'd1, F_W1 = 3'd2, F_W2 = 3'd3, F_TLB = 3'd4;
@@ -306,24 +345,62 @@ module l1i #(
 
     // The early want for a taken branch's line (never into the I/O page of a
     // pair bank, never an excluded line, never a line already held).
-    wire ew_taken = (fst == F_IDLE) && !map_settling && !want_fetch && ew_v;
-    assign sw_taken = (fst == F_IDLE) && !map_settling && !want_fetch && !ew_v && sw_v;
+    wire bt_taken = (fst == F_IDLE) && !map_settling && !want_fetch && bt_v;   // the engine looked at it
+    wire ew_taken = (fst == F_IDLE) && !map_settling && !want_fetch && !bt_v && ew_v;
     always_ff @(posedge clk) begin
         if (rst || cpu_rst || !turbo_en) begin
             ew_v <= 1'b0; ew_tag <= 12'd0;
+            bt_v <= 1'b0; bt_tag <= 12'd0;
+            bt_dec_v <= 1'b0; bt_dec <= 1'b0;
         end else begin
             if (ew_taken) ew_v <= 1'b0;
+            if (bt_taken) bt_v <= 1'b0;
+            // The opcode-time decision: a taken transfer whose line is not held
+            // is wanted now; the early want at the operand then has nothing to
+            // add (its line will be held or in flight).
+            if (th_go && !th_held && !excl(th_tgt[15:4]) && !(pair_q && th_tgt[15:8] == 8'hC0)) begin
+                bt_v   <= 1'b1;
+                bt_tag <= th_tgt[15:4];
+            end
+            bt_dec_v <= i_serve && cpu_sync && th_hit && th_rel;
+            bt_dec   <= th_taken;
             if (resolving && res_taken && !excl(res_tgt[15:4]) &&
-                !(pair_q && res_tgt[15:8] == 8'hC0) &&
+                !(pair_q && res_tgt[15:8] == 8'hC0) && !bt_v &&
+                !(f_live && f_vtag == {pc_bank, res_tgt[15:4]}) &&
                 !((v[0] && vtag[0] == {pc_bank, res_tgt[15:4]}) || (v[1] && vtag[1] == {pc_bank, res_tgt[15:4]}))) begin
                 ew_v   <= 1'b1;
                 ew_tag <= res_tgt[15:4];
             end
         end
     end
+`ifndef SYNTHESIS
+    // The flags at the opcode fetch are the flags the branch uses: checked at
+    // the operand, where the truth is computed as before.
+    always @(posedge clk)
+        if (resolving && bk_q == BK_BR && bt_dec_v && bt_dec != br_taken)
+            $error("l1i: the opcode-time branch decision (%0d) disagrees with the operand-time truth (%0d) at $%02x/%04x",
+                   bt_dec, br_taken, pc_bank, pc_addr);
+`endif
+    // The table.
+    always_ff @(posedge clk) begin
+        if (rst || cpu_rst || inval || !serve || map_changed) begin
+            for (int i = 0; i < TB_N; i = i + 1) te_v[i] <= 1'b0;
+            te_rr <= 2'd0;
+        end else if (tb_v) begin
+            logic [1:0] slot; logic same;
+            slot = te_rr; same = 1'b0;
+            for (int i = TB_N - 1; i >= 0; i = i - 1)
+                if (te_v[i] && te_addr[i] == {pc_bank, tb_addr}) begin slot = 2'(i); same = 1'b1; end
+            te_v[slot]    <= 1'b1;
+            te_addr[slot] <= {pc_bank, tb_addr};
+            te_op[slot]   <= tb_op;
+            te_tgt[slot]  <= tb_tgt;
+            if (!same) te_rr <= te_rr + 2'd1;
+        end
+    end
 
     // ---- the books -----------------------------------------------------------
-    logic [31:0] cnt_slow_i, cnt_fills, cnt_kills, cnt_unserv, cnt_tlb_waits, cnt_prefetch, cnt_scan;
+    logic [31:0] cnt_slow_i, cnt_fills, cnt_kills, cnt_unserv, cnt_tlb_waits, cnt_prefetch, cnt_bt, cnt_bt_held, cnt_bt_miss;
 
     // ---- the engine, the buffers, the events -----------------------------------
     always_ff @(posedge clk) begin
@@ -342,23 +419,24 @@ module l1i #(
             vtag[0] <= 20'd0; vtag[1] <= 20'd0;
             b_ppn[0] <= 16'd0; b_ppn[1] <= 16'd0;
             b_set[0] <= '0; b_set[1] <= '0; b_way[0] <= '0; b_way[1] <= '0;
-            cur <= 1'b0; pin_v <= 1'b0; pin <= 1'b0;
+            cur <= 1'b0;
             fst <= F_IDLE; f_vtag <= 20'd0; f_ppn <= 16'd0; f_set <= '0; f_way <= '0;
             f_reg <= 4'd0; f_fold <= 1'b0; f_slot <= 1'b0;
             dr_req <= 1'b0; dr_set <= '0; dr_way <= '0; dr_line <= 4'd0;
             tev_bank <= 8'd0;
             cnt_slow_i <= 32'd0; cnt_fills <= 32'd0;
-            cnt_kills <= 32'd0; cnt_unserv <= 32'd0; cnt_tlb_waits <= 32'd0; cnt_prefetch <= 32'd0; cnt_scan <= 32'd0;
+            cnt_kills <= 32'd0; cnt_unserv <= 32'd0; cnt_tlb_waits <= 32'd0; cnt_prefetch <= 32'd0;
+            cnt_bt <= 32'd0; cnt_bt_held <= 32'd0; cnt_bt_miss <= 32'd0;
         end else begin
             if (accel_cyc_en && cyc_is_i && cpu_rw) cnt_slow_i <= cnt_slow_i + 32'd1;
 
-            // Where the stream is, and the pin: a fetch the predictor did not
-            // expect that lands in a buffer (a taken branch or a jump into a
-            // resident line) pins that buffer.
+            // Where the stream is.
             if (hit0 && cyc_is_i && cpu_rw) cur <= 1'b0;
             if (hit1 && cyc_is_i && cpu_rw) cur <= 1'b1;
-            if (recover && ihit) begin pin_v <= 1'b1; pin <= hslot; end
-            if (lb_v) begin pin_v <= 1'b1; pin <= !lb_slot; end   // a loop held whole in the pair
+            // The table's books: taken decisions whose line was held, and
+            // opcode fetches of a relative branch the table did not know.
+            if (th_go && th_held) cnt_bt_held <= cnt_bt_held + 32'd1;
+            if (i_serve && cpu_sync && !th_hit && turbo_en && op_is_branch) cnt_bt_miss <= cnt_bt_miss + 32'd1;
 
             if (kill0) begin v[0] <= 1'b0; cnt_kills <= cnt_kills + 32'd1; end
             if (kill1) begin v[1] <= 1'b0; cnt_kills <= cnt_kills + 32'd1; end
@@ -368,8 +446,8 @@ module l1i #(
                 fst <= F_IDLE;
             end else case (fst)
                 F_IDLE: if (want_any && !map_settling) begin
-                    if (excl(want_tag)) begin
-                        cnt_unserv <= cnt_unserv + 32'd1;
+                    if (excl(want_tag) || (!want_is_fetch && want_held)) begin
+                        cnt_unserv <= cnt_unserv + 32'd1;   // the fetch rides the sequencer; a held want drops
                     end else if (la_hit) begin
                         f_vtag  <= {pc_bank, want_tag};
                         f_ppn   <= la_ppn;
@@ -380,8 +458,8 @@ module l1i #(
                         dr_set  <= la_set;
                         dr_way  <= la_way;
                         dr_line <= want_tag[3:0];
-                        if (!want_is_fetch && !ew_v) cnt_prefetch <= cnt_prefetch + 32'd1;
-                        if (!want_is_fetch && !ew_v && want_scan) cnt_scan <= cnt_scan + 32'd1;
+                        if (!want_is_fetch && !bt_v && !ew_v) cnt_prefetch <= cnt_prefetch + 32'd1;
+                        if (!want_is_fetch && bt_v) cnt_bt <= cnt_bt + 32'd1;
                         fst <= F_DR;
                     end else if (!p_fs) begin
                         cnt_unserv <= cnt_unserv + 32'd1;
@@ -420,7 +498,6 @@ module l1i #(
                     b_ppn[f_slot] <= f_ppn;
                     b_set[f_slot] <= f_set;
                     b_way[f_slot] <= f_way;
-                    if (pin_v && pin == f_slot) pin_v <= 1'b0;
                     cnt_fills <= cnt_fills + 32'd1;
                     fst <= F_IDLE;
                 end
@@ -429,7 +506,6 @@ module l1i #(
 
             if (map_changed || inval || !serve) begin
                 v[0] <= 1'b0; v[1] <= 1'b0;
-                pin_v <= 1'b0;
             end
         end
     end
@@ -442,8 +518,10 @@ module l1i #(
             4'd4:  dbg_val = cnt_unserv;
             4'd5:  dbg_val = cnt_tlb_waits;
             4'd6:  dbg_val = cnt_prefetch;
-            4'd7:  dbg_val = cnt_scan;
-            4'd14: dbg_val = {v[1], v[0], fst, cur, pin_v, pin, turbo_en, serve, inval,
+            4'd7:  dbg_val = cnt_bt;
+            4'd8:  dbg_val = cnt_bt_held;
+            4'd9:  dbg_val = cnt_bt_miss;
+            4'd14: dbg_val = {v[1], v[0], fst, cur, bt_v, 1'b0, turbo_en, serve, inval,
                               intc8rom_q, lhit_q, ew_v, dr_req, pair_q, 16'd0};
             default: dbg_val = 32'hDEAD_0001;
         endcase

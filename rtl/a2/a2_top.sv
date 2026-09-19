@@ -571,7 +571,7 @@ module a2_top #(
         .vbl_stat (vbl_stat), .vbl_pos (vbl_pos),
         .mem_op_present (op_present),
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
-        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
+        .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_sel (16'hFFFF), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data),
         .mem_image_ready (mem_image_ready),
         .mem_serve (mem_serve), .mem_cnt_clr (mem_cnt_clr), .mem_inval (mem_inval),

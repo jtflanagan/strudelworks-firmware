@@ -159,6 +159,21 @@ module accel_seq #(
     input  wire        op_inflight,
     input  wire        ovr_en,
     input  wire [7:0]  ovr_bank,        // the override's bank - the DMA buffer's, zero for the rest
+    // THE FAST OVERRIDE (docs/CORE_REFACTOR_65816.md, 2026-09-19, the user's
+    // design): a hard disk block landing as override WRITES paced by this
+    // module instead of the driver's bus cycle.  Each byte is presented on
+    // the unified stream as an override op - the same word, in the same
+    // order, that the bus path put there, so the host's mirror sees exactly
+    // what it saw - and the page cache lands it at P1 and paces the next
+    // with `decided`: four or five clocks a byte against a hundred.  The
+    // core stays held for the block, as before.  ovr_fast says THIS override
+    // is to go that way (the top: the hard disk's, a write, mode 2 serving);
+    // the driver is kept off it there.  Reads (HD_FETCH) stay on the bus.
+    input  wire        ovr_fast,
+    input  wire [15:0] ovr_addr,
+    input  wire        ovr_rw,
+    input  wire [7:0]  ovr_wdata,
+    output wire        ovr_win,         // a fast override's op is on the stream: the peripherals see it
     output wire        bus_owns,
     output wire        core_valid,
 
@@ -166,6 +181,7 @@ module accel_seq #(
     input  wire        mem_sub_en,
     input  wire [7:0]  mem_sub_data,
     input  wire        decided,
+    input  wire        blocked,        // ...and the op was blocked by a busy engine: retry it
     input  wire        busy,
     input  wire        mq_valid,
 
@@ -297,7 +313,8 @@ module accel_seq #(
         S_FAST,     // on the card; waiting for the cache's decision
         S_BUS,      // offered to the driver; waiting for its cycle to end
         S_HELD,     // the bus is an override's; waiting for it to let go
-        S_NULL      // the core's internal cycle: paid for, and nothing else
+        S_NULL,     // the core's internal cycle: paid for, and nothing else
+        S_OVR       // a fast override's byte on the stream; waiting for the cache's decision
     } state_t;
     state_t st;
     assign state_o = {1'b0, st};
@@ -379,10 +396,12 @@ module accel_seq #(
     // says they describe the op the core has up now (see the header).
     logic [1:0] dq_cls, fast_cls_q;
     logic       dq_rw, dq_ovr, dq_swi, dq_quiet, swi_q, quiet_q, fast_i_q, settled;
+    logic       ovr_retry;          // a fast override's byte the cache blocked, owed again
     logic [7:0] dq_bank;               // the override's bank, held while it is live
     logic       dq_slot, slot_q;
     assign slot_q_o = slot_q;
     assign sl_win   = slot_q && ((st == S_FAST) || swi_commit);
+    assign ovr_win  = (st == S_OVR);
     always_ff @(posedge clk) begin
         dq_cls   <= q_cls;
         dq_rw    <= cpu_rw;
@@ -407,6 +426,10 @@ module accel_seq #(
     // and this is the other half that makes the two never meet).
     wire fast_ok   = !stall_q && mem_image_ready && !mem_invalidating &&
                      !op_inflight && !busy && !mq_valid && !ovr_en;
+    // ...and the fast override's own readiness: the same, with the override
+    // it is about to serve necessarily pending.
+    wire ovr_ok    = !stall_q && mem_image_ready && !mem_invalidating &&
+                     !op_inflight && !busy && !mq_valid;
 
     // The instruction front's leash.  turbo_en is the steady half - the mode,
     // the serve, the reset sequence - and it is a REGISTER: its sources live
@@ -508,8 +531,9 @@ module accel_seq #(
     // stable across a clock.
     logic [7:0] swi_byte_q;
     always_ff @(posedge clk) swi_byte_q <= swi_byte;
-    wire fast_hit  = (st == S_FAST) && decided && (!fast_rw || mem_sub_en || swi_q);
-    wire fast_miss = (st == S_FAST) && decided &&   fast_rw && !mem_sub_en && !swi_q;
+    // A blocked op is a miss whatever its direction: it is dispatched again.
+    wire fast_hit  = (st == S_FAST) && decided && !blocked && (!fast_rw || mem_sub_en || swi_q);
+    wire fast_miss = (st == S_FAST) && decided && (blocked || (fast_rw && !mem_sub_en && !swi_q));
     assign mem_served = (st == S_FAST) && decided && fast_rw && mem_sub_en && !swi_q;
 
     // ---- the census, one clock behind the retirement -------------------------
@@ -580,7 +604,7 @@ module accel_seq #(
             st <= S_RST;
             reset_seq <= !GS;
             settled <= 1'b0;
-            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0; quiet_q <= 1'b0; slot_q <= 1'b0;
+            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0; quiet_q <= 1'b0; slot_q <= 1'b0; ovr_retry <= 1'b0;
             credit <= 20'd0; grant_q <= 1'b0; spent_q <= 1'b0;
             u_addr <= 16'd0; u_bank <= 8'd0; u_rw <= 1'b1; u_wdata <= 8'd0;
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
@@ -665,6 +689,32 @@ module accel_seq #(
                         // DMA would land under the write it should be
                         // over.  Bounded by the drain - a few clocks.
                         if (d_pending) begin
+                        end else if (ovr_retry) begin
+                            // A fast override's byte the cache blocked: the SAME
+                            // byte again (the card has stepped past it; u_* still
+                            // hold it), once the engine is quiet.
+                            if (ovr_ok) begin
+                                st <= S_OVR;
+                                u_present <= 1'b1;
+                                ovr_retry <= 1'b0;
+                            end
+                        end else if (dq_ovr && ovr_fast && ovr_en) begin
+                            // The fast override: the byte onto the stream as soon
+                            // as the cache can take it (never the bus: the driver
+                            // is kept off this override, so HELD would never end).
+                            if (ovr_ok) begin
+                                st <= S_OVR;
+                                bus_owns_q   <= 1'b0;
+                                core_valid_q <= 1'b0;
+                                u_present <= 1'b1;
+                                u_addr    <= ovr_addr;
+                                u_bank    <= ovr_bank;
+                                u_rw      <= 1'b0;
+                                u_wdata   <= ovr_wdata;
+                                u_sync    <= 1'b0;
+                                u_ovr     <= 1'b1;
+                                u_divert  <= 1'b0;
+                            end
                         end else if (dq_ovr) begin
                             st <= S_HELD;
                             bus_owns_q   <= 1'b1;
@@ -745,6 +795,35 @@ module accel_seq #(
 
                     S_HELD: begin
                         if (!ovr_en && !op_inflight && !busy && !d_pending) st <= S_DECIDE;
+                    end
+
+                    S_OVR: begin
+                        // The byte lands at P1; `decided` paces.  The card stepped
+                        // to its next byte on the present (ovr_addr moved), or
+                        // dropped ovr_en after its last: the next byte goes at
+                        // once, or the dispatcher has the machine back.
+                        if (decided && blocked) begin
+                            // Blocked: nothing landed, no event; again from DECIDE.
+                            ovr_retry <= 1'b1;
+                            st <= S_DECIDE;
+                        end else if (decided) begin
+                            fast_ops  <= fast_ops + 32'd1;
+                            fev_valid <= 1'b1;
+                            fev_quiet <= 1'b0;
+                            fev_addr  <= u_addr;
+                            fev_bank  <= u_bank;
+                            fev_rw    <= 1'b0;
+                            fev_data  <= u_wdata;
+                            fev_sync  <= 1'b0;
+                            if (ovr_en && ovr_fast && !ovr_rw && !busy) begin
+                                u_present <= 1'b1;
+                                u_addr    <= ovr_addr;
+                                u_bank    <= ovr_bank;
+                                u_wdata   <= ovr_wdata;
+                            end else begin
+                                st <= S_DECIDE;
+                            end
+                        end
                     end
 
                     default: st <= S_RST;
