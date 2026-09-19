@@ -32,6 +32,7 @@ set board_part(pt_v2) xc7a100tfgg484-2
 set part      ""
 set jobs      4
 set keep_open 0
+set synth_only 0
 set outdir    [file join $root build work]
 set diag      0
 set ft601     0
@@ -67,6 +68,7 @@ for {set i 0} {$i < $argc} {incr i} {
         --board { incr i; set board [lindex $argv $i] }
         -part   { incr i; set part [lindex $argv $i] }
         -outdir { incr i; set outdir [lindex $argv $i] }
+        -synth_only { set synth_only 1 }
         -open   { set keep_open 1 }
         -diag   -
         --diag  { set diag 1 }
@@ -185,8 +187,6 @@ if {$snoop || $master} {
         [file join $root rtl common tx_ring.sv] \
         [file join $root rtl common page_client.sv] \
         [file join $root rtl common event_merge.sv] \
-        [file join $root rtl common uart_tx.v] \
-        [file join $root rtl common uart_rx.v] \
         [file join $root rtl common card_link.sv] \
     ]
     if {$master} {
@@ -449,6 +449,17 @@ if {1} {
     }
 }
 
+# SYNTHESIS ONLY (docs/CORE_REFACTOR_65C02.md rung 2): the footprint is the
+# question and no bitstream is wanted, so report the synthesised utilisation,
+# flat and by module, and stop.  build/build.sh --master --synth-only.
+if {$synth_only} {
+    open_run synth_1
+    set results_dir [file join $root build results]
+    report_utilization -file [file join $results_dir synth_util.rpt]
+    report_utilization -hierarchical -hierarchical_depth 2 -file [file join $results_dir synth_util_hier.rpt]
+    puts "SYNTH ONLY: [file join $results_dir synth_util.rpt] and synth_util_hier.rpt written; no implementation, no bitstream"
+    exit 0
+}
 launch_runs impl_1 -to_step write_bitstream -jobs $jobs
 wait_on_run impl_1
 if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {

@@ -23,6 +23,35 @@ ladder yet).
   from the mirror.
 - Commit on request only, both repos in lock-step; never push.
 
+## Rung 2's footprint ledger (2026-09-18, out-of-context synthesis, the Pt part)
+
+| block | as built | lever | measured | note |
+|---|---|---|---|---|
+| tx_ring | 372 LUTs / 325 FF / 4 RAMB36 | the boot lane (required, REQ 1.10) | **455 / 365 / 4 + 1 RAMB18** | +83 LUTs is the requirement's price |
+| the register cut (wb_regfile) | 1,225 LUTs / 3,041 FF | none in its shape: 153 shadow flops behind a 102-way 32-bit read mux is what random-access readback of a hundred words costs (~46 LUT6 per bit); the lever is FEWER READABLE WORDS | **DONE 2026-09-19 (the user): wb_regfile's MINIMAL, set by a2_top through card_link's MINIMAL_REGS: 56 of 102 words (every counter, census, statistic and debug word) read zero, their shadows and the counters feeding them fall out of the netlist; measured next by OOC of a2's card_link** | what comes back in is decided later, word by word |
+| the UART report (uart_tx 179, uart_rx, report_tx and card_link's rpt_* formatter) | ~300-400 LUTs | the DDR3-free boot path makes the UART status line redundant | **DONE 2026-09-19 (the user): gone from card_link, both cards; the pins stay (tx idles high); build/ddr3_census_run.sh is retired with it** | the 'R' reset over the FT2232H went with it; LINK_RESET over USB3 is the reset that remains |
+| UberDDR3 (ddr3_wrapper, OOC with `--clock clk_ctrl`) - **the strip is DONE 2026-09-19 (the user): fork commit acd12a7 on strudelworks-research, the pin in third_party/fetch_uberddr3.sh bumped; a calibrating bit is still owed before it is trusted** | 3,224 LUTs / 2,657 FF (synthesis; 3,509 routed in the rung-0 build) | the eight `(* mark_debug *)` attributes stripped from the fork's ddr3_controller.v: on `state_calibrate`, the BIST address counters, `correct_read_data`/`wrong_read_data`, `write_level_fail`, `lane`, `instruction_address`, `o_calib_complete` - they pin the BIST compare and the calibration FSM's encoding, which is why that family heads the depth baseline at BIST_MODE 0 | **2,950 / 2,594: -274 LUTs, -63 FF** | a fork change (third_party/UberDDR3 is the pinned fork); function unchanged, but the FSM may be re-encoded and the calibration lottery was placement-sensitive, so its adoption wants a calibrating bit - which the 65816 card (the Pt) can build, the 65C02 card cannot until the checkpoint. The user's call |
+| UberDDR3, EYE_SWEEP/EYE_CENTER off (the wrapper now passes them through) | | the fork's read-eye sweep and centring | with mark_debug on: **3,407** (183 MORE than as built - synthesis re-shuffles around the pinned registers); with it stripped: **2,929 / 2,579**, i.e. -21 LUTs / -15 FF against the strip alone | NOT a lever: the sweep is ~20 LUTs. Keep it; it is the instrument the calibration lottery was read with. The UART text engine is under `ifdef UART_DEBUG` and is not built |
+
+### The whole card, synthesis only, before and after 2026-09-19's three cuts
+
+`build/build.sh --master --synth-only` (new: synthesise, report, no bitstream), the Pt part, the
+tree at 4ab5136 with the fork at c2caf89 against the working tree with the fork at acd12a7:
+
+| | LUTs | flops | RAMB36 |
+|---|---|---|---|
+| before (the boot lane in, nothing else) | 35,867 | 27,018 | 87 |
+| after (mark_debug strip, register file MINIMAL, UART report gone) | **33,758** | **21,434** | 87 |
+| delta | **-2,109** | **-5,584** | 0 |
+
+By module: card_link -1,150 LUTs / -2,437 FF (the register file 1,255 -> 582 LUTs and 3,044 ->
+1,014 flops at its minimum; the UART's 196-LUT transmitter, its receiver and the formatter gone;
+the controller -87 in context); L1-D -308 / -547 and L1-I -304 / -581
+(their books, unread, pruned); page_cache -188 / -618 (its counters); accel_seq -31 / -200; the
+top -24 / -974 (the clock histogram and the snapshot words). Synthesis numbers are not routed
+numbers (rung 0's 33,349 was routed); the delta is like for like. The Au is 20,800: the floor
+outside L1/L2 is now ~10.3k synthesised, and L1 + L2 (rungs 3-5) are 13.0k of the 33.8k.
+
 ## The ladder
 
 | rung | what | gate | status |

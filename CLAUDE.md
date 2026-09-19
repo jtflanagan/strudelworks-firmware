@@ -24,8 +24,10 @@ session: `git status` both repos and get old work committed before editing.
   writes a .bit. Read WNS (`build/wns.sh`), never the exit status. A miss is
   never green. A new deep tail (`build/depth_baseline.txt`) is named.
 - Stop swhost on the Pi (verified) before any load; the link cannot resync.
-  The FT2232H cable (JTAG + UART) is needed only for loading; the UART report
-  is for a USB3 link that answers no register at all, never a routine step.
+  The FT2232H cable is needed only for loading (JTAG); the UART report is
+  GONE (2026-09-19): a card whose DDR3 has not calibrated answers every
+  register over USB3 on the ring's boot lane (LINK_STAT, RING_STATUS,
+  DDR3_DBG1..4), so that is where a calibration failure is read.
 - Verilator-first: `sim/suite.sh quick|cpu|battery|boot`; iverilog only with
   `--iverilog` or when asked. Monitor long benches by their progress counters
   (`sim/progress.sh`), never timeout-and-retry; abort on bad/mism > 0.

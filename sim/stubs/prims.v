@@ -128,6 +128,7 @@ endmodule
 // third_party/ and is what Vivado builds; linting it here would drown this
 // design's warnings in upstream's, which sim/lint.sh already declines to do.
 module ddr3_top #(
+    parameter EYE_SWEEP = 1, parameter EYE_CENTER = 1,   // the fork's read-eye sweep (rtl/common/ddr3_wrapper.sv passes them)
     parameter integer CONTROLLER_CLK_PERIOD = 10000,
     parameter integer DDR3_CLK_PERIOD = 2500,
     parameter integer ROW_BITS = 14,

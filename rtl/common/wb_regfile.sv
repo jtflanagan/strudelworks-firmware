@@ -29,6 +29,14 @@
 // wait would be measuring nothing but itself.
 //////////////////////////////////////////////////////////////////////////////////
 module wb_regfile #(
+    // THE MINIMUM (the user, 2026-09-19, docs/CORE_REFACTOR_65C02.md rung 2):
+    // the 65C02 card builds the register file with only what the host needs
+    // to bring the machine up and run it - the stamps, every control word,
+    // the hold and start words, the link's and the DDR3's status - and every
+    // counter, census, statistic and debug word reads ZERO.  Their shadows,
+    // their read arms and, upstream, the counters that fed them fall out of
+    // the netlist.  What comes back in is decided later, word by word.
+    parameter bit MINIMAL = 1'b0,
     // log2 of the page cache's pages (SETS x WAYS x 256 bytes), for
     // MEM_CTRL's readback: the host renders the cache's size from it.
     parameter integer MEM_PAGES_LOG2 = 10,
@@ -1665,82 +1673,82 @@ module wb_regfile #(
                         R_FD_STAT:    wb_dat_r <= fd_stat_rd;
                         R_MEM_CTRL:   wb_dat_r <= mem_ctrl_rd;
                         R_MEM_STAT:   wb_dat_r <= mem_stat_rd;
-                        R_MEM_HITS:   wb_dat_r <= mem_hits_s;
-                        R_MEM_MISSES: wb_dat_r <= mem_misses_s;
-                        R_MEM_MISMATCH: wb_dat_r <= mem_mismatch_s;
-                        R_MEM_SERVED: wb_dat_r <= mem_served_s;
-                        R_MEM_LAST:   wb_dat_r <= mem_last_s;
-                        R_MEM_DIVERTED: wb_dat_r <= mem_diverted_s;
+                        R_MEM_HITS:   wb_dat_r <= MINIMAL ? 32'd0 : (mem_hits_s);
+                        R_MEM_MISSES: wb_dat_r <= MINIMAL ? 32'd0 : (mem_misses_s);
+                        R_MEM_MISMATCH: wb_dat_r <= MINIMAL ? 32'd0 : (mem_mismatch_s);
+                        R_MEM_SERVED: wb_dat_r <= MINIMAL ? 32'd0 : (mem_served_s);
+                        R_MEM_LAST:   wb_dat_r <= MINIMAL ? 32'd0 : (mem_last_s);
+                        R_MEM_DIVERTED: wb_dat_r <= MINIMAL ? 32'd0 : (mem_diverted_s);
                         R_VIDHD_SLOT: wb_dat_r <= vidhd_slot_rd;
                         R_MOUSE_SLOT: wb_dat_r <= mouse_slot_rd;
-                        R_MOUSE_STAT: wb_dat_r <= mouse_stat_rd;
+                        R_MOUSE_STAT: wb_dat_r <= MINIMAL ? 32'd0 : (mouse_stat_rd);
                         R_NSC_CTRL:   wb_dat_r <= nsc_ctrl_rd;
                         R_RING_CTRL:  wb_dat_r <= {31'd0, ring_engage_q};
-                        R_NSC_TIME:   wb_dat_r <= nsc_now_s[31:0];
-                        R_NSC_DATE:   wb_dat_r <= nsc_now_s[63:32];
+                        R_NSC_TIME:   wb_dat_r <= MINIMAL ? 32'd0 : (nsc_now_s[31:0]);
+                        R_NSC_DATE:   wb_dat_r <= MINIMAL ? 32'd0 : (nsc_now_s[63:32]);
                         R_U2_SLOT:    wb_dat_r <= u2_slot_rd;
                         R_PRINTER_SLOT: wb_dat_r <= printer_slot_rd;
-                        R_U2_STAT:    wb_dat_r <= u2_stat_rd;
+                        R_U2_STAT:    wb_dat_r <= MINIMAL ? 32'd0 : (u2_stat_rd);
                         R_LINK_STAT:  wb_dat_r <= link_stat_s;
                         R_AUDIO_CTRL: wb_dat_r <= audio_ctrl_rd;
                         R_AUDIO_RATE: wb_dat_r <= audio_rate_q;
-                        R_AUDIO_STAT: wb_dat_r <= audio_stat_s;
+                        R_AUDIO_STAT: wb_dat_r <= MINIMAL ? 32'd0 : (audio_stat_s);
                         R_FB_CTRL:    wb_dat_r <= fb_ctrl_rd;
-                        R_FB_COMPARED: wb_dat_r <= fb_compared_s;
-                        R_FB_MISMATCH: wb_dat_r <= fb_mismatch_s;
-                        R_FB_LAST:    wb_dat_r <= fb_last_s;
-                        R_FB_LAST2:   wb_dat_r <= fb_last2_s;
-                        R_FB_OTHER:   wb_dat_r <= fb_other_s;
-                        R_FB_PEEK:    wb_dat_r <= fb_peek_rd;
+                        R_FB_COMPARED: wb_dat_r <= MINIMAL ? 32'd0 : (fb_compared_s);
+                        R_FB_MISMATCH: wb_dat_r <= MINIMAL ? 32'd0 : (fb_mismatch_s);
+                        R_FB_LAST:    wb_dat_r <= MINIMAL ? 32'd0 : (fb_last_s);
+                        R_FB_LAST2:   wb_dat_r <= MINIMAL ? 32'd0 : (fb_last2_s);
+                        R_FB_OTHER:   wb_dat_r <= MINIMAL ? 32'd0 : (fb_other_s);
+                        R_FB_PEEK:    wb_dat_r <= MINIMAL ? 32'd0 : (fb_peek_rd);
                         R_ACCEL_CTRL: wb_dat_r <= accel_ctrl_rd;
                         R_ACCEL_STAT: wb_dat_r <= accel_stat_s;
-                        R_ACCEL_FAST: wb_dat_r <= accel_fast_s;
-                        R_ACCEL_BUS:  wb_dat_r <= accel_bus_s;
-                        R_ACCEL_CYCLES: wb_dat_r <= accel_cycles_s;
-                        R_ACCEL_WAIT: wb_dat_r <= accel_wait_s;
-                        R_ACCEL_TURBO: wb_dat_r <= accel_turbo_s;
-                        R_ACCEL_DLINE: wb_dat_r <= accel_dline_s;
-                        R_ACCEL_MAPS: wb_dat_r <= accel_maps_s;
-                        R_ACCEL_IDROP: wb_dat_r <= accel_idrop_s;
-                        R_ACCEL_IREVIVE: wb_dat_r <= accel_irevive_s;
-                        R_ACCEL_DDROP: wb_dat_r <= accel_ddrop_s;
-                        R_ACCEL_DREVIVE: wb_dat_r <= accel_drevive_s;
-                        R_MEM_FILLS:    wb_dat_r <= mem_fills_s;
-                        R_MEM_FLUSHES:  wb_dat_r <= mem_flushes_s;
-                        R_MEM_DECLINES: wb_dat_r <= mem_declines_s;
+                        R_ACCEL_FAST: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_s);
+                        R_ACCEL_BUS:  wb_dat_r <= MINIMAL ? 32'd0 : (accel_bus_s);
+                        R_ACCEL_CYCLES: wb_dat_r <= MINIMAL ? 32'd0 : (accel_cycles_s);
+                        R_ACCEL_WAIT: wb_dat_r <= MINIMAL ? 32'd0 : (accel_wait_s);
+                        R_ACCEL_TURBO: wb_dat_r <= MINIMAL ? 32'd0 : (accel_turbo_s);
+                        R_ACCEL_DLINE: wb_dat_r <= MINIMAL ? 32'd0 : (accel_dline_s);
+                        R_ACCEL_MAPS: wb_dat_r <= MINIMAL ? 32'd0 : (accel_maps_s);
+                        R_ACCEL_IDROP: wb_dat_r <= MINIMAL ? 32'd0 : (accel_idrop_s);
+                        R_ACCEL_IREVIVE: wb_dat_r <= MINIMAL ? 32'd0 : (accel_irevive_s);
+                        R_ACCEL_DDROP: wb_dat_r <= MINIMAL ? 32'd0 : (accel_ddrop_s);
+                        R_ACCEL_DREVIVE: wb_dat_r <= MINIMAL ? 32'd0 : (accel_drevive_s);
+                        R_MEM_FILLS:    wb_dat_r <= MINIMAL ? 32'd0 : (mem_fills_s);
+                        R_MEM_FLUSHES:  wb_dat_r <= MINIMAL ? 32'd0 : (mem_flushes_s);
+                        R_MEM_DECLINES: wb_dat_r <= MINIMAL ? 32'd0 : (mem_declines_s);
                         R_MEM_ROM:      wb_dat_r <= mem_rom_rd;
-                        R_GS_ADB:       wb_dat_r <= gs_adb_stat_s;
-                        R_ACCEL_CORE_CYC: wb_dat_r <= cnt_core_cyc_s;
-                        R_ACCEL_BUS_CYC:  wb_dat_r <= cnt_bus_cyc_s;
-                        R_DBG_SEL:        wb_dat_r <= {24'd0, dbg_sel};
-                        R_DBG_VAL:        wb_dat_r <= dbg_val_s;
-                        R_FD35_DRIVE:     wb_dat_r <= fd35_drive_rd;
-                        R_FD35_STAT:      wb_dat_r <= fd35_stat_rd;
+                        R_GS_ADB:       wb_dat_r <= MINIMAL ? 32'd0 : (gs_adb_stat_s);
+                        R_ACCEL_CORE_CYC: wb_dat_r <= MINIMAL ? 32'd0 : (cnt_core_cyc_s);
+                        R_ACCEL_BUS_CYC:  wb_dat_r <= MINIMAL ? 32'd0 : (cnt_bus_cyc_s);
+                        R_DBG_SEL:        wb_dat_r <= MINIMAL ? 32'd0 : ({24'd0, dbg_sel});
+                        R_DBG_VAL:        wb_dat_r <= MINIMAL ? 32'd0 : (dbg_val_s);
+                        R_FD35_DRIVE:     wb_dat_r <= MINIMAL ? 32'd0 : (fd35_drive_rd);
+                        R_FD35_STAT:      wb_dat_r <= MINIMAL ? 32'd0 : (fd35_stat_rd);
                         R_DDR3_DBG1:      wb_dat_r <= ddr3_dbg1_s;
                         R_DDR3_DBG2:      wb_dat_r <= ddr3_dbg2_s;
                         R_DDR3_DBG3:      wb_dat_r <= ddr3_dbg3_s;
                         R_DDR3_DBG4:      wb_dat_r <= ddr3_dbg4_s;
                         R_DDR3_EYE0:      wb_dat_r <= ddr3_eye0_s;
                         R_DDR3_EYE1:      wb_dat_r <= ddr3_eye1_s;
-                        R_GS_CLOCK:       wb_dat_r <= gs_clock_stat_s;
-                        R_PANEL_STAT:     wb_dat_r <= {24'd0, panel_drops_s, panel_dmas_s};
-                        R_FD35_WSTAT:     wb_dat_r <= fd35_wstat_s;
+                        R_GS_CLOCK:       wb_dat_r <= MINIMAL ? 32'd0 : (gs_clock_stat_s);
+                        R_PANEL_STAT:     wb_dat_r <= MINIMAL ? 32'd0 : ({24'd0, panel_drops_s, panel_dmas_s});
+                        R_FD35_WSTAT:     wb_dat_r <= MINIMAL ? 32'd0 : (fd35_wstat_s);
                         R_TELEM_CTRL:     wb_dat_r <= telem_ctrl_rd;
-                        R_WIDE_U2_CMDS:    wb_dat_r <= wide_u2_cmds_s;
-                        R_WIDE_U2_RX:      wb_dat_r <= wide_u2_rx_s;
-                        R_WIDE_PRN_WRITES: wb_dat_r <= wide_prn_writes_s;
-                        R_WIDE_HD_EXECS:   wb_dat_r <= wide_hd_execs_s;
-                        R_WIDE_PANEL_DMAS: wb_dat_r <= wide_panel_dmas_s;
-                        R_WIDE_AUDIO_SENT: wb_dat_r <= wide_audio_sent_s;
-                        R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i_s;
-                        R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram_s;
-                        R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc_s;
-                        R_ACCEL_FAST_DROM: wb_dat_r <= accel_fast_drom_s;
-                        R_ACCEL_FAST_DCX: wb_dat_r <= accel_fast_dcx_s;
-                        R_ACCEL_FAST_WR: wb_dat_r <= accel_fast_wr_s;
-                        R_ACCEL_FAST_KBD: wb_dat_r <= accel_fast_kbd_s;
-                        R_GAME_STAT:      wb_dat_r <= game_stat_rd;
-                        R_GAME_STAT2:     wb_dat_r <= game_stat2_rd;
+                        R_WIDE_U2_CMDS:    wb_dat_r <= MINIMAL ? 32'd0 : (wide_u2_cmds_s);
+                        R_WIDE_U2_RX:      wb_dat_r <= MINIMAL ? 32'd0 : (wide_u2_rx_s);
+                        R_WIDE_PRN_WRITES: wb_dat_r <= MINIMAL ? 32'd0 : (wide_prn_writes_s);
+                        R_WIDE_HD_EXECS:   wb_dat_r <= MINIMAL ? 32'd0 : (wide_hd_execs_s);
+                        R_WIDE_PANEL_DMAS: wb_dat_r <= MINIMAL ? 32'd0 : (wide_panel_dmas_s);
+                        R_WIDE_AUDIO_SENT: wb_dat_r <= MINIMAL ? 32'd0 : (wide_audio_sent_s);
+                        R_ACCEL_FAST_I: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_i_s);
+                        R_ACCEL_FAST_DRAM: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_dram_s);
+                        R_ACCEL_FAST_DLC: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_dlc_s);
+                        R_ACCEL_FAST_DROM: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_drom_s);
+                        R_ACCEL_FAST_DCX: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_dcx_s);
+                        R_ACCEL_FAST_WR: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_wr_s);
+                        R_ACCEL_FAST_KBD: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_kbd_s);
+                        R_GAME_STAT:      wb_dat_r <= MINIMAL ? 32'd0 : (game_stat_rd);
+                        R_GAME_STAT2:     wb_dat_r <= MINIMAL ? 32'd0 : (game_stat2_rd);
                         default:      wb_dat_r <= 32'd0;
                     endcase
                 end
@@ -1786,9 +1794,9 @@ module wb_regfile #(
                          (word == R_FD_DRIVE2);
     wire wr_fd_stat    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FD_STAT);
-    wire wr_fd35_drive = access && !wb_ack && in_region && wb_we &&
+    wire wr_fd35_drive = !MINIMAL && access && !wb_ack && in_region && wb_we &&
                          (word == R_FD35_DRIVE);
-    wire wr_fd35_stat  = access && !wb_ack && in_region && wb_we &&
+    wire wr_fd35_stat  = !MINIMAL && access && !wb_ack && in_region && wb_we &&
                          (word == R_FD35_STAT);
     wire wr_mem_ctrl   = access && !wb_ack && in_region && wb_we &&
                          (word == R_MEM_CTRL);
@@ -1810,11 +1818,11 @@ module wb_regfile #(
                          (word == R_PRINTER_SLOT);
     wire wr_fb_ctrl    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FB_CTRL);
-    wire wr_fb_peek    = access && !wb_ack && in_region && wb_we &&
+    wire wr_fb_peek    = !MINIMAL && access && !wb_ack && in_region && wb_we &&
                          (word == R_FB_PEEK);
     wire wr_accel_ctrl = access && !wb_ack && in_region && wb_we &&
                          (word == R_ACCEL_CTRL);
-    wire wr_dbg_sel    = access && !wb_ack && in_region && wb_we &&
+    wire wr_dbg_sel    = !MINIMAL && access && !wb_ack && in_region && wb_we &&
                          (word == R_DBG_SEL);
     wire wr_telem_ctrl = access && !wb_ack && in_region && wb_we &&
                          (word == R_TELEM_CTRL);

@@ -20,6 +20,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 top="cpu65c02"
 srcs=()
 period="10.0"
+clkport=""
 effort=""
 generics=()
 extra=()
@@ -29,6 +30,7 @@ while [ $# -gt 0 ]; do
         --top)    shift; top="$1" ;;
         --src)    shift; srcs+=("$1") ;;
         --period) shift; period="$1" ;;
+        --clock)  shift; clkport="$1" ;;
         --effort) shift; effort="$1" ;;
         --generic) shift; generics+=("$1") ;;
         *)        extra+=("$1") ;;
@@ -63,7 +65,7 @@ WORKDIR="${WORKDIR:-/mnt/c/temp/strudelworks-ooc}"
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
 
-args=(-top "$top" -period "$period" -outdir "$(wslpath -w "$WORKDIR")")
+args=(-top "$top" -period "$period" ${clkport:+-clock "$clkport"} -outdir "$(wslpath -w "$WORKDIR")")
 [ -n "$effort" ] && args+=(-effort "$effort")
 # cmd.exe splits an argument at '=', so NAME=VALUE reaches Vivado as two
 # tokens and the generic binds to nothing (measured: "Parameter SETS bound to:

@@ -79,6 +79,13 @@ module ddr3_wrapper #(
     // intends (the refresh-gate patch that pulled it into idle bus windows was
     // removed 2026-09-14 - docs/DERISK.md).
     parameter SELF_REFRESH = 0,
+    // The fork's read-eye measurement at calibration (docs/UBERDDR3.md): sweep
+    // every DQ IDELAY tap of each lane after the alignment and report the
+    // passing taps on o_calib_eye (DDR3_EYE0/1); EYE_CENTER leaves the delay
+    // at the centre of the measured eye.  Passed through so the footprint
+    // work (docs/CORE_REFACTOR_65C02.md rung 2) can measure them off.
+    parameter EYE_SWEEP  = 1,
+    parameter EYE_CENTER = 1,
 
     parameter AUX_WIDTH = 4
 ) (
@@ -177,6 +184,8 @@ module ddr3_wrapper #(
         .DLL_OFF               (0),
         .WB_ERROR              (0),
         .BIST_MODE             (BIST_MODE),
+        .EYE_SWEEP             (EYE_SWEEP),
+        .EYE_CENTER            (EYE_CENTER),
         .ECC_ENABLE            (0),
         .SELF_REFRESH          (SELF_REFRESH)
     ) u_ddr3 (

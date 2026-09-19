@@ -14,7 +14,8 @@
 #      path.  Hence the wslpath conversions below.  Passing /home/... makes
 #      Vivado report the script as missing.
 #
-# Usage: build/build.sh [--master|--gs|--snoop|--ft601|--diag] [--board <b>] [extra tclargs...]
+# Usage: build/build.sh [--master|--gs|--snoop|--ft601|--diag] [--board <b>] [--synth-only] [extra tclargs...]
+#   --synth-only: synthesise, report utilisation (build/results/synth_util*.rpt), no bitstream
 #   --gs is --master with the GS parameter set: the same top level built as an
 #   Apple IIgs, into its own work directory, landing as
 #   build/results/master_top_gs.bit (docs/GS.md rung 4).
@@ -34,6 +35,7 @@ args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --board|-board) shift; BOARD="$1" ;;
+    --synth-only) args+=("-synth_only") ;;
     *) args+=("$1") ;;
   esac
   shift

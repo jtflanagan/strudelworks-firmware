@@ -461,6 +461,8 @@ module a2_top #(
     wire        aux_valid, aux_take;
 
     card_link #(
+        // THE REGISTER FILE AT ITS MINIMUM (docs/CORE_REFACTOR_65C02.md rung 2).
+        .MINIMAL_REGS (1'b1),
         .MEM_PAGES_LOG2 ($clog2(MEM_SETS * MEM_WAYS)),
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),

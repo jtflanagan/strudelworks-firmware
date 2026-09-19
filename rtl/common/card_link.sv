@@ -49,6 +49,9 @@ module card_link #(
     // Passed straight to wb_regfile: which machine this bitstream is
     // (docs/GS.md rung 4).
     parameter bit GS = 1'b0,
+    // The register file at its minimum (rtl/common/wb_regfile.sv MINIMAL):
+    // the 65C02 card's top sets it.
+    parameter bit MINIMAL_REGS = 1'b0,
     // CK_PHASE_SHIFT (docs/UBERDDR3.md rung 2): the DDR3 controller walks the
     // CK pin's clock phase under the DRAM's own write-level feedback.  The
     // default since 2026-09-18; `build/build.sh --ck-phase 0` builds without it.
@@ -1140,7 +1143,8 @@ module card_link #(
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
         .CAN_MASTER (CAN_MASTER),
-        .GS (GS)
+        .GS (GS),
+        .MINIMAL (MINIMAL_REGS)
     ) u_regfile (
         .clk      (clk_ctrl),
         .rst      (rst),
@@ -1709,228 +1713,21 @@ module card_link #(
 
     assign tx_push = out_valid && !txc_full;
 
-    // ---- host command channel ---------------------------------------------
-    // 'R' resets the FT601, over the Au's own serial bridge - a separate USB
-    // device, so it is reachable exactly when the FT601 is not.
-    wire [7:0] urx_data;
-    wire       urx_valid;
+    // ---- the UART: gone (the user, 2026-09-19) ----------------------------
+    // The status line over the FT2232H's serial bridge - "C= E= O= P= D= T=
+    // R= L= S= K= M= X= D1..D4" once a second - and the 'R' command that reset
+    // the FT601 from it existed for the one card the USB3 link could not
+    // speak for: a DDR3 that never calibrated, when every word to the host
+    // crossed the ring.  Since the ring's boot lane (rtl/common/tx_ring.sv,
+    // docs/REQ_65C02.md 1.10) that card answers every register over USB3 -
+    // LINK_STAT, RING_STATUS, DDR3_DBG1..4, the eye - so the report went,
+    // with uart_rx, uart_tx, the formatter and its ~300 LUTs.  The pins
+    // stay: the transmitter idles high, the receiver is not read.
+    // (build/ddr3_census_run.sh, which read the line, is retired with it.)
+    assign cmd_reset_strobe = 1'b0;
+    assign usb_tx = 1'b1;
+    wire   unused_usb_rx = usb_rx;
 
-    uart_rx #(.CLK_HZ(100_000_000), .BAUD(115_200)) u_uart_rx (
-        .clk (clk_ctrl), .rst (~clk_locked),
-        .rx (usb_rx), .rx_data (urx_data), .rx_valid (urx_valid)
-    );
-
-    assign cmd_reset_strobe = urx_valid && (urx_data == 8'h52 || urx_data == 8'h72);
-
-    // ---- status over UART -------------------------------------------------
-    // "C=xxxxxxxx E=x O=x P=x D=x T=x R=xxxxxx L=x S=xxxx" - events captured, capture
-    // enabled, overflow, whether phi0 is ticking, whether the DDR3
-    // calibrated, whether a message was ever torn on the bus, and the lines
-    // the DDR3 ring holds right now.  R is the one number the host cannot
-    // report about its own stall - it is the observer that is not stalled.  P is the one that answers
-    // "is this card actually in a machine?", which no amount of staring at the
-    // USB side will tell you; D answers "is there a link at all?", since every
-    // word to the host crosses the DDR3 and a board that cannot calibrate has
-    // nothing to say there; T is a can't-happen, reported because can't-
-    // happens have to be seen to be fixed.  The UART is the only way to see
-    // the card's own view when the FT601 link is the thing under suspicion.
-    // L and S are the link's last reset: its cause and the chip-side snapshot
-    // taken as it fired (see link_cause above).  K is the DDR3 controller's
-    // calibration state (two hex digits; 17 = $17 = DONE_CALIBRATE when D=1),
-    // M the highest state reached, X the controller's self-restarts.
-    // D1..D4 are DDR3_DBG1..4 whole (PROTOCOL.md): the lane, the taps,
-    // the restart counts by cause, the state at the last restart, the
-    // write-level feedback, the DQS indices - everything the register map
-    // holds about the calibration, on the one line that a card whose DDR3
-    // never calibrates (so whose ring, and every register, is dead) can
-    // still say (UBERDDR3.md rung 0).
-    localparam [7:0] CH_C = 8'h43, CH_E = 8'h45, CH_O = 8'h4F, CH_EQ = 8'h3D;
-    localparam [7:0] CH_P = 8'h50, CH_D = 8'h44, CH_T = 8'h54;
-    localparam [7:0] CH_SP = 8'h20, CH_CR = 8'h0D, CH_LF = 8'h0A;
-
-    localparam [7:0] CH_R = 8'h52, CH_L = 8'h4C, CH_S = 8'h53, CH_K = 8'h4B;
-    localparam [7:0] CH_M = 8'h4D, CH_X = 8'h58;
-    localparam [7:0] CH_1 = 8'h31, CH_2 = 8'h32, CH_3 = 8'h33, CH_4 = 8'h34;
-
-    localparam [7:0] RPT_LAST = 8'd115;
-    localparam [7:0] RPT_IDLE = 8'd116;
-
-    wire [7:0] uart_data;
-    wire       uart_valid, uart_ready;
-    // The DDR3 controller's calibration state (UberDDR3 o_debug1[4:0]:
-    // 0 IDLE, 1-6 the DQS bitslip training, 9-11 the write/read issue, 13
-    // ANALYZE_DATA, 14 CHECK_STARTING_DATA, 15 BITSLIP_DQS_TRAIN_3, 22
-    // FINISH_READ, 23 DONE_CALIBRATE), reported as K so a bitstream whose
-    // DDR3 never calibrates says WHERE it sticks (docs/GS.md "The retained
-    // set and the DDR3": two builds that met timing and never got to D=1).
-    // M is the highest calibration state ever reached since the clock
-    // locked and X the controller's own restart count (o_debug2[7:0]): a K
-    // sampled once a second cannot tell "stuck in IDLE" from "restarting
-    // every 1.4 ms", these can (docs/UBERDDR3.md).
-
-    reg [21:0] rpt_div  = 22'd0;
-    reg [7:0]  rpt_idx  = RPT_IDLE;
-    reg [31:0] rpt_cnt  = 32'd0;
-    reg        rpt_en   = 1'b0;
-    reg        rpt_ovf  = 1'b0;
-    reg        rpt_phi  = 1'b0;
-    reg        rpt_cal  = 1'b0;
-    reg [4:0]  rpt_kal  = 5'd0;
-    reg [4:0]  rpt_kmax = 5'd0;
-    reg [7:0]  rpt_krst = 8'd0;
-    reg        rpt_torn = 1'b0;
-    reg [23:0] rpt_ring = 24'd0;
-    reg [4:0]  rpt_cause = 5'd0;
-    reg [15:0] rpt_snap  = 16'd0;
-    reg [31:0] rpt_d1 = 32'd0, rpt_d2 = 32'd0, rpt_d3 = 32'd0, rpt_d4 = 32'd0;
-
-    always @(posedge clk_ctrl) begin
-        if (!clk_locked) begin
-            rpt_div <= 22'd0;
-            rpt_idx <= RPT_IDLE;
-        end else begin
-            rpt_div <= rpt_div + 22'd1;
-            if (rpt_div == 22'd0 && rpt_idx == RPT_IDLE) begin
-                rpt_cnt <= captured;
-                rpt_en  <= capture_enable;
-                rpt_ovf <= overflow;
-                rpt_phi <= phi0_live;
-                rpt_cal <= calib_complete;
-                rpt_kal <= ddr3_debug_w[4:0];
-                rpt_kmax <= ddr3_debug_w[31:27];
-                rpt_krst <= ddr3_debug2_w[7:0];
-                rpt_torn <= ring_status[26];
-                rpt_ring <= {2'd0, ring_status[21:0]};
-                rpt_cause <= link_cause;
-                rpt_snap  <= {link_snap, link_resets};
-                rpt_d1 <= ddr3_debug_w;
-                rpt_d2 <= ddr3_debug2_w;
-                rpt_d3 <= ddr3_debug3_w;
-                rpt_d4 <= ddr3_debug4_w;
-                rpt_idx <= 8'd0;
-            end else if (uart_valid && uart_ready && rpt_idx != RPT_IDLE) begin
-                if (rpt_idx == RPT_LAST) rpt_idx <= RPT_IDLE;
-                else                     rpt_idx <= rpt_idx + 8'd1;
-            end
-        end
-    end
-
-    reg [3:0] nib;
-    always @(*) begin
-        case (rpt_idx)
-            8'd2:  nib = rpt_cnt[31:28];
-            8'd3:  nib = rpt_cnt[27:24];
-            8'd4:  nib = rpt_cnt[23:20];
-            8'd5:  nib = rpt_cnt[19:16];
-            8'd6:  nib = rpt_cnt[15:12];
-            8'd7:  nib = rpt_cnt[11:8];
-            8'd8:  nib = rpt_cnt[7:4];
-            8'd9:  nib = rpt_cnt[3:0];
-            8'd13: nib = {3'b000, rpt_en};
-            8'd17: nib = {3'b000, rpt_ovf};
-            8'd21: nib = {3'b000, rpt_phi};
-            8'd25: nib = {3'b000, rpt_cal};
-            8'd29: nib = {3'b000, rpt_torn};
-            8'd33: nib = rpt_ring[23:20];
-            8'd34: nib = rpt_ring[19:16];
-            8'd35: nib = rpt_ring[15:12];
-            8'd36: nib = rpt_ring[11:8];
-            8'd37: nib = rpt_ring[7:4];
-            8'd38: nib = rpt_ring[3:0];
-            8'd42: nib = {3'd0, rpt_cause[4]};
-            8'd43: nib = rpt_cause[3:0];
-            8'd47: nib = rpt_snap[15:12];
-            8'd48: nib = rpt_snap[11:8];
-            8'd49: nib = rpt_snap[7:4];
-            8'd50: nib = rpt_snap[3:0];
-            8'd54: nib = {3'b000, rpt_kal[4]};
-            8'd55: nib = rpt_kal[3:0];
-            8'd59: nib = {3'b000, rpt_kmax[4]};
-            8'd60: nib = rpt_kmax[3:0];
-            8'd64: nib = rpt_krst[7:4];
-            8'd65: nib = rpt_krst[3:0];
-            8'd70, 8'd71, 8'd72, 8'd73, 8'd74, 8'd75, 8'd76, 8'd77:
-                   nib = rpt_d1[{(8'd77 - rpt_idx), 2'b00} +: 4]; // high nibble first
-            8'd82, 8'd83, 8'd84, 8'd85, 8'd86, 8'd87, 8'd88, 8'd89:
-                   nib = rpt_d2[{(8'd89 - rpt_idx), 2'b00} +: 4];
-            8'd94, 8'd95, 8'd96, 8'd97, 8'd98, 8'd99, 8'd100, 8'd101:
-                   nib = rpt_d3[{(8'd101 - rpt_idx), 2'b00} +: 4];
-            8'd106, 8'd107, 8'd108, 8'd109, 8'd110, 8'd111, 8'd112, 8'd113:
-                   nib = rpt_d4[{(8'd113 - rpt_idx), 2'b00} +: 4];
-            default: nib = 4'd0;
-        endcase
-    end
-
-    wire [7:0] hex = (nib < 4'd10) ? (8'h30 + {4'd0, nib})
-                                   : (8'h41 + {4'd0, nib} - 8'd10);
-
-    reg [7:0] ch;
-    always @(*) begin
-        case (rpt_idx)
-            8'd0:  ch = CH_C;
-            8'd1:  ch = CH_EQ;
-            8'd10: ch = CH_SP;
-            8'd11: ch = CH_E;
-            8'd12: ch = CH_EQ;
-            8'd14: ch = CH_SP;
-            8'd15: ch = CH_O;
-            8'd16: ch = CH_EQ;
-            8'd18: ch = CH_SP;
-            8'd19: ch = CH_P;
-            8'd20: ch = CH_EQ;
-            8'd22: ch = CH_SP;
-            8'd23: ch = CH_D;
-            8'd24: ch = CH_EQ;
-            8'd26: ch = CH_SP;
-            8'd27: ch = CH_T;
-            8'd28: ch = CH_EQ;
-            8'd30: ch = CH_SP;
-            8'd31: ch = CH_R;
-            8'd32: ch = CH_EQ;
-            8'd39: ch = CH_SP;
-            8'd40: ch = CH_L;
-            8'd41: ch = CH_EQ;
-            8'd44: ch = CH_SP;
-            8'd45: ch = CH_S;
-            8'd46: ch = CH_EQ;
-            8'd51: ch = CH_SP;
-            8'd52: ch = CH_K;
-            8'd53: ch = CH_EQ;
-            8'd56: ch = CH_SP;
-            8'd57: ch = CH_M;
-            8'd58: ch = CH_EQ;
-            8'd61: ch = CH_SP;
-            8'd62: ch = CH_X;
-            8'd63: ch = CH_EQ;
-            8'd66: ch = CH_SP;
-            8'd67: ch = CH_D;
-            8'd68: ch = CH_1;
-            8'd69: ch = CH_EQ;
-            8'd78: ch = CH_SP;
-            8'd79: ch = CH_D;
-            8'd80: ch = CH_2;
-            8'd81: ch = CH_EQ;
-            8'd90: ch = CH_SP;
-            8'd91: ch = CH_D;
-            8'd92: ch = CH_3;
-            8'd93: ch = CH_EQ;
-            8'd102: ch = CH_SP;
-            8'd103: ch = CH_D;
-            8'd104: ch = CH_4;
-            8'd105: ch = CH_EQ;
-            8'd114: ch = CH_CR;
-            8'd115: ch = CH_LF;
-            default: ch = hex;
-        endcase
-    end
-
-    assign uart_data  = ch;
-    assign uart_valid = (rpt_idx != RPT_IDLE);
-
-    uart_tx #(.CLK_HZ(100_000_000), .BAUD(115_200)) u_uart_tx (
-        .clk (clk_ctrl), .rst (~clk_locked),
-        .tx_data (uart_data), .tx_valid (uart_valid), .tx_ready (uart_ready), .tx (usb_tx)
-    );
 
     // ---- status -----------------------------------------------------------
     reg [25:0] heartbeat = 26'd0;

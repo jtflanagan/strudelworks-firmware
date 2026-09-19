@@ -49,6 +49,7 @@ for {set i 0} {$i < $argc} {incr i} {
         --board { incr i; set board  [lindex $argv $i] }
         -part   { incr i; set part   [lindex $argv $i] }
         -period { incr i; set period [lindex $argv $i] }
+        -clock  { incr i; set clkport [lindex $argv $i] }
         -effort { incr i; set effort [lindex $argv $i] }
         -generic { incr i; set g [lindex $argv $i]; regsub {:} $g {=} g; lappend generics $g }
         -outdir { incr i; set outdir [lindex $argv $i] }
@@ -114,7 +115,9 @@ if {$effort eq "high"} {
 # The clock has to be declared AFTER synth_design in this flow - there is no
 # design to attach it to before that.  Everything in this core is one clock
 # domain, so one create_clock covers it.
-create_clock -period $period -name clk [get_ports clk]
+# -clock names the port when it is not `clk` (ddr3_wrapper's is clk_ctrl).
+if {![info exists clkport]} { set clkport clk }
+create_clock -period $period -name clk [get_ports $clkport]
 
 puts "=========================================================="
 puts " POST-SYNTHESIS (estimate)"
