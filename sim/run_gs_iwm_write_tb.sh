@@ -9,8 +9,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/gs_iwm_write_work"
 mkdir -p "$work"
 verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module gs_iwm_write_tb \
-    -I"$root/rtl" \
-    -Mdir "$work/obj" "$root/sim/gs_iwm_write_tb.sv" "$root/rtl/gs_iwm.sv" \
+    -I"$root/rtl/common" -I"$root/rtl/gs" \
+    -Mdir "$work/obj" "$root/sim/gs_iwm_write_tb.sv" "$root/rtl/gs/gs_iwm.sv" \
     -o gs_iwm_write_tb > "$work/verilator.log" 2>&1 || {
         echo "verilator build failed:" >&2; tail -30 "$work/verilator.log" >&2; exit 1; }
 "$work/obj/gs_iwm_write_tb" | tee "$work/gs_iwm_write.log" | grep -v '^\$finish' || true

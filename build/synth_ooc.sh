@@ -7,7 +7,7 @@
 #   build/synth_ooc.sh --period 6.0          # ask for 166 MHz instead
 #   build/synth_ooc.sh --effort high         # trade runtime for Fmax
 #   build/synth_ooc.sh --top foo --src rtl/foo.sv
-#   build/synth_ooc.sh --top phys_cache --src rtl/phys_cache.sv --src rtl/way_ram.sv \
+#   build/synth_ooc.sh --top phys_cache --src rtl/phys_cache.sv --src rtl/a2/way_ram.sv \
 #                      --generic SETS=64 --generic WAYS=8
 #
 # Same WSL plumbing as build/build.sh, and for the same two reasons: a .bat is

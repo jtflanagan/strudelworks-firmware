@@ -12,9 +12,9 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 iverilog -g2012 -o "$root/sim/tx_ring_tb.out" -s tx_ring_tb \
     "$root/sim/tx_ring_tb.sv" \
-    "$root/rtl/tx_ring.sv" \
-    "$root/rtl/msg_master.sv" \
-    "$root/rtl/wb_arb.sv" \
-    "$root/rtl/sync_fifo.sv"
+    "$root/rtl/common/tx_ring.sv" \
+    "$root/rtl/common/msg_master.sv" \
+    "$root/rtl/common/wb_arb.sv" \
+    "$root/rtl/common/sync_fifo.sv"
 
 exec vvp -n "$root/sim/tx_ring_tb.out"

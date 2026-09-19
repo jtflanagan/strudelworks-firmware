@@ -10,11 +10,11 @@ work="$root/sim/floppy_card_work"
 mkdir -p "$work"
 obj="$work/obj_vl"
 verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module floppy_card_tb \
-    -I"$root/rtl" -Mdir "$obj" \
+    -I"$root/rtl/common" -I"$root/rtl/a2" -Mdir "$obj" \
     "$root/sim/floppy_card_tb.sv" \
-    "$root/rtl/apple_bus_write.sv" "$root/rtl/ft601_msg_rx.sv" "$root/rtl/msg_arb.sv" \
-    "$root/rtl/msg_master.sv" "$root/rtl/slot_switches.sv" "$root/rtl/fd_bank.sv" \
-    "$root/rtl/floppy_card.sv" \
+    "$root/rtl/common/apple_bus_write.sv" "$root/rtl/common/ft601_msg_rx.sv" "$root/rtl/common/msg_arb.sv" \
+    "$root/rtl/common/msg_master.sv" "$root/rtl/common/slot_switches.sv" "$root/rtl/common/fd_bank.sv" \
+    "$root/rtl/a2/floppy_card.sv" \
     -o floppy_card_vl > "$work/verilator.log" 2>&1 || {
         echo "verilator build failed:" >&2; tail -30 "$work/verilator.log" >&2; exit 1; }
 "$obj/floppy_card_vl" | tee "$work/floppy_card_vl.log"

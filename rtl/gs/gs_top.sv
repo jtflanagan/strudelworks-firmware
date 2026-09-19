@@ -72,7 +72,7 @@
 // machine's own memory, which is a memory-mode decision that has not been made;
 // RDY is not used by the Apple II for the CPU; the slot brings out no NMI.
 //////////////////////////////////////////////////////////////////////////////////
-module master_top #(
+module gs_top #(
     parameter integer BUILD_DATE = 0,   // YYYYMMDD
     parameter integer BUILD_TIME = 0,   // HHMMSS
     // The page cache's geometry (rtl/page_cache.sv, docs/PAGE_CACHE.md):
@@ -88,7 +88,10 @@ module master_top #(
     // the chipset's registers, the map and the ROM in the 24-bit space.
     // build/build.sh --gs sets it; the plain build must stay bit-identical
     // at GS = 0, which the IIe battery is the parity check on.
-    parameter bit GS = 1'b0,
+    // THE MACHINE is this top: the 65816 card (rtl/gs, docs/REQ_65816.md).
+    // GS stays a constant 1 until every conditional that names it leaves with
+    // the module that owns it.
+    localparam bit GS = 1'b1,
     parameter integer CK_PHASE_SHIFT = 1  // write-level the DDR3's CK (docs/UBERDDR3.md rung 2; the default since 2026-09-18)
 ) (
     input  wire        clk_pin,
@@ -357,7 +360,7 @@ module master_top #(
     wire [7:0]  fb_peek_data;
     // The sequencer: ACCEL_CTRL in, its stream, status and counters out.
     wire [1:0]  accel_mode;
-    wire        accel_swint_dis, accel_game_dis, accel_fronts_dis;
+    wire        accel_swint_dis, accel_game_dis, accel_l1_dis;
     // The debug pair (rtl/wb_regfile.sv DBG_SEL/DBG_VAL, docs/GS.md rung 6).
     wire [7:0]  dbg_sel;
     wire [31:0] dbg_val, il_dbg, dl_dbg, dl_dbg2, pc_dbg;
@@ -571,7 +574,7 @@ module master_top #(
         .accel_mode (accel_mode), .accel_target (accel_target),
         .accel_swint_dis (accel_swint_dis),
         .accel_game_dis (accel_game_dis),
-        .accel_fronts_dis (accel_fronts_dis),
+        .accel_l1_dis (accel_l1_dis),
         .dbg_sel (dbg_sel), .dbg_val (dbg_val), .snap_hold (tm_snap_hold),
         .game_pb (game_pb), .game_pb_ok (game_pb_ok), .game_pdl_ok (game_pdl_ok),
         .game_pdl0 (game_pdl0), .game_pdl1 (game_pdl1), .game_pdl2 (game_pdl2), .game_pdl3 (game_pdl3),
@@ -743,47 +746,9 @@ module master_top #(
     // dispatcher's byte on both streams and the dispatcher keeps turbo_en
     // low, so the machine runs exactly as it did before rung 6 - the A/B
     // for a fault the benches do not show (docs/GS.md rung 6).
-    wire front_bypass = GS && accel_fronts_dis;
+    wire front_bypass = GS && accel_l1_dis;
 
-    generate if (!GS) begin : g_65c02
-
-    assign cpu_bank_raw = 8'd0;
-    assign cyc_internal = 1'b0;
-    assign core_vpb     = 1'b0;
-
-    cpu65c02 u_cpu (
-        .clk    (apple_clk),
-        .rst    (cpu_rst),
-        .cyc_en (cpu_cyc_en),
-        .addr   (cpu_addr),
-        .rw     (cpu_rw),
-        .dout   (cpu_dout),
-        .i_din  (i_din_w),          // the instruction front's byte
-        .d_din  (d_din_w),          // the data front's, or the sequencer's through it
-        .cyc_is_i (cpu_cyc_is_i),
-        .i_addr (),
-        .i_pred (),                 // the front predicts for itself (rtl/iline.sv)
-        .pc_addr (cpu_pc_addr),
-        .d_addr (),
-        .d_rw   (),
-        .d_dout (),
-        .d_pred (cpu_d_pred[15:0]), // the data front's candidate (rtl/dline.sv)
-        .d_pred_v (cpu_d_pred_v),
-        .d_pred_rw (cpu_d_pred_rw),
-        .p_flags (cpu_p_flags),     // the front resolves branches on them
-        .irq_n  (apple_irq_sync && !mb_irq && !mouse_irq),
-        .nmi_n  (1'b1),             // the slot brings out no NMI
-        .sync   (cpu_sync),
-        .halted ()                  // STP is not on the base part; see the RTL
-    );
-    // A 65C02 lives in bank zero: no bank class, no bank registers, no hold.
-    assign cpu_d_pred[23:16] = 8'd0;
-    assign cpu_d_pred_bcls   = 2'd0;
-    assign cpu_pc_bank       = 8'd0;
-    assign cpu_dbr           = 8'd0;
-    assign cpu_bank_wr       = 1'b0;
-
-    end else begin : g_65816
+    generate if (GS) begin : g_65816
 
     // ---- the 65816 (docs/GS.md rung 4, the fronts rung 6) -------------------
     // The same split interface the 65C02 offers, widened: the byte per
@@ -2323,54 +2288,7 @@ module master_top #(
     // the card is not built at all - no claim, no stall, no listener on the
     // FD_TRACK messages the IWM's 5.25" side takes instead - and its outputs
     // read as an absent card.
-    generate if (!GS) begin : g_fd
-        floppy_card u_fd (
-            .clk           (apple_clk),
-            .rst           (apple_rst),
-            .cpu_rst       (cpu_rst),
-            .res_sync      (apple_res_sync),
-            .master_active (cpu_source_active),
-            .slot_assign   (fd_slot_active),
-            .op_addr       (p_addr),
-            .op_rw         (p_rw),
-            .op_wdata      (p_wdata),
-            .op_present    (p_present),
-            .op_commit     (p_commit),
-            .op_ovr        (p_ovr),
-            .op_dummy      (p_dummy),
-            .fast_tick     (seq_fast_tick || turbo_tick || dline_tick),
-            .rd_claim      (fd_rd_claim),
-            .rd_data       (fd_rd_data),
-            .msg_valid     (app_msg_valid),
-            .msg_type      (app_msg_type),
-            .msg_free      (app_msg_free),
-            .msg_len       (app_msg_len),
-            .pay_data      (app_pay_data),
-            .pay_valid     (app_pay_valid),
-            .tx_word       (fd_word),
-            .tx_valid      (fd_valid),
-            .tx_take       (fd_take),
-            .drv_inserted  (fd_inserted),
-            .drv_wp        (fd_wp),
-            .drv_cell      (fd_nibbles),
-            .drv_tracks    (fd_tracks),
-            .drv_flush     (fd_flush),
-            .late_clr      (fd_late_clr),
-            .fill_clr      (fd_fill_clr),
-            .rom_loaded    (fd_rom_loaded),
-            .stale_o       (fd_stale),
-            .dirty_o       (fd_dirty),
-            .phase_o       (fd_phase),
-            .motor_o       (fd_motor),
-            .drive_sel_o   (fd_drive_sel),
-            .q6_o          (fd_q6),
-            .q7_o          (fd_q7),
-            .seeks         (fd_seeks),
-            .late          (fd_late),
-            .fill_max      (fd_fill_max),
-            .stall_o       (fd_stall)
-        );
-    end else begin : g_no_fd
+    generate if (GS) begin : g_no_fd
         assign fd_rd_claim   = 1'b0;
         assign fd_rd_data    = 8'd0;
         assign fd_word       = 32'd0;
@@ -2402,29 +2320,7 @@ module master_top #(
     // the key outright at machine = iigs, so the card would never be
     // assigned a slot anyway - building it there only puts another claim
     // term in the slot read mux below, which is on the read path.
-    generate if (!GS) begin : g_vidhd
-        vidhd_card u_vidhd (
-            .clk           (apple_clk),
-            .rst           (apple_rst),
-            .res_sync      (apple_res_sync),
-            .master_active (cpu_source_active),
-            .slot_assign   (vidhd_slot_active),
-            .op_addr       (op_addr),
-            .op_rw         (op_rw),
-            .op_present    (op_present),
-            .op_commit     (op_commit),
-            .op_ovr        (op_ovr),
-            .rd_claim      (vidhd_rd_claim),
-            .rd_data       (vidhd_rd_data),
-            .msg_valid     (app_msg_valid),
-            .msg_type      (app_msg_type),
-            .msg_free      (app_msg_free),
-            .msg_len       (app_msg_len),
-            .pay_data      (app_pay_data),
-            .pay_valid     (app_pay_valid),
-            .rom_loaded    (vidhd_rom_loaded)
-        );
-    end else begin : g_no_vidhd
+    generate if (GS) begin : g_no_vidhd
         assign vidhd_rd_claim   = 1'b0;
         assign vidhd_rd_data    = 8'd0;
         assign vidhd_rom_loaded = 1'b0;

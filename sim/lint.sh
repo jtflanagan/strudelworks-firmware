@@ -37,11 +37,11 @@ run() {
     rm -f /tmp/lint.$$
 }
 
-run uart_tx       rtl/uart_tx.v
-run uart_rx       rtl/uart_rx.v
-run bin_to_bcd    rtl/bin_to_bcd.v
-run report_tx     rtl/report_tx.sv rtl/bin_to_bcd.v
-run latency_probe rtl/latency_probe.sv
+run uart_tx       rtl/common/uart_tx.v
+run uart_rx       rtl/common/uart_rx.v
+run bin_to_bcd    rtl/common/bin_to_bcd.v
+run report_tx     rtl/common/report_tx.sv rtl/common/bin_to_bcd.v
+run latency_probe rtl/common/latency_probe.sv
 
 # ft601_fifo is now pure logic - the FIFOs moved out to ft601_top, mirroring the
 # reference, which keeps its clock-domain crossing outside the FT601 controller.
@@ -51,90 +51,90 @@ run latency_probe rtl/latency_probe.sv
 # For FPGA power-on values the distinction has no effect; Verilator is objecting
 # to simulation semantics we do not rely on.  Diverging from the source to quiet
 # a lint message is not worth it.
-run ft601_fifo    rtl/ft601_fifo.sv -Wno-INITIALDLY
-run ft601_msg_tx  rtl/ft601_msg_tx.sv
-run ft601_msg_rx  rtl/ft601_msg_rx.sv
-run link_watchdog rtl/link_watchdog.sv
-run sync_fifo     rtl/sync_fifo.sv
-run synth_bus_events rtl/synth_bus_events.sv
-run bus_event_capture rtl/bus_event_capture.sv rtl/sync_fifo.sv
-run bus_event_filter rtl/bus_event_filter.sv
+run ft601_fifo    rtl/common/ft601_fifo.sv -Wno-INITIALDLY
+run ft601_msg_tx  rtl/common/ft601_msg_tx.sv
+run ft601_msg_rx  rtl/common/ft601_msg_rx.sv
+run link_watchdog rtl/common/link_watchdog.sv
+run sync_fifo     rtl/common/sync_fifo.sv
+run synth_bus_events rtl/common/synth_bus_events.sv
+run bus_event_capture rtl/common/bus_event_capture.sv rtl/common/sync_fifo.sv
+run bus_event_filter rtl/common/bus_event_filter.sv
 # vbeam shares the scanner formula with vbl_lock and fb_sim.
-run vbeam         -Irtl rtl/vbeam.sv
-run event_merge   rtl/event_merge.sv
-run synchronizer  rtl/synchronizer.sv
-run wb_regfile    rtl/wb_regfile.sv rtl/fast_census.sv rtl/start_hold.sv
-run reg_bridge    rtl/reg_bridge.sv
-run reg_front     rtl/reg_front.sv
-run telem_tx      -Irtl rtl/telem_tx.sv rtl/sync_fifo.sv
-run msg_arb       rtl/msg_arb.sv
-run reply_stream  rtl/reply_stream.sv
-run msg_master    rtl/msg_master.sv
-run wb_arb        rtl/wb_arb.sv
-run apple_mmu     rtl/apple_mmu.sv
-run rom_loader    rtl/rom_loader.sv
+run vbeam         -Irtl/common -Irtl/a2 rtl/common/vbeam.sv
+run event_merge   rtl/common/event_merge.sv
+run synchronizer  rtl/common/synchronizer.sv
+run wb_regfile    rtl/common/wb_regfile.sv rtl/a2/fast_census.sv rtl/common/start_hold.sv
+run reg_bridge    rtl/common/reg_bridge.sv
+run reg_front     rtl/common/reg_front.sv
+run telem_tx      -Irtl/common -Irtl/a2 rtl/common/telem_tx.sv rtl/common/sync_fifo.sv
+run msg_arb       rtl/common/msg_arb.sv
+run reply_stream  rtl/common/reply_stream.sv
+run msg_master    rtl/common/msg_master.sv
+run wb_arb        rtl/common/wb_arb.sv
+run apple_mmu     rtl/a2/apple_mmu.sv
+run rom_loader    rtl/a2/rom_loader.sv
 # way_ram is the two-process true-dual-port RAM template at a way's geometry,
 # like fd_bank; page_cache is linted at all three of the geometries
 # sim/run_page_cache_tb.sh sweeps, because a way count that is not a power of
 # two takes different paths through its replacement tree.
-run way_ram       rtl/way_ram.sv -Wno-MULTIDRIVEN
-run page_cache    rtl/page_cache.sv rtl/way_ram.sv -Wno-MULTIDRIVEN
-run page_cache    rtl/page_cache.sv rtl/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=10
-run page_cache    rtl/page_cache.sv rtl/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=8
-run page_client   rtl/page_client.sv
-run tx_ring       rtl/tx_ring.sv rtl/sync_fifo.sv
-run apple_bus_read rtl/apple_bus_read.sv rtl/synchronizer.sv
-run apple_bus_write rtl/apple_bus_write.sv
-run accel_seq     rtl/accel_seq.sv
-run fast_census   rtl/fast_census.sv
-run bank_census   rtl/bank_census.sv
-run iline         rtl/iline.sv rtl/iscan.sv
-run dline         -Irtl rtl/dline.sv
-run iscan         rtl/iscan.sv
-run boot_hold     rtl/boot_hold.sv
-run kbd_inject    rtl/kbd_inject.sv
-run kbd_notice    rtl/kbd_notice.sv
-run speaker       rtl/speaker.sv
-run audio_sampler rtl/audio_sampler.sv
-run audio_tx      rtl/audio_tx.sv rtl/sync_fifo.sv
-run pb_inject     rtl/pb_inject.sv
-run game_port     rtl/game_port.sv
-run slot_switches rtl/slot_switches.sv
-run hd_card       rtl/hd_card.sv rtl/slot_switches.sv
-run vidhd_card    rtl/vidhd_card.sv rtl/slot_switches.sv
-run printer_card  rtl/printer_card.sv rtl/slot_switches.sv
-run mouse_card    rtl/mouse_card.sv rtl/slot_switches.sv
-run no_slot_clock rtl/no_slot_clock.sv
-run uthernet2_card rtl/uthernet2_card.sv rtl/fd_bank.sv -Wno-MULTIDRIVEN
+run way_ram       rtl/a2/way_ram.sv -Wno-MULTIDRIVEN
+run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN
+run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=10
+run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=8
+run page_client   rtl/common/page_client.sv
+run tx_ring       rtl/common/tx_ring.sv rtl/common/sync_fifo.sv
+run apple_bus_read rtl/common/apple_bus_read.sv rtl/common/synchronizer.sv
+run apple_bus_write rtl/common/apple_bus_write.sv
+run accel_seq     rtl/a2/accel_seq.sv
+run fast_census   rtl/a2/fast_census.sv
+run bank_census   rtl/gs/bank_census.sv
+run iline         rtl/a2/iline.sv rtl/a2/iscan.sv
+run dline         -Irtl/common -Irtl/a2 rtl/a2/dline.sv
+run iscan         rtl/a2/iscan.sv
+run boot_hold     rtl/common/boot_hold.sv
+run kbd_inject    rtl/common/kbd_inject.sv
+run kbd_notice    rtl/common/kbd_notice.sv
+run speaker       rtl/common/speaker.sv
+run audio_sampler rtl/common/audio_sampler.sv
+run audio_tx      rtl/common/audio_tx.sv rtl/common/sync_fifo.sv
+run pb_inject     rtl/common/pb_inject.sv
+run game_port     rtl/common/game_port.sv
+run slot_switches rtl/common/slot_switches.sv
+run hd_card       rtl/common/hd_card.sv rtl/common/slot_switches.sv
+run vidhd_card    rtl/a2/vidhd_card.sv rtl/common/slot_switches.sv
+run printer_card  rtl/common/printer_card.sv rtl/common/slot_switches.sv
+run mouse_card    rtl/common/mouse_card.sv rtl/common/slot_switches.sv
+run no_slot_clock rtl/common/no_slot_clock.sv
+run uthernet2_card rtl/common/uthernet2_card.sv rtl/common/fd_bank.sv -Wno-MULTIDRIVEN
 # fd_bank is the two-process true-dual-port RAM template Vivado infers block
 # RAM from (UG901); Verilator reads its two writers as a multi-driven array,
 # which is the shape, not a bug.
-run floppy_card   rtl/floppy_card.sv rtl/fd_bank.sv rtl/slot_switches.sv \
+run floppy_card   rtl/a2/floppy_card.sv rtl/common/fd_bank.sv rtl/common/slot_switches.sv \
                   -Wno-MULTIDRIVEN
 # vbl_lock and fb_sim share the scanner formula, an `include beside the RTL.
-run vbl_lock      -Irtl rtl/vbl_lock.sv
-run fb_sim        -Irtl rtl/fb_sim.sv rtl/fd_bank.sv -Wno-MULTIDRIVEN
+run vbl_lock      -Irtl/common -Irtl/a2 rtl/common/vbl_lock.sv
+run fb_sim        -Irtl/common -Irtl/a2 rtl/common/fb_sim.sv rtl/common/fd_bank.sv -Wno-MULTIDRIVEN
 # via6522 is third-party (see its header) and linted only as a dependency of
 # the mockingboard, with the style warnings its 2011 idiom trips suppressed
 # rather than fixed - it ran real machines as-is, and diverging from the
 # source to quiet a linter is how faithful ports stop being faithful.
 # YM2149.sv is third-party too (a2fpga's, via aty) and carries width idioms
 # Verilator dislikes; suppressed here, not edited there.
-run ay_pair       rtl/ay_pair.sv rtl/YM2149.sv -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND
-run ssi263        rtl/ssi263.sv
-run start_hold    rtl/start_hold.sv
-run mockingboard  rtl/mockingboard.sv rtl/via6522.v rtl/slot_switches.sv rtl/ay_pair.sv rtl/YM2149.sv rtl/ssi263.sv -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND \
+run ay_pair       rtl/common/ay_pair.sv rtl/common/YM2149.sv -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND
+run ssi263        rtl/common/ssi263.sv
+run start_hold    rtl/common/start_hold.sv
+run mockingboard  rtl/common/mockingboard.sv rtl/common/via6522.v rtl/common/slot_switches.sv rtl/common/ay_pair.sv rtl/common/YM2149.sv rtl/common/ssi263.sv -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND \
                   -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY
-# -Irtl: the microcode field definitions are a generated `include, and they live
+# -Irtl/common -Irtl/a2: the microcode field definitions are a generated `include, and they live
 # beside the RTL rather than in the simulator's working directory.
-run cpu65c02      -Irtl rtl/cpu65c02.sv
+run cpu65c02      -Irtl/common -Irtl/a2 rtl/a2/cpu65c02.sv
 # The exploratory 65816 (branch ucode_65816).  Same generated-include
 # arrangement as the 65C02 core.
-run cpu65816      -Irtl rtl/cpu65816.sv
+run cpu65816      -Irtl/common -Irtl/gs rtl/gs/cpu65816.sv
 
-# ---- the top level, at both machines -------------------------------------
-# master_top used to be on the "not linted" list below, because it
-# instantiates Xilinx primitives, an XPM macro and UberDDR3's top and
+# ---- the two tops ---------------------------------------------------------
+# The tops used to be on the "not linted" list below, because they
+# instantiate Xilinx primitives, an XPM macro and UberDDR3's top and
 # Verilator cannot resolve any of them - which left a mistyped connection or
 # an undriven wire in the top level to be found by Vivado, after a fifteen-
 # minute elaboration.  sim/stubs/prims.v gives the linter the port names and
@@ -142,19 +142,28 @@ run cpu65816      -Irtl rtl/cpu65816.sv
 # never in a synthesis source list; if one disagrees with the real primitive,
 # Vivado still says so.
 #
-# BOTH VALUES OF GS (docs/GS.md rung 4).  The IIe build and the IIgs build
-# are one file and one parameter, and the arm that is not being built is the
-# one that rots - so each is elaborated on every lint.  The suppressions are
-# the ones the modules underneath already carry in this file: ft601_fifo's
-# INITIALDLY, card_link's SYNCASYNCNET, the third-party width idioms.
-TOPRTL=$(ls rtl/*.sv rtl/*.v | grep -v 'master_top\|snoop_top\|au_top\|diag_top\|ft601_top')
-for gs in 0 1; do
-    LINT_LABEL="master_top GS=$gs" \
-    run master_top -GGS=$gs \
-        rtl/master_top.sv $TOPRTL sim/stubs/prims.v \
+# TWO CARDS, TWO TREES (2026-09-18, docs/CORE_REFACTOR_65C02.md rung 1):
+# rtl/a2/a2_top.sv over rtl/common + rtl/a2, rtl/gs/gs_top.sv over rtl/common
+# + rtl/gs.  Each card carries its own copy of the sequencer, L1 and L2 under
+# the same module names, so a lint never sees both trees at once.  The
+# suppressions are the ones the modules underneath already carry in this
+# file: ft601_fifo's INITIALDLY, card_link's SYNCASYNCNET, the third-party
+# width idioms.
+# (set -e is on: a glob with no match makes ls fail, so the card lists are
+# built with the shell's own nullglob, never a failing ls.)
+COMMONRTL=$(ls rtl/common/*.sv rtl/common/*.v | grep -v 'snoop_top\|au_top\|diag_top\|ft601_top')
+shopt -s nullglob
+for card in a2 gs; do
+    CARDRTL=""
+    for f in rtl/$card/*.sv rtl/$card/*.v; do
+        case "$f" in *"${card}_top.sv") ;; *) CARDRTL="$CARDRTL $f" ;; esac
+    done
+    LINT_LABEL="${card}_top" \
+    run ${card}_top \
+        rtl/$card/${card}_top.sv $COMMONRTL $CARDRTL sim/stubs/prims.v \
         -Wno-MULTIDRIVEN -Wno-CASEINCOMPLETE -Wno-PINCONNECTEMPTY \
         -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-PINMISSING \
-        -Wno-INITIALDLY -Wno-SYNCASYNCNET -Irtl
+        -Wno-INITIALDLY -Wno-SYNCASYNCNET -Irtl/common -Irtl/$card
 done
 
 # Not linted, deliberately:

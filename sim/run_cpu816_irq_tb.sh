@@ -9,10 +9,10 @@ work="$root/sim/cpu816_work/irq"
 mkdir -p "$work"
 python3 "$root/sim/gen_microcode816.py" --check
 verilator --binary --timing -j 4 -O1 -Wno-fatal --top-module cpu816_irq_tb \
-    -I"$root/rtl" \
-    -GUCODE="\"$root/rtl/cpu65816_ucode.hex\"" \
-    -GUCODE0="\"$root/rtl/cpu65816_ucode0.hex\"" \
-    -GUSEQ0="\"$root/rtl/cpu65816_useq0.hex\"" \
-    -Mdir "$work" "$root/sim/cpu816_irq_tb.sv" "$root/rtl/cpu65816.sv" \
+    -I"$root/rtl/common" -I"$root/rtl/gs" \
+    -GUCODE="\"$root/rtl/gs/cpu65816_ucode.hex\"" \
+    -GUCODE0="\"$root/rtl/gs/cpu65816_ucode0.hex\"" \
+    -GUSEQ0="\"$root/rtl/gs/cpu65816_useq0.hex\"" \
+    -Mdir "$work" "$root/sim/cpu816_irq_tb.sv" "$root/rtl/gs/cpu65816.sv" \
     -o cpu816_irq_tb > "$work/verilator.log" 2>&1 || { echo "verilator build failed:" >&2; tail -30 "$work/verilator.log" >&2; exit 1; }
 "$work/cpu816_irq_tb" | grep -v '^- '

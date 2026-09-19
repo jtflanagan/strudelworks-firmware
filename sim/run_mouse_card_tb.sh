@@ -5,12 +5,12 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/sim/mouse_card_tb.out"
-iverilog -g2012 -I "$root/rtl" -o "$out" -s mouse_card_tb \
+iverilog -g2012 -I "$root/rtl/common" -I "$root/rtl/a2" -o "$out" -s mouse_card_tb \
     "$root/sim/mouse_card_tb.sv" \
-    "$root/rtl/apple_bus_write.sv" \
-    "$root/rtl/ft601_msg_rx.sv" \
-    "$root/rtl/slot_switches.sv" \
-    "$root/rtl/mouse_card.sv"
+    "$root/rtl/common/apple_bus_write.sv" \
+    "$root/rtl/common/ft601_msg_rx.sv" \
+    "$root/rtl/common/slot_switches.sv" \
+    "$root/rtl/common/mouse_card.sv"
 # iverilog notes every constant part-select inside the always_comb ("sorry:
 # constant selects ... all bits will be included"): a sensitivity remark, not
 # a fault, and twenty of them a run - filtered.

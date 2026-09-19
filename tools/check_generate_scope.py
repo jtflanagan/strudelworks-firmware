@@ -21,7 +21,7 @@ root = pathlib.Path(__file__).resolve().parent.parent
 attr = r'(?:\(\*[^*]*\*\)\s*)*'
 decl_re = re.compile(r'^\s*' + attr + r'(?:wire|logic|reg)\b[^;=]*?\b([A-Za-z_]\w*)\s*(?:,\s*([A-Za-z_]\w*)\s*)*(?:=[^;]*)?;', re.M)
 bad = 0
-for f in sorted(root.glob('rtl/*.sv')):
+for f in sorted(root.glob('rtl/*/*.sv')):
     src = f.read_text()
     lines = src.split('\n')
     # module-level declarations: name -> first line (1-based); a comma list names several

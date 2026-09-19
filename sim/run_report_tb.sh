@@ -13,8 +13,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 iverilog -g2012 -o "$root/sim/report_tb.out" -s report_tb \
     "$root/sim/report_tb.sv" \
-    "$root/rtl/report_tx.sv" \
-    "$root/rtl/uart_tx.v" \
-    "$root/rtl/bin_to_bcd.v"
+    "$root/rtl/common/report_tx.sv" \
+    "$root/rtl/common/uart_tx.v" \
+    "$root/rtl/common/bin_to_bcd.v"
 
 exec vvp -n "$root/sim/report_tb.out"

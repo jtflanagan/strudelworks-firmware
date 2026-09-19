@@ -282,7 +282,7 @@ module wb_regfile #(
     output logic [1:0]     accel_mode,
     output logic           accel_swint_dis, // [28]: no internalized keyboard, dummies at $0000
     output logic           accel_game_dis,  // [27]: no internalized game port, dummies at $C000 only
-    output logic           accel_fronts_dis, // [29]: the fronts bypassed - the core takes the
+    output logic           accel_l1_dis, // [29]: the fronts bypassed - the core takes the
                                              // dispatcher's byte on both streams and neither
                                              // front retires (a diagnosis level, IIgs only)
     // The game port's samples, for GAME_STAT (rtl/game_port.sv).
@@ -1329,14 +1329,14 @@ module wb_regfile #(
             accel_cnt_clr <= 1'b0;
             accel_swint_dis <= 1'b0;
             accel_game_dis  <= 1'b0;
-            accel_fronts_dis <= 1'b0;
+            accel_l1_dis <= 1'b0;
         end else begin
             if (wr_accel_ctrl) begin
                 accel_mode    <= GS ? 2'd2 : wb_dat_w[1:0];
                 accel_target  <= wb_dat_w[23:8];
                 accel_swint_dis <= wb_dat_w[28];
                 accel_game_dis  <= wb_dat_w[27];
-                accel_fronts_dis <= wb_dat_w[29];
+                accel_l1_dis <= wb_dat_w[29];
             end
             accel_cnt_clr <= wr_accel_ctrl && wb_dat_w[31];
         end
@@ -1358,7 +1358,7 @@ module wb_regfile #(
         .fast_drom (accel_fast_drom), .fast_dcx (accel_fast_dcx), .fast_wr (accel_fast_wr),
         .fast_kbd (accel_fast_kbd)
     );
-    wire [31:0] accel_ctrl_rd = {2'd0, accel_fronts_dis, accel_swint_dis, accel_game_dis, 3'd0, accel_target, 6'd0, accel_mode};
+    wire [31:0] accel_ctrl_rd = {2'd0, accel_l1_dis, accel_swint_dis, accel_game_dis, 3'd0, accel_target, 6'd0, accel_mode};
 
     // ---- GAME_STAT ----------------------------------------------------------
     // The game port as the dummy loop last sampled it (rtl/game_port.sv):

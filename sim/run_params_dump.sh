@@ -8,7 +8,7 @@
 # inter-command delays.  sim/params_dump.sv instantiates it with our parameters
 # and nothing else, so this is the cheapest possible way to see exactly what
 # timing a parameter change produces.  Run it after touching any parameter in
-# rtl/ddr3_wrapper.sv or rtl/clk_gen.v.
+# rtl/common/ddr3_wrapper.sv or rtl/common/clk_gen.v.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

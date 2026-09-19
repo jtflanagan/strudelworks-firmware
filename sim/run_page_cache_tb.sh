@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
-# The physical page cache (rtl/page_cache.sv), its engine, the DDR3 client,
+# The physical page cache (rtl/a2/page_cache.sv), its engine, the DDR3 client,
 # the arbiter's priority slot and a streaming client sharing the port, against
 # a Wishbone memory that acks like the DDR3 - and against a full model of the
 # cache, so the replacement policy is checked exactly and not merely plausibly.
@@ -25,12 +25,12 @@ for g in "${geoms[@]}"; do
     obj="$work/obj_$g"
     verilator --binary --timing -j 4 -O1 -Wno-fatal --top-module page_cache_tb \
         -GSETS="$sets" -GWAYS="$ways" \
-        -I"$root/rtl" --Mdir "$obj" \
+        -I"$root/rtl/common" -I"$root/rtl/a2" --Mdir "$obj" \
         "$root/sim/page_cache_tb.sv" \
-        "$root/rtl/page_cache.sv" \
-        "$root/rtl/way_ram.sv" \
-        "$root/rtl/page_client.sv" \
-        "$root/rtl/wb_arb.sv" \
+        "$root/rtl/a2/page_cache.sv" \
+        "$root/rtl/a2/way_ram.sv" \
+        "$root/rtl/common/page_client.sv" \
+        "$root/rtl/common/wb_arb.sv" \
         > "$work/build_$g.log" 2>&1 || { echo "== $g: BUILD FAILED"; tail -30 "$work/build_$g.log"; fail=1; continue; }
     echo "== geometry $sets x $ways"
     if "$obj/Vpage_cache_tb" | tee "$work/run_$g.log" | grep -vE '^ok: '; then :; fi

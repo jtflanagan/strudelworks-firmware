@@ -8,8 +8,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/mmu_xlate_work"
 mkdir -p "$work"
 verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module mmu_xlate_gs_tb \
-    -I"$root/rtl" -Mdir "$work/obj_gs" \
-    "$root/sim/mmu_xlate_gs_tb.sv" "$root/rtl/apple_mmu.sv" \
+    -I"$root/rtl/common" -I"$root/rtl/gs" -Mdir "$work/obj_gs" \
+    "$root/sim/mmu_xlate_gs_tb.sv" "$root/rtl/gs/apple_mmu.sv" \
     -o mmu_xlate_gs > "$work/verilator_gs.log" 2>&1 || {
         echo "build failed:" >&2; tail -30 "$work/verilator_gs.log" >&2; exit 1; }
 exec "$work/obj_gs/mmu_xlate_gs" "$@"

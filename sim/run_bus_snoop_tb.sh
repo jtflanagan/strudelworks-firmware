@@ -14,7 +14,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 iverilog -g2012 -o "$root/sim/bus_snoop_tb.out" -s bus_snoop_tb \
     "$root/sim/bus_snoop_tb.sv" \
-    "$root/rtl/bus_event_capture.sv" \
-    "$root/rtl/sync_fifo.sv"
+    "$root/rtl/common/bus_event_capture.sv" \
+    "$root/rtl/common/sync_fifo.sv"
 
 exec vvp -n "$root/sim/bus_snoop_tb.out"

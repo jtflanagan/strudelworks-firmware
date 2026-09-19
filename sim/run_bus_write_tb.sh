@@ -9,5 +9,5 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/sim/bus_write_tb.out"
-iverilog -g2012 -o "$out" "$root/sim/bus_write_tb.sv" "$root/rtl/apple_bus_write.sv"
+iverilog -g2012 -o "$out" "$root/sim/bus_write_tb.sv" "$root/rtl/common/apple_bus_write.sv"
 exec vvp "$out"

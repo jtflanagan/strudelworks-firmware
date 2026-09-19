@@ -7,13 +7,13 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/sim/floppy_card_tb.out"
-iverilog -g2012 -I "$root/rtl" -o "$out" -s floppy_card_tb \
+iverilog -g2012 -I "$root/rtl/common" -I "$root/rtl/a2" -o "$out" -s floppy_card_tb \
     "$root/sim/floppy_card_tb.sv" \
-    "$root/rtl/apple_bus_write.sv" \
-    "$root/rtl/ft601_msg_rx.sv" \
-    "$root/rtl/msg_arb.sv" \
-    "$root/rtl/msg_master.sv" \
-    "$root/rtl/slot_switches.sv" \
-    "$root/rtl/fd_bank.sv" \
-    "$root/rtl/floppy_card.sv"
+    "$root/rtl/common/apple_bus_write.sv" \
+    "$root/rtl/common/ft601_msg_rx.sv" \
+    "$root/rtl/common/msg_arb.sv" \
+    "$root/rtl/common/msg_master.sv" \
+    "$root/rtl/common/slot_switches.sv" \
+    "$root/rtl/common/fd_bank.sv" \
+    "$root/rtl/a2/floppy_card.sv"
 exec vvp -n "$out"

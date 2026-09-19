@@ -9,7 +9,7 @@ instructions), which is what the machine this core has to stand in for
 actually contains.  Rockwell's RMB/SMB/BBR/BBS and WDC's STP/WAI are NOT on
 that part: those encodings are NOPs, and they are listed as such here.
 Transcribed by hand.  It is the REFERENCE, so it is deliberately kept as a flat literal rather
-than derived from anything in rtl/cpu65c02.sv - a table computed from the core's
+than derived from anything in rtl/a2/cpu65c02.sv - a table computed from the core's
 own decoder would agree with the core by construction and prove nothing.
 
 Each opcode gets one vector: two operand bytes, the processor status to start

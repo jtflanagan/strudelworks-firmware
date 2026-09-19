@@ -10,16 +10,16 @@ work="$root/sim/fb_work"
 mkdir -p "$work"
 command -v verilator > /dev/null || { echo "verilator not found" >&2; exit 1; }
 verilator --binary --timing -j 4 -O1 -Wno-fatal --top-module fb_sim_tb \
-    -I"$root/rtl" -GUCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
+    -I"$root/rtl/common" -I"$root/rtl/a2" -GUCODE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
     --Mdir "$work/obj_vl" \
     "$root/sim/fb_sim_tb.sv" \
-    "$root/rtl/synchronizer.sv" \
-    "$root/rtl/apple_bus_read.sv" \
-    "$root/rtl/apple_bus_write.sv" \
-    "$root/rtl/cpu65c02.sv" \
-    "$root/rtl/boot_hold.sv" \
-    "$root/rtl/vbl_lock.sv" \
-    "$root/rtl/apple_mmu.sv" \
-    "$root/rtl/fb_sim.sv" \
-    "$root/rtl/fd_bank.sv" > "$work/build.log" 2>&1 || { tail -30 "$work/build.log"; exit 1; }
+    "$root/rtl/common/synchronizer.sv" \
+    "$root/rtl/common/apple_bus_read.sv" \
+    "$root/rtl/common/apple_bus_write.sv" \
+    "$root/rtl/a2/cpu65c02.sv" \
+    "$root/rtl/common/boot_hold.sv" \
+    "$root/rtl/common/vbl_lock.sv" \
+    "$root/rtl/a2/apple_mmu.sv" \
+    "$root/rtl/common/fb_sim.sv" \
+    "$root/rtl/common/fd_bank.sv" > "$work/build.log" 2>&1 || { tail -30 "$work/build.log"; exit 1; }
 exec "$work/obj_vl/Vfb_sim_tb"

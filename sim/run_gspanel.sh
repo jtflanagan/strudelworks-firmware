@@ -25,16 +25,16 @@ done
 python3 "$root/sim/gen_microcode816.py" --check
 
 verilator --cc --exe --build -O2 -Wno-fatal --public-flat-rw --top-module cpu65816 \
-    -I"$root/rtl" \
-    -GUCODE_FILE="\"$root/rtl/cpu65816_ucode.hex\"" \
-    -GUCODE0_FILE="\"$root/rtl/cpu65816_ucode0.hex\"" \
-    -GUSEQ0_FILE="\"$root/rtl/cpu65816_useq0.hex\"" \
-    -Mdir "$work/obj" "$root/rtl/cpu65816.sv" "$root/sim/gspanel_run_main.cpp" \
+    -I"$root/rtl/common" -I"$root/rtl/gs" \
+    -GUCODE_FILE="\"$root/rtl/gs/cpu65816_ucode.hex\"" \
+    -GUCODE0_FILE="\"$root/rtl/gs/cpu65816_ucode0.hex\"" \
+    -GUSEQ0_FILE="\"$root/rtl/gs/cpu65816_useq0.hex\"" \
+    -Mdir "$work/obj" "$root/rtl/gs/cpu65816.sv" "$root/sim/gspanel_run_main.cpp" \
     -o gspanel_run > "$work/verilator.log" 2>&1 || {
         echo "build failed:" >&2; tail -30 "$work/verilator.log" >&2; exit 1; }
 
 run="$work/obj/gspanel_run"
-hex="--hex=$root/rtl/cpu65816_ucode.hex"
+hex="--hex=$root/rtl/gs/cpu65816_ucode.hex"
 
 if [ -z "$bin" ]; then
     for t in ca65 ld65; do

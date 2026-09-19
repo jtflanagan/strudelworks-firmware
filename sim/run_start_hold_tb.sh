@@ -9,8 +9,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/start_hold_work"
 mkdir -p "$work"
 verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module start_hold_tb \
-    -I"$root/rtl" -Mdir "$work/obj" \
-    "$root/sim/start_hold_tb.sv" "$root/rtl/start_hold.sv" \
+    -I"$root/rtl/common" -I"$root/rtl/a2" -Mdir "$work/obj" \
+    "$root/sim/start_hold_tb.sv" "$root/rtl/common/start_hold.sv" \
     -o start_hold > "$work/verilator.log" 2>&1 || {
         echo "build failed:" >&2; tail -30 "$work/verilator.log" >&2; exit 1; }
 exec "$work/obj/start_hold" "$@"

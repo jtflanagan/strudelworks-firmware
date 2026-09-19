@@ -9,11 +9,11 @@ work="$root/sim/audio_work"
 mkdir -p "$work"
 obj="$work/obj_vl"
 verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module audio_tb \
-    -I"$root/rtl" -Mdir "$obj" \
+    -I"$root/rtl/common" -I"$root/rtl/a2" -Mdir "$obj" \
     "$root/sim/audio_tb.sv" \
-    "$root/rtl/apple_bus_write.sv" "$root/rtl/mockingboard.sv" "$root/rtl/via6522.v" \
-    "$root/rtl/ay_pair.sv" "$root/rtl/YM2149.sv" "$root/rtl/ssi263.sv" "$root/rtl/slot_switches.sv" \
-    "$root/rtl/speaker.sv" "$root/rtl/audio_sampler.sv" "$root/rtl/audio_tx.sv" "$root/rtl/sync_fifo.sv" \
+    "$root/rtl/common/apple_bus_write.sv" "$root/rtl/common/mockingboard.sv" "$root/rtl/common/via6522.v" \
+    "$root/rtl/common/ay_pair.sv" "$root/rtl/common/YM2149.sv" "$root/rtl/common/ssi263.sv" "$root/rtl/common/slot_switches.sv" \
+    "$root/rtl/common/speaker.sv" "$root/rtl/common/audio_sampler.sv" "$root/rtl/common/audio_tx.sv" "$root/rtl/common/sync_fifo.sv" \
     -o audio_vl > "$work/verilator.log" 2>&1 || {
         echo "verilator build failed:" >&2; tail -30 "$work/verilator.log" >&2; exit 1; }
 "$obj/audio_vl" | tee "$work/audio_vl.log"

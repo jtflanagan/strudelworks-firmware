@@ -10,16 +10,16 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/sim/fb_sim_tb.out"
-iverilog -g2012 -I "$root/rtl" -o "$out" -s fb_sim_tb \
-    -P fb_sim_tb.UCODE=\"$root/rtl/cpu65c02_ucode.hex\" \
+iverilog -g2012 -I "$root/rtl/common" -I "$root/rtl/a2" -o "$out" -s fb_sim_tb \
+    -P fb_sim_tb.UCODE=\"$root/rtl/a2/cpu65c02_ucode.hex\" \
     "$root/sim/fb_sim_tb.sv" \
-    "$root/rtl/synchronizer.sv" \
-    "$root/rtl/apple_bus_read.sv" \
-    "$root/rtl/apple_bus_write.sv" \
-    "$root/rtl/cpu65c02.sv" \
-    "$root/rtl/boot_hold.sv" \
-    "$root/rtl/vbl_lock.sv" \
-    "$root/rtl/apple_mmu.sv" \
+    "$root/rtl/common/synchronizer.sv" \
+    "$root/rtl/common/apple_bus_read.sv" \
+    "$root/rtl/common/apple_bus_write.sv" \
+    "$root/rtl/a2/cpu65c02.sv" \
+    "$root/rtl/common/boot_hold.sv" \
+    "$root/rtl/common/vbl_lock.sv" \
+    "$root/rtl/a2/apple_mmu.sv" \
     \
-    "$root/rtl/fb_sim.sv"
+    "$root/rtl/common/fb_sim.sv"
 exec vvp -n "$out"

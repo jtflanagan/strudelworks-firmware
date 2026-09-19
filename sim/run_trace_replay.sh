@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
-# Replay a captured Apple II bus trace against rtl/cpu65c02.sv.
+# Replay a captured Apple II bus trace against rtl/a2/cpu65c02.sv.
 #
 #   sim/run_trace_replay.sh path/to/capture.bustrace [--skew=N] [...]
 #
@@ -14,7 +14,7 @@
 # computes the right results and run_cpu_cycles_tb.sh proves each opcode takes
 # the right NUMBER of cycles.  Neither has a bus, so neither can say which
 # address is driven during a cycle whose value the instruction discards.  The
-# unverified ones are listed in rtl/cpu65c02.sv's header - the indexed
+# unverified ones are listed in rtl/a2/cpu65c02.sv's header - the indexed
 # page-cross fixup, JMP (abs)'s extra cycle, the decimal extra cycle, $5C's
 # filler, and reset's two reads at PC.  A real 65C02 driving a real Apple II is
 # the reference, and this compares against it.
@@ -50,9 +50,9 @@ mkdir -p "$work"
 python3 "$root/sim/gen_microcode.py" --check
 
 verilator --cc --exe --build -O2 -Wno-fatal --top-module cpu65c02 \
-    -I"$root/rtl" \
-    -GUCODE_FILE="\"$root/rtl/cpu65c02_ucode.hex\"" \
-    -Mdir "$work/obj_dir" "$root/rtl/cpu65c02.sv" "$root/sim/trace_replay_main.cpp" \
+    -I"$root/rtl/common" -I"$root/rtl/a2" \
+    -GUCODE_FILE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
+    -Mdir "$work/obj_dir" "$root/rtl/a2/cpu65c02.sv" "$root/sim/trace_replay_main.cpp" \
     -o trace_replay > "$work/verilator.log" 2>&1 || {
         echo "build failed:" >&2; tail -20 "$work/verilator.log" >&2; exit 1; }
 

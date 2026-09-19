@@ -177,23 +177,23 @@ xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
 
 srcs=(
     "$root/sim/boot_gs_tb.sv"
-    "$root/rtl/cpu65816.sv" "$root/rtl/accel_seq.sv"
-    "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv" "$root/rtl/bank_census.sv"
-    "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv"
-    "$root/rtl/gs_io.sv" "$root/rtl/gs_adb.sv" "$root/rtl/gs_doc.sv" "$root/rtl/gs_clock.sv" "$root/rtl/gs_intc.sv" "$root/rtl/gs_iwm.sv"
-    "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv"
-    "$root/rtl/way_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv"
-    "$root/rtl/hd_card.sv" "$root/rtl/ft601_msg_rx.sv" "$root/rtl/fd_bank.sv"
+    "$root/rtl/gs/cpu65816.sv" "$root/rtl/gs/accel_seq.sv"
+    "$root/rtl/gs/iline.sv" "$root/rtl/gs/iscan.sv" "$root/rtl/gs/dline.sv" "$root/rtl/gs/bank_census.sv"
+    "$root/rtl/common/synchronizer.sv" "$root/rtl/common/apple_bus_read.sv" "$root/rtl/common/apple_bus_write.sv"
+    "$root/rtl/gs/gs_io.sv" "$root/rtl/gs/gs_adb.sv" "$root/rtl/gs/gs_doc.sv" "$root/rtl/gs/gs_clock.sv" "$root/rtl/gs/gs_intc.sv" "$root/rtl/gs/gs_iwm.sv"
+    "$root/rtl/gs/apple_mmu.sv" "$root/rtl/gs/rom_loader.sv" "$root/rtl/gs/page_cache.sv"
+    "$root/rtl/gs/way_ram.sv" "$root/rtl/common/page_client.sv" "$root/rtl/common/wb_arb.sv"
+    "$root/rtl/common/hd_card.sv" "$root/rtl/common/ft601_msg_rx.sv" "$root/rtl/common/fd_bank.sv"
 )
 echo "== boot_gs_tb: rom=$(basename "$rom") ($chunks chunks) mode=$mode target=$target instrs=$instrs"
 
 if [ "$vl" = 1 ]; then
     obj="$work/obj_gs_$tag"
     verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module boot_gs_tb \
-        -I"$root/rtl" \
-        -GUCODE="\"$root/rtl/cpu65816_ucode.hex\"" \
-        -GUCODE0="\"$root/rtl/cpu65816_ucode0.hex\"" \
-        -GUSEQ0="\"$root/rtl/cpu65816_useq0.hex\"" \
+        -I"$root/rtl/common" -I"$root/rtl/gs" \
+        -GUCODE="\"$root/rtl/gs/cpu65816_ucode.hex\"" \
+        -GUCODE0="\"$root/rtl/gs/cpu65816_ucode0.hex\"" \
+        -GUSEQ0="\"$root/rtl/gs/cpu65816_useq0.hex\"" \
         -GROMF="\"$work/gsrom_$tag.hex\"" \
         -GTRACEF="\"$trace\"" \
         -GROM_CHUNKS="$chunks" \
@@ -215,7 +215,7 @@ if [ "$vl" = 1 ]; then
         -GBTN_AT="$btnat" -GBTN_HOLD="$btnhold" \
         -GKEY_HOLD="$keyhold" -GPAGE_WATCH="${pagewatch:-0}" \
         -GOPSF="\"${mirror:+$mirror/ops.bin}\"" -GPAGESF="\"${mirror:+$mirror/pages.bin}\"" \
-        -GADB_KEYMAP="\"$root/rtl/adb_keymap.hex\"" \
+        -GADB_KEYMAP="\"$root/rtl/gs/adb_keymap.hex\"" \
         -GBRAMF="\"$work/gsbram_$tag.hex\"" -GHAS_BRAM="$has_bram" \
         -GFD35F="\"$work/fd35_$tag.hex\"" -GFD35_COUNTSF="\"$work/fd35_$tag.counts\"" \
         -GHAS_FD35="$has_fd35" -GFD35_DELAY="$fd35delay" -GFD35_TRACE="$fd35trace" \
@@ -226,10 +226,10 @@ if [ "$vl" = 1 ]; then
     "$obj/boot_gs_tb" | tee "$work/boot_gs_$tag.log" | grep -v '^\$finish' || true
 else
     out="$work/boot_gs_tb.out"
-    if ! iverilog -g2012 -I "$root/rtl" -o "$out" -s boot_gs_tb \
-            -Pboot_gs_tb.UCODE="\"$root/rtl/cpu65816_ucode.hex\"" \
-            -Pboot_gs_tb.UCODE0="\"$root/rtl/cpu65816_ucode0.hex\"" \
-            -Pboot_gs_tb.USEQ0="\"$root/rtl/cpu65816_useq0.hex\"" \
+    if ! iverilog -g2012 -I "$root/rtl/common" -I "$root/rtl/gs" -o "$out" -s boot_gs_tb \
+            -Pboot_gs_tb.UCODE="\"$root/rtl/gs/cpu65816_ucode.hex\"" \
+            -Pboot_gs_tb.UCODE0="\"$root/rtl/gs/cpu65816_ucode0.hex\"" \
+            -Pboot_gs_tb.USEQ0="\"$root/rtl/gs/cpu65816_useq0.hex\"" \
             -Pboot_gs_tb.ROMF="\"$work/gsrom_$tag.hex\"" \
             -Pboot_gs_tb.TRACEF="\"$trace\"" \
             -Pboot_gs_tb.ROM_CHUNKS="$chunks" \

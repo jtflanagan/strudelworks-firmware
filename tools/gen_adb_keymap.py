@@ -14,7 +14,7 @@ Columns, as KEGS uses them (adb_key_event): [0] the keycode, [1] unshifted,
 of $EF00 set is a SPECIAL key rather than an ASCII one, which is KEGS's own
 `hard_key` test, so the flag is carried rather than recomputed.
 
-    tools/gen_adb_keymap.py [--kegs DIR] [--out rtl/adb_keymap.hex] [--check]
+    tools/gen_adb_keymap.py [--kegs DIR] [--out rtl/gs/adb_keymap.hex] [--check]
 
 One line an entry, 128 of them, each `{ctrl[9:0], shift[9:0], plain[9:0]}` as
 30 bits.  A field is {none, special, byte}: `none` is KEGS's -1, and
@@ -95,7 +95,7 @@ def main():
     ap.add_argument("--check", action="store_true")
     a = ap.parse_args()
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    out = a.out or os.path.join(root, "rtl", "adb_keymap.hex")
+    out = a.out or os.path.join(root, "rtl", "gs", "adb_keymap.hex")
     lines = build(read_table(a.kegs))
     text = "".join(l + "\n" for l in lines)
     if a.check:

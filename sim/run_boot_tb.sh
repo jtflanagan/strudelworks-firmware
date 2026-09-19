@@ -67,23 +67,23 @@ xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
 
 srcs=(
     "$root/sim/boot_tb.sv"
-    "$root/rtl/cpu65c02.sv" "$root/rtl/accel_seq.sv" "$root/rtl/fast_census.sv"
-    "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv"
-    "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv"
-    "$root/rtl/boot_hold.sv"
-    "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv"
-    "$root/rtl/way_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv"
-    "$root/rtl/hd_card.sv" "$root/rtl/slot_switches.sv"
-    "$root/rtl/mockingboard.sv" "$root/rtl/via6522.v" "$root/rtl/ay_pair.sv" "$root/rtl/YM2149.sv" "$root/rtl/ssi263.sv"
-    "$root/rtl/ft601_msg_rx.sv"
+    "$root/rtl/a2/cpu65c02.sv" "$root/rtl/a2/accel_seq.sv" "$root/rtl/a2/fast_census.sv"
+    "$root/rtl/a2/iline.sv" "$root/rtl/a2/iscan.sv" "$root/rtl/a2/dline.sv"
+    "$root/rtl/common/synchronizer.sv" "$root/rtl/common/apple_bus_read.sv" "$root/rtl/common/apple_bus_write.sv"
+    "$root/rtl/common/boot_hold.sv"
+    "$root/rtl/a2/apple_mmu.sv" "$root/rtl/a2/rom_loader.sv" "$root/rtl/a2/page_cache.sv"
+    "$root/rtl/a2/way_ram.sv" "$root/rtl/common/page_client.sv" "$root/rtl/common/wb_arb.sv"
+    "$root/rtl/common/hd_card.sv" "$root/rtl/common/slot_switches.sv"
+    "$root/rtl/common/mockingboard.sv" "$root/rtl/common/via6522.v" "$root/rtl/common/ay_pair.sv" "$root/rtl/common/YM2149.sv" "$root/rtl/common/ssi263.sv"
+    "$root/rtl/common/ft601_msg_rx.sv"
 )
 echo "== boot_tb: $(basename "$hdv") mode=$mode target=$target slot=$slot cycles=$cyclim clks=$clks vl=$vl"
 
 if [ "$vl" = 1 ]; then
     obj="$work/obj_$tag"
     verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module boot_tb \
-        -I"$root/rtl" \
-        -GUCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
+        -I"$root/rtl/common" -I"$root/rtl/a2" \
+        -GUCODE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
         -GROMF="\"$work/rom.hex\"" \
         -GHDROMF="\"$work/hdrom.hex\"" \
         -GHDVF="\"$work/hdv_$tag.hex\"" \
@@ -104,8 +104,8 @@ if [ "$vl" = 1 ]; then
     grep -E "Elapsed|Maximum resident" "$work/time_$tag.log" || true
 else
     out="$work/boot_tb.out"
-    if ! iverilog -g2012 -I "$root/rtl" -o "$out" -s boot_tb \
-            -Pboot_tb.UCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
+    if ! iverilog -g2012 -I "$root/rtl/common" -I "$root/rtl/a2" -o "$out" -s boot_tb \
+            -Pboot_tb.UCODE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
             -Pboot_tb.ROMF="\"$work/rom.hex\"" \
             -Pboot_tb.HDROMF="\"$work/hdrom.hex\"" \
             -Pboot_tb.HDVF="\"$work/hdv_$tag.hex\"" \

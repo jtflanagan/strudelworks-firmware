@@ -26,9 +26,9 @@ mkdir -p "$work"
 python3 "$root/sim/gen_microcode.py" --check
 
 verilator --cc --exe --build -O2 -Wno-fatal --top-module cpu65c02 \
-    -I"$root/rtl" \
-    -GUCODE_FILE="\"$root/rtl/cpu65c02_ucode.hex\"" \
-    -Mdir "$work/obj_dir" "$root/rtl/cpu65c02.sv" "$root/sim/trace_replay_main.cpp" \
+    -I"$root/rtl/common" -I"$root/rtl/a2" \
+    -GUCODE_FILE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
+    -Mdir "$work/obj_dir" "$root/rtl/a2/cpu65c02.sv" "$root/sim/trace_replay_main.cpp" \
     -o trace_replay > "$work/verilator.log" 2>&1 || {
         echo "build failed:" >&2; tail -20 "$work/verilator.log" >&2; exit 1; }
 

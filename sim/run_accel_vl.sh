@@ -27,18 +27,18 @@ highs=("$@"); [ ${#highs[@]} -eq 0 ] && highs=(49 47)
 for high in "${highs[@]}"; do
     obj="$work/obj_vl_$high"
     verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module accel_tb \
-        -I"$root/rtl" \
-        -GUCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
+        -I"$root/rtl/common" -I"$root/rtl/a2" \
+        -GUCODE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
         -GPROG="\"$work/accel.hex\"" \
         -GPHI0_HIGH="$high" \
         -Mdir "$obj" \
-        "$root/sim/accel_tb.sv" "$root/rtl/cpu65c02.sv" "$root/rtl/accel_seq.sv" "$root/rtl/fast_census.sv" \
-        "$root/rtl/game_port.sv" \
-        "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv" \
-        "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv" \
-        "$root/rtl/boot_hold.sv" \
-        "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv" \
-        "$root/rtl/way_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" "$root/rtl/event_merge.sv" \
+        "$root/sim/accel_tb.sv" "$root/rtl/a2/cpu65c02.sv" "$root/rtl/a2/accel_seq.sv" "$root/rtl/a2/fast_census.sv" \
+        "$root/rtl/common/game_port.sv" \
+        "$root/rtl/a2/iline.sv" "$root/rtl/a2/iscan.sv" "$root/rtl/a2/dline.sv" \
+        "$root/rtl/common/synchronizer.sv" "$root/rtl/common/apple_bus_read.sv" "$root/rtl/common/apple_bus_write.sv" \
+        "$root/rtl/common/boot_hold.sv" \
+        "$root/rtl/a2/apple_mmu.sv" "$root/rtl/a2/rom_loader.sv" "$root/rtl/a2/page_cache.sv" \
+        "$root/rtl/a2/way_ram.sv" "$root/rtl/common/page_client.sv" "$root/rtl/common/wb_arb.sv" "$root/rtl/common/event_merge.sv" \
         -o accel_vl > "$work/verilator_$high.log" 2>&1 || {
             echo "verilator build failed:" >&2; tail -30 "$work/verilator_$high.log" >&2; exit 1; }
     echo "== PHI0_HIGH = $high"

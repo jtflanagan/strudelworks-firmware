@@ -320,7 +320,7 @@ module boot_tb #(parameter UCODE = "cpu65c02_ucode.hex",
         .fast_ops (fast_ops), .map_changed (map_changed), .map_settling (map_settling), .maps (accel_maps), .cen_v (), .cen_sel (), .turbo_ops (turbo_ops), .bus_ops (bus_ops),
         .cycles (cycles), .wait_clocks (wait_clocks),
         .retries (retries),
-        .fronts_dis (1'b0)
+        .l1_dis (1'b0)
     );
 
     iline u_iline (

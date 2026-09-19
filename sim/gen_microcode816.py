@@ -5,8 +5,8 @@
 
 Emits two generated files, both committed:
 
-    rtl/cpu65816_ucode.vh    field positions and symbolic values
-    rtl/cpu65816_ucode.hex   the ROM contents, one microinstruction per line
+    rtl/gs/cpu65816_ucode.vh    field positions and symbolic values
+    rtl/gs/cpu65816_ucode.hex   the ROM contents, one microinstruction per line
 
 Both files come from the field table below, so the RTL cannot disagree with the
 assembler about where a field lives.  That is the classic way a microcoded
@@ -1184,7 +1184,7 @@ def emit_hex0():
     out = []
     for opcode in range(256):
         slots = PROG.get(opcode)
-        # rtl/cpu65816.sv lands slot 0 in uc_q at the fetch edge and takes
+        # rtl/gs/cpu65816.sv lands slot 0 in uc_q at the fetch edge and takes
         # f_sync from that word: a slot 0 that is itself a fetch would make
         # a one-cycle instruction, which no 65xx has.
         assert not (slots and slots[0].get("sync")), f"${opcode:02X}: slot 0 is a fetch"
@@ -1233,10 +1233,10 @@ def main():
     undefined = [o for o in range(256) if o not in PROG]
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    vh = os.path.join(root, "rtl", "cpu65816_ucode.vh")
-    hx = os.path.join(root, "rtl", "cpu65816_ucode.hex")
-    h0 = os.path.join(root, "rtl", "cpu65816_ucode0.hex")
-    hs = os.path.join(root, "rtl", "cpu65816_useq0.hex")
+    vh = os.path.join(root, "rtl", "gs", "cpu65816_ucode.vh")
+    hx = os.path.join(root, "rtl", "gs", "cpu65816_ucode.hex")
+    h0 = os.path.join(root, "rtl", "gs", "cpu65816_ucode0.hex")
+    hs = os.path.join(root, "rtl", "gs", "cpu65816_useq0.hex")
     # resolve() mutates PROG, and emit_hex0 must see the SAME resolved slots as
     # emit_hex - so the main image is built first.
     hx_text = emit_hex()

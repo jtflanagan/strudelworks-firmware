@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
-# Replay a captured Apple II bus trace through rtl/apple_mmu.sv and check its
+# Replay a captured Apple II bus trace through rtl/a2/apple_mmu.sv and check its
 # memory-map decisions against what the real machine returned.
 #
 #   sim/run_mmu_trace.sh path/to/capture.bustrace [--rom=FILE] [--max=N] [--show=N]
@@ -28,7 +28,7 @@ case " $* " in *" --rom="*) ;; *) [ -f "$default_rom" ] && rom_arg="--rom=$defau
 
 mkdir -p "$work"
 verilator --cc --exe --build -O2 -Wno-fatal --top-module apple_mmu \
-    -Mdir "$work/obj_dir" "$root/rtl/apple_mmu.sv" "$root/sim/mmu_trace_check.cpp" \
+    -Mdir "$work/obj_dir" "$root/rtl/a2/apple_mmu.sv" "$root/sim/mmu_trace_check.cpp" \
     -o mmu_trace_check > "$work/verilator.log" 2>&1 || {
         echo "build failed:" >&2; tail -20 "$work/verilator.log" >&2; exit 1; }
 

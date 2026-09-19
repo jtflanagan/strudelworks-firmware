@@ -15,7 +15,18 @@ UberDDR3 file) is skipped, and so is the port list of a module it cannot parse.
 import re, sys, pathlib
 
 root = pathlib.Path(__file__).resolve().parent.parent
-files = sorted(root.glob('rtl/*.sv')) + sorted(root.glob('rtl/*.v')) + sorted(root.glob('sim/*.sv'))
+# Three trees since 2026-09-18: rtl/common, rtl/a2 (the 65C02 card) and rtl/gs
+# (the 65816 card).  The two cards each carry their own copy of the sequencer,
+# L1 and L2 under the SAME module names, so a port list is kept per tree and a
+# connection is checked against its own tree first, then common, then the other.
+files = sorted(root.glob('rtl/*/*.sv')) + sorted(root.glob('rtl/*/*.v')) + sorted(root.glob('sim/*.sv'))
+def tree_of(f):
+    parts = f.relative_to(root).parts
+    if parts[0] == 'rtl': return parts[1]
+    import re as _re
+    return 'gs' if _re.search(r'gs|816|gspanel|adb', f.name) else 'a2'
+def lookup_order(t):
+    return {'common': ['common','a2','gs'], 'a2': ['a2','common','gs'], 'gs': ['gs','common','a2']}[t]
 
 mod_re = re.compile(r'^\s*module\s+(\w+)\s*(#\s*\((?:[^()]|\([^()]*\))*\))?\s*\(', re.M)
 ident_re = re.compile(r'[A-Za-z_]\w*')
@@ -52,8 +63,10 @@ def strip_comments(t):
     t = re.sub(r'/\*.*?\*/', '', t, flags=re.S)
     return re.sub(r'//[^\n]*', '', t)
 
-ports = {}
+ports = {'common': {}, 'a2': {}, 'gs': {}}   # per tree; sim/ benches define none we check
 for f in files:
+    t = tree_of(f)
+    if t not in ports: continue
     text = strip_comments(f.read_text(errors='ignore'))
     for m in mod_re.finditer(text):
         name = m.group(1)
@@ -65,7 +78,7 @@ for f in files:
                 depth -= 1
                 if depth == 0: break
             i += 1
-        ports[name] = port_names(text[m.end():i])
+        ports[t][name] = port_names(text[m.end():i])
 
 inst_re = re.compile(r'\b([A-Za-z_]\w*)\s*(?:#\s*\((?:[^()]|\([^()]*\))*\)\s*)?'
                      r'([A-Za-z_]\w*)\s*(\()\s*\.\s*\w', re.S)
@@ -75,9 +88,13 @@ kw = {'if', 'else', 'for', 'while', 'case', 'begin', 'end', 'assign', 'always',
 bad = 0
 for f in files:
     text = strip_comments(f.read_text(errors='ignore'))
+    order = lookup_order(tree_of(f))
     for m in inst_re.finditer(text):
         mod, inst = m.group(1), m.group(2)
-        if mod in kw or mod not in ports:
+        if mod in kw:
+            continue
+        found = next((ports[t][mod] for t in order if mod in ports[t]), None)
+        if found is None:
             continue
         start = m.start(3)          # the instantiation's own '('
         i, depth = start, 0
@@ -89,7 +106,7 @@ for f in files:
             i += 1
         body = text[start:i]
         for p in re.findall(r'\.\s*(\w+)\s*\(', body):
-            if p not in ports[mod]:
+            if p not in found:
                 line = text[:m.start()].count('\n') + 1
                 print(f"{f.relative_to(root)}:{line}: {mod} {inst}: no port '{p}'")
                 bad += 1

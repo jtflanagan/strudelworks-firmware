@@ -10,11 +10,11 @@ mkdir -p "$work"
 python3 "$root/tools/gen_adb_keymap.py" --check
 python3 "$root/tools/gen_adb_revmap.py" --check
 verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module gs_kbd_a2_tb \
-    -I"$root/rtl" \
-    -GKEYMAP="\"$root/rtl/adb_keymap.hex\"" \
-    -GREVMAP="\"$root/rtl/adb_revmap.hex\"" \
+    -I"$root/rtl/common" -I"$root/rtl/gs" \
+    -GKEYMAP="\"$root/rtl/gs/adb_keymap.hex\"" \
+    -GREVMAP="\"$root/rtl/gs/adb_revmap.hex\"" \
     -Mdir "$work/obj" "$root/sim/gs_kbd_a2_tb.sv" \
-    "$root/rtl/gs_kbd_a2.sv" "$root/rtl/gs_adb.sv" \
+    "$root/rtl/gs/gs_kbd_a2.sv" "$root/rtl/gs/gs_adb.sv" \
     -o gs_kbd_a2_tb > "$work/verilator.log" 2>&1 || {
         echo "verilator build failed:" >&2; tail -40 "$work/verilator.log" >&2; exit 1; }
 "$work/obj/gs_kbd_a2_tb" | tee "$work/gs_kbd_a2.log" | grep -v '^\$finish' || true

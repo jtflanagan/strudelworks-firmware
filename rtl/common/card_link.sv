@@ -305,7 +305,7 @@ module card_link #(
     output wire [1:0]   accel_mode,
     output wire         accel_swint_dis,
     output wire         accel_game_dis,
-    output wire         accel_fronts_dis,   // ACCEL_CTRL[29]: the fronts bypassed (IIgs diagnosis)
+    output wire         accel_l1_dis,   // ACCEL_CTRL[29]: the fronts bypassed (IIgs diagnosis)
     // The debug pair (rtl/wb_regfile.sv DBG_SEL/DBG_VAL): the top's mux answers.
     output wire [7:0]   dbg_sel,
     // ...and the register cut's hold, for the top's own snapshot words.
@@ -1256,7 +1256,7 @@ module card_link #(
         .accel_mode        (accel_mode),
         .accel_swint_dis   (accel_swint_dis),
         .accel_game_dis    (accel_game_dis),
-        .accel_fronts_dis  (accel_fronts_dis),
+        .accel_l1_dis  (accel_l1_dis),
         .dbg_sel           (dbg_sel_host),
         .dbg_val           (dbg_val),
         .accel_target      (accel_target),

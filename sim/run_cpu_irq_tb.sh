@@ -17,9 +17,9 @@ python3 "$root/sim/gen_microcode.py" --check
 # See run_cpu_cycles_tb.sh for why the compile status is checked directly rather
 # than through the grep that filters iverilog's constant-select notes.
 rm -f "$work/cpu_irq_tb.out"
-if ! iverilog -g2012 -I "$root/rtl" -o "$work/cpu_irq_tb.out" -s cpu_irq_tb \
-        -Pcpu_irq_tb.UCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
-        "$root/sim/cpu_irq_tb.sv" "$root/rtl/cpu65c02.sv" \
+if ! iverilog -g2012 -I "$root/rtl/common" -I "$root/rtl/a2" -o "$work/cpu_irq_tb.out" -s cpu_irq_tb \
+        -Pcpu_irq_tb.UCODE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
+        "$root/sim/cpu_irq_tb.sv" "$root/rtl/a2/cpu65c02.sv" \
         > "$work/iverilog_irq.log" 2>&1; then
     grep -vE "sorry: constant selects|cannot be synthesized" "$work/iverilog_irq.log" >&2
     echo "compile failed" >&2

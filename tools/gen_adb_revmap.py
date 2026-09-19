@@ -6,10 +6,10 @@
 The card lives in an Apple IIe, and at GS = 1 that machine's own keyboard is
 the one under the user's hands.  What the IOU hands over is an ASCII byte and
 a strobe - the encoder has already applied shift, control and caps lock and
-thrown the keycode away - but rtl/gs_adb.sv is an ADB micro and wants what an
+thrown the keycode away - but rtl/gs/gs_adb.sv is an ADB micro and wants what an
 ADB micro is given: a KEYCODE and a modifier byte, which it then puts back
 through its own keymap to make the ASCII again.  So the byte has to be run
-backwards through that map first.  See rtl/gs_kbd_a2.sv and docs/GS.md.
+backwards through that map first.  See rtl/gs/gs_kbd_a2.sv and docs/GS.md.
 
 THE INVERSE IS NOT UNIQUE and the ambiguity is real, not an artefact: $0D is
 Return AND control-M, $08 is the left arrow AND control-H, $7F is Delete AND
@@ -29,12 +29,12 @@ ties left inside the winning column.  Both facts are asserted here rather
 than assumed, because a change in KEGS's table could break either.
 
 THE ROUND TRIP IS THE ORACLE.  Every entry is fed back through the FORWARD
-selection exactly as rtl/gs_adb.sv performs it - KEGS's own column choice,
+selection exactly as rtl/gs/gs_adb.sv performs it - KEGS's own column choice,
 including its rule that `hard_key` is decided by the plain column alone - and
 must reproduce the byte it came from.  A generated table that cannot be
 inverted back to itself is the one bug this file exists to prevent.
 
-    tools/gen_adb_revmap.py [--kegs DIR] [--out rtl/adb_revmap.hex] [--check]
+    tools/gen_adb_revmap.py [--kegs DIR] [--out rtl/gs/adb_revmap.hex] [--check]
 
 One line an entry, 128 of them, indexed by the ASCII byte: nine bits,
 {ctrl, shift, keycode[6:0]}.  There is no `none` flag because there is no
@@ -66,7 +66,7 @@ def has_ascii(v):
 
 
 def forward(row, col):
-    """The byte rtl/gs_adb.sv's km_sel would choose for this row and column.
+    """The byte rtl/gs/gs_adb.sv's km_sel would choose for this row and column.
 
     Transcribed from the module rather than reasoned out, ITS rule included:
     `ev_hard` comes from the PLAIN column alone, so a key whose plain entry is
@@ -135,7 +135,7 @@ def main():
     ap.add_argument("--check", action="store_true")
     a = ap.parse_args()
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    out = a.out or os.path.join(root, "rtl", "adb_revmap.hex")
+    out = a.out or os.path.join(root, "rtl", "gs", "adb_revmap.hex")
     lines = build(read_table(a.kegs))
     text = "".join(l + "\n" for l in lines)
     if a.check:

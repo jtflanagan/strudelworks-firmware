@@ -28,15 +28,15 @@ xxd -p -c1 "$work/accel.bin" > "$work/accel.hex"
 highs=("$@"); [ ${#highs[@]} -eq 0 ] && highs=(49 47)
 for high in "${highs[@]}"; do
     rm -f "$work/accel_tb.out"
-    if ! iverilog -g2012 -I "$root/rtl" -o "$work/accel_tb.out" -s accel_tb \
-            -Paccel_tb.UCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
+    if ! iverilog -g2012 -I "$root/rtl/common" -I "$root/rtl/a2" -o "$work/accel_tb.out" -s accel_tb \
+            -Paccel_tb.UCODE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
             -Paccel_tb.PROG="\"$work/accel.hex\"" \
             -Paccel_tb.PHI0_HIGH="$high" \
-            "$root/sim/accel_tb.sv" "$root/rtl/cpu65c02.sv" "$root/rtl/accel_seq.sv" "$root/rtl/iline.sv" "$root/rtl/iscan.sv" "$root/rtl/dline.sv" \
-            "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv" \
-            "$root/rtl/boot_hold.sv" \
-            "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv" \
-            "$root/rtl/way_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" "$root/rtl/event_merge.sv" \
+            "$root/sim/accel_tb.sv" "$root/rtl/a2/cpu65c02.sv" "$root/rtl/a2/accel_seq.sv" "$root/rtl/a2/iline.sv" "$root/rtl/a2/iscan.sv" "$root/rtl/a2/dline.sv" \
+            "$root/rtl/common/synchronizer.sv" "$root/rtl/common/apple_bus_read.sv" "$root/rtl/common/apple_bus_write.sv" \
+            "$root/rtl/common/boot_hold.sv" \
+            "$root/rtl/a2/apple_mmu.sv" "$root/rtl/a2/rom_loader.sv" "$root/rtl/a2/page_cache.sv" \
+            "$root/rtl/a2/way_ram.sv" "$root/rtl/common/page_client.sv" "$root/rtl/common/wb_arb.sv" "$root/rtl/common/event_merge.sv" \
             > "$work/iverilog.log" 2>&1; then
         grep -vE "sorry: constant selects|cannot be synthesized" "$work/iverilog.log" >&2
         echo "compile failed" >&2

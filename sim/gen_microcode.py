@@ -5,8 +5,8 @@
 
 Emits two generated files, both committed:
 
-    rtl/cpu65c02_ucode.vh    field positions and symbolic values
-    rtl/cpu65c02_ucode.hex   the ROM contents, one microinstruction per line
+    rtl/a2/cpu65c02_ucode.vh    field positions and symbolic values
+    rtl/a2/cpu65c02_ucode.hex   the ROM contents, one microinstruction per line
 
 Both come from the field table below, so the RTL cannot disagree with the
 assembler about where a field lives.  That is the classic way a microcoded
@@ -374,7 +374,7 @@ def build(mode, acc, op=OP["NOP"], alu_a=ALU_A["DIN"], wb=WB["NONE"], fl=0,
         # is a conditional slot, so the binary case costs nothing.
         #
         # The decimal OPERATION runs in that cycle (2026-09-14).  With D set
-        # the read slot writes nothing (rtl/cpu65c02.sv dec_defer) and the core
+        # the read slot writes nothing (rtl/a2/cpu65c02.sv dec_defer) and the core
         # keeps the operand it read (dm); this slot does the BCD add from
         # registers and lands A and N/V/Z/C.  The bus cycle is the same dummy
         # read at PC it always was.  What it buys: the nibble correction is off
@@ -739,7 +739,7 @@ def emit_hex():
 
 
 def check_decimal():
-    """The shape rtl/cpu65c02.sv's dec_defer rests on: every ADC/SBC word is
+    """The shape rtl/a2/cpu65c02.sv's dec_defer rests on: every ADC/SBC word is
     a slot whose condition is DEC and whose successor is the matching decimal
     word, and a decimal word appears nowhere else.  A binary ADC/SBC anywhere
     else would have its writes suppressed in decimal mode."""
@@ -764,8 +764,8 @@ def main():
     check_decimal()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    vh = os.path.join(root, "rtl", "cpu65c02_ucode.vh")
-    hx = os.path.join(root, "rtl", "cpu65c02_ucode.hex")
+    vh = os.path.join(root, "rtl", "a2", "cpu65c02_ucode.vh")
+    hx = os.path.join(root, "rtl", "a2", "cpu65c02_ucode.hex")
     vh_text, hx_text = emit_vh(vh), emit_hex()
 
     if "--check" in sys.argv:

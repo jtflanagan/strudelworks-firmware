@@ -108,7 +108,8 @@ puts "=========================================================="
 
 # One place decides the top level, so the source list, the constraint list and
 # the bitstream name below cannot drift apart.
-set topname [expr {$master ? {master_top} : ($snoop ? {snoop_top} : ($ft601 ? {ft601_top} : ($diag ? {diag_top} : {au_top})))}]
+set card [expr {$gs ? {gs} : {a2}}]
+set topname [expr {$master ? ($gs ? {gs_top} : {a2_top}) : ($snoop ? {snoop_top} : ($ft601 ? {ft601_top} : ($diag ? {diag_top} : {au_top})))}]
 # What the bitstream is CALLED, which is the top's name except for the IIgs
 # build - same top, different machine, and the two must not overwrite each
 # other in build/results.
@@ -159,150 +160,163 @@ if {$snoop || $master} {
     # them.  A second copy of the link plumbing was the alternative, and a bug
     # fixed in one copy is a bug still shipped in the other.
     add_files -norecurse [list \
-        [file join $root rtl clk_gen.v] \
-        [file join $root rtl ft_clk_buf.v] \
-        [file join $root rtl ft601_fifo.sv] \
-        [file join $root rtl ft601_msg_tx.sv] \
-        [file join $root rtl ft601_msg_rx.sv] \
-        [file join $root rtl link_watchdog.sv] \
-        [file join $root rtl sync_fifo.sv] \
-        [file join $root rtl synth_bus_events.sv] \
-        [file join $root rtl synchronizer.sv] \
-        [file join $root rtl apple_bus_read.sv] \
-        [file join $root rtl bus_event_capture.sv] \
-        [file join $root rtl bus_event_filter.sv] \
-        [file join $root rtl wb_regfile.sv] \
-        [file join $root rtl start_hold.sv] \
-        [file join $root rtl reg_bridge.sv] \
-        [file join $root rtl reg_front.sv] \
-        [file join $root rtl telem_tx.sv] \
-        [file join $root rtl msg_arb.sv] \
-        [file join $root rtl reply_stream.sv] \
-        [file join $root rtl msg_master.sv] \
-        [file join $root rtl ddr3_wrapper.sv] \
-        [file join $root rtl wb_arb.sv] \
-        [file join $root rtl tx_ring.sv] \
-        [file join $root rtl page_client.sv] \
-        [file join $root rtl apple_mmu.sv] \
-        [file join $root rtl rom_loader.sv] \
-        [file join $root rtl way_ram.sv] \
-        [file join $root rtl page_cache.sv] \
-        [file join $root rtl event_merge.sv] \
-        [file join $root rtl uart_tx.v] \
-        [file join $root rtl uart_rx.v] \
-        [file join $root rtl card_link.sv] \
+        [file join $root rtl common clk_gen.v] \
+        [file join $root rtl common ft_clk_buf.v] \
+        [file join $root rtl common ft601_fifo.sv] \
+        [file join $root rtl common ft601_msg_tx.sv] \
+        [file join $root rtl common ft601_msg_rx.sv] \
+        [file join $root rtl common link_watchdog.sv] \
+        [file join $root rtl common sync_fifo.sv] \
+        [file join $root rtl common synth_bus_events.sv] \
+        [file join $root rtl common synchronizer.sv] \
+        [file join $root rtl common apple_bus_read.sv] \
+        [file join $root rtl common bus_event_capture.sv] \
+        [file join $root rtl common bus_event_filter.sv] \
+        [file join $root rtl common wb_regfile.sv] \
+        [file join $root rtl common start_hold.sv] \
+        [file join $root rtl common reg_bridge.sv] \
+        [file join $root rtl common reg_front.sv] \
+        [file join $root rtl common telem_tx.sv] \
+        [file join $root rtl common msg_arb.sv] \
+        [file join $root rtl common reply_stream.sv] \
+        [file join $root rtl common msg_master.sv] \
+        [file join $root rtl common ddr3_wrapper.sv] \
+        [file join $root rtl common wb_arb.sv] \
+        [file join $root rtl common tx_ring.sv] \
+        [file join $root rtl common page_client.sv] \
+        [file join $root rtl common event_merge.sv] \
+        [file join $root rtl common uart_tx.v] \
+        [file join $root rtl common uart_rx.v] \
+        [file join $root rtl common card_link.sv] \
     ]
     if {$master} {
         add_files -norecurse [list \
-            [file join $root rtl apple_bus_write.sv] \
-            [file join $root rtl accel_seq.sv] \
-            [file join $root rtl fast_census.sv] \
-            [file join $root rtl bank_census.sv] \
-            [file join $root rtl iline.sv] \
-            [file join $root rtl dline.sv] \
-            [file join $root rtl iscan.sv] \
-            [file join $root rtl boot_hold.sv] \
-            [file join $root rtl kbd_inject.sv] \
-            [file join $root rtl kbd_notice.sv] \
-            [file join $root rtl pb_inject.sv] \
-            [file join $root rtl game_port.sv] \
-            [file join $root rtl cpu65c02.sv] \
-            [file join $root rtl via6522.v] \
-            [file join $root rtl YM2149.sv] \
-            [file join $root rtl ay_pair.sv] \
-            [file join $root rtl ssi263.sv] \
-            [file join $root rtl slot_switches.sv] \
-            [file join $root rtl mockingboard.sv] \
-            [file join $root rtl speaker.sv] \
-            [file join $root rtl audio_sampler.sv] \
-            [file join $root rtl audio_tx.sv] \
-            [file join $root rtl hd_card.sv] \
-            [file join $root rtl fd_bank.sv] \
-            [file join $root rtl floppy_card.sv] \
-            [file join $root rtl vidhd_card.sv] \
-            [file join $root rtl printer_card.sv] \
-            [file join $root rtl mouse_card.sv] \
-            [file join $root rtl uthernet2_card.sv] \
-            [file join $root rtl no_slot_clock.sv] \
-            [file join $root rtl vbl_lock.sv] \
-            [file join $root rtl vbeam.sv] \
-            [file join $root rtl fb_sim.sv] \
-            [file join $root rtl master_top.sv] \
+            [file join $root rtl common apple_bus_write.sv] \
+            [file join $root rtl common boot_hold.sv] \
+            [file join $root rtl common kbd_inject.sv] \
+            [file join $root rtl common kbd_notice.sv] \
+            [file join $root rtl common pb_inject.sv] \
+            [file join $root rtl common game_port.sv] \
+            [file join $root rtl common via6522.v] \
+            [file join $root rtl common YM2149.sv] \
+            [file join $root rtl common ay_pair.sv] \
+            [file join $root rtl common ssi263.sv] \
+            [file join $root rtl common slot_switches.sv] \
+            [file join $root rtl common mockingboard.sv] \
+            [file join $root rtl common speaker.sv] \
+            [file join $root rtl common audio_sampler.sv] \
+            [file join $root rtl common audio_tx.sv] \
+            [file join $root rtl common hd_card.sv] \
+            [file join $root rtl common fd_bank.sv] \
+            [file join $root rtl a2 floppy_card.sv] \
+            [file join $root rtl a2 vidhd_card.sv] \
+            [file join $root rtl common printer_card.sv] \
+            [file join $root rtl common mouse_card.sv] \
+            [file join $root rtl common uthernet2_card.sv] \
+            [file join $root rtl common no_slot_clock.sv] \
+            [file join $root rtl common vbl_lock.sv] \
+            [file join $root rtl common vbeam.sv] \
+            [file join $root rtl common fb_sim.sv] \
         ]
-        # cpu65c02 loads its microcode with $readmemh at elaboration, so the
-        # path has to be absolute: the simulator's - and the synthesiser's -
-        # working directory is not the RTL's directory.
-        set_property generic [list \
-            UCODE_FILE=[file join $root rtl cpu65c02_ucode.hex] \
-        ] [current_fileset]
-        add_files -norecurse [list [file join $root rtl cpu65c02_ucode.hex]]
         if {$gs} {
-            # The IIgs: the soft 65816 and the chipset's register faces
-            # (docs/GS.md).  The 65C02 and the two fronts stay in the list
-            # above and are simply not instantiated at GS = 1, so one source
-            # list serves both machines.
+            # THE 65816 CARD (rtl/gs): its core and ROMs, the chipset's register
+            # faces, its own copies of the sequencer, L1 and L2, and gs_top.
+            # Read at elaboration by $readmemh, and resolved by Vivado against
+            # the files in the fileset.
             add_files -norecurse [list \
-                [file join $root rtl cpu65816.sv] \
-                [file join $root rtl gs_io.sv] \
-                [file join $root rtl gs_adb.sv] \
-                [file join $root rtl gs_doc.sv] \
-                [file join $root rtl gs_kbd_a2.sv] \
-                [file join $root rtl gs_clock.sv] \
-                [file join $root rtl gs_intc.sv] \
-                [file join $root rtl gs_iwm.sv] \
+                [file join $root rtl gs cpu65816.sv] \
+                [file join $root rtl gs gs_io.sv] \
+                [file join $root rtl gs gs_adb.sv] \
+                [file join $root rtl gs gs_doc.sv] \
+                [file join $root rtl gs gs_kbd_a2.sv] \
+                [file join $root rtl gs gs_clock.sv] \
+                [file join $root rtl gs gs_intc.sv] \
+                [file join $root rtl gs gs_iwm.sv] \
+                [file join $root rtl gs bank_census.sv] \
+                [file join $root rtl gs cpu65816_ucode.hex] \
+                [file join $root rtl gs cpu65816_ucode0.hex] \
+                [file join $root rtl gs cpu65816_useq0.hex] \
+                [file join $root rtl gs adb_keymap.hex] \
+                [file join $root rtl gs adb_revmap.hex] \
+                [file join $root rtl gs gs_top.sv] \
             ]
-            # Read at elaboration by $readmemh, and resolved by Vivado
-            # against the files in the fileset - the same arrangement the
-            # 65C02's microcode has had since the first master build.
+        } else {
+            # THE 65C02 CARD (rtl/a2): its core, the IIe-only cards, its own
+            # copies of the sequencer, L1 and L2, and a2_top.  cpu65c02 loads
+            # its microcode with $readmemh at elaboration, so the path has to
+            # be absolute: the simulator's - and the synthesiser's - working
+            # directory is not the RTL's directory.
             add_files -norecurse [list \
-                [file join $root rtl cpu65816_ucode.hex] \
-                [file join $root rtl cpu65816_ucode0.hex] \
-                [file join $root rtl cpu65816_useq0.hex] \
-                [file join $root rtl adb_keymap.hex] \
-                [file join $root rtl adb_revmap.hex] \
+                [file join $root rtl a2 cpu65c02.sv] \
+                [file join $root rtl a2 floppy_card.sv] \
+                [file join $root rtl a2 vidhd_card.sv] \
+                [file join $root rtl a2 cpu65c02_ucode.hex] \
+                [file join $root rtl a2 a2_top.sv] \
             ]
+            set_property generic [list \
+                UCODE_FILE=[file join $root rtl a2 cpu65c02_ucode.hex] \
+            ] [current_fileset]
         }
+        # The sequencer, L1 and L2: one copy per card (docs/REQ_65C02.md,
+        # the two cards' cache decisions are independent).
+        add_files -norecurse [list \
+            [file join $root rtl $card accel_seq.sv] \
+            [file join $root rtl $card fast_census.sv] \
+            [file join $root rtl $card iline.sv] \
+            [file join $root rtl $card dline.sv] \
+            [file join $root rtl $card iscan.sv] \
+            [file join $root rtl $card page_cache.sv] \
+            [file join $root rtl $card way_ram.sv] \
+            [file join $root rtl $card apple_mmu.sv] \
+            [file join $root rtl $card rom_loader.sv] \
+        ]
     } else {
-        add_files -norecurse [list [file join $root rtl snoop_top.sv]]
+        add_files -norecurse [list [file join $root rtl common snoop_top.sv]]
     }
 } elseif {$ft601} {
     # FT601 link bring-up: no DDR3 and no Apple bus, so only the board pins and
     # the ft601 pair apply.  No .xci here either - the FT601 clock is used directly (ft_clk_buf.v) and v5.s
     # clk_wiz_0 and ft601_fifo.sv uses xpm_fifo_async in place of fifo_ft600.
     add_files -norecurse [list \
-        [file join $root rtl clk_gen.v] \
-        [file join $root rtl ft_clk_buf.v] \
-        [file join $root rtl ft601_fifo.sv] \
-        [file join $root rtl ft601_msg_tx.sv] \
-        [file join $root rtl uart_tx.v] \
-        [file join $root rtl uart_rx.v] \
-        [file join $root rtl ft601_top.sv] \
+        [file join $root rtl common clk_gen.v] \
+        [file join $root rtl common ft_clk_buf.v] \
+        [file join $root rtl common ft601_fifo.sv] \
+        [file join $root rtl common ft601_msg_tx.sv] \
+        [file join $root rtl common uart_tx.v] \
+        [file join $root rtl common uart_rx.v] \
+        [file join $root rtl common ft601_top.sv] \
     ]
 } elseif {$diag} {
     # Diagnostic build: no DDR3, so ddr3.xdc must be left out too - its ports do
     # not exist in diag_top and an XDC naming a missing port is only a warning,
     # which the unmatched-constraint guard below would (correctly) turn fatal.
     add_files -norecurse [list \
-        [file join $root rtl clk_gen.v] \
-        [file join $root rtl uart_tx.v] \
-        [file join $root rtl uart_rx.v] \
-        [file join $root rtl diag_top.sv] \
+        [file join $root rtl common clk_gen.v] \
+        [file join $root rtl common uart_tx.v] \
+        [file join $root rtl common uart_rx.v] \
+        [file join $root rtl common diag_top.sv] \
     ]
 } else {
     add_files -norecurse [list \
-        [file join $root rtl clk_gen.v] \
-        [file join $root rtl ddr3_wrapper.sv] \
-        [file join $root rtl latency_probe.sv] \
-        [file join $root rtl uart_tx.v] \
-        [file join $root rtl uart_rx.v] \
-        [file join $root rtl bin_to_bcd.v] \
-        [file join $root rtl report_tx.sv] \
-        [file join $root rtl au_top.sv] \
+        [file join $root rtl common clk_gen.v] \
+        [file join $root rtl common ddr3_wrapper.sv] \
+        [file join $root rtl common latency_probe.sv] \
+        [file join $root rtl common uart_tx.v] \
+        [file join $root rtl common uart_rx.v] \
+        [file join $root rtl common bin_to_bcd.v] \
+        [file join $root rtl common report_tx.sv] \
+        [file join $root rtl common au_top.sv] \
     ]
 }
 
 set_property file_type {Verilog}        [get_files *.v]
 set_property file_type {SystemVerilog}  [get_files *.sv]
+# The `include headers (telem_map.vh, scan_addr.vh, gs_iopage.vh, the cores'
+# microcode field definitions) are found beside the including file or on this
+# path; since the tree split a card's file may include a common header.
+if {$snoop || $master} {
+    set_property include_dirs [list [file join $root rtl common] [file join $root rtl $card]] [current_fileset]
+}
 set_property top $topname [current_fileset]
 
 # Build stamp -> top-level generics. Vivado's -generic takes decimal integers
@@ -319,8 +333,7 @@ if {$stamp_date != 0 || $stamp_time != 0} {
 # that "bit-identical at GS = 0" is a statement about the toolchain's input
 # and not only about the RTL's meaning.
 if {$gs} {
-    set_property generic [concat [get_property generic [current_fileset]] \
-                                 [list GS=1]] [current_fileset]
+    # GS is a localparam of gs_top since the tree split (2026-09-18): nothing to pass.
 }
 if {$ck_phase >= 0} {
     puts "CK_PHASE_SHIFT = $ck_phase ([expr {$ck_phase ? "the DDR3 write-levels its own CK" : "asked for OFF: CK on the commands' clock"}])"

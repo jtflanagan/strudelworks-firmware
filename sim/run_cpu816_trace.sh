@@ -33,11 +33,11 @@ done
 python3 "$root/sim/gen_microcode816.py" --check
 
 verilator --cc --exe --build -O2 -Wno-fatal --public-flat-rw --top-module cpu65816 \
-    -I"$root/rtl" \
-    -GUCODE_FILE="\"$root/rtl/cpu65816_ucode.hex\"" \
-    -GUCODE0_FILE="\"$root/rtl/cpu65816_ucode0.hex\"" \
-    -GUSEQ0_FILE="\"$root/rtl/cpu65816_useq0.hex\"" \
-    -Mdir "$work/obj_trace" "$root/rtl/cpu65816.sv" "$root/sim/cpu816_trace_main.cpp" \
+    -I"$root/rtl/common" -I"$root/rtl/gs" \
+    -GUCODE_FILE="\"$root/rtl/gs/cpu65816_ucode.hex\"" \
+    -GUCODE0_FILE="\"$root/rtl/gs/cpu65816_ucode0.hex\"" \
+    -GUSEQ0_FILE="\"$root/rtl/gs/cpu65816_useq0.hex\"" \
+    -Mdir "$work/obj_trace" "$root/rtl/gs/cpu65816.sv" "$root/sim/cpu816_trace_main.cpp" \
     -o cpu816_trace > "$work/verilator_trace.log" 2>&1 || {
         echo "build failed:" >&2; tail -30 "$work/verilator_trace.log" >&2; exit 1; }
 
@@ -46,5 +46,5 @@ pack=("$work/tests.bin")
 [ "$limit" != 0 ] && pack+=(--limit "$limit")
 python3 "$root/sim/cpu816_tests.py" "${pack[@]}"
 
-"$work/obj_trace/cpu816_trace" --tests="$work/tests.bin" --hex="$root/rtl/cpu65816_ucode.hex" \
+"$work/obj_trace/cpu816_trace" --tests="$work/tests.bin" --hex="$root/rtl/gs/cpu65816_ucode.hex" \
     --detail="$detail" $flags

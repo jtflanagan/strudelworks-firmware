@@ -11,11 +11,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/sim/mockingboard_tb.out"
 iverilog -g2012 -o "$out" \
     "$root/sim/mockingboard_tb.sv" \
-    "$root/rtl/apple_bus_write.sv" \
-    "$root/rtl/mockingboard.sv" \
-    "$root/rtl/via6522.v" \
-    "$root/rtl/ay_pair.sv" \
-    "$root/rtl/YM2149.sv" \
-    "$root/rtl/ssi263.sv" \
-    "$root/rtl/slot_switches.sv"
+    "$root/rtl/common/apple_bus_write.sv" \
+    "$root/rtl/common/mockingboard.sv" \
+    "$root/rtl/common/via6522.v" \
+    "$root/rtl/common/ay_pair.sv" \
+    "$root/rtl/common/YM2149.sv" \
+    "$root/rtl/common/ssi263.sv" \
+    "$root/rtl/common/slot_switches.sv"
 exec vvp "$out"

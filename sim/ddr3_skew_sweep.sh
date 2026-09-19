@@ -25,8 +25,8 @@ if [ $# -gt 0 ]; then pts=("$@"); elif [ "${CK:-0}" = 1 ]; then pts=(200 400 600
 macro=SW_WRITE_SKEW_PS; [ "${CK:-0}" = 1 ] && macro=SW_CK_SKEW_PS
 enforce=(); [ "${ENFORCE:-0}" = 1 ] && enforce=(-DSW_ENFORCE_TDQSS)   # the model's tDQSS violation costs the write (ddr3.sv)
 phase=();   [ "${PHASE:-0}" = 1 ]   && phase=(-DSW_CK_PHASE_SHIFT)     # CK_PHASE_SHIFT: the controller walks CK's phase under the feedback (rung 2)
-srcs=("$root/sim/mem_ddr3_tb.sv" "$root/rtl/tx_ring.sv" "$root/rtl/page_client.sv" "$root/rtl/msg_master.sv"
-      "$root/rtl/wb_arb.sv" "$root/rtl/sync_fifo.sv" "$tb/ddr3.sv" "$tb"/models/*_model.v
+srcs=("$root/sim/mem_ddr3_tb.sv" "$root/rtl/common/tx_ring.sv" "$root/rtl/common/page_client.sv" "$root/rtl/common/msg_master.sv"
+      "$root/rtl/common/wb_arb.sv" "$root/rtl/common/sync_fifo.sv" "$tb/ddr3.sv" "$tb"/models/*_model.v
       "$uber/rtl/ddr3_top.v" "$uber/rtl/ddr3_controller.v" "$uber/rtl/ddr3_phy.v")
 one() {
     local ps="$1"

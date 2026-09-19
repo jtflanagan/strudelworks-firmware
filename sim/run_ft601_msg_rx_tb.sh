@@ -13,7 +13,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 iverilog -g2012 -o "$root/sim/ft601_msg_rx_tb.out" -s ft601_msg_rx_tb \
     "$root/sim/ft601_msg_rx_tb.sv" \
-    "$root/rtl/ft601_msg_rx.sv" \
-    "$root/rtl/link_watchdog.sv"
+    "$root/rtl/common/ft601_msg_rx.sv" \
+    "$root/rtl/common/link_watchdog.sv"
 
 exec vvp -n "$root/sim/ft601_msg_rx_tb.out"

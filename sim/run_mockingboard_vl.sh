@@ -10,10 +10,10 @@ work="$root/sim/mockingboard_work"
 mkdir -p "$work"
 obj="$work/obj_vl"
 verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module mockingboard_tb \
-    -I"$root/rtl" -Mdir "$obj" \
+    -I"$root/rtl/common" -I"$root/rtl/a2" -Mdir "$obj" \
     "$root/sim/mockingboard_tb.sv" \
-    "$root/rtl/apple_bus_write.sv" "$root/rtl/mockingboard.sv" "$root/rtl/via6522.v" \
-    "$root/rtl/ay_pair.sv" "$root/rtl/YM2149.sv" "$root/rtl/ssi263.sv" "$root/rtl/slot_switches.sv" \
+    "$root/rtl/common/apple_bus_write.sv" "$root/rtl/common/mockingboard.sv" "$root/rtl/common/via6522.v" \
+    "$root/rtl/common/ay_pair.sv" "$root/rtl/common/YM2149.sv" "$root/rtl/common/ssi263.sv" "$root/rtl/common/slot_switches.sv" \
     -o mockingboard_vl > "$work/verilator.log" 2>&1 || {
         echo "verilator build failed:" >&2; tail -30 "$work/verilator.log" >&2; exit 1; }
 "$obj/mockingboard_vl" | tee "$work/mockingboard_vl.log"

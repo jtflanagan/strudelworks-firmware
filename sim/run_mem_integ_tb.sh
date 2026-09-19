@@ -23,13 +23,13 @@ ld65 -C "$root/sim/mem_integ.cfg" -o "$work/mem_integ.bin" "$work/mem_integ.o"
 xxd -p -c1 "$work/mem_integ.bin" > "$work/mem_integ.hex"
 
 verilator --binary --timing -j 4 -O1 -Wno-fatal --top-module mem_integ_tb \
-    -I"$root/rtl" --Mdir "$work/obj_integ" \
-    -GUCODE="\"$root/rtl/cpu65c02_ucode.hex\"" \
+    -I"$root/rtl/common" -I"$root/rtl/a2" --Mdir "$work/obj_integ" \
+    -GUCODE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
     -GPROG="\"$work/mem_integ.hex\"" \
-    "$root/sim/mem_integ_tb.sv" "$root/rtl/cpu65c02.sv" \
-    "$root/rtl/synchronizer.sv" "$root/rtl/apple_bus_read.sv" "$root/rtl/apple_bus_write.sv" \
-    "$root/rtl/apple_mmu.sv" "$root/rtl/rom_loader.sv" "$root/rtl/page_cache.sv" \
-    "$root/rtl/way_ram.sv" "$root/rtl/page_client.sv" "$root/rtl/wb_arb.sv" \
+    "$root/sim/mem_integ_tb.sv" "$root/rtl/a2/cpu65c02.sv" \
+    "$root/rtl/common/synchronizer.sv" "$root/rtl/common/apple_bus_read.sv" "$root/rtl/common/apple_bus_write.sv" \
+    "$root/rtl/a2/apple_mmu.sv" "$root/rtl/a2/rom_loader.sv" "$root/rtl/a2/page_cache.sv" \
+    "$root/rtl/a2/way_ram.sv" "$root/rtl/common/page_client.sv" "$root/rtl/common/wb_arb.sv" \
     > "$work/verilator_integ.log" 2>&1 || { tail -40 "$work/verilator_integ.log"; echo "compile failed" >&2; exit 1; }
 
 "$work/obj_integ/Vmem_integ_tb" | tee "$work/mem_integ_tb.log" | grep -v "^\$finish"

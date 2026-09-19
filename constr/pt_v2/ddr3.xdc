@@ -8,7 +8,7 @@
 # or `python3 tools/gen_ddr3_xdc.py --check` to verify.
 #
 # Port names here are the MIG/v5 top-level names, NOT UberDDR3's internal ones.
-# rtl/ddr3_wrapper.sv does the rename (ddr3_ck_* -> o_ddr3_clk_*, ddr3_ba ->
+# rtl/common/ddr3_wrapper.sv does the rename (ddr3_ck_* -> o_ddr3_clk_*, ddr3_ba ->
 # o_ddr3_ba_addr, and the o_/io_ prefixes).  Keeping the MIG names at the pin
 # boundary means this file is a pin-for-pin transcription of a constraint set
 # that is known to have worked on this exact board.
@@ -209,5 +209,5 @@ set_property SLEW FAST [get_ports {ddr3_reset_n}]
 # there is no DCI: termination is the UNTUNED_SPLIT_50 above, and VREF has
 # to come from the internal reference.  This also forces
 # ODELAY_SUPPORTED = 0 in the UberDDR3 instance, which is why the design
-# needs a 90-degree-shifted DDR3 clock (see rtl/clk_gen.v).
+# needs a 90-degree-shifted DDR3 clock (see rtl/common/clk_gen.v).
 set_property INTERNAL_VREF 0.675 [get_iobanks 15]

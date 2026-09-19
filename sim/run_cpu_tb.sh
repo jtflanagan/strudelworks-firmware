@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
-# Klaus Dormann's functional suites, run on rtl/cpu65c02.sv.  ~15 s.
+# Klaus Dormann's functional suites, run on rtl/a2/cpu65c02.sv.  ~15 s.
 #
 # Both suites matter and they are not disjoint.  The 65C02 suite covers the
 # instructions the CMOS part added; the NMOS suite hammers corner cases in the
@@ -48,9 +48,9 @@ python3 "$root/sim/gen_microcode.py" --check
 # The microcode ROM is loaded by $readmemh at elaboration, so its path has to
 # be absolute - the simulator's working directory is not the RTL's directory.
 verilator --cc --exe --build -O2 -Wno-fatal --top-module cpu65c02 \
-    -I"$root/rtl" \
-    -GUCODE_FILE="\"$root/rtl/cpu65c02_ucode.hex\"" \
-    -Mdir "$work/obj_dir" "$root/rtl/cpu65c02.sv" "$root/sim/cpu65c02_main.cpp" \
+    -I"$root/rtl/common" -I"$root/rtl/a2" \
+    -GUCODE_FILE="\"$root/rtl/a2/cpu65c02_ucode.hex\"" \
+    -Mdir "$work/obj_dir" "$root/rtl/a2/cpu65c02.sv" "$root/sim/cpu65c02_main.cpp" \
     -o cpu65c02_sim > "$work/verilator.log" 2>&1 || {
         echo "build failed:" >&2; tail -20 "$work/verilator.log" >&2; exit 1; }
 
@@ -96,7 +96,7 @@ run_one() {
 
 # The 65C02 suite is RE-ASSEMBLED rather than taken as shipped.  Upstream's
 # prebuilt binary fully tests Rockwell's BBR/BBS/RMB/SMB, and this core is a
-# base 65C02 that has none of them - see rtl/cpu65c02.sv's VARIANT note.  Built
+# base 65C02 that has none of them - see rtl/a2/cpu65c02.sv's VARIANT note.  Built
 # with those switches at 0, the suite tests those encodings AS NOPs, which is
 # the stronger check: it would catch a core that implemented them anyway.
 base_dir="$root/sim/cpu_work/base_test"

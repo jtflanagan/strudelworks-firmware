@@ -7,5 +7,5 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/sim/ssi263_tb.out"
-iverilog -g2012 -o "$out" "$root/sim/ssi263_tb.sv" "$root/rtl/ssi263.sv"
+iverilog -g2012 -o "$out" "$root/sim/ssi263_tb.sv" "$root/rtl/common/ssi263.sv"
 exec vvp "$out"

@@ -11,6 +11,6 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 iverilog -g2012 -o "$root/sim/msg_arb_tb.out" -s msg_arb_tb \
     "$root/sim/msg_arb_tb.sv" \
-    "$root/rtl/msg_arb.sv"
+    "$root/rtl/common/msg_arb.sv"
 
 exec vvp -n "$root/sim/msg_arb_tb.out"
