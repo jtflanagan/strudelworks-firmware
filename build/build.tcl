@@ -115,7 +115,12 @@ set topname [expr {$master ? ($gs ? {gs_top} : {a2_top}) : ($snoop ? {snoop_top}
 # What the bitstream is CALLED, which is the top's name except for the IIgs
 # build - same top, different machine, and the two must not overwrite each
 # other in build/results.
-set bitname [expr {$gs ? {master_top_gs} : $topname}]
+# The card's bitstream keeps its name whichever top builds it (CLAUDE.md,
+# build/build.sh's post-check, build/load.sh): master_top.bit for the 65C02
+# card, master_top_gs.bit for the 65816's.  (Rung 1 renamed the tops and left
+# this reading the top's name: the a2 card's bit landed as a2_top.bit and the
+# post-check called a finished build failed.)
+set bitname [expr {$master ? ($gs ? {master_top_gs} : {master_top}) : $topname}]
 if {$gs} { puts " machine: Apple IIgs (GS=1)" }
 
 set uber [file join $root third_party UberDDR3]

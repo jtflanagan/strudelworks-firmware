@@ -36,6 +36,12 @@ module wb_regfile #(
     // counter, census, statistic and debug word reads ZERO.  Their shadows,
     // their read arms and, upstream, the counters that fed them fall out of
     // the netlist.  What comes back in is decided later, word by word.
+    // MINIMAL = 1: the 65C02 card's register file (docs/CORE_REFACTOR_65C02.md
+    // rung 2): every counter, census, stat and debug word reads 0 EXCEPT the
+    // accelerator's own family (ACCEL_FAST..ACCEL_FAST_KBD, CORE_CYC/BUS_CYC),
+    // which is the instrument every hardware measurement is read from - the
+    // host's PLAIN ratio and its on-screen figure went blank without it
+    // (2026-09-19, the first a2 bitstream on hardware).
     parameter bit MINIMAL = 1'b0,
     // log2 of the page cache's pages (SETS x WAYS x 256 bytes), for
     // MEM_CTRL's readback: the host renders the cache's size from it.
@@ -1702,24 +1708,24 @@ module wb_regfile #(
                         R_FB_PEEK:    wb_dat_r <= MINIMAL ? 32'd0 : (fb_peek_rd);
                         R_ACCEL_CTRL: wb_dat_r <= accel_ctrl_rd;
                         R_ACCEL_STAT: wb_dat_r <= accel_stat_s;
-                        R_ACCEL_FAST: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_s);
-                        R_ACCEL_BUS:  wb_dat_r <= MINIMAL ? 32'd0 : (accel_bus_s);
-                        R_ACCEL_CYCLES: wb_dat_r <= MINIMAL ? 32'd0 : (accel_cycles_s);
-                        R_ACCEL_WAIT: wb_dat_r <= MINIMAL ? 32'd0 : (accel_wait_s);
-                        R_ACCEL_TURBO: wb_dat_r <= MINIMAL ? 32'd0 : (accel_turbo_s);
-                        R_ACCEL_DLINE: wb_dat_r <= MINIMAL ? 32'd0 : (accel_dline_s);
-                        R_ACCEL_MAPS: wb_dat_r <= MINIMAL ? 32'd0 : (accel_maps_s);
-                        R_ACCEL_IDROP: wb_dat_r <= MINIMAL ? 32'd0 : (accel_idrop_s);
-                        R_ACCEL_IREVIVE: wb_dat_r <= MINIMAL ? 32'd0 : (accel_irevive_s);
-                        R_ACCEL_DDROP: wb_dat_r <= MINIMAL ? 32'd0 : (accel_ddrop_s);
-                        R_ACCEL_DREVIVE: wb_dat_r <= MINIMAL ? 32'd0 : (accel_drevive_s);
+                        R_ACCEL_FAST: wb_dat_r <= accel_fast_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_BUS:  wb_dat_r <= accel_bus_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_CYCLES: wb_dat_r <= accel_cycles_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_WAIT: wb_dat_r <= accel_wait_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_TURBO: wb_dat_r <= accel_turbo_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_DLINE: wb_dat_r <= accel_dline_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_MAPS: wb_dat_r <= accel_maps_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_IDROP: wb_dat_r <= accel_idrop_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_IREVIVE: wb_dat_r <= accel_irevive_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_DDROP: wb_dat_r <= accel_ddrop_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_DREVIVE: wb_dat_r <= accel_drevive_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
                         R_MEM_FILLS:    wb_dat_r <= MINIMAL ? 32'd0 : (mem_fills_s);
                         R_MEM_FLUSHES:  wb_dat_r <= MINIMAL ? 32'd0 : (mem_flushes_s);
                         R_MEM_DECLINES: wb_dat_r <= MINIMAL ? 32'd0 : (mem_declines_s);
                         R_MEM_ROM:      wb_dat_r <= mem_rom_rd;
                         R_GS_ADB:       wb_dat_r <= MINIMAL ? 32'd0 : (gs_adb_stat_s);
-                        R_ACCEL_CORE_CYC: wb_dat_r <= MINIMAL ? 32'd0 : (cnt_core_cyc_s);
-                        R_ACCEL_BUS_CYC:  wb_dat_r <= MINIMAL ? 32'd0 : (cnt_bus_cyc_s);
+                        R_ACCEL_CORE_CYC: wb_dat_r <= cnt_core_cyc_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_BUS_CYC:  wb_dat_r <= cnt_bus_cyc_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
                         R_DBG_SEL:        wb_dat_r <= MINIMAL ? 32'd0 : ({24'd0, dbg_sel});
                         R_DBG_VAL:        wb_dat_r <= MINIMAL ? 32'd0 : (dbg_val_s);
                         R_FD35_DRIVE:     wb_dat_r <= MINIMAL ? 32'd0 : (fd35_drive_rd);
@@ -1740,13 +1746,13 @@ module wb_regfile #(
                         R_WIDE_HD_EXECS:   wb_dat_r <= MINIMAL ? 32'd0 : (wide_hd_execs_s);
                         R_WIDE_PANEL_DMAS: wb_dat_r <= MINIMAL ? 32'd0 : (wide_panel_dmas_s);
                         R_WIDE_AUDIO_SENT: wb_dat_r <= MINIMAL ? 32'd0 : (wide_audio_sent_s);
-                        R_ACCEL_FAST_I: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_i_s);
-                        R_ACCEL_FAST_DRAM: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_dram_s);
-                        R_ACCEL_FAST_DLC: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_dlc_s);
-                        R_ACCEL_FAST_DROM: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_drom_s);
-                        R_ACCEL_FAST_DCX: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_dcx_s);
-                        R_ACCEL_FAST_WR: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_wr_s);
-                        R_ACCEL_FAST_KBD: wb_dat_r <= MINIMAL ? 32'd0 : (accel_fast_kbd_s);
+                        R_ACCEL_FAST_I: wb_dat_r <= accel_fast_i_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_FAST_DRAM: wb_dat_r <= accel_fast_dram_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_FAST_DLC: wb_dat_r <= accel_fast_dlc_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_FAST_DROM: wb_dat_r <= accel_fast_drom_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_FAST_DCX: wb_dat_r <= accel_fast_dcx_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_FAST_WR: wb_dat_r <= accel_fast_wr_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
+                        R_ACCEL_FAST_KBD: wb_dat_r <= accel_fast_kbd_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
                         R_GAME_STAT:      wb_dat_r <= MINIMAL ? 32'd0 : (game_stat_rd);
                         R_GAME_STAT2:     wb_dat_r <= MINIMAL ? 32'd0 : (game_stat2_rd);
                         default:      wb_dat_r <= 32'd0;

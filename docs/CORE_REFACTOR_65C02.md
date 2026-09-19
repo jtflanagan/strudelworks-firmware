@@ -1,6 +1,6 @@
 # The 65C02 card: the core / L1 / L2 refactor ladder
 
-Status: **RUNG 5 DONE (sims) 2026-09-19, branch `core_refactor`**: L1-D is rtl/a2/l1d.sv (the shadow, the last row and the last byte at one clock; every other read a TLB hit covers served from the page cache's row at THREE clocks through the shared direct way read; writes as dline's rung 3); dline is gone from the a2 tree; accel_vl 98/0 at both sweeps (63.7x), quick 34/34, boot 2/2 (Nox 58.0 ops per bus cycle, unchanged); synthesis only: **25,124 LUTs / 15,562 flops / 47 RAMB36** (L1-D 5,256 -> 880; L1 + L2 together 4.6k of the 25.1k). Next: the budget checkpoint (the Au is 20,800 LUTs: ~4.3k over, all of it outside L1/L2 now), then rung 6. Earlier: RUNG 4 DONE (sims): L1-I is rtl/a2/l1i.sv (two line buffers filled by direct way reads) over rtl/a2/tlb.sv (eight entries naming the L2 set and way); iline and iscan are gone from the a2 tree; accel_vl 98/0 at both sweeps (99.9% of mode-2 fetches at one clock, 65.5x in the bench against ~71x before), quick 34/34, boot 2/2; synthesis only: **29,444 LUTs / 20,601 flops / 47 RAMB36** (L1-I 4.4k -> 1,237 LUTs; the ledger below). Next: rung 5 (L1-D). Earlier: RUNG 3 DONE (sims): the 65C02 card's page cache is 64 sets x 6 ways with the referenced-way rule, the placement report and the direct way read (rtl/a2/page_cache.sv header); page_cache_tb 61 checks at 128x8, 64x10, 64x8 and 64x6, lint 67, mem_integ 21/0, accel_vl 98/0 at both sweeps, boot 2/2; synthesis only: **32,674 LUTs / 21,384 flops / 47 RAMB36** (the cache 3,113 -> 2,030 LUTs, 64 -> 24 tiles) - block RAM is inside the Au's 50 for the first time; LUTs are L1's 9.9k to answer for in rungs 4-5. Earlier: RUNG 1 DONE (sims), RUNG 2's three cuts: the DDR3-free boot path is built - rtl/common/tx_ring.sv's boot lane, RING_CTRL 0x8000_0188, LINK_STAT[25]/[31], the host's checklist engaging the ring before BUS_ENABLE; tx_ring_tb with three boot-lane phases, reg_map_tb, both DDR3-model benches and the quick suite green; out of context the lane costs the ring +83 LUTs / +40 flops / +1 RAMB18 (372 -> 455 LUTs). Earlier: RUNG 0 DONE (a2_au_base: the Au refuses placement at 73 RAMB36 of 50 and 35k logic LUTs of 20.8k; a2_pt_base: the IIe routed on the Pt at 33,349 LUTs / 26,757 flops / 83 RAMB36, WNS -0.007, a numbers build not a loadable one; both tables in REQ_65C02.md §0). Rung 1 next; the peripheral-free floor is 25.6k LUTs, 12.4k of it outside L1/L2 (REQ §0). Requirements:
+Status: **BUDGET CHECKPOINT DECIDED 2026-09-19: the 35T cannot fit the full card (25,128 LUTs of 20,800 at synthesis); on a 50T Au variant the user may have manufactured the full card ROUTES AND MEETS TIMING at 23,022 LUTs = 70.6% (WNS +0.066, build a2_au50, no such board yet); the user's direction: develop and test on the Pt for both cards, watch resources against the 50T for both, bitstream builds resume (see "The budget checkpoint")**. RUNG 5 DONE (sims) 2026-09-19, branch `core_refactor`: L1-D is rtl/a2/l1d.sv (the shadow, the last row and the last byte at one clock; every other read a TLB hit covers served from the page cache's row at THREE clocks through the shared direct way read; writes as dline's rung 3); dline is gone from the a2 tree; accel_vl 98/0 at both sweeps (63.7x), quick 34/34, boot 2/2 (Nox 58.0 ops per bus cycle, unchanged); synthesis only: **25,124 LUTs / 15,562 flops / 47 RAMB36** (L1-D 5,256 -> 880; L1 + L2 together 4.6k of the 25.1k). Next: the budget checkpoint (the Au is 20,800 LUTs: ~4.3k over, all of it outside L1/L2 now), then rung 6. Earlier: RUNG 4 DONE (sims): L1-I is rtl/a2/l1i.sv (two line buffers filled by direct way reads) over rtl/a2/tlb.sv (eight entries naming the L2 set and way); iline and iscan are gone from the a2 tree; accel_vl 98/0 at both sweeps (99.9% of mode-2 fetches at one clock, 65.5x in the bench against ~71x before), quick 34/34, boot 2/2; synthesis only: **29,444 LUTs / 20,601 flops / 47 RAMB36** (L1-I 4.4k -> 1,237 LUTs; the ledger below). Next: rung 5 (L1-D). Earlier: RUNG 3 DONE (sims): the 65C02 card's page cache is 64 sets x 6 ways with the referenced-way rule, the placement report and the direct way read (rtl/a2/page_cache.sv header); page_cache_tb 61 checks at 128x8, 64x10, 64x8 and 64x6, lint 67, mem_integ 21/0, accel_vl 98/0 at both sweeps, boot 2/2; synthesis only: **32,674 LUTs / 21,384 flops / 47 RAMB36** (the cache 3,113 -> 2,030 LUTs, 64 -> 24 tiles) - block RAM is inside the Au's 50 for the first time; LUTs are L1's 9.9k to answer for in rungs 4-5. Earlier: RUNG 1 DONE (sims), RUNG 2's three cuts: the DDR3-free boot path is built - rtl/common/tx_ring.sv's boot lane, RING_CTRL 0x8000_0188, LINK_STAT[25]/[31], the host's checklist engaging the ring before BUS_ENABLE; tx_ring_tb with three boot-lane phases, reg_map_tb, both DDR3-model benches and the quick suite green; out of context the lane costs the ring +83 LUTs / +40 flops / +1 RAMB18 (372 -> 455 LUTs). Earlier: RUNG 0 DONE (a2_au_base: the Au refuses placement at 73 RAMB36 of 50 and 35k logic LUTs of 20.8k; a2_pt_base: the IIe routed on the Pt at 33,349 LUTs / 26,757 flops / 83 RAMB36, WNS -0.007, a numbers build not a loadable one; both tables in REQ_65C02.md §0). Rung 1 next; the peripheral-free floor is 25.6k LUTs, 12.4k of it outside L1/L2 (REQ §0). Requirements:
 docs/REQ_65C02.md. Design discussion: docs/L1_RETHINK.md (the TLB carries the L2 way; the
 sizes picked there). Sibling project, decided separately: the 65816 card (docs/REQ_65816.md, no
 ladder yet).
@@ -110,13 +110,133 @@ against 23.3 M serves (the shadow and the last row take nearly everything on tha
 | 6 | **The dispatcher after L1.** With TLB-hit reads at two clocks, accel_seq's fast-op path serves only BUS-class ops, TLB misses and internalized $C0xx; its GS terms (S_NULL, gs_map_wr, sl_win, the bank on the stream) are already gone with rung 1. Cut what the histogram still charges: the settle-then-decide clock where the class is now the TLB's, the registered copies whose paragraphs describe chains that no longer exist. The governor is not touched (REQ §1.5). | accel_vl (mode 0 bit-exact, the reset sequence on the bus, the boot hold, the DMA); the clock histogram on HW: DEC_D and SEQ_FAST against rung 4's | |
 | 7 | **The core.** Only after 1-5, and only what the census names: the dead WDC-variant logic and the ld_if bit go (REQ §2.5); the false path through the ucode ROM is re-checked against the new din cone; nothing in the cycle contract (REQ §2.1) moves. | cpu suite 4/4 at the exact Klaus cycle counts; trace_replay address-exact; both builds MET | |
 
-## The budget checkpoint, after rung 5
+## The budget checkpoint, after rung 5 - MEASURED 2026-09-19 (fw 4f3cb2b)
 
 With the floor cleaned (rung 2) and L1 + L2 rebuilt (rungs 3-5), read the Au build's LUT count
 against 20,800 and decide what comes back in: the floppy and the HD first (1.5k together), then
 the Mockingboard (1.7k), the mouse (1.1k), the Uthernet (2.6k). **The user's stance
 (2026-09-18): everything is on the table, and if the fit needs a sacrifice not worth the saving,
 the 65C02 card gives up the Au here** and the ladder continues on the Pt alone.
+
+**The measurement** (`build/build.sh --master --board au_v2 --synth-only`, xc7a35tftg256-2, the
+whole a2 card with every peripheral, synthesis only - no bitstream, by the rule):
+
+| | Au synthesis | the Au | |
+|---|---|---|---|
+| slice LUTs | **25,128** | 20,800 | **121%** |
+| of which logic | 23,593 | 20,800 | 113% |
+| LUT as memory | 1,535 | 9,600 | 16% |
+| flops | 15,563 | 41,600 | 37% |
+| RAMB36 tiles | 47 | 50 | 94% |
+| bonded IOB | 140 | 170 | 82% |
+
+Where it goes (top-level modules, LUTs):
+
+| | LUTs | |
+|---|---|---|
+| **the floor without peripherals** | **16,961** | 82% of the Au by itself |
+| of which L1 + L2 (l1i 699, l1d 880, tlb 727, page_cache 2,335) | 4,641 | rungs 3-5's result, from 13.2k |
+| of which the rest: card_link 8,636 (the DDR3 wrapper 3,952, the register file 614 + reg_front 423 + bridge 68, the event merge 656, the ring 512, telemetry 365, msg_arb 260, msg_rx 240, capture 213, wb_arb 182, the two FIFOs 294, page_client 113, filter 92, the rest ~180), cpu65c02 1,318, accel_seq 974, vbl_lock 485, rom_loader 337, bus write 173, vbeam 154, apple_mmu 131, kbd 80, bus read 32 | 12,320 | |
+| **the peripherals** | **8,150** | |
+| Uthernet II | 2,667 | |
+| Mockingboard/Phasor (two AY pairs 1,025, four VIAs 521, two SSI-263 310) | 1,866 | |
+| mouse | 1,152 | |
+| floppy | 976 | |
+| HD | 527 | |
+| audio sampler + tx | 524 | |
+| game port, printer, VidHD, NSC | 438 | |
+
+**The DDR3 controller has no parameter lever**: out of context the wrapper is 2,951 LUTs as built,
+2,950 with BIST_MODE=0 and 2,929 with the eye sweep and centring off as well (rung 2's -274 for
+the mark_debug strip was the whole of it).
+
+**What this says.** The full IIe feature set - the rung-1 gate as written - does not fit: 4.3k
+LUTs over at synthesis, before any routing margin, and a 100 MHz design with a DDR3 controller
+and one-clock serve cones has never closed on this fabric above ~85-90% of the LUTs (the Pt's
+IIe build was congestion-bound at 53%). The peripheral-free floor alone is 82% of the part.
+The levers left are all small: rungs 6-7 (accel_seq + core, 2.3k, perhaps -0.5k), telemetry off
+(-0.4k with its registers), trims in the merge/capture/reg_front (~-0.3k) - call it -1.2k, a
+floor of ~15.7k. Against an ~18.5k ceiling that leaves ~2.8k for peripherals: the floppy, the HD,
+the audio, the game port, the clock, the printer and the VidHD signature (2,465) - and NOT the
+Mockingboard (even a plain one without the Phasor and the SSI-263s is ~1.0k), NOT the mouse, NOT
+the Uthernet. The one structural lever of the right size is the DDR3 itself (the wrapper, the
+ring, the client and the arbiter: 4.8k), which would mean a card with no RamWorks beyond the
+block RAM and a different link buffer - a different design, not a rung.
+
+**So the checkpoint's answer is the user's decision, with these two roads:**
+
+1. **Give up the Au for the 65C02 card and continue on the Pt.** The refactor has already paid:
+   the a2 card is 25.1k LUTs where the shared IIe build was 33.3k routed and the GS 40k, with
+   L1 + L2 at 4.6k instead of 13.2k - which is exactly the timing relief the whole rethink set
+   out for (docs/DLINE.md "the fronts' timing is a draw"). Rungs 6-7 continue on the Pt, and the
+   first bitstream since 2026-09-18 is a Pt build of this tree.
+2. **A reduced Au variant**: an Au build target that carries the floppy, the HD, the speaker,
+   the game port, the clock, the printer and the VidHD signature, and no sound card, no mouse,
+   no network - feasible on paper at ~18k after rungs 6-7 and the telemetry cut, unproven for
+   timing, and a second build target to keep green. Its first real test is an Au build after
+   rung 7, which the no-bitstream rule allows once the reduced set synthesises under budget.
+
+The recommendation recorded here (2026-09-19): road 1, with road 2 kept open as a later variant
+if a sound-card-less, mouse-less IIe card is worth $200 to enough people.
+
+3. **A third road (the user, 2026-09-19): an Au variant manufactured with a 50T.** The
+   xc7a50tftg256 is the 35T's footprint (the same 170 I/O, the same balls, so the Au V2's pin
+   constraints and the MIG's DDR3 wiring apply unchanged) with 32,600 LUTs, 65,200 flops,
+   75 RAMB36 and 120 DSPs. At synthesis the full card is 25,128 LUTs = **77%** of it, 47 of 75
+   tiles = 63%, every peripheral in. No such board exists, so it cannot be hardware-tested; what
+   can be seen is the build: `build/run_build.sh a2_au50 --board au_v2 -part xc7a50tftg256-2`,
+   a full place-and-route on the part with the Au's constraints, for the routed utilisation and
+   the timing verdict. (Its bitstream is not loadable anywhere and is never loaded.) Result:
+   see "The 50T build" below.
+
+### The 50T build (2026-09-19, build/master_build_a2_au50.log, fw 4f3cb2b + the checkpoint docs)
+
+**TIMING MET, WNS +0.066 / WHS +0.012, 0 failing of 55,613 endpoints**, the DDR3 pad checks in
+their windows (tDQSS +0.054 slow / +0.033 fast), route_design 79 seconds, post-placement
+congestion at most 4x4 (nothing).
+
+| routed on xc7a50tftg256-2 | used | of | |
+|---|---|---|---|
+| slice LUTs | **23,022** | 32,600 | **70.6%** |
+| of which logic | 21,495 | 32,600 | 65.9% |
+| LUT as memory | 1,527 | 9,600 | 15.9% |
+| flops | 15,347 | 65,200 | 23.5% |
+| RAMB36 tiles | 47 | 75 | 62.7% |
+| bonded IOB | 137 | 170 | 80.6% |
+
+Logic depth: max 15 (the baseline's 21), 183 paths at 14 or more (was 259); the census names a
+NEW deep tail of 13 endpoints, all in the renamed tree: the core's PC into L1-D's candidate
+valid bits and L1-I's early want (pcl -> dq_v / dq_wv / ew_v), L1-D's serve into the 65C02's
+flags (dq_addr -> f_c, dq_byte -> f_n: the same family the old design carried as
+dq_sx -> f_z/f_n), and the ROM loader's chunk checksum (dr_k -> rom_sum, eight endpoints). The
+baseline predates the tree split and names paths under master_top, so it is re-saved from this
+build once the Pt build of the same source has been read against it.
+
+**The decision (the user, 2026-09-19):** this is plausible. Development and testing continue on
+the Pt for BOTH cards, and resource consumption is watched against the 50T's envelope (32,600
+LUTs, 65,200 flops, 75 RAMB36) for both projects: delivering one or both within a 50T "would
+reduce production costs quite a lot". The no-bitstream rule of 2026-09-18 is lifted; the Pt
+build of this tree (a2_pt_r5) is the first to go on hardware: **TIMING MET, WNS +0.278 / WHS
++0.029, 0 failing of 55,606** (the old tree's last IIe build missed at -0.007), 22,993 LUTs / 47
+RAMB36 on the 100T; the depth baseline is re-saved from it (max 15, 190 paths at >= 14, the
+families: the core's PC into L1's candidate registers, L1-D's serve into the flags, the boot
+hold into the filter's counters, the ROM loader's checksum).
+
+**ON HARDWARE (2026-09-19, bit a2_pt_r5 in the Pt's SRAM, host a1dd5da):** the DDR3 calibrated
+on the first load (eye 4+7/12 both lanes, write-levelled early/late), the link came up over the
+boot lane with the build's stamp, swhost engaged the ring, and Nox booted from the hard disk to
+its overworld map at accel ALL, unlimited - the first run of the boot lane, the minimal register
+file, the TLB, l1i, l1d and the 64x6 page cache on a card. What was missing: the PLAIN figure
+and the census (the host showed 0.00x and its on-screen figure went blank), because rung 2's
+MINIMAL register file zeroed the accelerator's words too. The twenty ACCEL_* words read their
+counters again under MINIMAL from this day (rtl/common/wb_regfile.sv); the rebuild is a2_pt_r5b:
+TIMING MET +0.166, 23,341 LUTs (+348 for the twenty words), loaded and measured on the Nox
+overworld map at accel ALL, unlimited: **60.0x** (core cycles 61.2 M/s over 1.02 M bus
+cycles/s; 45.1 M turbo + 13.3 M dline + 2.8 M fast ops/s; 32 k map changes/s) against the
+old tree's 72.3x on the same screen (docs/DLINE.md) - a 17% step back for L1 + L2 at a third
+of the LUTs, the deliberate trade (the user, 2026-09-19). The depth baseline is re-saved from
+this build. The bench's forecast held: accel_vl 63.7x, the boot bench's Nox 58.0. The 65816 card's own L1/L2 rungs
+are what would bring it under the same envelope (it was ~40k on the Pt before the refactor).
 
 ## Rules for the ladder
 
