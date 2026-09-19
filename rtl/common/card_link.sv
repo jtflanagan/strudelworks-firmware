@@ -1299,6 +1299,7 @@ module card_link #(
         .start_cause_res   (start_cause_res),
         .start_count       (start_count),
         .ring_status       (ring_status),
+        .ring_engage       (ring_engage),
         .link_stat         (link_stat),
         .ddr3_dbg1         (ddr3_debug_w),
         .ddr3_dbg2         (ddr3_debug2_w),
@@ -1512,6 +1513,7 @@ module card_link #(
     wire [3:0]          sb_sel;
     wire                out_valid;
     wire [31:0]         ring_status;
+    wire                ring_engage;    // RING_CTRL[0] -> the ring's boot lane
 
     // LINK_STAT (0x8000_00EC): the UART status line's facts, readable over
     // USB3 - [0] phi0 ticking (the card is in a powered machine), [1] the
@@ -1520,7 +1522,13 @@ module card_link #(
     // many resets, [24] the DDR3 calibrated (RING_STATUS[25] again, so one
     // read answers "is there a link, and is it in a machine").  With this
     // the UART is for the card that answers no register at all.
-    wire [31:0] link_stat = {7'd0, ring_status[25], link_resets, link_snap,
+    // [25] the ring engaged (RING_STATUS[23] again): with [24] one read says
+    // whether the DDR3 trained AND whether the stream is on it yet.  [31] is
+    // the register's own signature, always set: gateware without LINK_STAT
+    // answers zero, and until the boot lane the calibrated bit was the
+    // signature - a card that answers with the DDR3 untrained needs one of
+    // its own.
+    wire [31:0] link_stat = {1'b1, 5'd0, ring_status[23], ring_status[25], link_resets, link_snap,
                              1'd0, link_cause, capture_enable, phi0_live};
 
     reply_stream u_reply (
@@ -1678,6 +1686,7 @@ module card_link #(
         .clk            (clk_ctrl),
         .rst            (rst),
         .calib_complete (calib_complete),
+        .engage         (ring_engage),
         .s_cyc          (sb_cyc),
         .s_stb          (sb_stb),
         .s_we           (sb_we),

@@ -22,6 +22,21 @@
 // is flagged, sticky, in the status word and on the UART, so that whatever
 // let it happen can be found.
 //
+// THE BOOT LANE (2026-09-18, docs/REQ_65C02.md 1.10).  The ring is not
+// engaged out of reset.  Until the host engages it (RING_CTRL[0], after it
+// has read the DDR3 calibrated and before it enables the capture) every word
+// accepted from the bus goes through a small DIRECT FIFO straight to the TX
+// FIFO, and the DDR3 is never touched: the card links, answers every
+// register and reports its calibration state over USB3 with the DDR3
+// uncalibrated, which is what makes a calibration failure diagnosable
+// from the host instead of from the UART.  The engage takes effect only
+// with the bus idle between bursts (msg_arb puts a CYC-low bubble between
+// every two) and the direct FIFO empty, so no word is ever in flight on
+// both paths - the ordering hazard docs/TX_RING.md rejected a dynamic
+// bypass over cannot arise; and it never lets go except by reset, so the
+// capture only ever rides the ring.  RING_STATUS[23] says which lane is
+// live, and the occupancy field counts the lane that is.
+//
 // WHOLE LINES ONLY.  The writer never issues a partial burst: one 16-byte
 // write per line, no byte enables, strictly sequential so the bank's open row
 // serves 128 lines before it has to change.  A message tail that leaves the
@@ -70,11 +85,16 @@ module tx_ring #(
     parameter integer RECV_DEPTH  = 256,    // lines of read-side receive  (4 KB)
     parameter integer ADDR_BITS   = 24,
     parameter integer DATA_BITS   = 128,
-    parameter integer DRAIN_TICKS = 10_000_000  // 100 ms at 100 MHz: the drain's patience
+    parameter integer DRAIN_TICKS = 10_000_000, // 100 ms at 100 MHz: the drain's patience
+    parameter integer DIRECT_DEPTH = 512        // words of the boot lane (2 KB)
 ) (
     input  wire                 clk,
     input  wire                 rst,
     input  wire                 calib_complete,
+    // RING_CTRL[0]: put the stream through the DDR3.  A level; honoured once
+    // the DDR3 is calibrated and the bus is between bursts, and then held
+    // until reset.
+    input  wire                 engage,
 
     // FROM the message bus: a pipelined Wishbone slave.  Every beat is a
     // word of the stream; the address and select are accepted and ignored.
@@ -112,8 +132,9 @@ module tx_ring #(
     input  wire                 wr_stall,
     input  wire                 wr_ack,
 
-    // RING_STATUS: [21:0] occupancy in lines, [24] full, [25] calibrated,
-    // [26] a message was torn (sticky until reset)
+    // RING_STATUS: [21:0] occupancy (lines engaged, words on the lane),
+    // [23] engaged, [24] full, [25] calibrated, [26] a message was torn
+    // (sticky until reset), [30:27] drain timeouts
     output wire [31:0]          status
 );
 
@@ -183,15 +204,29 @@ module tx_ring #(
     logic                 stage_rd;
     wire [$clog2(STAGE_DEPTH+1)-1:0] stage_count;
 
+    // ---- the boot lane ------------------------------------------------------
+    // Engaged: words go to the packer and the DDR3.  Not engaged: words go
+    // to the direct FIFO.  The switch is one way (reset is the way back) and
+    // happens only when nothing is on the bus and nothing is in the lane, so
+    // the two paths never hold words at the same time.
+    logic engaged = 1'b0;
+    wire                  direct_full, direct_empty;
+    wire [31:0]           direct_dout;
+    logic                 direct_rd;
+    wire [$clog2(DIRECT_DEPTH+1)-1:0] direct_count;
+
     // Take a beat when there is a line's worth of room to put it in and the
-    // memory is there to write it to.  Padding takes the packer over.  A read
-    // beat is accepted and acked and carries nothing; the bus is a stream.
-    wire can_pack = !rst && !drain && calib_complete && !stage_full;
+    // memory is there to write it to - or, on the boot lane, room in the
+    // direct FIFO.  Padding takes the packer over.  A read beat is accepted
+    // and acked and carries nothing; the bus is a stream.
+    wire can_pack = engaged ? (!rst && !drain && calib_complete && !stage_full)
+                            : (!rst && !drain && !direct_full);
     assign s_stall = !(can_pack && !padding);
 
     wire s_accept = s_cyc && s_stb && !s_stall;
     wire in_take  = s_accept && s_we;
     wire [31:0] in_word = s_dat;
+    wire direct_wr = in_take && !engaged;
 
     always_ff @(posedge clk) s_ack <= !rst && s_accept;
 
@@ -203,7 +238,7 @@ module tx_ring #(
     logic torn = 1'b0;
     wire  tear = !s_cyc && !at_boundary;
 
-    wire pack_word  = in_take || (can_pack && padding);
+    wire pack_word  = (in_take && engaged) || (can_pack && padding);
     wire [31:0] pw  = padding ? 32'h0000_0000 : in_word;
     wire line_done  = pack_word && (wc == 2'd3);
 
@@ -251,6 +286,33 @@ module tx_ring #(
                                                              padding <= 1'b1;
         end
     end
+
+    // ---- the engage, and the lane's FIFO -------------------------------------
+    // Only at a message boundary, with no beat accepted this cycle, the lane
+    // drained and the packer empty: a header accepted on the very edge the
+    // lane switched would be stranded in the FIFO the output no longer
+    // reads.  Not "CYC low": the arbiter's bubble between back-to-back
+    // messages is one cycle, and waiting for the lane to be empty on that
+    // one cycle starved the engage under load (3 chances in 400 cycles in
+    // the bench); a boundary with no accept is the same guarantee and comes
+    // with every message.  `direct_count` and not `direct_empty`: the FIFO's
+    // empty is its output register alone, and a word just written sits in
+    // its memory for a cycle before it is fetched - the bench lost two words
+    // at the switch that way.  The message-boundary book (`left`) is kept
+    // in both modes, so the tear guard holds too.
+    wire engage_ok = engage && calib_complete && !rst && !drain && !in_take &&
+                     (direct_count == '0) && (wc == 2'd0) && !padding && at_boundary;
+    always_ff @(posedge clk) begin
+        if (rst)            engaged <= 1'b0;
+        else if (engage_ok) engaged <= 1'b1;
+    end
+
+    sync_fifo #(.WIDTH (32), .DEPTH (DIRECT_DEPTH)) u_direct (
+        .clk (clk), .rst (rst || drain),
+        .din (in_word), .wr_en (direct_wr), .full (direct_full),
+        .dout (direct_dout), .rd_en (direct_rd), .empty (direct_empty),
+        .count (direct_count)
+    );
 
     // ---- staging ------------------------------------------------------------
     sync_fifo #(.WIDTH (DATA_BITS), .DEPTH (STAGE_DEPTH)) u_stage (
@@ -432,22 +494,28 @@ module tx_ring #(
     // Low word first: the order the packer put them in.
     logic [1:0] uc = 2'd0;
 
-    assign out_word  = recv_dout[uc*32 +: 32];
-    assign out_valid = !recv_empty;
+    assign out_word  = engaged ? recv_dout[uc*32 +: 32] : direct_dout;
+    assign out_valid = engaged ? !recv_empty : !direct_empty;
     wire   out_go    = out_valid && out_take;
-    assign recv_rd   = out_go && (uc == 2'd3);
+    assign recv_rd   = engaged && out_go && (uc == 2'd3);
+    assign direct_rd = !engaged && out_go;
 
+    // The counter is the ring's: a take on the boot lane must not move it,
+    // or the first line after the engage comes out from the wrong word.
     always_ff @(posedge clk) begin
-        if (rst || drain) uc <= 2'd0;
-        else if (out_go)     uc <= uc + 2'd1;
+        if (rst || drain)           uc <= 2'd0;
+        else if (out_go && engaged) uc <= uc + 2'd1;
     end
 
     // ---- status ---------------------------------------------------------------
     // Occupancy is placed explicitly, whatever width the pointers are: the
     // bank's 2^21 lines need 22 bits, a smaller ring in a testbench fewer.
+    // [23] engaged; [21:0] lines in the ring when it is, words in the direct
+    // FIFO when it is not - either way zero means nothing is queued, which
+    // is what the watchdog's disarm asks.
     wire        ring_full = (room < PW'(BATCH));
-    wire [31:0] occ_ext   = 32'(occupancy);
-    assign status = {1'd0, drain_timeouts, torn, calib_complete, ring_full, 2'd0, occ_ext[21:0]};
+    wire [31:0] occ_ext   = engaged ? 32'(occupancy) : 32'(direct_count);
+    assign status = {1'd0, drain_timeouts, torn, calib_complete, ring_full, engaged, 1'd0, occ_ext[21:0]};
 
     wire _unused_ok = &{1'b0, recv_full, s_adr, s_sel, 1'b0};
 

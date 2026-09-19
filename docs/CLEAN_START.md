@@ -35,7 +35,7 @@ Status: 2026-09-15, branch `gs_control_panel` (fw ebb96ef / host fbf9f96, not pu
 - `rtl/rom_loader.sv`: MEM_ROM 0x22 chunks, a one-chunk staging buffer, the window-gated drain,
   `seen`/`rom_ok`, overruns; all cleared by `apple_rst` (= the link reset).  MEM_STAT[15]
   rom_loaded, MEM_ROM_STAT {busy, overruns}.
-- Card->host: `msg_master` adapters into a fixed-priority `msg_arb`, then `tx_ring`
+- Card->host: `msg_master` adapters into a fixed-priority `msg_arb`, then `tx_ring` - which, since 2026-09-18, carries every word on a direct lane until the host engages the DDR3 ring (`RING_CTRL`, TX_RING.md "The boot lane"): the checklist runs with no DDR3 behind it, and engages the ring once LINK_STAT reads calibrated, before BUS_ENABLE
   (`card_link.sv:1277-1378`); CPU_HOLD / `kbd_notice.sv` are the one-pending level-notice
   patterns; UNKNOWN_TYPE is the one notice not gated on `capture_enable`.  A new type is the
   4-edit pattern on the host (protocol.hpp, link_parser.cpp, link_session, pipeline.cpp) plus

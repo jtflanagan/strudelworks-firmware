@@ -141,6 +141,7 @@ module reg_map_tb;
     wire [2:0]  mouse_slot_active;
     wire [2:0]  u2_slot_active;
     wire        nsc_enable;
+    wire ring_engage;
     reg         vidhd_rom_loaded = 1'b0;
     always @(posedge clk) begin
         if (fd_flush[0]) fd_flush_pulses = fd_flush_pulses + 1;
@@ -223,7 +224,8 @@ module reg_map_tb;
         .mouse_mode (4'd0), .mouse_buttons (2'd0), .mouse_moves (8'd0), .mouse_x (16'd0), .mouse_y (16'd0),
         .u2_slot_active (u2_slot_active), .u2_sock_open (4'b0001), .u2_cmd_dropped (1'b0),
         .u2_cmds (8'h07), .u2_rx_chunks (8'h21), .u2_s0_rsr (16'h0102), .u2_s0_fsr (16'h0FFE),
-        .nsc_enable (nsc_enable), .nsc_time_loaded (1'b1), .nsc_ring_en (1'b0), .nsc_wr_en (1'b1),
+        .nsc_enable (nsc_enable),
+        .ring_engage (ring_engage), .nsc_time_loaded (1'b1), .nsc_ring_en (1'b0), .nsc_wr_en (1'b1),
         .nsc_cmp_idx (6'd5), .nsc_ring_idx (6'd9), .nsc_unlocks (8'h2A),
         .nsc_now ({32'h2609_0507, 32'h1341_2599}),
         .kbd_press (kbd_press), .kbd_press_key (kbd_press_key), .kbd_drop (kbd_drop),
@@ -469,6 +471,21 @@ module reg_map_tb;
             $display("FAIL: RING_STATUS read %08x, expected 02001234", out_mem[base+2]);
             errors = errors + 1;
         end else $display("  ok: RING_STATUS reads back tx_ring's word");
+
+        // --- case 5b2 / RING_CTRL: clear out of reset, a level once written ---
+        base = out_n;
+        do_read(32'h8000_0188);
+        if (out_mem[base+2] !== 32'h0000_0000 || ring_engage !== 1'b0) begin
+            $display("FAIL: RING_CTRL reads %08x out of reset, engage %b", out_mem[base+2], ring_engage);
+            errors = errors + 1;
+        end else $display("  ok: RING_CTRL is clear out of reset: the boot lane, no DDR3");
+        do_write(32'h8000_0188, 32'h0000_0001);
+        base = out_n;
+        do_read(32'h8000_0188);
+        if (out_mem[base+2] !== 32'h0000_0001 || ring_engage !== 1'b1) begin
+            $display("FAIL: RING_CTRL after write reads %08x, engage %b", out_mem[base+2], ring_engage);
+            errors = errors + 1;
+        end else $display("  ok: RING_CTRL[0] is the ring's engage, a level");
 
         // --- case 5c / LINK_STAT reads back card_link's word ---------------
         base = out_n;

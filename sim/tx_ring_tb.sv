@@ -101,6 +101,7 @@ module tx_ring_tb;
 
     // ---- the DUT: ring + arbiter -------------------------------------------
     reg  calib_complete = 1'b0;
+    reg  engage         = 1'b0;
     wire [31:0] status;
 
     wire [1:0]   c_req, c_gnt, c_cyc, c_stb, c_stall, c_ack;
@@ -136,7 +137,7 @@ module tx_ring_tb;
         .STAGE_DEPTH (STAGE_DEPTH), .RECV_DEPTH (RECV_DEPTH),
         .DRAIN_TICKS (DRAIN_TICKS)
     ) dut (
-        .clk (clk), .rst (rst), .calib_complete (calib_complete),
+        .clk (clk), .rst (rst), .calib_complete (calib_complete), .engage (engage),
         .s_cyc (m_cyc && !tear), .s_stb (m_stb && !tear), .s_we (m_we), .s_adr (m_adr),
         .s_dat (m_dat), .s_sel (m_sel), .s_stall (m_stall), .s_ack (m_ack),
         .out_word (out_word), .out_valid (out_valid), .out_take (out_take),
@@ -216,6 +217,17 @@ module tx_ring_tb;
         end
     end
 
+    // ---- the engage's terms, counted while it waits ------------------------
+    integer n_wait = 0, n_nocyc = 0, n_dc0 = 0, n_ab = 0, n_both = 0, n_all = 0;
+    always @(posedge clk) if (!rst && engage && calib_complete && !dut.engaged) begin
+        n_wait = n_wait + 1;
+        if (!dut.s_cyc)              n_nocyc = n_nocyc + 1;
+        if (dut.direct_count == 0)   n_dc0   = n_dc0 + 1;
+        if (dut.at_boundary)         n_ab    = n_ab + 1;
+        if (!dut.s_cyc && dut.at_boundary) n_both = n_both + 1;
+        if (dut.engage_ok)           n_all   = n_all + 1;
+    end
+
     // ---- the checker --------------------------------------------------------
     integer check_en = 1;
     integer ei    = 0;       // next word expected out
@@ -293,7 +305,7 @@ module tx_ring_tb;
 
     // A deadlock shows as the source stuck; say where everything is and stop.
     initial begin
-        #20_000_000;
+        #30_000_000;   // the boot-lane phases added a tenth to the run (2026-09-18)
         $display("TIMEOUT: si=%0d ei=%0d out_n=%0d status=%08x in_valid=%b in_take=%b calib=%b",
                  si, ei, out_n, status, in_valid, in_take, calib_complete);
         $display("  req=%b gnt=%b cyc=%b stb=%b stall=%b pending=%0d held=%b holder=%0d",
@@ -315,13 +327,60 @@ module tx_ring_tb;
         repeat (4) @(posedge clk);
         @(negedge clk); rst = 0;
 
-        // --- nothing moves before calibration --------------------------------
-        run_cycles(200, 100, 100);
-        if (in_takes != 0 || out_n != 0) begin
-            $display("FAIL: %0d words taken before calibration", in_takes);
+        // --- phase 0: the boot lane (docs/REQ_65C02.md 1.10) ----------------
+        // Uncalibrated and not engaged: words flow, word-exact, through the
+        // direct FIFO, and the DDR3 port is never asked for.
+        phase_start = si;
+        while (si < phase_start + 400) run_cycles(100, 70, 60);
+        drain;
+        if (in_takes == 0 || out_n == 0) begin
+            $display("FAIL: the boot lane carried nothing before calibration (in %0d out %0d)", in_takes, out_n);
             errors = errors + 1;
-        end else $display("  ok: nothing taken before the DDR3 is calibrated");
+        end else if (writes != 0 || reads != 0) begin
+            $display("FAIL: the DDR3 was touched before calibration (%0d writes, %0d reads)", writes, reads);
+            errors = errors + 1;
+        end else if (ei != si) begin
+            $display("FAIL: boot lane: expected index %0d, source at %0d", ei, si);
+            errors = errors + 1;
+        end else if (status[23] !== 1'b0) begin
+            $display("FAIL: RING_STATUS says engaged before anyone asked");
+            errors = errors + 1;
+        end else $display("  ok: the boot lane carried %0d words word-exact with the DDR3 uncalibrated and untouched", si - phase_start);
+
+        // Engaged asked for before calibration: the lane stays, the ask waits.
+        @(negedge clk); engage = 1'b1;
+        phase_start = si;
+        while (si < phase_start + 200) run_cycles(100, 70, 60);
+        drain;
+        if (dut.engaged !== 1'b0 || writes != 0) begin
+            $display("FAIL: engaged without calibration (engaged=%b writes=%0d)", dut.engaged, writes);
+            errors = errors + 1;
+        end else $display("  ok: an engage asked before calibration waits on the lane");
+
+        // Calibrated: the engage takes effect at the first quiet boundary,
+        // the order holds across the switch, the status says so, and the
+        // traffic after it rides the DDR3.
         @(negedge clk); calib_complete = 1'b1;
+        phase_start = si;
+        while (si < phase_start + 200) run_cycles(100, 70, 60);
+        $display("  engage waited %0d cycles: cyc low %0d, lane empty %0d, boundary %0d, low+boundary %0d, all terms %0d",
+                 n_wait, n_nocyc, n_dc0, n_ab, n_both, n_all);
+        drain;
+        if (dut.engaged !== 1'b1 || status[23] !== 1'b1) begin
+            $display("FAIL: not engaged after calibration (engaged=%b status=%08x)", dut.engaged, status);
+            errors = errors + 1;
+        end
+        phase_start = si;
+        while (si < phase_start + 400) run_cycles(100, 70, 60);
+        drain;
+        if (writes == 0) begin
+            $display("FAIL: engaged but nothing reached the DDR3 (engaged=%b direct_count=%0d stage_count=%0d wc=%0d wptr=%0d rptr=%0d wr_req=%b out_n=%0d)",
+                     dut.engaged, dut.direct_count, dut.stage_count, dut.wc, dut.wptr, dut.rptr, dut.wr_req, out_n);
+            errors = errors + 1;
+        end else if (ei != si) begin
+            $display("FAIL: across the engage expected index %0d, source at %0d", ei, si);
+            errors = errors + 1;
+        end else $display("  ok: engaged at a boundary, %0d words word-exact across the switch, %0d lines written", si - phase_start, writes);
 
         // --- phase 1: random everything, through several wraps ---------------
         phase_start = si;

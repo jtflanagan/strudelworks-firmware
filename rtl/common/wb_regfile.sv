@@ -177,6 +177,8 @@ module wb_regfile #(
     // The No-Slot Clock (rtl/no_slot_clock.sv, docs/NSC.md): its lever,
     // and its state and the host's time for NSC_CTRL / NSC_TIME / NSC_DATE.
     output wire            nsc_enable,
+    // RING_CTRL[0]: engage the DDR3 ring (rtl/tx_ring.sv's boot lane)
+    output wire            ring_engage,
     input  wire            nsc_time_loaded,
     input  wire            nsc_ring_en,
     input  wire            nsc_wr_en,
@@ -471,6 +473,7 @@ module wb_regfile #(
     localparam [13:0] R_MOUSE_SLOT     = 'd52; // 0x8000_00D0, RW in bits 2:0
     localparam [13:0] R_MOUSE_STAT     = 'd53; // 0x8000_00D4, RO
     localparam [13:0] R_NSC_CTRL       = 'd54; // 0x8000_00D8, RW bit 0
+    localparam [13:0] R_RING_CTRL      = 'd98; // 0x8000_0188, RW bit 0: engage the DDR3 ring (REQ_65C02.md 1.10)
     localparam [13:0] R_NSC_TIME       = 'd55; // 0x8000_00DC, RO
     localparam [13:0] R_NSC_DATE       = 'd56; // 0x8000_00E0, RO
     localparam [13:0] R_U2_SLOT        = 'd57; // 0x8000_00E4, RW in bits 2:0
@@ -1058,6 +1061,16 @@ module wb_regfile #(
     // NSC_TIME: the host's time, low half - {hour, minute, second, centisecond}
     // as BCD bytes, the centisecond lowest; NSC_DATE the high half - {year,
     // month, date, day of week}.  docs/NSC.md.
+    // THE RING'S ENGAGE (docs/REQ_65C02.md 1.10): clear out of reset, so a card
+    // that has just come up answers over USB3 with no DDR3 behind it; the host
+    // sets it once it has read the DDR3 calibrated and before BUS_ENABLE.
+    logic ring_engage_q;
+    always_ff @(posedge clk) begin
+        if (rst)               ring_engage_q <= 1'b0;
+        else if (wr_ring_ctrl) ring_engage_q <= wb_dat_w[0];
+    end
+    assign ring_engage = ring_engage_q;
+
     logic nsc_enable_q;
     always_ff @(posedge clk) begin
         if (rst)              nsc_enable_q <= 1'b1;
@@ -1662,6 +1675,7 @@ module wb_regfile #(
                         R_MOUSE_SLOT: wb_dat_r <= mouse_slot_rd;
                         R_MOUSE_STAT: wb_dat_r <= mouse_stat_rd;
                         R_NSC_CTRL:   wb_dat_r <= nsc_ctrl_rd;
+                        R_RING_CTRL:  wb_dat_r <= {31'd0, ring_engage_q};
                         R_NSC_TIME:   wb_dat_r <= nsc_now_s[31:0];
                         R_NSC_DATE:   wb_dat_r <= nsc_now_s[63:32];
                         R_U2_SLOT:    wb_dat_r <= u2_slot_rd;
@@ -1784,6 +1798,8 @@ module wb_regfile #(
                          (word == R_MOUSE_SLOT);
     wire wr_nsc_ctrl   = access && !wb_ack && in_region && wb_we &&
                          (word == R_NSC_CTRL);
+    wire wr_ring_ctrl  = access && !wb_ack && in_region && wb_we &&
+                         (word == R_RING_CTRL);
     wire wr_audio_ctrl = access && !wb_ack && in_region && wb_we &&
                          (word == R_AUDIO_CTRL);
     wire wr_audio_rate = access && !wb_ack && in_region && wb_we &&

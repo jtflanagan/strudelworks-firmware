@@ -96,15 +96,35 @@ raw events. Three reasons:
   snapshot, a trace sync record and a register reply have nothing in common
   except that each is a message.
 
-There is **no bypass, and no fallback**. Every word goes through the DDR3
-even when the ring is empty and the link idle. A dynamic bypass would save
-~300 ns against a link whose latency floor is the 100 µs heartbeat, and would
-buy an ordering hazard — words in flight to the DDR3 racing words on the
-short path — for it. A static one, a build without the ring, was considered
-and rejected: the DDR3 is going to carry far more than this, and a board
-whose DDR3 will not train is a broken board, not a configuration. What such a
-board gets is a diagnostic — `D=0` on the UART status line, and bit 25 clear
-in `RING_STATUS` — not a link.
+## The boot lane (2026-09-18)
+
+The paragraph this replaces said there was no bypass and no fallback: every
+word through the DDR3, and a board whose DDR3 would not train got a UART
+diagnostic and no link. The user's requirement (docs/REQ_65C02.md 1.10)
+reversed the second half: **a calibration failure has to be diagnosable over
+USB3**, so the card must link and answer every register with no DDR3 behind
+it. The ordering hazard the old paragraph rightly feared — words in flight to
+the DDR3 racing words on a short path — is avoided by construction rather than
+by having no short path:
+
+- The ring is **not engaged out of reset**. Every word accepted from the bus
+  goes through a 512-word direct FIFO straight to the TX FIFO; the DDR3 side
+  is never asked for. Register replies, notices, the ROM loader's acks and
+  the telemetry all ride it.
+- The host **engages** it (`RING_CTRL[0]`) once it has read the DDR3
+  calibrated, and before `BUS_ENABLE`. The engage takes effect only at a
+  message boundary with no beat accepted that cycle and the lane empty, so
+  no word is ever on both paths; `RING_STATUS[23]` says it is live, and the
+  occupancy field counts the lane that is.
+- It is **one way**: only a reset clears it, and a reset clears the register
+  too, so every startup checklist engages it again. The capture, the one
+  unbounded source, only ever rides the ring.
+
+Under sustained traffic the engage can wait: the boundary-with-nothing-offered
+instant it needs is rare when messages are back to back (the bench measured
+three chances in four hundred cycles with "CYC low" as the term, which is why
+the term is "no beat accepted" instead). At startup the card's own sources
+are a notice, the acks and a 1 Hz sample, so it engages at once.
 
 ## Lines, and the partial-line problem
 
@@ -380,10 +400,11 @@ built into `au_top`.
   host waits for its first reply. Calibration alone is milliseconds.
 - The controller's reset is the clock-lock reset, as in `au_top` — never the
   link reset (above).
-- Until `calib_complete`, the writer accepts nothing and every source sees
-  `full`. At power-up the host is not attached yet, so nothing waits on it.
-  A calibration that never completes is a dead link, and the UART status
-  line — now `C=… E=x O=x P=x D=x T=x … K=xx` — says so with `D=0` and, since 2026-09-11, where the controller's calibration state machine stands in `K` (UberDDR3's `state_calibrate`; `17` is DONE) — as does
+- Until `calib_complete`, the writer accepts nothing - but since the boot
+  lane (above) nothing waits on it: every source rides the lane until the
+  host engages the ring. A calibration that never completes is no longer a
+  dead link; it is a card that answers every register and says `calibrated`
+  is clear. The UART status line — now `C=… E=x O=x P=x D=x T=x … K=xx` — says so with `D=0` and, since 2026-09-11, where the controller's calibration state machine stands in `K` (UberDDR3's `state_calibrate`; `17` is DONE) — as does
   RING_STATUS bit 25 for a host that can still ask. `T` is the torn-message
   flag.
 - **Timing.** `master_top` closes at +0.21 ns and `snoop_top` at +0.15, and

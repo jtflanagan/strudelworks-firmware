@@ -193,7 +193,7 @@ module tx_ring_ddr3_tb;
     wire       out_valid;
 
     tx_ring #(.ADDR_BITS (WB_ADDR_BITS)) dut (
-        .clk (clk), .rst (rst), .calib_complete (o_calib_complete),
+        .clk (clk), .rst (rst), .calib_complete (o_calib_complete), .engage (1'b1),
         .s_cyc (m_cyc), .s_stb (m_stb), .s_we (m_we), .s_adr (m_adr),
         .s_dat (m_dat), .s_sel (m_sel), .s_stall (m_stall), .s_ack (m_ack),
         .out_word (out_word), .out_valid (out_valid), .out_take (out_take),
