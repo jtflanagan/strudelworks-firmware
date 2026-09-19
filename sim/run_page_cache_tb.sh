@@ -17,7 +17,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/mem_work"; mkdir -p "$work"
 command -v verilator > /dev/null || { echo "verilator not found" >&2; exit 1; }
 
-if [ $# -gt 0 ]; then geoms=("$@"); else geoms=(128x8 64x10 64x8); fi
+if [ $# -gt 0 ]; then geoms=("$@"); else geoms=(128x8 64x10 64x8 64x6); fi
 
 fail=0
 for g in "${geoms[@]}"; do

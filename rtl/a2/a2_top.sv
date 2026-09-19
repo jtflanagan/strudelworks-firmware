@@ -80,8 +80,12 @@ module a2_top #(
     // occupies five of every set's eight ways.  64 x 8 is the cheap fallback
     // if the block RAM is ever wanted elsewhere; both are proven by
     // sim/run_page_cache_tb.sh's sweep.
-    parameter integer MEM_SETS = 128,
-    parameter integer MEM_WAYS = 8,
+    // THE 65C02 CARD'S L2 (docs/CORE_REFACTOR_65C02.md rung 3): 64 sets x 6
+    // ways = 384 pages = 96 KB = 24 RAMB36, the Au's budget; the IIe's 576
+    // pages do not all fit, so this card evicts, and the referenced-way rule
+    // keeps L1's pointers safe.  128 x 8 was the Pt's.
+    parameter integer MEM_SETS = 64,
+    parameter integer MEM_WAYS = 6,
     // THE MACHINE (docs/GS.md rung 4).  0 = the Apple IIe this board has
     // always been: a 65C02, the two fronts, the IIe's own $Cxxx apparatus.
     // 1 = the Apple IIgs: a 65816 on the dispatcher, rtl/gs_io.sv answering
@@ -1947,6 +1951,12 @@ module a2_top #(
         .il_done     (il_done),
         .il_ok       (il_ok),
         .il_row      (il_row),
+        // Rung 3's ports, tied until rung 4 gives L1 a TLB to drive them.
+        .ref_v       (1'b0), .ref_set ('0), .ref_way ('0), .ref_on (1'b0),
+        .evict_v     (), .evict_set (), .evict_way (),
+        .op_place_v  (), .op_place_ppn (), .op_place_set (), .op_place_way (),
+        .dr_req      (1'b0), .dr_set ('0), .dr_way ('0), .dr_line (4'd0),
+        .dr_ack      (), .dr_done (), .dr_row (),
         .serve       (mem_serve),
         .inval       (mem_inval),
         .dbg_sel     (dbg_sel[3:0]),

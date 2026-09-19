@@ -597,6 +597,10 @@ module accel_tb #(parameter integer SWINT = 1,
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we),
         .pq_line (pq_line), .pq_wdata (pq_wdata), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data),
+        .ref_v (1'b0), .ref_set ('0), .ref_way ('0), .ref_on (1'b0),
+        .evict_v (), .evict_set (), .evict_way (),
+        .op_place_v (), .op_place_ppn (), .op_place_set (), .op_place_way (),
+        .dr_req (1'b0), .dr_set ('0), .dr_way ('0), .dr_line (4'd0), .dr_ack (), .dr_done (), .dr_row (),
         .dbg_sel (4'd0), .dbg_val ()
     );
 

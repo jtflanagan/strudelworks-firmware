@@ -81,6 +81,7 @@ run way_ram       rtl/a2/way_ram.sv -Wno-MULTIDRIVEN
 run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN
 run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=10
 run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=8
+run page_cache    rtl/a2/page_cache.sv rtl/a2/way_ram.sv -Wno-MULTIDRIVEN -GSETS=64 -GWAYS=6   # the 65C02 card's
 run page_client   rtl/common/page_client.sv
 run tx_ring       rtl/common/tx_ring.sv rtl/common/sync_fifo.sv
 run apple_bus_read rtl/common/apple_bus_read.sv rtl/common/synchronizer.sv

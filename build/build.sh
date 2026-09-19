@@ -220,6 +220,8 @@ fi
 # Vivado's own errors, because the log is 400 KB and the three lines that
 # matter are somewhere in the middle of it.
 echo >&2
+# A synthesis-only run owes no bitstream (build/results/synth_util*.rpt is its product).
+if printf "%s\n" "${args[@]+"${args[@]}"}" | grep -qx -- "-synth_only"; then exit 0; fi
 if [ "$after" != 0 ]; then
     echo "BUILD FAILED: $bitname.bit was NOT rebuilt." >&2
     echo "  The file in build/results is the PREVIOUS run's," >&2

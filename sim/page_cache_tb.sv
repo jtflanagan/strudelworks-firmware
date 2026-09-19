@@ -77,6 +77,19 @@ module page_cache_tb;
     logic        serve = 1'b1, inval = 1'b0, cnt_clr = 1'b0;
     logic        master_active = 1'b1, calib_complete = 1'b0;
     logic        il_req = 1'b0, il_src = 1'b0;
+    // rung 3: the referenced ways, the placement and the direct way read
+    logic            ref_v = 1'b0, ref_on = 1'b0;
+    logic [SIDX-1:0] ref_set = '0;
+    logic [LEV-1:0]  ref_way = '0;
+    wire             evict_v, op_place_v, dr_ack, dr_done;
+    wire [SIDX-1:0]  evict_set, op_place_set;
+    wire [LEV-1:0]   evict_way, op_place_way;
+    wire [15:0]      op_place_ppn;
+    logic            dr_req = 1'b0;
+    logic [SIDX-1:0] dr_set = '0;
+    logic [LEV-1:0]  dr_way = '0;
+    logic [3:0]      dr_line = 4'd0;
+    wire [127:0]     dr_row;
     logic [15:0] il_ppn = 16'd0;
     logic [3:0]  il_line = 4'd0;
 
@@ -122,6 +135,10 @@ module page_cache_tb;
         .pq_busy (pq_busy), .pq_valid (pq_valid), .pq_we (pq_we), .pq_line (pq_line),
         .pq_wdata (pq_wdata), .pq_ready (pq_ready),
         .pr_valid (pr_valid), .pr_data (pr_data),
+                .ref_v (ref_v), .ref_set (ref_set), .ref_way (ref_way), .ref_on (ref_on),
+        .evict_v (evict_v), .evict_set (evict_set), .evict_way (evict_way),
+        .op_place_v (op_place_v), .op_place_ppn (op_place_ppn), .op_place_set (op_place_set), .op_place_way (op_place_way),
+        .dr_req (dr_req), .dr_set (dr_set), .dr_way (dr_way), .dr_line (dr_line), .dr_ack (dr_ack), .dr_done (dr_done), .dr_row (dr_row),
         .dbg_sel (4'd0), .dbg_val ()
     );
 
@@ -258,6 +275,8 @@ module page_cache_tb;
     logic [NODES-1:0] m_plr [SETS];
     bit              m_touch [0:65535];    // pages this run has been near
     logic [15:0]     m_list [0:65535];
+    bit              m_ref [SETS][WAYS];        // rung 3: L1's references, as the model holds them
+    integer          m_last_vic_set = -1, m_last_vic_way = -1, m_last_vic_n = 0;
     integer          m_n = 0;
     integer          e_hits = 0, e_misses = 0, e_served = 0, e_fills = 0, e_flushes = 0;
 
@@ -307,6 +326,14 @@ module page_cache_tb;
                 if (v < 0) begin
                     v = int'(plru_pick(m_plr[s]));
                     if (v >= WAYS) v = v - WAYS;
+                    // rung 3: a referenced way is not the victim if any
+                    // other way will do - the lowest unreferenced one
+                    if (m_ref[s][v]) begin
+                        int u; u = -1;
+                        for (k = WAYS-1; k >= 0; k = k - 1) if (!m_ref[s][k]) u = k;
+                        if (u >= 0) v = u;
+                    end
+                    m_last_vic_set = s; m_last_vic_way = v; m_last_vic_n = m_last_vic_n + 1;
                 end
                 if (m_vld[s][v] && m_dty[s][v]) did_flush = 1;
                 did_fill = 1;
@@ -327,6 +354,7 @@ module page_cache_tb;
 
     task automatic model_invalidate;
         int s, k;
+        for (s = 0; s < SETS; s = s + 1) for (k = 0; k < WAYS; k = k + 1) m_ref[s][k] = 1'b0;
         for (s = 0; s < SETS; s = s + 1)
             for (k = 0; k < WAYS; k = k + 1) begin m_vld[s][k] = 0; m_dty[s][k] = 0; end
     endtask
@@ -499,6 +527,56 @@ module page_cache_tb;
         end
     endtask
 
+    // rung 3: a reference, in the DUT and the model
+    task automatic do_ref(input [SIDX-1:0] st, input [LEV-1:0] wy, input bit on);
+        begin
+            @(negedge clk);
+            ref_v <= 1'b1; ref_set <= st; ref_way <= wy; ref_on <= on;
+            @(negedge clk);
+            ref_v <= 1'b0;
+            m_ref[st][wy] = on;
+        end
+    endtask
+    // rung 3: the watchers - the direct read's ack and done, the placement, the eviction
+    integer tnow = 0;
+    always @(posedge clk) tnow <= tnow + 1;
+    integer dra_n = 0, drd_n = 0, dra_t = 0, drd_t = 0;
+    logic [127:0] drd_row;
+    always @(posedge clk) begin
+        if (dr_ack)  begin dra_n <= dra_n + 1; dra_t <= tnow; end
+        if (dr_done) begin drd_n <= drd_n + 1; drd_t <= tnow; drd_row <= dr_row; end
+    end
+    integer lp_n = 0;
+    logic [15:0] lp_ppn; logic [SIDX-1:0] lp_set; logic [LEV-1:0] lp_way;
+    always @(posedge clk) if (op_place_v) begin lp_n <= lp_n + 1; lp_ppn <= op_place_ppn; lp_set <= op_place_set; lp_way <= op_place_way; end
+    integer ev_n = 0;
+    logic [SIDX-1:0] ev_set; logic [LEV-1:0] ev_way;
+    always @(posedge clk) if (evict_v) begin ev_n <= ev_n + 1; ev_set <= evict_set; ev_way <= evict_way; end
+    // rung 3: a direct way read; got = acked within patience, done 2 after
+    task automatic dr_get(input [SIDX-1:0] st, input [LEV-1:0] wy, input [3:0] ln, input integer patience,
+                          output bit got, output logic [127:0] row);
+        integer n, a0, d0;
+        begin
+            a0 = dra_n; d0 = drd_n;
+            @(negedge clk);
+            dr_req <= 1'b1; dr_set <= st; dr_way <= wy; dr_line <= ln;
+            n = 0;
+            while (dra_n == a0 && n < patience) begin @(negedge clk); n = n + 1; end
+            dr_req <= 1'b0;
+            got = (dra_n != a0);
+            n = 0;
+            while (drd_n == d0 && n < 8) begin @(negedge clk); n = n + 1; end
+            row = drd_row;
+            if (got && drd_n == d0) fail("a granted direct read never completed");
+            if (got && (drd_t - dra_t) != 2)
+                fail($sformatf("dr_done %0d clocks after the ack, wanted 2", drd_t - dra_t));
+        end
+    endtask
+    // a page that hashes to set st: {k, st ^ k} for k below 2**SIDX
+    function automatic [15:0] page_in_set(input [SIDX-1:0] st, input integer k);
+        page_in_set = 16'((k << SIDX) | int'(st ^ SIDX'(k)));
+    endfunction
+
     // the write tap, watched
     integer mw_count = 0;
     logic [15:0] mw_last_addr;
@@ -525,6 +603,7 @@ module page_cache_tb;
             mimg[a] = smem[a];
         end
         for (a = 0; a < 65536; a = a + 1) m_touch[a] = 1'b0;
+        for (s = 0; s < SETS; s = s + 1) for (k = 0; k < WAYS; k = k + 1) m_ref[s][k] = 1'b0;
         for (s = 0; s < SETS; s = s + 1) begin
             u_dut.plr[s] = {NODES{1'b0}};                 // the bitstream's zeros
             for (k = 0; k < WAYS; k = k + 1) u_dut.dir[k][s] = 18'd0;
@@ -805,6 +884,125 @@ module page_cache_tb;
             fail($sformatf("the line port booked %0d/%0d by source, %0d acks in all",
                            u_dut.cnt_il_i, u_dut.cnt_il_d, ila_n));
         else ok($sformatf("every one of the %0d line-port grants is booked to the front that asked", ila_n));
+
+        // ---- 15. the placement (rung 3) ---------------------------------------
+        // A hit's decision names the set and way the page sits in, so does a
+        // fill's retag; the model knows both.
+        begin
+            integer w0, n0;
+            n0 = lp_n;
+            do_op(CLS_RAM, 16'h0004, 8'h11, 1'b1, 8'h00, 1'b1, CYC);
+            s = int'(set_of(16'h0004)); w0 = -1;
+            for (k = 0; k < WAYS; k = k + 1) if (m_vld[s][k] && m_tag[s][k] == 16'h0004) w0 = k;
+            if (lp_n != n0 + 1) fail($sformatf("a hit placed %0d times, wanted once", lp_n - n0));
+            else if (lp_ppn !== 16'h0004 || lp_set !== SIDX'(s) || int'(lp_way) !== w0)
+                fail($sformatf("a hit's placement %04x set %0d way %0d, the model says set %0d way %0d", lp_ppn, lp_set, lp_way, s, w0));
+            else ok("a hit's decision names the page's set and way, as the model has them");
+            n0 = lp_n;
+            do_op(CLS_RAM, 16'h7702, 8'h22, 1'b1, 8'h00, 1'b1, 60);
+            // the byte comes at the critical beat, the placement at the retag
+            while (pq_busy || busy) @(negedge clk);
+            repeat (3) @(negedge clk);
+            s = int'(set_of(16'h7702)); w0 = -1;
+            for (k = 0; k < WAYS; k = k + 1) if (m_vld[s][k] && m_tag[s][k] == 16'h7702) w0 = k;
+            if (lp_n != n0 + 1) fail($sformatf("a fill placed %0d times, wanted once", lp_n - n0));
+            else if (lp_ppn !== 16'h7702 || lp_set !== SIDX'(s) || int'(lp_way) !== w0)
+                fail($sformatf("a fill's placement %04x set %0d way %0d, the model says set %0d way %0d", lp_ppn, lp_set, lp_way, s, w0));
+            else ok("a fill's retag names the placement too");
+        end
+
+        // ---- 16. the direct way read (rung 3) ---------------------------------
+        begin
+            integer w0;
+            logic [SIDX-1:0] st;
+            s = int'(set_of(16'h0004)); st = SIDX'(s); w0 = -1;
+            for (k = 0; k < WAYS; k = k + 1) if (m_vld[s][k] && m_tag[s][k] == 16'h0004) w0 = k;
+            while (busy) @(negedge clk);
+            dr_get(st, LEV'(w0), 4'h1, 8, got, row);
+            if (!got) fail("a direct read was never granted");
+            else begin
+                for (b = 0; b < 16; b = b + 1)
+                    if (row[8*b +: 8] !== mimg[{16'h0004, 4'h1, 4'(b)}]) fail("dr_row byte differs");
+                ok("a direct read of a known way returns its row two clocks after the ack, no directory involved");
+            end
+            // The landing sweep on the direct port: only the write's landing
+            // clock refuses (the op's P0 is not the direct read's business),
+            // and what is read says which side of the write it read.
+            for (k = -4; k <= 4; k = k + 1) begin
+                logic [7:0] before_b, after_b;
+                integer got_at, da, db;
+                before_b = mimg[{16'h0004, 8'h20}];
+                after_b  = 8'(8'hD0 + (k + 4));
+                a0 = dra_n;
+                da = (k < 0) ? (-k - 1) : 0;
+                db = (k < 0) ? 0        : (k + 1);
+                while (busy) @(negedge clk);
+                fork
+                    begin
+                        repeat (da) @(negedge clk);
+                        do_op(CLS_RAM, 16'h0004, 8'h20, 1'b0, after_b, 1'b1, CYC);
+                    end
+                    begin
+                        repeat (db) @(negedge clk);
+                        dr_req <= 1'b1; dr_set <= st; dr_way <= LEV'(w0); dr_line <= 4'h2;
+                        @(negedge clk);
+                        dr_req <= 1'b0;
+                    end
+                join
+                got_at = dra_n;
+                repeat (6) @(negedge clk);
+                if (k == 2) begin
+                    if (got_at != a0) fail("a direct read was granted on the clock a write landed in its row");
+                end else begin
+                    if (got_at == a0) fail($sformatf("a direct read at k=%0d was refused for no reason", k));
+                    else if (k > 2 && drd_row[7:0] !== after_b)
+                        fail($sformatf("a direct read after the landing (k=%0d) read %02x, the pre-write byte", k, drd_row[7:0]));
+                    else if (k < 2 && drd_row[7:0] !== before_b)
+                        fail($sformatf("a direct read before the landing (k=%0d) read %02x, not the pre-write %02x", k, drd_row[7:0], before_b));
+                end
+            end
+            if (errors == 0) ok("the direct read refuses the write's landing clock and nothing else, and reads the right side of it");
+        end
+
+        // ---- 17. the referenced ways (rung 3) ---------------------------------
+        // Fill one set, reference every way but one: the next miss into the
+        // set must take the unreferenced one.  Reference that too: the next
+        // miss takes the tree's pick and says so on evict_v.
+        begin
+            logic [SIDX-1:0] st;
+            integer wfree, n0, e0, kk, wv;
+            st = SIDX'(9);
+            for (kk = 0; kk < WAYS; kk = kk + 1)
+                do_op(CLS_RAM, page_in_set(st, kk), 8'h00, 1'b0, 8'(kk), 1'b1, 60);
+            check_dir("the set is full, as the model has it");
+            // the last page written is surely resident: its way stays unreferenced
+            wfree = -1;
+            for (kk = 0; kk < WAYS; kk = kk + 1)
+                if (m_tag[int'(st)][kk] == page_in_set(st, WAYS - 1)) wfree = kk;
+            if (wfree < 0) fail("the last page written into the set is not resident");
+            for (kk = 0; kk < WAYS; kk = kk + 1) if (kk != wfree) do_ref(st, LEV'(kk), 1'b1);
+            n0 = lp_n; e0 = ev_n;
+            do_op(CLS_RAM, page_in_set(st, WAYS), 8'h00, 1'b1, 8'h00, 1'b1, 60);
+            while (pq_busy || busy) @(negedge clk);
+            repeat (3) @(negedge clk);
+            if (int'(lp_way) !== wfree) fail($sformatf("the miss took way %0d, not the one unreferenced way %0d", lp_way, wfree));
+            else if (ev_n != e0 + 1 || int'(ev_set) !== int'(st) || int'(ev_way) !== wfree)
+                fail($sformatf("the eviction was not named: %0d evictions, set %0d way %0d", ev_n - e0, ev_set, ev_way));
+            else ok("a miss into a set with one unreferenced way takes that way, and names it");
+            check_dir("the directory after the referenced miss matches the model");
+            do_ref(st, LEV'(wfree), 1'b1);
+            e0 = ev_n;
+            do_op(CLS_RAM, page_in_set(st, WAYS + 1), 8'h00, 1'b1, 8'h00, 1'b1, 60);
+            while (pq_busy || busy) @(negedge clk);
+            repeat (3) @(negedge clk);
+            wv = m_last_vic_way;
+            if (ev_n != e0 + 1) fail("a miss into a fully referenced set named no eviction");
+            else if (int'(ev_set) !== int'(st) || int'(ev_way) !== wv)
+                fail($sformatf("the eviction named set %0d way %0d, the model took way %0d", ev_set, ev_way, wv));
+            else ok("a miss into a fully referenced set takes the tree's pick and names the eviction");
+            check_dir("the directory after the forced eviction matches the model");
+            for (kk = 0; kk < WAYS; kk = kk + 1) do_ref(st, LEV'(kk), 1'b0);
+        end
 
         // ---- 14. the invalidate and the counters -------------------------------
         inval <= 1'b1; @(negedge clk); inval <= 1'b0; @(negedge clk);
