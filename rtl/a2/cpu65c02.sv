@@ -216,7 +216,6 @@ module cpu65c02 #(
     wire [1:0] f_ld_adh = uc[UCP_LD_ADH   +: 2];
     wire [2:0] f_ld_pc  = uc[UCP_LD_PC    +: 3];
     wire [1:0] f_ld_s   = uc[UCP_LD_S     +: 2];
-    wire       f_ld_if  = uc[UCP_LD_IF];
     wire [2:0] f_dout   = uc[UCP_DOUT     +: 3];
     wire [4:0] f_alu_op = uc[UCP_ALU_OP   +: 5];
     wire [2:0] f_alu_a  = uc[UCP_ALU_A    +: 3];
@@ -235,7 +234,7 @@ module cpu65c02 #(
     logic [7:0]  md;                // scratch: RMW result, jump target low byte
     logic [2:0]  ucyc;
     logic        agu_c;             // carry SAVED from the previous AGU add
-    logic        in_rst, int_brk, int_nmi, nmi_prev, nmi_pend, hlt;
+    logic        in_rst, int_brk, int_nmi, nmi_prev, nmi_pend;
     logic [15:0] last_addr;
     logic [7:0]  dm;                // the last din: the ADC/SBC operand, for the decimal slot
 
@@ -376,7 +375,7 @@ module cpu65c02 #(
     // become reads.  Cheaper and less error-prone than a second sequence.
     assign rw     = f_rw | in_rst;
     assign sync   = f_sync;
-    assign halted = hlt;
+    assign halted = 1'b0;               // STP is not on the base part (rung 7: the register went)
 
     // ---- ALU ----------------------------------------------------------------
     // Entirely parallel to the AGU; the two never feed each other.
@@ -502,8 +501,6 @@ module cpu65c02 #(
         UC_OP_DEC: begin alu_res = alu_m - 8'd1; alu_n = alu_res[7]; alu_z = (alu_res == 8'h00); end
         UC_OP_TRB: begin alu_res = din & ~a; alu_z = ((a & din) == 8'h00); end
         UC_OP_TSB: begin alu_res = din |  a; alu_z = ((a & din) == 8'h00); end
-        UC_OP_RMB:       alu_res = din & ~(8'h01 << ir[6:4]);    // no flags
-        UC_OP_SMB:       alu_res = din |  (8'h01 << ir[6:4]);    // no flags
         default: ;
         endcase
     end
@@ -539,7 +536,6 @@ module cpu65c02 #(
     // A taken branch needs the extra cycle exactly when the low-byte add left
     // the page: carry out disagreeing with the offset's sign.
     wire page_adj = agu_co ^ adl[7];
-    wire zp_bit   = md[ir[6:4]] == ir[7];
 
     logic cond_met;
     always_comb begin
@@ -549,7 +545,6 @@ module cpu65c02 #(
             UC_COND_BRANCH: cond_met = (br_flag == ir[5]);
             UC_COND_PAGE:   cond_met = page_adj;
             UC_COND_DEC:    cond_met = f_d;
-            UC_COND_ZPBIT:  cond_met = zp_bit;
             default:        cond_met = 1'b1;
         endcase
     end
@@ -560,9 +555,6 @@ module cpu65c02 #(
     wire irq_ready = nmi_pend | (~irq_n & ~f_i);
     wire take_int  = f_sync & irq_ready & ~in_rst;
 
-    // WAI parks on its own slot until any interrupt arrives - even a masked one,
-    // after which the mask decides whether a handler runs.  STP parks until rst.
-    wire wai_wake = (ir == 8'hCB) && (nmi_pend || ~irq_n);
 
     // The PC must NOT advance on a hardware interrupt: the pushed return address
     // is the instruction that was ABOUT to run, so RTI comes back to it rather
@@ -607,8 +599,6 @@ module cpu65c02 #(
             // timing charged at zero margin (docs/DLINE.md, the serve-byte
             // cone).  Sourcing the opcode from the I byte cuts it.
             uaddr_alt = take_int ? {8'h00, 3'd0} : {i_din, 3'd0};
-        end else if (wai_wake) begin
-            uaddr_alt = {ir, 3'd2};                     // WAI's exit slot
         end else begin
             uaddr_alt = {ir, f_alt};
         end
@@ -617,17 +607,17 @@ module cpu65c02 #(
     wire [UC_W-1:0] uc_taken = ucode[uaddr_taken];
     wire [UC_W-1:0] uc_alt   = ucode[uaddr_alt];
 
-    // f_sync wins over wai_wake wins over the condition - the old priority
-    // mux exactly: take_seq is 0 whenever an overriding arm fires, so uc_alt
-    // carries them regardless of what cond_met says.  ucyc_next above derives
-    // from the same cond_met, so sequencer and fetch cannot disagree.
-    wire take_seq = ~f_sync & ~wai_wake & cond_met;
+    // f_sync wins over the condition: take_seq is 0 whenever the fetch arm
+    // fires, so uc_alt carries it regardless of what cond_met says.  ucyc_next
+    // above derives from the same cond_met, so sequencer and fetch cannot
+    // disagree.
+    wire take_seq = ~f_sync & cond_met;
     wire [UC_W-1:0] uc_next = take_seq ? uc_taken : uc_alt;
 
     // ---- register file ------------------------------------------------------
-    // `ld_if` gates the loads on the condition, which is how BBR/BBS branches
-    // without changing its cycle count.
-    wire ld_en = ~f_ld_if | cond_met;
+    // Every load is unconditional (rung 7, 2026-09-19): the `ld_if` gate that
+    // let BBR/BBS branch without a cycle - a field no word of this ROM set -
+    // sat in every register's enable cone for nothing.
 
     // ---- next PC ------------------------------------------------------------
     // The value the PC registers take at this cycle's edge - equivalently, the
@@ -645,7 +635,7 @@ module cpu65c02 #(
     logic [15:0] next_pc;
     always_comb begin
         next_pc = {pch, pcl};
-        if (ld_en) begin
+        begin
             case (f_ld_pc)
                 UC_LD_PC_INC:    if (!int_pc_hold) next_pc = {pch_inc, pcl_inc};
                 UC_LD_PC_AGU:    next_pc = {agu_hi, agu_lo};
@@ -683,7 +673,7 @@ module cpu65c02 #(
     logic [7:0] adl_n, adh_n, s_n;
     always_comb begin
         adl_n = adl; adh_n = adh; s_n = s;
-        if (ld_en) begin
+        begin
             case (f_ld_adl)
                 UC_LD_ADL_AGU: adl_n = agu_lo;
                 UC_LD_ADL_DIN: adl_n = din;
@@ -780,7 +770,7 @@ module cpu65c02 #(
     always_ff @(posedge clk) begin
         if (rst) dchk_pend <= 1'b0;
         else if (cyc_en) begin
-            if (ld_en && dec_defer) begin
+            if (dec_defer) begin
                 dchk_exp  <= dec_ref(a, din, f_c, f_alu_op == UC_OP_SBC);
                 dchk_pend <= 1'b1;
             end else if (f_alu_op == UC_OP_DADC || f_alu_op == UC_OP_DSBC) begin
@@ -808,7 +798,7 @@ module cpu65c02 #(
             f_n <= 1'b0; f_v <= 1'b0; f_d <= 1'b0;
             f_i <= 1'b1; f_z <= 1'b0; f_c <= 1'b0;
             ir <= 8'h00; adl <= 8'h00; adh <= 8'h00; md <= 8'h00;
-            agu_c <= 1'b0; hlt <= 1'b0;
+            agu_c <= 1'b0;
             nmi_prev <= 1'b1; nmi_pend <= 1'b0;
             int_brk <= 1'b0; int_nmi <= 1'b0; in_rst <= 1'b1;
             // Enter BRK's microcode from the top.  Reset runs the same sequence
@@ -834,12 +824,12 @@ module cpu65c02 #(
             uc    <= '0;
         end else if (cyc_en) begin
             uc   <= uc_next;
-            ucyc <= f_sync ? 3'd0 : (wai_wake ? 3'd2 : ucyc_next);
+            ucyc <= f_sync ? 3'd0 : ucyc_next;
 
             // The PC loads FROM next_pc - the same mux i_pred exports - so a
             // predictive icache follows the architecture by construction.
-            // next_pc already folds in ld_en, int_pc_hold and the hold default,
-            // hence no gate here.
+            // next_pc already folds in int_pc_hold and the hold default, hence
+            // no gate here.
             pcl <= next_pc[7:0];
             pch <= next_pc[15:8];
 
@@ -862,7 +852,7 @@ module cpu65c02 #(
                 end
             end
 
-            if (ld_en) begin
+            begin
                 case (f_ld_adl)
                     UC_LD_ADL_AGU: adl <= agu_lo;
                     UC_LD_ADL_DIN: adl <= din;
@@ -922,7 +912,6 @@ module cpu65c02 #(
                 int_nmi <= 1'b0;
             end
 
-            if (ir == 8'hDB && ucyc == 3'd1) hlt <= 1'b1;
         end
     end
 

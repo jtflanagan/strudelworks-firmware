@@ -119,13 +119,13 @@ DOUT = dict(A=0, X=1, Y=2, ZERO=3, P_B=4, PCL=5, PCH=6, MD=7)
 # ALU
 OP = dict(NOP=0, LD=1, AND=2, ORA=3, EOR=4, ADC=5, SBC=6, CMP=7, CPX=8,
           CPY=9, BIT=10, BITI=11, ASL=12, LSR=13, ROL=14, ROR=15, INC=16,
-          DEC=17, TRB=18, TSB=19, RMB=20, SMB=21, FLAG=22, TXS=23,
+          DEC=17, TRB=18, TSB=19, FLAG=22, TXS=23,   # 20/21 were Rockwell's RMB/SMB: gone (rung 7)
           DADC=24, DSBC=25)
 ALU_A = dict(DIN=0, A=1, X=2, Y=3, S=4, ZERO=5, MD=6)
 WB    = dict(NONE=0, A=1, X=2, Y=3, S=4, MD=5, P=6)
 
 # Sequencing: next = cond ? (ucycle + 1) : alt
-COND = dict(ALWAYS=0, NEVER=1, CARRY=2, BRANCH=3, PAGE=4, DEC=5, ZPBIT=6)
+COND = dict(ALWAYS=0, NEVER=1, CARRY=2, BRANCH=3, PAGE=4, DEC=5)   # 6 was ZPBIT (BBR/BBS): gone
 
 # ---------------------------------------------------------------------------
 # Microinstruction layout.  Order here is the bit order in the ROM word.
@@ -144,7 +144,6 @@ FIELDS = [
     ("ld_adh",    2),
     ("ld_pc",     3),
     ("ld_s",      2),
-    ("ld_if",     1),   # gate all register loads on the condition
     ("dout",      3),
     ("alu_op",    5),
     ("alu_a",     3),
@@ -158,7 +157,7 @@ WIDTH = sum(w for _, w in FIELDS)
 
 DEFAULTS = dict(sync=0, rw=1, addr_sel=ADDR["PC"], lo_a=LO_A["ADL"],
                 lo_b=LO_B["ZERO"], lo_ci=0, hi_a=HI_A["ADH"], hi_c=HI_C["NONE"],
-                hi_d=HI_D["NONE"], ld_adl=0, ld_adh=0, ld_pc=0, ld_s=0, ld_if=0,
+                hi_d=HI_D["NONE"], ld_adl=0, ld_adh=0, ld_pc=0, ld_s=0,
                 dout=DOUT["A"], alu_op=OP["NOP"], alu_a=ALU_A["DIN"], wb=0,
                 fl=0, seti=0, cond=COND["ALWAYS"], alt=0)
 
@@ -628,10 +627,13 @@ put(0x00, [
 # WDC's, and not on the base part.  $CB and $DB are one-byte NOPs there, in the
 # table below with the rest of $xB.
 #
-# The RTL still carries the `hlt` register and the `halted` output, and they are
-# INERT against this ROM rather than dead code: `hlt` is set by `ir == $DB` at
-# `ucyc == 3'd1`, and a one-cycle NOP never reaches ucyc 1.  Leaving them costs
-# nothing and is what a WDC variant of this ROM would need.
+# The RTL carried a `hlt` register, WAI's wake arm, RMB/SMB ALU arms, the
+# ZPBIT condition and an `ld_if` field gating every register load on the
+# condition (BBR/BBS's trick) - all inert against this ROM.  Rung 7 of the
+# 65C02 card's refactor (2026-09-19) removed them: the base part has none of
+# it, and the load gate sat in every register's enable cone for nothing
+# (docs/REQ_65C02.md §2.5).  A WDC or Rockwell variant would put them back
+# with its ROM.
 
 # ---- CMOS no-ops ----------------------------------------------------------
 put(0xEA, build("imp", "none"))
