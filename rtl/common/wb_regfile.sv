@@ -1694,7 +1694,7 @@ module wb_regfile #(
                         R_NSC_DATE:   wb_dat_r <= MINIMAL ? 32'd0 : (nsc_now_s[63:32]);
                         R_U2_SLOT:    wb_dat_r <= u2_slot_rd;
                         R_PRINTER_SLOT: wb_dat_r <= printer_slot_rd;
-                        R_U2_STAT:    wb_dat_r <= MINIMAL ? 32'd0 : (u2_stat_rd);
+                        R_U2_STAT:    wb_dat_r <= u2_stat_rd;   // the IIgs's: kept under MINIMAL (2026-09-19)
                         R_LINK_STAT:  wb_dat_r <= link_stat_s;
                         R_AUDIO_CTRL: wb_dat_r <= audio_ctrl_rd;
                         R_AUDIO_RATE: wb_dat_r <= audio_rate_q;
@@ -1723,22 +1723,22 @@ module wb_regfile #(
                         R_MEM_FLUSHES:  wb_dat_r <= MINIMAL ? 32'd0 : (mem_flushes_s);
                         R_MEM_DECLINES: wb_dat_r <= MINIMAL ? 32'd0 : (mem_declines_s);
                         R_MEM_ROM:      wb_dat_r <= mem_rom_rd;
-                        R_GS_ADB:       wb_dat_r <= MINIMAL ? 32'd0 : (gs_adb_stat_s);
+                        R_GS_ADB:       wb_dat_r <= gs_adb_stat_s;   // the IIgs's: kept under MINIMAL (2026-09-19)
                         R_ACCEL_CORE_CYC: wb_dat_r <= cnt_core_cyc_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
                         R_ACCEL_BUS_CYC:  wb_dat_r <= cnt_bus_cyc_s;   // the accelerator's instrument: kept under MINIMAL (2026-09-19)
-                        R_DBG_SEL:        wb_dat_r <= MINIMAL ? 32'd0 : ({24'd0, dbg_sel});
-                        R_DBG_VAL:        wb_dat_r <= MINIMAL ? 32'd0 : (dbg_val_s);
-                        R_FD35_DRIVE:     wb_dat_r <= MINIMAL ? 32'd0 : (fd35_drive_rd);
-                        R_FD35_STAT:      wb_dat_r <= MINIMAL ? 32'd0 : (fd35_stat_rd);
+                        R_DBG_SEL:        wb_dat_r <= {24'd0, dbg_sel};   // the IIgs's: kept under MINIMAL (2026-09-19)
+                        R_DBG_VAL:        wb_dat_r <= dbg_val_s;   // the IIgs's: kept under MINIMAL (2026-09-19)
+                        R_FD35_DRIVE:     wb_dat_r <= fd35_drive_rd;   // the IIgs's: kept under MINIMAL (2026-09-19)
+                        R_FD35_STAT:      wb_dat_r <= fd35_stat_rd;   // the IIgs's: kept under MINIMAL (2026-09-19)
                         R_DDR3_DBG1:      wb_dat_r <= ddr3_dbg1_s;
                         R_DDR3_DBG2:      wb_dat_r <= ddr3_dbg2_s;
                         R_DDR3_DBG3:      wb_dat_r <= ddr3_dbg3_s;
                         R_DDR3_DBG4:      wb_dat_r <= ddr3_dbg4_s;
                         R_DDR3_EYE0:      wb_dat_r <= ddr3_eye0_s;
                         R_DDR3_EYE1:      wb_dat_r <= ddr3_eye1_s;
-                        R_GS_CLOCK:       wb_dat_r <= MINIMAL ? 32'd0 : (gs_clock_stat_s);
-                        R_PANEL_STAT:     wb_dat_r <= MINIMAL ? 32'd0 : ({24'd0, panel_drops_s, panel_dmas_s});
-                        R_FD35_WSTAT:     wb_dat_r <= MINIMAL ? 32'd0 : (fd35_wstat_s);
+                        R_GS_CLOCK:       wb_dat_r <= gs_clock_stat_s;   // the IIgs's: kept under MINIMAL (2026-09-19)
+                        R_PANEL_STAT:     wb_dat_r <= {24'd0, panel_drops_s, panel_dmas_s};   // the IIgs's: kept under MINIMAL (2026-09-19)
+                        R_FD35_WSTAT:     wb_dat_r <= fd35_wstat_s;   // the IIgs's: kept under MINIMAL (2026-09-19)
                         R_TELEM_CTRL:     wb_dat_r <= telem_ctrl_rd;
                         R_WIDE_U2_CMDS:    wb_dat_r <= MINIMAL ? 32'd0 : (wide_u2_cmds_s);
                         R_WIDE_U2_RX:      wb_dat_r <= MINIMAL ? 32'd0 : (wide_u2_rx_s);
@@ -1800,9 +1800,14 @@ module wb_regfile #(
                          (word == R_FD_DRIVE2);
     wire wr_fd_stat    = access && !wb_ack && in_region && wb_we &&
                          (word == R_FD_STAT);
-    wire wr_fd35_drive = !MINIMAL && access && !wb_ack && in_region && wb_we &&
+    // NOT under MINIMAL: the 3.5" drive is the IIgs's, and the 50T IIgs
+    // variant builds with MINIMAL too (build.tcl -gs50t).  Gated, the host's
+    // FD35_DRIVE write never landed, the IWM saw no disk in the drive and
+    // GS/OS showed no 3.5" icon (on hardware 2026-09-19).  On the 65C02 card
+    // the sources are constants, so the gate never saved a LUT there.
+    wire wr_fd35_drive = access && !wb_ack && in_region && wb_we &&
                          (word == R_FD35_DRIVE);
-    wire wr_fd35_stat  = !MINIMAL && access && !wb_ack && in_region && wb_we &&
+    wire wr_fd35_stat  = access && !wb_ack && in_region && wb_we &&
                          (word == R_FD35_STAT);
     wire wr_mem_ctrl   = access && !wb_ack && in_region && wb_we &&
                          (word == R_MEM_CTRL);
@@ -1828,7 +1833,7 @@ module wb_regfile #(
                          (word == R_FB_PEEK);
     wire wr_accel_ctrl = access && !wb_ack && in_region && wb_we &&
                          (word == R_ACCEL_CTRL);
-    wire wr_dbg_sel    = !MINIMAL && access && !wb_ack && in_region && wb_we &&
+    wire wr_dbg_sel    = access && !wb_ack && in_region && wb_we &&
                          (word == R_DBG_SEL);
     wire wr_telem_ctrl = access && !wb_ack && in_region && wb_we &&
                          (word == R_TELEM_CTRL);

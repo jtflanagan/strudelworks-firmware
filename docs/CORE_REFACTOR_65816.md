@@ -192,6 +192,27 @@ in the bench: GS/OS +11.7% on the boot, XMAS +1%. The bit: build/results/master_
 (no 50T board exists to load it on). Further LUT levers if headroom is ever wanted: fb_sim (unread
 on this build, 4 tiles), the bank census, the Uthernet's 2.6 k as the last resort.
 
+**ON HARDWARE (gs_pt50, the same feature set on the Pt, TIMING MET +0.093, 2026-09-19): PROVEN.**
+system6 cold-boots to the Finder through the fast slot path and the fast DMA, the host's hd count
+climbing (4614/4614 at the Finder), the mouse working. The first attempts ended at "Check startup
+device!" and the fault was the HOST's: its apply loop skipped every fast word in the bus time base
+before the hard-disk controller (`if (fast && !virt_base_) continue;`), and a IIgs reports the bus
+base by design (`virt_base = !GS && virt`, the beam at the bus's cadence), so the EXECUTE the card
+kept on the stream never reached the controller; the card timed the command out. The IIe never
+showed it (its base is virtual under accel) and neither did the IIgs while its $Cxxx was all bus
+class. Telemetry found it: `hdexecs` rose by one per `PR#7` while the log's `hd N/N` stood still.
+The fix moves the skip below the peripherals (src/pipeline.cpp, host). Two lessons from the same
+hour: a programmatic RES' is a WARM reset on a IIgs (BASIC, no slot scan) - a cold boot holds
+Open-Apple through it (`button open down` / `reset` / `button open hardware`); and `mouse = off`
+on a IIgs disarms the ADB feed, so the 50T bit (no slot mouse card) still runs `mouse = on`.
+Also: build.tcl's -gs50t generics had replaced the build stamp (fixed, uncommitted).
+Then the 3.5" drive: listed in the chooser, no icon on the desktop, and `PR#5` booted the 5.25" instead
+(the host's d35seeks stayed 0). MINIMAL_REGS - the 65C02 card's cut - gated the FD35_DRIVE write off,
+so the host's insert never reached the IWM, and it zeroes the FD35 readbacks, so telemetry could not
+say so either. rtl/common/wb_regfile.sv keeps the IIgs's registers (fd35, ADB, clock, panel, U2, the
+DBG pair) under MINIMAL now; their sources are constants on the 65C02 card, so nothing is lost there.
+The rule: a cut named for one card is checked against what the other still needs. Pt bit gs_pt51.
+
 ## The L2 geometry on GS/OS (2026-09-19, `--l2=SETSxWAYS` before the CAM, the 50T question)
 
 The user has an immediate chance to build 50T boards (32,600 LUTs / 75 RAMB36) and keeps the

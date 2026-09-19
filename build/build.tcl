@@ -354,7 +354,11 @@ if {$gs && $gs50t} {
     # THE 50T CANDIDATE (docs/CORE_REFACTOR_65816.md): the CAM-L2 at 32 slots,
     # no Mockingboard, no slot mouse card, the register file at MINIMAL.
     puts " variant: the 50T candidate (32 slots, no MB, no mouse, MINIMAL regs)"
-    set_property generic [list MEM_SETS=32 HAS_MB=0 HAS_MOUSE=0 MINIMAL_REGS=1] [current_fileset]
+    # APPENDED to the fileset's generics: set_property replaces the list, and the
+    # first build of this variant lost its build stamp that way (the host then
+    # called the gateware unknown and never configured the hard disk's slot).
+    set_property generic [concat [get_property generic [current_fileset]] \
+        [list MEM_SETS=32 HAS_MB=0 HAS_MOUSE=0 MINIMAL_REGS=1]] [current_fileset]
 }
 if {$gs} {
     # GS is a localparam of gs_top since the tree split (2026-09-18): nothing to pass.
