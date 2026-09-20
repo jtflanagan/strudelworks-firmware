@@ -51,8 +51,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     parameter integer TARGET = 0,
                     parameter integer MAX_INSTRS = 200000,
                     parameter integer TLB_N = 16,        // the TLB's entries (--tlb=N: a census lever)
-                    parameter integer L2_SETS = 32,      // the CAM-L2's slots (--l2=N; gs_top's default since 2026-09-20)
-                    parameter integer L2_WAYS = 2,       // nominal: a one-bit way, always zero
+                    parameter integer L2_SETS = 16,      // the L2's sets (--l2=N; gs_top's default, 2026-09-20)
+                    parameter integer L2_WAYS = 8,       // ...and its ways a set (--ways=N)
                     parameter integer FAST_DMA = 1,      // 0: the hard disk's blocks land by the bus (--slowdma)
                     parameter integer ROOM_P = 12,       // the merge's no-room model (--room=P; 0 = never)
                     parameter integer MAX_CLKS = 400000000,
@@ -1175,7 +1175,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .busy (rom_busy), .overruns (rom_overruns), .rom_ok (rom_loaded)
     );
 
-    page_cam #(.N (L2_SETS)) u_cache (
+    page_cam #(.SETS (L2_SETS), .WAYS (L2_WAYS)) u_cache (
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_ppn (cl_ppn_w), .cl_off (cl_off[7:0]),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_wdata (cl_wdata), .cl_posted (cl_posted),
@@ -2914,7 +2914,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // holds it - else the DDR3 stub has it.  The bench needs this to check
     // that a block the host DMA'd in actually landed where the machine will
     // look for it.
-    localparam integer MEM_SETS = L2_SETS;
+    localparam integer MEM_SETS = L2_SETS * L2_WAYS;   // slots: a slot is {set, way}
     localparam integer SIDX = $clog2(MEM_SETS);
     function automatic [7:0] card_byte(input [15:0] ppn, input [7:0] off);
         int w, hit;

@@ -95,8 +95,14 @@ module gs_top #(
     // than its capacity. The BLOCK RAM DOES NOT CHANGE: the row is 128 bits
     // wide and 128 bits needs four RAMB36 whatever the depth.
     // build.tcl's `-gsslots N` builds any other count for an A/B.
-    parameter integer MEM_SETS = 32,    // the CAM-L2's slots (rtl/gs/page_cam.sv)
-    parameter integer MEM_WAYS = 2,     // nominal: one bit of way, always zero
+    // 2026-09-20 LATER, THE L2 IN SETS (the user's direction): SETS x WAYS
+    // slots in the one block RAM with the directory in LUTRAM per way -
+    // 16 x 8 = 128 slots = 32 KB = eight RAMB36 - the working-set policy
+    // per set, the TLB naming {set, way} as the set cache's did.  Measured
+    // on hardware before any sizing up (docs/CORE_REFACTOR_65816.md "The
+    // L2 in sets"); build.tcl's `-gsslots N` is the SET count now.
+    parameter integer MEM_SETS = 16,    // the L2's sets (rtl/gs/page_cam.sv)
+    parameter integer MEM_WAYS = 8,     // ...and its ways a set
     // THE 50T VARIANT (docs/CORE_REFACTOR_65816.md "The 50T candidate", 2026-09-19):
     // the Mockingboard and the slot mouse card generated out (the IIgs's own
     // mouse is ADB), the register file at its MINIMAL (build.tcl -gs50t sets
@@ -481,7 +487,7 @@ module gs_top #(
 
     card_link #(
         .MINIMAL_REGS (MINIMAL_REGS),
-        .MEM_PAGES_LOG2 ($clog2(MEM_SETS)),
+        .MEM_PAGES_LOG2 ($clog2(MEM_SETS * MEM_WAYS)),
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
         .CAN_MASTER (1'b1),
@@ -2059,7 +2065,7 @@ module gs_top #(
     wire [7:0]  pw_any_off   = pw_off_w;
     wire [7:0]  pw_any_data  = pw_data_w;
 
-    page_cam #(.N (MEM_SETS)) u_cache (
+    page_cam #(.SETS (MEM_SETS), .WAYS (MEM_WAYS)) u_cache (
         .clk         (apple_clk),
         .rst         (apple_rst),
         .cl_valid    (cl_valid),

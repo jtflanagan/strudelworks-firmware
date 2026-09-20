@@ -1,6 +1,6 @@
 # The 65816 card: the core / L1 / L2 refactor ladder
 
-Status: **2026-09-20 LATEST: THE CAM-L2 IS 32 SLOTS BY DEFAULT** (the user,
+Status: **2026-09-20 LATEST: THE L2 IN SETS, 16 x 8 = 128 SLOTS, ON HARDWARE: THE FINDER 47.6x -> 55.1x (+15.8%)** (the user's direction, bit `l2s16x8`, TIMING MET +0.030 / whs +0.019, 0 of 72,552; fw built 2026-09-20 18:22:13, SRAM; branch l2_sets, uncommitted).  The directory in LUTRAM per way, the working-set policy per set, the same block RAM four times deeper (8 RAMB36), and the design LUT-NEUTRAL: 27,587 -> 27,598.  Three 5 s windows each arm, the same conf (gs_zelda.conf) the same evening: fills 2.53 M -> 0.84 M a window, flushes 366 k -> 80 k.  Section "The L2 in sets" below.  Not yet measured: the Nox map, XMAS, a read stream.  **EARLIER THE SAME DAY: THE CAM-L2 IS 32 SLOTS BY DEFAULT** (the user,
 measured on hardware, bit `l2s32`, TIMING MET +0.014, 0 of 70,313).  An A/B on
 one commit (fw 588c81a), one generic apart, both Pt GS builds: the Finder
 **47.9x** at 32 slots against **51.6x** at 64 (bit `enc1`, the last round's
@@ -502,6 +502,83 @@ absolute block at 49% of the clocks but already runs at 2.15 clocks an op - a gr
 The supporting counters over the same window: dl_serves 114.9 M (= the dline ops), dl_cam_serves
 14.8 M, dl_decl 3.66 M, dl_claims 0, dl_reval_revive 42.95 M / dl_reval_drop 1.23 M, il_acks 6.82 M,
 il_inst 876 k, pc_il_i / pc_il_d / pc_decline all 0.
+
+## The L2 in sets (the user's direction, 2026-09-20; built and measured the same day)
+
+The user, with the 32-slot CAM's working-set cliff on the Finder in hand: 32 ways fully
+associative is expensive and it was the LUT expense that brought it down to 32 - can the
+working-set policy (the TLB's pinning of the ways it points at, the referenced bit) let L2 go
+back to a LARGER cache at a good associativity, eight ways, insulated from a stream by the same
+hints?  Test the smaller geometry first, 16 x 8, on hardware; the benches are too short to bite;
+the 50T question waits on the performance.
+
+**THE SHAPE THAT WORKS IS THE CAM's, PARTITIONED.**  One RAM per way is out - way_ram is true
+dual port at 128 bits, four RAMB36 an instance whatever its depth, so eight ways would be 32
+tiles - so the store stays ONE block RAM and a slot is {set, way}; the directory is decided
+before the row read as the CAM did, with the compare narrowed to a set.  rtl/gs/page_cam.sv
+(SETS x WAYS): per way, SETS words of {tag, referenced, last offset} in LUTRAM (16 x 25, RAM32M
+x 15 a way), read ASYNCHRONOUSLY by the entrant's set in P0 - the compare and the hit way's row
+read stay in P0; three read addresses (the entrant's set, the op's set at P2, the direct read's
+set) and one write a clock a way, by priority: the fill's retag (its slot is valid the same
+clock, so its tag must land), the op's touch, a skipped pick's reference given up, the direct
+read's touch (a lost touch is a lost hint).  The valid, dirty and TLB-pointed bits are flop
+vectors, a bit a slot: each has more than one writer a clock.  The victim is chosen at P1
+within the entrant's set from the bits registered at P0 (the engine's own slot masked; the
+landings of the P0 and P1 clocks forwarded into the dirty bits - a stale dirty bit would drop
+a page's writes, a stale pointed bit only costs a TLB kill); the victim's tag is read at P2 from
+the LUTRAM at the op's set.  The set is a fold of the whole page number (bank byte included: the
+64-set bug).  The PLRU is seven nodes a set in LUTRAM.  The L1 sides and the TLB are untouched:
+their SIDX/LEV parameters were built for sets and ways and carry 4 + 3 bits where they carried
+5 + 1.  Everything behind P0 is the CAM's, by name.
+
+WHY LUTRAM AND NOT BLOCK RAM, AND NOT FLOPS.  L1's fills never consult the directory - the TLB
+names {set, way} and a fill is a direct way read - so the lookup serves the op path (the
+dispatcher's ops that bypass L1, the TLB's misses) and what matters there is LATENCY: a block
+RAM directory reads synchronously and would cost every one of those a clock (about 3% on the
+Nox census), plus a tile a way for the independent write ports, plus a walk to clear.  Flops
+were the CAM's cost: 46 LUTs and 33 flops a slot, the index-decoded next-state selects and the
+N:1 reads, linear in slots.  In LUTRAM the cost is per WAY.
+
+**MEASURED (the Pt, gs_zelda.conf, the Finder idle at the desktop, accel 2 unlimited, three 5 s
+windows = 500.0 M clocks each, both arms the same evening, all three agreeing to three figures):**
+
+| | CAM 32 slots (fw 16:31) | 16 x 8 = 128 slots (fw 18:22) |
+|---|---|---|
+| ops retired / 5.10 M bus cycles | 242.8 M = **47.6x** | 281.3 M = **55.1x** (+15.8%) |
+| L2 fills / flushes a window | 2.53 M / 366 k | 0.84 M / 80 k |
+| DEC_D | 80.8 M | 71.0 M |
+| SEQ_FAST | 73.4 M | 45.9 M |
+| DEC_I | 35.6 M | 24.8 M |
+| D fill wait / I fill wait | 30.0 M / 26.6 M | 34.3 M / 31.6 M |
+
+The 64-slot CAM had measured 51.6x here: 128 slots at eight ways is past it, and the fill
+rate says why - three quarters of the Finder's fills were re-fills of pages the 32 slots could
+not hold.  The line-fill waits GREW while the L2 fills fell by three: the L1 sides are now fed
+from L2 at a higher rate instead of waiting behind L2's own misses, and DEC_D and SEQ_FAST are
+where the clocks came back from.  (The baseline's open window was GSHardDrive, the new bit's
+ClassicsGS: the same idle loop, not the same pixels.)
+
+**THE COST (the Pt, both TIMING MET; utilization_hier_gs_l2s16x8.rpt against l2s32):**
+
+| module | LUTs | flops | RAMB36 |
+|---|---|---|---|
+| page_cam | 2,905 -> 2,810 (484 of them LUTRAM) | 2,470 -> 1,889 | 4 -> 8 |
+| tlb | 1,045 -> 1,437 | 956 -> 992 | |
+| l1i | 1,654 -> 1,579 | 1,363 -> 1,373 | |
+| l1d | 1,531 -> 1,365 | 1,220 -> 1,224 | |
+| design | 27,587 -> 27,598 | 23,132 -> 22,533 | 50 -> 54 |
+
+LUT-NEUTRAL for four times the slots: the TLB's wider entries (7 bits of {set, way} against 5)
+are paid for by page_cam and both L1 sides.  Depth: max 20, tail >= 14 482 (the l2s32 build:
+18 / 321) - named, not a miss.  gs suite 18/18 (boot_gs 12/0), lint 73 OK; the bench's
+`--l2=N --ways=N` are sets and ways; build.tcl's `-gsslots N` is the set count, `-gs50t` no
+longer names a geometry.
+
+NEXT (the user's plan, in order): the Nox map (fits 8 KB already; a drop would be the hash or
+the pipeline), XMAS at 2.8 (write sweeps, the write-around's case), a read stream through the
+cache (a large Finder copy, then the Finder measured again - the set-conflict case the CAM did
+not have); then, if wanted, 32 x 8 = 256 slots (16 RAMB36, the 50T's ceiling), with the LUT
+count expected flat.
 
 ## The L2 geometry on GS/OS (2026-09-19, `--l2=SETSxWAYS` before the CAM, the 50T question)
 
