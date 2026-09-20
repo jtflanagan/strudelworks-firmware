@@ -762,10 +762,30 @@ module cpu65816 #(
     // early - and which one is selected by the prefetched microinstruction's own
     // fields, so this needs no extra bit in the ROM.  This is exactly the kind of
     // special-case hardware the original part's random control logic is made of.
-    wire [7:0] early_b = (n_cond == UC_COND_EPAGE) ? pc_inc[7:0] :
-                         (n_lo_b == UC_LO_B_XL)    ? x_eff[7:0]  : y_eff[7:0];
-    wire [8:0] early_sum = {1'b0, din} + {1'b0, early_b};
-    wire       early_co  = early_sum[8];
+    // THE THREE SUMS RUN AT ONCE AND THE CHOICE IS MADE AFTER (2026-09-20).
+    // This carry is the head of the core's binding loop - early_co -> cond_next
+    // -> slot_n2 -> uaddr -> the microcode ROM's address port - and the build
+    // `neigh1` missed by 0.155 ns on exactly that path, 17 levels from
+    // `pc_reg` (docs/GS.md has named it since rung 6).  It held TWO carry
+    // chains in series with a mux between them: pc + 1, then din + that.
+    //
+    // The increment folds into the adder's carry-in instead, so `pc[7:0]` goes
+    // straight from its register into the only carry chain on the path; the
+    // three candidates are summed in parallel and a single LUT6 picks the bit
+    // at the end (two selects, three data, and pcl_ff is six inputs).
+    //
+    // pcl_ff IS NOT AN OPTIMISATION, IT IS THE FOLD'S CORRECTNESS.
+    // `pc_inc[7:0]` is a TRUNCATED 8-bit increment: at PCL = $FF it is $00, and
+    // `din + $00` carries nothing.  Folded into a 9-bit add, din + 255 + 1 is
+    // din + 256, which carries ALWAYS.  The two disagree on precisely the page
+    // boundary this condition exists to find, so the wrap is masked back out -
+    // and `&pc[7:0]` comes off a register, early, and rides into the same LUT.
+    wire [8:0] esum_pc = {1'b0, din} + {1'b0, pc[7:0]} + 9'd1;   // EPAGE: PCL+1 + din
+    wire [8:0] esum_x  = {1'b0, din} + {1'b0, x_eff[7:0]};       // IDX, XL
+    wire [8:0] esum_y  = {1'b0, din} + {1'b0, y_eff[7:0]};       // IDX, YL
+    wire       pcl_ff  = &pc[7:0];
+    wire       early_co = (n_cond == UC_COND_EPAGE) ? (esum_pc[8] & ~pcl_ff) :
+                          (n_lo_b == UC_LO_B_XL)    ?  esum_x[8]             : esum_y[8];
 
     // The branch page-cross test compares the carry against the offset's sign,
     // and the offset is the din being read right now.

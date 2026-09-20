@@ -3105,6 +3105,26 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                  u_l1d.cnt_lr_serves, u_l1d.cnt_lb_serves, u_l1d.cnt_kb_serves, u_l1d.cnt_io_serves,
                  u_l1d.cnt_posts, u_l1d.cnt_post_hi, u_l1d.cnt_dups, u_l1d.cnt_null,
                  tlb_fills_w, tlb_deaths_w);
+        // What a one-clock serve could reach: the reads whose address is the
+        // previous read's +/-1, split by how far apart they retired.  gap 0 is
+        // the 16-bit pair (a register valid for one cycle catches it); gap 3
+        // is a block move's source stream (a persistent slot, and only with
+        // the core's mv_done to stop it prefetching past the end).
+        $display("    L1-D fast serves (the neighbour slot, one clock): %0d of %0d reads (%0d.%0d%%)",
+                 u_l1d.cnt_fast_rd, u_l1d.m_reads,
+                 (u_l1d.m_reads == 0) ? 0 : (100 * u_l1d.cnt_fast_rd) / u_l1d.m_reads,
+                 (u_l1d.m_reads == 0) ? 0 : ((1000 * u_l1d.cnt_fast_rd) / u_l1d.m_reads) % 10);
+        $display("    L1-D reads: %0d; +1 at the next data cycle %0d (%0d.%0d%%), +1 further on %0d; -1 next %0d, -1 further %0d; neither %0d (%0d.%0d%%); the +/-1 gaps 0..7: %0d %0d %0d %0d %0d %0d %0d %0d",
+                 u_l1d.m_reads,
+                 u_l1d.m_p1_now,
+                 (u_l1d.m_reads == 0) ? 0 : (100 * u_l1d.m_p1_now) / u_l1d.m_reads,
+                 (u_l1d.m_reads == 0) ? 0 : ((1000 * u_l1d.m_p1_now) / u_l1d.m_reads) % 10,
+                 u_l1d.m_p1_gap, u_l1d.m_m1_now, u_l1d.m_m1_gap,
+                 u_l1d.m_other,
+                 (u_l1d.m_reads == 0) ? 0 : (100 * u_l1d.m_other) / u_l1d.m_reads,
+                 (u_l1d.m_reads == 0) ? 0 : ((1000 * u_l1d.m_other) / u_l1d.m_reads) % 10,
+                 u_l1d.m_gaphist[0], u_l1d.m_gaphist[1], u_l1d.m_gaphist[2], u_l1d.m_gaphist[3],
+                 u_l1d.m_gaphist[4], u_l1d.m_gaphist[5], u_l1d.m_gaphist[6], u_l1d.m_gaphist[7]);
 `ifndef L1I_STORE
         $display("    L1-I: fetches the sequencer served %0d (the bubbles); line fills %0d (next-line prefetches %0d, opcode-time target fetches %0d, TLB waits %0d), kills %0d, unservable %0d; targets already held %0d, branches the table did not know %0d; turbo (one-clock) fetches %0d",
                  u_l1i.cnt_slow_i, u_l1i.cnt_fills, u_l1i.cnt_prefetch, u_l1i.cnt_bt, u_l1i.cnt_tlb_waits,

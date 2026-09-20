@@ -317,6 +317,61 @@ module l1d #(
         sv_byte_q <= l2_serve_now ? dr_row[8 * dq_addr[3:0] +: 8] : serve_byte;
     end
 
+    // ---- THE NEIGHBOUR SLOT: a read that retires on its FIRST clock ---------
+    // MEASURED FIRST (2026-09-20, the GS/OS row, 16.58 M reads): 50.6% are the
+    // previous read's address + 1 at the VERY NEXT data cycle - the second byte
+    // of a 16-bit access - and another 14% are +/-1 further on, a block move's
+    // source stream walking past its destination write and two internal cycles
+    // (the gaps cluster at 0, then 2 and 3, and nowhere else).  35.5% are
+    // neither, and they stay two-clock reads: their address comes out of the
+    // AGU, and that chain is the one docs/GS.md already cut once.
+    //
+    // WHY THESE TWO ARE REACHABLE AND THE REST ARE NOT: a read costs two clocks
+    // because the 816's AGU is a chained adder and din must be register-direct,
+    // so the byte cannot be muxed out of a row in the cycle that asks for it
+    // (the byte reaches din 5.6 ns in).  The addresses above are the only ones
+    // the unit can know WITHOUT the AGU - the previous read's address plus the
+    // stride - so the byte is picked out of the row we ALREADY HOLD, into a
+    // register, on the clock the previous read retires.  When the next cycle
+    // turns out to ask for it, it is served from that register on its first
+    // clock.  din stays register-direct: the existing 2:1 becomes a 3:1, which
+    // is one LUT6 either way.
+    //
+    // IT PERFORMS NO MEMORY ACCESS.  The byte comes from the row register, so a
+    // prediction never used costs nothing, cannot reach the I/O page and cannot
+    // evict a line; the row-crossing case (the next byte in the NEXT row) is
+    // simply not predicted, which is why no prefetch, no `mv_done` and no
+    // region gate are needed here.  A wrong prediction cannot be served either:
+    // the address is compared before anything retires.  What is left is
+    // STALENESS - a write to that byte between the copy and its use - and the
+    // slot dies on it.
+    logic        pb_v;
+    logic [23:0] pb_addr;
+    logic [7:0]  pb_byte;
+    logic        pb_dn;              // the stride: 0 = +1, 1 = -1
+    logic [23:0] pr_addr;            // the previous read's address
+    logic        pr_v;
+    // The row this read is being served out of: the one arriving, else the last.
+    wire         pb_take = op_take && d_cycle && op_row_v && turbo_en;
+    wire [19:0]  pb_rtag = pb_take ? {cpu_bank, cpu_addr[15:4]} : lr_addr;
+    wire         pb_rok  = pb_take ? 1'b1 : lr_v;
+    // The stride, from the step this read just made; unchanged when it made
+    // none, so a run of +1s survives one unrelated read in the middle.
+    wire         pb_up_n = pr_v && (dq_addr == (pr_addr + 24'd1));
+    wire         pb_dn_n = pr_v && (dq_addr == (pr_addr - 24'd1));
+    wire         pb_str  = pb_dn_n ? 1'b1 : (pb_up_n ? 1'b0 : pb_dn);
+    wire [23:0]  pb_next = pb_str ? (dq_addr - 24'd1) : (dq_addr + 24'd1);
+    wire         pb_same = pb_rok && (pb_next[23:4] == pb_rtag);
+    wire [7:0]   pb_pick = pb_take ? op_row[8 * pb_next[3:0] +: 8]
+                                   : lr_row[8 * pb_next[3:0] +: 8];
+    // A write into the slot's ROW kills it (the row, not the byte: cheaper, and
+    // a block move's source and destination are different rows).  The splices
+    // are the core's own write landing a clock later, and they are killed
+    // wholesale - in a block move they do not fire, the last row being the
+    // source's while the write goes to the destination's.
+    wire         pb_kill = map_changed || inval || sp_write || lr_snp ||
+                           (w_retire && (dq_addr[23:4] == pb_addr[23:4]));
+
     wire d_cycle = !cyc_is_i &&  cpu_rw && !cyc_int;
     wire w_cycle = !cyc_is_i && !cpu_rw;
     wire n_cycle = cyc_int;
@@ -332,6 +387,25 @@ module l1d #(
     wire w_serv = wr_en && dq_wv && !rwb_nz_q &&
                   (((dq_addr[15:14] != 2'b11) && dq_bz) || w_hi);
 
+    // The slot itself: refilled by every read that retires (the fast ones too,
+    // so a run walks itself forward), emptied when the next byte is in another
+    // row or a write lands in this one.
+    always_ff @(posedge clk) begin
+        if (rst || cpu_rst || inval || map_changed) begin
+            pb_v <= 1'b0; pb_addr <= 24'd0; pb_byte <= 8'd0; pb_dn <= 1'b0;
+            pr_v <= 1'b0; pr_addr <= 24'd0;
+        end else if (r_retire) begin
+            pr_v    <= 1'b1;
+            pr_addr <= dq_addr;
+            pb_dn   <= pb_str;
+            pb_v    <= pb_same;
+            pb_addr <= pb_next;
+            pb_byte <= pb_pick;
+        end else if (pb_kill) begin
+            pb_v <= 1'b0;
+        end
+    end
+
     logic fc_q, claim_q;
     always_ff @(posedge clk) begin
         if (rst || cpu_rst) begin
@@ -344,8 +418,14 @@ module l1d #(
         end
     end
     wire addr_match = (cpu_addr == dq_addr[15:0]) && (cpu_bank == dq_addr[23:16]) && (fc_q || claim_q);
-    // A read retires from the registered hit, never on the cycle's first clock.
-    wire r_hit    = sv_hit_q && !fc_q;
+    // A read retires from the registered hit, never on the cycle's first clock
+    // - UNLESS the neighbour slot already holds this very address, in which
+    // case the byte is in a register before the cycle began and it retires on
+    // the first.  `!is_cx` for the same reason lr_hit carries it: a row's byte
+    // is not what a $Cxxx address means.
+    wire pb_hit   = pb_v && dq_v && !is_cx && (dq_addr == pb_addr);
+    wire r_fast   = pb_hit && fc_q;
+    wire r_hit    = (sv_hit_q && !fc_q) || r_fast;
     wire r_retire = !cpu_rst && turbo_en && turbo_ok && r_hit && d_cycle && addr_match && ev_room;
     wire w_retire = !cpu_rst && turbo_ok && w_serv && w_room && w_cycle && addr_match && !dup_go;
     wire n_retire = !cpu_rst && turbo_en && turbo_ok && n_cycle && (fc_q || claim_q);
@@ -353,7 +433,9 @@ module l1d #(
 
     assign d_commit = retire;
     assign cyc_en   = il_cyc_en || retire;
-    assign d_din    = sv_hit_q ? sv_byte_q : accel_din;
+    // Three registers into one mux, one LUT6 deep, so din is still whole at
+    // the AGU: the neighbour slot, the registered serve, the dispatcher's.
+    assign d_din    = r_fast ? pb_byte : (sv_hit_q ? sv_byte_q : accel_din);
     assign claim    = claim_q;
 
     // ---- the splice ---------------------------------------------------------
@@ -457,6 +539,56 @@ module l1d #(
                    dq_addr, dq_v, dq_wv, cpu_bank, cpu_addr, cpu_rw, cyc_is_i, cyc_int, turbo_ok, ev_room, sv_hit_q, serve_hit,
                    sh_hit, lby_hit, lr_hit, kb_hit, io_hit, l2_ok, l2_pend, l2_live, l2_v_q, lb_hit, fc_q, w_serv, w_room, dup_go, pending);
     end
+
+    // ---- THE READS' NEIGHBOURHOOD, for sizing a one-clock serve -------------
+    // SIM ONLY: no synthesis, no timing, no hardware.  Every read retires on
+    // its SECOND clock because the 816's AGU is a chained adder and its din
+    // must be register-direct (the header), and the general fix - start the
+    // lookup from the core's early address - is the chain docs/GS.md already
+    // cut once: the byte reaches din 5.6 ns in, and the AGU is behind it.
+    //
+    // What IS reachable is a read whose address the unit can know WITHOUT the
+    // AGU, because it is the previous read's address plus one: the second byte
+    // of a 16-bit access (the very next data cycle) and a block move's source
+    // stream (+/-1, but a write and two internal cycles away - seven core
+    // cycles per byte moved).  Those two want different machinery - a register
+    // valid for one cycle against a persistent pair of slots - so this counts
+    // which reads are which BEFORE either is built.
+    //
+    // `gap` is the D-side retires (writes, internal cycles) between this read
+    // and the last one: gap 0 is the 16-bit pair, gap 3 with a write in it is
+    // the block move's signature.
+    logic [23:0] m_prev_addr;
+    logic        m_prev_v;
+    logic [3:0]  m_gap;
+    logic [31:0] m_reads, m_p1_now, m_p1_gap, m_m1_now, m_m1_gap, m_other;
+    logic [31:0] m_gaphist [0:7];        // the gap a +/-1 read came at
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            m_prev_v <= 1'b0; m_prev_addr <= 24'd0; m_gap <= 4'd0;
+            m_reads <= '0; m_p1_now <= '0; m_p1_gap <= '0;
+            m_m1_now <= '0; m_m1_gap <= '0; m_other <= '0;
+            for (int g = 0; g < 8; g = g + 1) m_gaphist[g] <= '0;
+        end else if (r_retire) begin
+            m_reads <= m_reads + 32'd1;
+            if (m_prev_v && dq_addr == (m_prev_addr + 24'd1)) begin
+                if (m_gap == 4'd0) m_p1_now <= m_p1_now + 32'd1;
+                else               m_p1_gap <= m_p1_gap + 32'd1;
+                m_gaphist[m_gap[2:0]] <= m_gaphist[m_gap[2:0]] + 32'd1;
+            end else if (m_prev_v && dq_addr == (m_prev_addr - 24'd1)) begin
+                if (m_gap == 4'd0) m_m1_now <= m_m1_now + 32'd1;
+                else               m_m1_gap <= m_m1_gap + 32'd1;
+                m_gaphist[m_gap[2:0]] <= m_gaphist[m_gap[2:0]] + 32'd1;
+            end else begin
+                m_other <= m_other + 32'd1;
+            end
+            m_prev_addr <= dq_addr;
+            m_prev_v    <= 1'b1;
+            m_gap       <= 4'd0;
+        end else if (w_retire || n_retire) begin
+            if (m_gap != 4'd15) m_gap <= m_gap + 4'd1;
+        end
+    end
 `endif
 
     // ---- the shadow claim ---------------------------------------------------
@@ -504,7 +636,7 @@ module l1d #(
 
     logic [31:0] cnt_claims, cnt_splices, cnt_lb_serves, cnt_lr_serves, cnt_posts, cnt_post_waits,
                  cnt_l2_launch, cnt_l2_abort, cnt_tlb_waits, cnt_kb_serves, cnt_io_serves,
-                 cnt_post_hi, cnt_dups, cnt_null;
+                 cnt_post_hi, cnt_dups, cnt_null, cnt_fast_rd;
     logic bk_rr_q, bk_lb_q, bk_lr_q, bk_l2_q, bk_kb_q, bk_io_q;
     always_ff @(posedge clk) begin
         bk_rr_q <= r_retire && !rst;
@@ -559,6 +691,7 @@ module l1d #(
             if (w_retire && w_hi) cnt_post_hi <= cnt_post_hi + 32'd1;
             if (dup_go) cnt_dups <= cnt_dups + 32'd1;
             if (n_retire) cnt_null <= cnt_null + 32'd1;
+            if (r_retire && r_fast) cnt_fast_rd <= cnt_fast_rd + 32'd1;
             if (turbo_ok && w_serv && w_cycle && addr_match && !w_room && !cpu_rst)
                 cnt_post_waits <= cnt_post_waits + 32'd1;
             if (sp_write || lr_snp) cnt_splices <= cnt_splices + 32'd1;
@@ -655,7 +788,7 @@ module l1d #(
                 cnt_lr_serves <= 32'd0; cnt_posts <= 32'd0; cnt_post_waits <= 32'd0;
                 cnt_l2_launch <= 32'd0; cnt_l2_abort <= 32'd0; cnt_tlb_waits <= 32'd0;
                 cnt_kb_serves <= 32'd0; cnt_io_serves <= 32'd0; cnt_post_hi <= 32'd0;
-                cnt_dups <= 32'd0; cnt_null <= 32'd0;
+                cnt_dups <= 32'd0; cnt_null <= 32'd0; cnt_fast_rd <= 32'd0;
             end
         end
     end
