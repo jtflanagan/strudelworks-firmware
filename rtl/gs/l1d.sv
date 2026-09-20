@@ -505,6 +505,15 @@ module l1d #(
     logic [31:0] cnt_claims, cnt_splices, cnt_lb_serves, cnt_lr_serves, cnt_posts, cnt_post_waits,
                  cnt_l2_launch, cnt_l2_abort, cnt_tlb_waits, cnt_kb_serves, cnt_io_serves,
                  cnt_post_hi, cnt_dups, cnt_null;
+    logic bk_rr_q, bk_lb_q, bk_lr_q, bk_l2_q, bk_kb_q, bk_io_q;
+    always_ff @(posedge clk) begin
+        bk_rr_q <= r_retire && !rst;
+        bk_lb_q <= !sh_hit && lby_hit;
+        bk_lr_q <= !sh_hit && !lby_hit && lr_hit;
+        bk_l2_q <= l2_v_q;
+        bk_kb_q <= kb_hit;
+        bk_io_q <= io_hit;
+    end
     always_ff @(posedge clk) begin
         tick_q    <= retire;
         dev_valid <= retire && !n_retire;
@@ -536,12 +545,15 @@ module l1d #(
             end
         end else begin
             if (retire) cnt_serves <= cnt_serves + 32'd1;
-            if (r_retire) begin
-                if (!sh_hit && lby_hit)             cnt_lb_serves <= cnt_lb_serves + 32'd1;
-                if (!sh_hit && !lby_hit && lr_hit)  cnt_lr_serves <= cnt_lr_serves + 32'd1;
-                if (l2_v_q)                         cnt_l2_serves <= cnt_l2_serves + 32'd1;
-                if (kb_hit)                         cnt_kb_serves <= cnt_kb_serves + 32'd1;
-                if (io_hit)                         cnt_io_serves <= cnt_io_serves + 32'd1;
+            // The serve books count a clock late, from registered flags: the
+            // core's instruction register into a counter's enable was the
+            // deep tail lut1 named (2026-09-20).
+            if (bk_rr_q) begin
+                if (bk_lb_q) cnt_lb_serves <= cnt_lb_serves + 32'd1;
+                if (bk_lr_q) cnt_lr_serves <= cnt_lr_serves + 32'd1;
+                if (bk_l2_q) cnt_l2_serves <= cnt_l2_serves + 32'd1;
+                if (bk_kb_q) cnt_kb_serves <= cnt_kb_serves + 32'd1;
+                if (bk_io_q) cnt_io_serves <= cnt_io_serves + 32'd1;
             end
             if (w_retire) cnt_posts <= cnt_posts + 32'd1;
             if (w_retire && w_hi) cnt_post_hi <= cnt_post_hi + 32'd1;

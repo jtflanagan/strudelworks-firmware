@@ -181,23 +181,32 @@ module rom_loader #(
                                     : (ROM_PPN0 + {{(15 - CW){1'b0}}, dr_page});
     assign ld_line  = {dr_ppn_now, dr_k[7:4]};
     // The line: four staging words, byte 0 of the row the lowest byte of the
-    // first (the order the posted path put them in).
-    assign ld_wdata = {stage[{dr_k[8:4], 2'd3}], stage[{dr_k[8:4], 2'd2}],
-                       stage[{dr_k[8:4], 2'd1}], stage[{dr_k[8:4], 2'd0}]};
-    // ...and its bytes' sum, for the ack the host checks its file against -
-    // REGISTERED (the 50T candidate and gs_r8 missed timing on this tree and
-    // the running sum in one clock): the line stands while it is offered, so
-    // the sum taken from it a clock earlier is the line's own on the take.
-    logic [11:0] line_sum_c, line_sum;
-    always_comb begin
-        line_sum_c = 12'd0;
-        for (int b = 0; b < 16; b = b + 1) line_sum_c = line_sum_c + {4'd0, ld_wdata[8*b +: 8]};
-    end
-    logic        sum_ok;                  // ...and not on the line's first clock, when it is the last line's
+    // first (the order the posted path put them in) - ASSEMBLED ONE WORD A
+    // CLOCK (2026-09-20, the LUT work for the 50T): the stage read four words
+    // at once, four read ports over a 128-deep RAM and a sixteen-byte adder
+    // tree behind them, for a drain that runs once a boot.  One port, one
+    // word a clock, the line's sum accumulated as its words arrive, and the
+    // line offered when its fourth word is in: four clocks a line, two
+    // thousand more at a boot.
+    logic [1:0]   asm_i;                  // the word being read
+    logic         asm_v;                  // ...and the line is whole
+    logic [127:0] line_q;
+    logic [11:0]  line_sum;
+    wire  [31:0]  stage_w = stage[{dr_k[8:4], asm_i}];
+    wire  [11:0]  word_sum = {4'd0, stage_w[7:0]} + {4'd0, stage_w[15:8]} +
+                             {4'd0, stage_w[23:16]} + {4'd0, stage_w[31:24]};
     always_ff @(posedge clk) begin
-        line_sum <= line_sum_c;
-        sum_ok   <= !rst && !ld_take;
+        if (rst || !draining || ld_take) begin
+            asm_i <= 2'd0; asm_v <= 1'b0; line_sum <= 12'd0;
+        end else if (!asm_v) begin
+            line_q[32 * asm_i +: 32] <= stage_w;
+            line_sum <= line_sum + word_sum;
+            asm_i <= asm_i + 2'd1;
+            if (asm_i == 2'd3) asm_v <= 1'b1;
+        end
     end
+    assign ld_wdata = line_q;
+    wire sum_ok = asm_v;
     assign busy     = draining;
 
     // ---- the ack --------------------------------------------------------------

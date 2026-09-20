@@ -135,14 +135,35 @@ module gs_doc #(
 );
 
     // ---- the register file --------------------------------------------------
-    logic [15:0] freq  [0:31];
-    logic [7:0]  vol   [0:31];
-    logic [7:0]  wptr  [0:31];
+    // THE PER-OSCILLATOR REGISTERS ARE DISTRIBUTED RAM (2026-09-20, the LUT
+    // work for the 50T, docs/CORE_REFACTOR_65816.md): 72 bits by 32 that were
+    // flops behind 32:1 read muxes and per-word write decodes (~1 k LUTs).
+    // Each array has ONE writer - the program's $C03D write for the four it
+    // sets, the scan's slot for the data register and the accumulator - and
+    // two readers, the fetch and the slot's start.  A reset is a 32-clock
+    // sweep of zeros (below), the machine being held in RES' far longer.
+    // The control register and `running` stay flops: the control logic
+    // reads and writes them from both sides in one clock.
+    (* ram_style = "distributed" *) logic [7:0]  r_freq_lo [0:31];
+    (* ram_style = "distributed" *) logic [7:0]  r_freq_hi [0:31];
+    (* ram_style = "distributed" *) logic [7:0]  r_vol     [0:31];
+    (* ram_style = "distributed" *) logic [7:0]  r_wptr    [0:31];
+    (* ram_style = "distributed" *) logic [7:0]  r_wsize   [0:31];
+    (* ram_style = "distributed" *) logic [7:0]  r_lastv   [0:31];   // the data register reads this back
+    (* ram_style = "distributed" *) logic [23:0] r_acc     [0:31];
     logic [7:0]  ctl   [0:31];
-    logic [7:0]  wsize [0:31];
-    logic [7:0]  lastv [0:31];      // the data register reads this back
-    logic [23:0] acc   [0:31];
     logic [31:0] running;
+    // The accumulator clears a control write asks for land when the scan next
+    // visits the oscillator (its only reader), so the RAM keeps one writer.
+    logic [31:0] acc_clr;
+    // The reset sweep: it runs THROUGH the reset (the machine is held in
+    // RES' for milliseconds; a bench's reset is tens of clocks), and if the
+    // reset was shorter than 32 clocks it finishes after, holding only the
+    // RAMs' write port - the chip's registers answer from the first clock.
+    logic [5:0]  sw_i;
+    logic        in_rst_q;
+    wire         in_rst   = rst || !res_sync;
+    wire         sweeping = !sw_i[5];
 
     // The three globals.
     logic [7:0]  sound_ctl;         // $C03C: [6] RAM/registers, [5] auto-inc, [3:0] volume
@@ -196,13 +217,13 @@ module gs_doc #(
             fetch = a_q;                                  // the RAM
         end else begin
             case (p_type)
-                3'd0:    fetch = freq[p_osc][7:0];
-                3'd1:    fetch = freq[p_osc][15:8];
-                3'd2:    fetch = vol[p_osc];
-                3'd3:    fetch = lastv[p_osc];
-                3'd4:    fetch = wptr[p_osc];
+                3'd0:    fetch = r_freq_lo[p_osc];
+                3'd1:    fetch = r_freq_hi[p_osc];
+                3'd2:    fetch = r_vol[p_osc];
+                3'd3:    fetch = r_lastv[p_osc];
+                3'd4:    fetch = r_wptr[p_osc];
                 3'd5:    fetch = ctl[p_osc];
-                3'd6:    fetch = wsize[p_osc];
+                3'd6:    fetch = r_wsize[p_osc];
                 // $E0-$FF: only three of them answer (doc.c:766).
                 default: case (p_osc)
                              5'h00:   fetch = reg_e0;
@@ -297,14 +318,40 @@ module gs_doc #(
 
     integer i, k;
 
+    // ---- the sweep counter ------------------------------------------------------
     always_ff @(posedge clk) begin
-        if (rst || !res_sync) begin
+        in_rst_q <= in_rst;
+        if (in_rst && !in_rst_q) sw_i <= 6'd0;
+        else if (sweeping)       sw_i <= sw_i + 6'd1;
+    end
+
+    // ---- the RAMs' writes -----------------------------------------------------
+    wire [4:0] sw_a = sw_i[4:0];
+    always_ff @(posedge clk) begin
+        if (sweeping) begin
+            r_freq_lo[sw_a] <= 8'd0; r_freq_hi[sw_a] <= 8'd0; r_vol[sw_a] <= 8'd0;
+            r_wptr[sw_a] <= 8'd0; r_wsize[sw_a] <= 8'd0; r_lastv[sw_a] <= 8'd0;
+            r_acc[sw_a] <= 24'd0;
+        end else begin
+            if (wr_c03d && w_type == 3'd0) r_freq_lo[w_osc] <= op_wdata;
+            if (wr_c03d && w_type == 3'd1) r_freq_hi[w_osc] <= op_wdata;
+            if (wr_c03d && w_type == 3'd2) r_vol[w_osc]     <= op_wdata;
+            if (wr_c03d && w_type == 3'd4) r_wptr[w_osc]    <= op_wdata;
+            if (wr_c03d && w_type == 3'd6) r_wsize[w_osc]   <= op_wdata;
+            if (sl == SL_APPLY)            r_lastv[s_osc]   <= b_q;
+            // The accumulator: advanced at APPLY, reset at END.
+            if (sl == SL_APPLY && b_q != 8'd0 && acc_next < a_end) r_acc[s_osc] <= acc_next[23:0];
+            if (sl == SL_END)                                        r_acc[s_osc] <= 24'd0;
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (in_rst) begin
             for (i = 0; i < 32; i = i + 1) begin
-                freq[i] <= 16'd0; vol[i] <= 8'd0; wptr[i] <= 8'd0;
                 ctl[i] <= 8'h01;                  // doc_reset: all halted
-                wsize[i] <= 8'd0; lastv[i] <= 8'd0;
-                acc[i] <= 24'd0; q_osc[i] <= 5'd0;
+                q_osc[i] <= 5'd0;
             end
+            acc_clr <= 32'd0;
             running <= 32'd0;
             sound_ctl <= 8'd0; saved <= 8'd0; ptr <= 16'd0;
             osc_en <= 6'd1;                       // g_doc_num_osc_en = 1
@@ -331,13 +378,7 @@ module gs_doc #(
             end
             if (wr_c03d) begin
                 case (w_type)
-                    3'd0: freq[w_osc][7:0]  <= op_wdata;
-                    3'd1: freq[w_osc][15:8] <= op_wdata;
-                    3'd2: vol[w_osc]        <= op_wdata;
-                    3'd3: ;                          // the data register: read only
-                    3'd4: wptr[w_osc]       <= op_wdata;
-                    3'd5: ;                          // the control register, below
-                    3'd6: wsize[w_osc]      <= op_wdata;
+                    // 0, 1, 2, 4, 6: the RAMs above.  3 is read only, 5 below.
                     default:
                         // $E1 is the enable count: ((val & 0x3e) >> 1) + 1,
                         // floored at one (doc.c:951).  $E0 is read-only in
@@ -359,7 +400,7 @@ module gs_doc #(
                 if (new_halt) begin
                     running[w_osc] <= 1'b0;
                     // "don't clear acc if free-running"
-                    if (old_mode != 2'd0) acc[w_osc] <= 24'd0;
+                    if (old_mode != 2'd0) acc_clr[w_osc] <= 1'b1;
                 end else if (old_halt) begin
                     // Starting.  An oscillator past the enabled count cannot
                     // run: doc_start_sound halts it again instead.
@@ -367,7 +408,7 @@ module gs_doc #(
                         ctl[w_osc] <= op_wdata | 8'h01;
                     end else begin
                         running[w_osc] <= 1'b1;
-                        acc[w_osc] <= 24'd0;
+                        acc_clr[w_osc] <= 1'b1;
                         // Sync mode on an even oscillator starts its odd
                         // partner, if the partner is stopped in sync mode
                         // (ctl & 7 == 5).  doc_start_sound.
@@ -375,7 +416,7 @@ module gs_doc #(
                             ((ctl[w_part] & 8'h07) == 8'h05)) begin
                             ctl[w_part] <= ctl[w_part] & ~8'h01;
                             running[w_part] <= 1'b1;
-                            acc[w_part] <= 24'd0;
+                            acc_clr[w_part] <= 1'b1;
                         end
                     end
                 end
@@ -414,12 +455,14 @@ module gs_doc #(
                     end
                     if ((slot < osc_en) && running[slot[4:0]]) begin
                         s_osc  <= slot[4:0];
-                        s_ws   <= wsize[slot[4:0]];
-                        s_vol  <= vol[slot[4:0]];
+                        s_ws   <= r_wsize[slot[4:0]];
+                        s_vol  <= r_vol[slot[4:0]];
                         s_ctl  <= ctl[slot[4:0]];
-                        s_wp   <= wptr[slot[4:0]];
-                        s_freq <= freq[slot[4:0]];
-                        s_acc  <= acc[slot[4:0]];
+                        s_wp   <= r_wptr[slot[4:0]];
+                        s_freq <= {r_freq_hi[slot[4:0]], r_freq_lo[slot[4:0]]};
+                        // A pending clear from a control write lands here.
+                        s_acc  <= acc_clr[slot[4:0]] ? 24'd0 : r_acc[slot[4:0]];
+                        acc_clr[slot[4:0]] <= 1'b0;
                         sl     <= SL_ADDR;
                     end
                 end
@@ -429,7 +472,6 @@ module gs_doc #(
                     // The byte is played first and the accumulator advances
                     // after, which is the order doc_play reads them in.  This
                     // state only DECIDES; doc_sound_end is the next one.
-                    lastv[s_osc] <= b_q;
                     if (b_q == 8'd0) begin
                         // The wavetable's terminator: can_repeat = 0.  No
                         // sound is produced for it.
@@ -443,8 +485,7 @@ module gs_doc #(
                             e_repeat <= 1'b1;
                             sl <= SL_END;
                         end else begin
-                            acc[s_osc] <= acc_next[23:0];
-                            sl <= SL_IDLE;
+                            sl <= SL_IDLE;        // the accumulator's advance: the RAM block
                         end
                     end
                 end
@@ -453,8 +494,7 @@ module gs_doc #(
                     // The accumulator is reset whatever happens next, and the
                     // interrupt (if this oscillator asked for one) is pushed
                     // by the queue block above on this same clock.
-                    sl <= SL_IDLE;
-                    acc[s_osc] <= 24'd0;
+                    sl <= SL_IDLE;                // the accumulator's reset: the RAM block
                     cnt_ends <= cnt_ends + 8'd1;
                     if ((e_mode == 2'd0) && e_repeat) begin
                         // Free-running with no zero byte: go again.  This is
@@ -470,7 +510,7 @@ module gs_doc #(
                         if (!e_oneshot_stop && !running[e_part] && ctl[e_part][0]) begin
                             ctl[e_part] <= ctl[e_part] & ~8'h01;
                             running[e_part] <= 1'b1;
-                            acc[e_part] <= 24'd0;
+                            acc_clr[e_part] <= 1'b1;
                         end
                     end else begin
                         running[s_osc] <= 1'b0;

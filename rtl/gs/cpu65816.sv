@@ -132,6 +132,12 @@ module cpu65816 #(
     // instruction front's compares want.
     output wire         cyc_is_i,
     output wire  [23:0] pc_addr,    // {pbr, pch, pcl}
+    // THE NEXT PC (rung 8, docs/CORE_REFACTOR_65816.md): the PC register's
+    // D input - what pc_addr will be next clock - so the instruction store
+    // reads the byte the next cycle fetches while this cycle runs.  Exactly
+    // the load arms below, combinationally; pc_addr itself when cyc_en is
+    // low or no arm loads.
+    output wire  [23:0] pc_d,
     // The data-stream prediction: the address, direction and BANK CLASS of
     // the NEXT cycle, valid when that cycle is a data access (VDA and not
     // VPA - an internal cycle is neither and predicts nothing).  Not a
@@ -1010,6 +1016,25 @@ module cpu65816 #(
     // If a conditional load is ever genuinely needed, gate the ONE register
     // that needs it.  Do not reintroduce a global enable.
 
+    // pc_d (declared with pc_addr above): after every name it uses.
+    logic [15:0] pc_d16;
+    always_comb begin
+        pc_d16 = pc;
+        if (cyc_en) case (f_ld_pc)
+            UC_LD_PC_INC:    if (!int_pc_hold) pc_d16 = pc_inc;
+            UC_LD_PC_AGU:    pc_d16 = {agu_hi, agu_lo};
+            UC_LD_PC_AGU_LO: pc_d16 = {pc[15:8], agu_lo};
+            UC_LD_PC_AGU_HI: pc_d16 = {agu_hi, pc[7:0]};
+            UC_LD_PC_JMP:    pc_d16 = {din, md[7:0]};
+            UC_LD_PC_JMPL:   pc_d16 = {md[15:8], md[7:0]};
+            UC_LD_PC_MD:     pc_d16 = md;
+            UC_LD_PC_M3C:    if (~mv_done) pc_d16 = pc - 16'd3;
+            default: ;
+        endcase
+    end
+    wire [7:0] pbr_d = (cyc_en && f_ld_pc == UC_LD_PC_JMP && f_asel == UC_ADDR_VEC1) ? 8'h00 :
+                       (cyc_en && f_wb == UC_WB_PBR) ? din : pbr;
+    assign pc_d = {pbr_d, pc_d16};
     always_ff @(posedge clk) begin
         if (rst) begin
             a <= 16'h0000; x <= 16'h0000; y <= 16'h0000;

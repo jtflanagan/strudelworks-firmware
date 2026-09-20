@@ -96,6 +96,7 @@ run tlb           rtl/a2/tlb.sv
 # The 65816 card's L1: l1i and l1d over its own tlb (docs/CORE_REFACTOR_65816.md).
 LINT_LABEL=gs_l1i run l1i rtl/gs/l1i.sv rtl/gs/iscan.sv
 LINT_LABEL=gs_iscan run iscan rtl/gs/iscan.sv
+LINT_LABEL=gs_l1i_store run l1i_store rtl/gs/l1i_store.sv rtl/gs/store_ram.sv
 LINT_LABEL=gs_l1d run l1d -Irtl/common -Irtl/gs rtl/gs/l1d.sv
 LINT_LABEL=gs_tlb run tlb rtl/gs/tlb.sv
 run boot_hold     rtl/common/boot_hold.sv

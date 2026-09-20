@@ -279,6 +279,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // bench's own checks and its trace read.
     wire        cpu_cyc_is_i, cpu_d_pred_v, cpu_d_pred_rw, cpu_bank_wr;
     wire [23:0] cpu_pc24, cpu_d_pred;
+    wire [23:0] cpu_pc_d;
     wire [1:0]  cpu_d_pred_bcls;
     wire        cpu_d_pred_vpb;
     wire [7:0]  cpu_p_flags, cpu_dbr, i_din_w, d_din_w, seq_din;
@@ -287,7 +288,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     cpu65816 #(.UCODE_FILE (UCODE), .UCODE0_FILE (UCODE0), .USEQ0_FILE (USEQ0)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_a24), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (d_din_w),
-        .cyc_is_i (cpu_cyc_is_i), .pc_addr (cpu_pc24), .d_pred (cpu_d_pred),
+        .cyc_is_i (cpu_cyc_is_i), .pc_addr (cpu_pc24), .pc_d (cpu_pc_d), .d_pred (cpu_d_pred),
         .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls), .d_pred_vpb (cpu_d_pred_vpb),
         .p_flags (cpu_p_flags), .dbr_o (cpu_dbr), .bank_wr (cpu_bank_wr),
         // The chipset's one interrupt line, active low into the core.
@@ -549,8 +550,13 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // ---- the fronts (rtl/iline.sv, rtl/dline.sv at GS = 1) ---------------------
     // The instruction front: two lines of the program stream ahead of the
     // sequencer, in the program's bank.
+`ifndef L1I_STORE
     l1i #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
+`else
+    l1i_store #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .pc_d (cpu_pc_d),
+`endif
         .pc_addr (cpu_pc24[15:0]), .pc_bank (cpu_pc24[23:16]),
         .cpu_rw (cpu_rw_eff), .cpu_sync (cpu_sync),
         .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
@@ -1976,8 +1982,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                              dj, u_gsio.u_doc.running[dj], u_gsio.u_doc.ctl[dj],
                              u_gsio.u_doc.ctl[dj][0], u_gsio.u_doc.ctl[dj][2:1],
                              u_gsio.u_doc.ctl[dj][3], u_gsio.u_doc.ctl[dj][7:4],
-                             u_gsio.u_doc.freq[dj], u_gsio.u_doc.vol[dj],
-                             u_gsio.u_doc.wptr[dj], u_gsio.u_doc.wsize[dj]);
+                             {u_gsio.u_doc.r_freq_hi[dj], u_gsio.u_doc.r_freq_lo[dj]}, u_gsio.u_doc.r_vol[dj],
+                             u_gsio.u_doc.r_wptr[dj], u_gsio.u_doc.r_wsize[dj]);
         end
     endtask
     // The interrupt controller's state (rtl/gs_intc.sv).  A machine spinning
@@ -3099,11 +3105,18 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                  u_l1d.cnt_lr_serves, u_l1d.cnt_lb_serves, u_l1d.cnt_kb_serves, u_l1d.cnt_io_serves,
                  u_l1d.cnt_posts, u_l1d.cnt_post_hi, u_l1d.cnt_dups, u_l1d.cnt_null,
                  tlb_fills_w, tlb_deaths_w);
+`ifndef L1I_STORE
         $display("    L1-I: fetches the sequencer served %0d (the bubbles); line fills %0d (next-line prefetches %0d, opcode-time target fetches %0d, TLB waits %0d), kills %0d, unservable %0d; targets already held %0d, branches the table did not know %0d; turbo (one-clock) fetches %0d",
                  u_l1i.cnt_slow_i, u_l1i.cnt_fills, u_l1i.cnt_prefetch, u_l1i.cnt_bt, u_l1i.cnt_tlb_waits,
                  u_l1i.cnt_kills, u_l1i.cnt_unserv, u_l1i.cnt_bt_held, u_l1i.cnt_bt_miss, turbo_ops);
         $display("    L1-I bubbles: resident-not-retiring clocks %0d (recover %0d, of which at a sync %0d; expected but byte register empty %0d; kill_now %0d; no event room %0d; other %0d); not-resident clocks %0d",
                  u_l1i.cnt_res_bubble, u_l1i.cnt_res_recover, u_l1i.cnt_res_sync, u_l1i.cnt_res_nolhit, u_l1i.cnt_res_kill, u_l1i.cnt_res_noroom, u_l1i.cnt_res_other, u_l1i.cnt_notres);
+`else
+        $display("    L1-I store: fetches the sequencer served %0d (the bubbles); row fills %0d (prefetches %0d, TLB waits %0d), page allocations %0d, row kills %0d, unservable %0d, bypass serves %0d",
+                 u_l1i.cnt_slow_i, u_l1i.cnt_fills, u_l1i.cnt_prefetch, u_l1i.cnt_tlb_waits, u_l1i.cnt_allocs, u_l1i.cnt_kills, u_l1i.cnt_unserv, u_l1i.cnt_byp);
+        $display("    L1-I store bubbles: resident-not-retiring clocks %0d; not-resident clocks %0d; misaligned (hit at another address) %0d; turbo (one-clock) fetches %0d",
+                 u_l1i.cnt_res_bubble, u_l1i.cnt_notres, u_l1i.cnt_misalign, turbo_ops);
+`endif
         $display("    slot fast ops: %0d, %0d clocks from present to commit on average", sl_lat_n, sl_lat_n == 0 ? 0 : sl_lat_sum / sl_lat_n);
         $display("    clock census of %0d clocks: retire %0d (%s%%), ifill %0d (%s%%), dread %0d (%s%%), dserve2 %0d (%s%%), seq fast %0d (%s%%), seq bus %0d (%s%%), held %0d, null %0d, disk stall %0d (%s%%), settle %0d (%s%%), drain %0d (%s%%), claim %0d (%s%%), decide %0d (%s%%), other %0d (%s%%)",
                  cc_all, cc_retire, bc_pct(cc_retire, cc_all), cc_ifill, bc_pct(cc_ifill, cc_all), cc_dread, bc_pct(cc_dread, cc_all),

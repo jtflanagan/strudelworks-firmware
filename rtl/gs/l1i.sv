@@ -330,7 +330,7 @@ module l1i #(
     // miss when the loop exits or falls through); the half line with the guard
     // 59.58 M and a third more fills (a target landing in a line's upper half
     // evicts the line it came from at once).  Both stay as bench switches:
-    // -DL1I_NX_HALF, -DL1I_LOOP_GUARD.
+    // -DL1I_NX_HALF, -DL1I_LOOP_GUARD.  The instruction store, parked, is -DL1I_STORE.
 `ifdef L1I_NX_HALF
     wire nx_point = exp_q[3];
 `else

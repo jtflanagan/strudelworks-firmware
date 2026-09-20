@@ -187,7 +187,7 @@ xxd -p -c1 "$hdrom" > "$work/hdrom.hex"
 srcs=(
     "$root/sim/boot_gs_tb.sv"
     "$root/rtl/gs/cpu65816.sv" "$root/rtl/gs/accel_seq.sv"
-    "$root/rtl/gs/l1i.sv" "$root/rtl/gs/iscan.sv" "$root/rtl/gs/tlb.sv" "$root/rtl/gs/l1d.sv" "$root/rtl/gs/bank_census.sv"
+    "$root/rtl/gs/l1i.sv" "$root/rtl/gs/iscan.sv" "$root/rtl/gs/l1i_store.sv" "$root/rtl/gs/store_ram.sv" "$root/rtl/gs/tlb.sv" "$root/rtl/gs/l1d.sv" "$root/rtl/gs/bank_census.sv"
     "$root/rtl/common/synchronizer.sv" "$root/rtl/common/apple_bus_read.sv" "$root/rtl/common/apple_bus_write.sv"
     "$root/rtl/gs/gs_io.sv" "$root/rtl/gs/gs_adb.sv" "$root/rtl/gs/gs_doc.sv" "$root/rtl/gs/gs_clock.sv" "$root/rtl/gs/gs_intc.sv" "$root/rtl/gs/gs_iwm.sv"
     "$root/rtl/gs/apple_mmu.sv" "$root/rtl/gs/rom_loader.sv" "$root/rtl/gs/page_cam.sv"

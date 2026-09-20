@@ -142,8 +142,8 @@ module gs_doc_replay_tb;
         for (int o = 0; o < 32; o++)
             if (u_doc.running[o])
                 $display("   osc %0d: ctl=$%02h freq=%0d vol=%0d wp=$%02h wsize=$%02h acc=%0d",
-                         o, u_doc.ctl[o], u_doc.freq[o], u_doc.vol[o],
-                         u_doc.wptr[o], u_doc.wsize[o], u_doc.acc[o]);
+                         o, u_doc.ctl[o], {u_doc.r_freq_hi[o], u_doc.r_freq_lo[o]}, u_doc.r_vol[o],
+                         u_doc.r_wptr[o], u_doc.r_wsize[o], u_doc.r_acc[o]);
 
         // ---- listen ---------------------------------------------------------
         // Long enough for many scans: a sample is (osc_en + 2) slots and a slot

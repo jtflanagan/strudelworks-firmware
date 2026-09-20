@@ -1,6 +1,6 @@
 # The 65816 card: the core / L1 / L2 refactor ladder
 
-Status: **THE 50T CANDIDATE MEETS TIMING 2026-09-19 (gs_50t2: +0.082, 28,514 LUTs = 87.5%, 48 RAMB36 = 64% of a 50T; the CAM-L2 at 32 slots with the write-around, the clean ROM, the fast DMA and slot path, the two-line L1-I; no Mockingboard, no mouse card, MINIMAL registers; GS/OS +11.7% on the boot against the Pt's set cache, XMAS +1%; uncommitted after fw 171eef4). Earlier the same day, rungs 0-3: the gs card is l1i + l1d over a 16-entry {bank, page} TLB and the shared page cache at 128 x 8; Pt bit gs_r3b TIMING MET +0.000 at 32,918 LUTs routed (from 42,860 synthesised at rung 0; L1 10.9k -> 3.4k), 112.5 RAMB36; gs suite 18/18, GS/OS 13/0 and XMAS 12/0; GS/OS runs 12% behind the old tree at equal clocks because sixteen TLB entries thrash on it (1.08 M fills in 17.5 M instructions) - the census rows at 32 and 64 entries are the next number; the bit is NOT on the machine. Rung 0's baseline: 42,860 LUTs / 33,025 flops / 110 RAMB36 against the 50T envelope's 32,600 / 65,200 / 75.** The sibling
+Status: **2026-09-20: THE I SIDE'S FIRST CUT ON HARDWARE (gs_pt52, MET +0.000: the early landing and the target serve back, the Nox map 55.0x -> 58.8x; fw 26cf946 / host ff59838). THE INSTRUCTION STORE (rung 8) WORKS IN SIM (suite 18/18, Nox 37.93 M against 39.86 M) and MISSES TIMING ON THE CARD (gs_pt54 -1.894 ns, 32,140 LUTs): its fix is decided (register the read for the din-dependent loads, keep two ways) and WAITS ON THE LUT WORK, which is under way: the DOC's registers in LUTRAM (-1.75 k), the books folded into one RAM, the ROM loader's drain one word a clock - measured by synthesis-only builds against the 50T's 32,600.** The 50T candidate met timing 2026-09-19 (gs_50t2: +0.082, 28,514 LUTs = 87.5%, 48 RAMB36).  The 65C02 card's
 ladder, done, is docs/CORE_REFACTOR_65C02.md; the requirements are docs/REQ_65816.md (this card's
 differences) over docs/REQ_65C02.md (the common items); the design idea is docs/L1_RETHINK.md.
 The user's direction (2026-09-19): develop and test on the Pt, watch resources against a 50T
@@ -309,6 +309,111 @@ Unexplained: ~42 M I-side clocks with the fetch up and neither resident-waiting 
 turbo_ok low (the books gate on it) - the next bit splits those by reason. The page-BRAM fetch source's
 hardware target from these numbers: the 29.7 M demand-fill clocks -> ~8.9 M, the 4.85 M recovers stay
 one clock each: ~5% of the map's clocks, more on GS/OS.
+
+**RUNG 8 (planned 2026-09-20, the user's design): THE PAGE STORE - L1-I AS A BRAM FETCH SOURCE.**
+Two RAMB36 as two ways of 16 pages x 256 B (8 KB), addressed by the NEXT PC with no compare on the
+address path. The core exports `pc_d` = {pbr_d, pc_d}, the D input of its PC register (the load
+arms UC_LD_PC_* replicated combinationally, pbr's UC_WB_PBR likewise; `pc` when cyc_en is low), so
+the byte the next cycle fetches is read this clock: port A of each way reads 8 bits at pc_d[11:0],
+the tags (per way 16 x {v, bank, addr[15:12], ppn, 16 row-valids}, flops) are read at pc_d[11:8]
+and compared in the same clock, and the hit + the row-valid bit are REGISTERED beside the BRAM's
+output register. The core's din is then the way mux of two BRAM output registers (one LUT level),
+and a fetch to ANY resident byte retires on its own cycle: sequential, taken branch, JMP through a
+vector, RTS, RTL, RTI, JSL - the transfer's target PC is the PC register's D input on the cycle
+before the fetch, so nothing is predicted and nothing is a bubble. The two-line registers, the
+expected-address predictor, the target table, the target serve and the scanner all go: the next-PC
+read is what they approximated. Kept: the fill engine (TLB lookup, the dr port, the row landing at
+F_W1) writing rows into a way through port B (64-bit writes, two per row, the write-wider-than-read
+SDP template; the fallback is 32-bit TDP writes, four per row), the row-valid bits, a next-row
+prefetch when the fetch enters a row's last quarter and the row after is not valid, and the
+landing bypass (the wanted byte off the landing row into a side register, served next clock, so a
+demand miss costs what it costs today, three clocks, not the write-then-read's five). Allocation:
+a page miss takes the set's LRU way (16 LRU bits per way pair), clears its row-valids, then fills
+the wanted row; a row miss on a resident page fills the row. Coherence as the lines': an image
+write (cl_*, ws_*) clears the row's valid bit by ppn compare; map_changed, inval and !serve clear
+every page; kill_v and evict_v are no longer deaths (the store copies memory, not L2, and every
+write to memory is on the snoop). The scanner's other use, the branch-target prefetch of a line
+outside the store, is dropped in this rung and measured: the bench's not-resident count says what
+it was worth. Cost: 2 RAMB36 (48 -> 50 of 75), ~900 flops of tags and valids, fewer LUTs than the
+lines and the scanner (~700). Measure: the Nox and GS/OS rows at --room=0 against 39.86 M and
+187.45 M; the map census's il_notres and il_res_recover; a Pt bit.
+
+**RUNG 8 BUILT (2026-09-20, rtl/gs/l1i_store.sv + store_ram.sv, the core's pc_d; the two-line l1i behind
+-DL1I_LINES / build.tcl -l1i-lines).** Two bugs on the way, both found by the short boot: the store's din
+had no fallback to the sequencer's byte (the reset vector's fetch fed the core garbage, PC at $00/C074
+from instruction 0), and the row writes were registered a clock behind the row-valid bit, so a fetch
+on that clock read the row's old bytes ($00/FE3D as $00 at instruction 24; the writes are combinational
+from the engine's state now and share the bit's edge). Also: the claim must not stand in F_TLB (the
+dispatcher's op is what places the page) - the lines' rule, and a deadlock without it. **Short boot
+(250 k instructions, the KEGS floor): store 1.797 M clocks against the lines' 1.859 M (-3.4% at the
+default room model), 12/12, the diff at the floor; 489 k one-clock fetches, 168 by the sequencer, 461
+row fills (238 prefetches), 142 page allocations, not-resident 1,461 clocks against the lines' 38,302,
+and no recover bubbles at all (the lines: 159,310).** Suite gs 18/18.
+**The Nox row at --room=0: 38.92 M clocks** against 39.86 M with the lines + the target serve and 40.35 M
+with the lines + the early landing (-2.4% and -3.5%), 14/14: 7.85 M one-clock fetches, 259 k row fills
+(103 k prefetches, 108 k page allocations) against 1.14 M line fills, not-resident 0.69 M clocks
+against 2.17 M, resident-not-retiring 16 clocks against 226 k, 98 k fetches by the sequencer (the I/O
+page's and the excluded slot pages'). The row is 43.8% bus time (the boot's disk), so the I side was
+already a small share here; the map screen is where it shows. Pt bit gs_pt53 building.
+**GS/OS 20 M at --room=0: 185.45 M clocks** against 187.45 M (-1.1%), 14/14: 37.4 M one-clock fetches,
+2.52 M row fills (1.17 M prefetches, 1.00 M page allocations, 0.90 M TLB waits), not-resident 10.26 M
+clocks against 11.18 M - GS/OS's code working set is wider than 8 KB and the page allocations churn -
+and 2.54 M fetches by the sequencer (unservable 12.8 M want-clocks: the pages the region table refuses
+and the excluded slot pages, the same rule the lines applied).
+**gs_pt53, the first store bit: TIMING MISS -2.330 ns (2,440 of 76,794), 31,889 LUTs (+3,358 over
+gs_pt51), the two RAMs block RAMs as meant (512 x 64 write, 4 K x 8 read; 50 tiles).** The path: the
+PC into the engine's own tag lookup on the want, through the TLB compare into the engine (17 levels);
+the LUTs: three writers of per-bit logic under 512 row-valid flops, and the want's second set of tag
+muxes. RESTRUCTURED: the fetch's want takes the lookup registered beside the RAM output (page_q,
+pway_q, hit_q), the prefetch's address has its own lookup registered every clock (gated a clock, or a
+row already held was fetched again), and a snoop clears a page's rows as a word (kills 8.9 k -> 9.7 k
+in the Nox row: nothing). Short boot 12/12 unchanged, suite 18/18, **Nox row 37.93 M clocks** (was
+38.92 M before the restructure, 39.86 M with the lines). Pt bit gs_pt54.
+
+**gs_pt54 (the restructured store): TIMING MISS -1.894 ns, 32,140 LUTs (98.6% of a 50T).** The path is the
+design's own loop: the store's RAM output -> the core's din -> the next PC (a JMP's high byte IS the
+byte in flight) -> the tag lookup -> the registered hit, 15 levels. USER DECISION 2026-09-20: register
+the store's read for the din-dependent loads (one bubble on JMP abs / JSR / returns / the vector pull,
+~2% of the map's clocks), KEEP TWO WAYS (direct-mapped evicts caller and callee at one offset), and
+DO THE LUT WORK FIRST - whatever the core does next needs the LUTs. No build without approval.
+
+**THE LUT WORK (2026-09-20).** The synthesis-only hierarchy (the full IIgs set, 2026-09-19) by
+module: u_card 9.5 k (the link), u_gsio 6.4 k, u_ddr3 4.0 k, u_doc 3.9 k, u_cache 3.7 k, u_u2 2.7 k, u_mb
+1.9 k, u_cpu/u_tlb/u_iwm/u_l1d ~1.4 k each, u_mouse 1.2 k, u_regfile/u_rom/u_seq ~1.1 k each. The
+trades, all cycle-for-LUT or flop-for-RAM: (1) the DOC's per-oscillator registers into distributed RAM
+- DONE: rtl/gs/gs_doc.sv, 72 bits x 32 that were flops behind 32:1 muxes are seven single-writer
+LUTRAMs with a reset sweep and a pending-clear mask for the accumulator; gs_doc_tb 25/25, the replay
+sounds; **u_doc 3,942 -> 2,189 LUTs by synthesis (-1.75 k)**; (2) the books into a RAM - DONE:
+rtl/common/book_ram.sv folds the two L1s' and the cache's counters (8 bits wide on the card, BOOK_W;
+32 in the benches) round-robin into one LUTRAM of 32-bit totals with one adder; the debug read of a
+counter word comes from the folder; the clock census stays in flops (its buckets sum to the clock);
+(3) the chipset's static registers into a LUTRAM shadow, (4) the Uthernet's socket machine time-shared,
+(5) the ROM loader's stage (u_rom 1.66 k) - pending. Measure: synthesis-only builds
+(`build/run_build.sh TAG --gs --board pt_v2 -gs50t -l1i-lines -synth_only`), the lines set: 30,838
+LUTs by synthesis with the DOC done (the implemented count runs lower than synthesis's).
+**The books folder MEASURED AND REVERTED:** with the two L1s' and the cache's counters at eight bits
+folding into one LUTRAM, synthesis gave 31,101 against 30,838 without it - up 263: a 32-bit counter is
+an 8-LUT carry chain, narrowing it saves five, and the debug muxes it feeds stay; the folder and the
+override mux cost more than that. The counters stay 32-bit flops. The lesson for the list: a flop
+array behind a wide mux (the DOC's 72 x 32) pays; a counter does not.
+**The ROM loader's drain, one word a clock: gs_top 30,838 -> 30,431 by synthesis (-407)**; the short boot
+12/12 at +145 k clocks (the load's four clocks a line, once a boot). The lines set with the two trades:
+30,431 by synthesis; the implemented count is the full Pt build lut1's.
+**lut1, THE IMPLEMENTED COUNT (the lines set + the DOC and ROM loader trades, Pt): 28,017 LUTs against
+gs_pt52's 28,531 - 514 fewer, 85.9% of a 50T; TIMING MET +0.000 (0 of 67,394); 52.5 tiles.** Synthesis
+had promised 2.2 k: implementation was already trimming the DOC's flop arrays. A named deep tail (the
+core's instruction register into l1d's serve counters' enables) is cut in the tree: the books count a
+clock late from registered flags. The remaining LUTs by module (implemented, by inference from
+synthesis's shares): the link ~8.5 k, the chipset ~4.2 k, the DDR3 controller ~3.6 k, L2 ~2.9 k, the
+Uthernet ~2.5 k, the DOC ~2.0 k - the store's own cost on gs_pt54 was +3.6 k over the lines before its
+LUTRAM-tag restructure, unmeasured since.
+**lut1 ON HARDWARE (loaded 2026-09-20, swhost on gs_nox.conf, the map, 5 s): 299.94 M ops = 58.8x, the
+same as gs_pt52 to four figures - the trades touch no fetch or data path.** And the RE-BUCKETED census
+(the fill waits charged to the op that is up, the post-fast clock its own bucket) redraws the map of
+the losses: retire 60.0%; **DEC_D 17.0% (84.9 M) + D fill 5.2% (26.0 M) = the D side 22.2%**; SEQ_FAST
+6.2% (31.1 M) + post-fast 2.0% (10.1 M) = the dispatcher 8.2%; **I fill 5.0% (24.9 M) + DEC_I 3.8%
+(18.9 M) = the I side 8.8%** (the old bucketing had charged I prefetches in flight under D ops to the I
+side: "15.3%"); settle 0.7%, bus 0.1%. The D side is the larger lever by a factor of two and a half.
 
 ## The L2 geometry on GS/OS (2026-09-19, `--l2=SETSxWAYS` before the CAM, the 50T question)
 

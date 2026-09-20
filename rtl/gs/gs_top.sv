@@ -456,6 +456,7 @@ module gs_top #(
     wire [127:0] il_row;
     wire        cpu_cyc_is_i;
     wire [15:0] cpu_pc_addr;
+    wire [23:0] cpu_pc_d;             // the PC register's D input (rung 8)
     wire        app_msg_valid, app_pay_valid;
     wire [7:0]  app_msg_type, app_msg_len;
     wire [15:0] app_msg_free;
@@ -790,6 +791,7 @@ module gs_top #(
         .d_din  (front_bypass ? cpu_din : d_din_w),   // the data front's, or the sequencer's through it
         .cyc_is_i (cpu_cyc_is_i),   // = VPA
         .pc_addr ({cpu_pc_bank, cpu_pc_addr}),
+        .pc_d    (cpu_pc_d),
         .d_pred (cpu_d_pred),
         .d_pred_v (cpu_d_pred_v),
         .d_pred_rw (cpu_d_pred_rw),
@@ -1284,8 +1286,18 @@ module gs_top #(
     // Two line buffers filled by DIRECT WAY READS of the page cache through
     // the TLB (rtl/gs/l1i.sv, rtl/gs/tlb.sv, docs/L1_RETHINK.md); a fetch
     // that lands in them retires in one clock, register-direct.
+    // THE L1-I IS THE TWO-LINE l1i.  The instruction store (rung 8,
+    // rtl/gs/l1i_store.sv) is PARKED (user decision 2026-09-20: 3 k LUTs and
+    // two tiles for a 3-5% ceiling on the map; the D side is the larger
+    // lever) and stays buildable behind -DL1I_STORE (build.tcl -l1i-store,
+    // the bench's --vflags=-DL1I_STORE).
+`ifndef L1I_STORE
     l1i #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
         .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst),
+`else
+    l1i_store #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
+        .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst), .pc_d (cpu_pc_d),
+`endif
         .pc_addr (cpu_pc_addr), .pc_bank (cpu_pc_bank), .cpu_rw (cpu_rw), .cpu_sync (cpu_sync),
         .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
         .cyc_en (iline_cyc_en), .i_din (i_din_w),
@@ -1414,7 +1426,7 @@ module gs_top #(
     //   9 DEC_D    ...in S_DECIDE with a data cycle up, unserved
     //  10 OTHER    none of the above (S_RST, the core in reset)
     //  11 CLOCKS   every clock
-    logic        h_ret, h_held, h_settle, h_ifill, h_dfill, h_isi;
+    logic        h_ret, h_held, h_settle, h_ifill, h_dfill, h_isi, h_fev;
     logic [3:0]  h_seq;
     always_ff @(posedge apple_clk) begin
         h_ret    <= cpu_cyc_en;
@@ -1424,20 +1436,30 @@ module gs_top #(
         h_dfill  <= dl_fill_busy;
         h_seq    <= seq_state;
         h_isi    <= cpu_cyc_is_i;
+        h_fev    <= fev_valid;
     end
     // accel_seq's state_t: 0 S_RST, 1 S_DECIDE, 2 S_FAST, 3 S_BUS, 4 S_HELD, 5 S_NULL.
     wire [11:0] h_sel_w;
     assign h_sel_w[0]  = h_ret;
     assign h_sel_w[1]  = !h_ret && h_held;
+    // THE FILL BUCKETS ARE THE OP'S THAT IS UP (2026-09-20).  IFILL used to
+    // count every clock the I engine was busy, whatever the sequencer was
+    // doing - a next-line prefetch in flight while a data op sat in S_FAST
+    // was charged to the I side (the map's "I side 21.5%" carried ~40 M
+    // such clocks in 5 s).  Now: a fill wait is charged only in S_DECIDE
+    // with that side's op up; the clock after every fast op (fev_valid,
+    // turbo_ok low for it) has its own bucket, 7, in place of S_NULL, a
+    // state the sequencer no longer has.
+    wire h_dec = !h_ret && !h_held && !h_settle && (h_seq == 4'd1);
     assign h_sel_w[2]  = !h_ret && !h_held && h_settle;
-    assign h_sel_w[3]  = !h_ret && !h_held && !h_settle && h_ifill;
-    assign h_sel_w[4]  = !h_ret && !h_held && !h_settle && !h_ifill && h_dfill;
-    assign h_sel_w[5]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd2);
-    assign h_sel_w[6]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd3 || h_seq == 4'd4);
-    assign h_sel_w[7]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd5);
-    assign h_sel_w[8]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd1) && h_isi;
-    assign h_sel_w[9]  = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && (h_seq == 4'd1) && !h_isi;
-    assign h_sel_w[10] = !h_ret && !h_held && !h_settle && !h_ifill && !h_dfill && !(h_seq inside {4'd1, 4'd2, 4'd3, 4'd4, 4'd5});
+    assign h_sel_w[7]  = h_dec && h_fev;
+    assign h_sel_w[3]  = h_dec && !h_fev &&  h_isi && h_ifill;
+    assign h_sel_w[4]  = h_dec && !h_fev && !h_isi && h_dfill;
+    assign h_sel_w[5]  = !h_ret && !h_held && !h_settle && (h_seq == 4'd2);
+    assign h_sel_w[6]  = !h_ret && !h_held && !h_settle && (h_seq == 4'd3 || h_seq == 4'd4);
+    assign h_sel_w[8]  = h_dec && !h_fev &&  h_isi && !h_ifill;
+    assign h_sel_w[9]  = h_dec && !h_fev && !h_isi && !h_dfill;
+    assign h_sel_w[10] = !h_ret && !h_held && !h_settle && !(h_seq inside {4'd1, 4'd2, 4'd3, 4'd4});
     assign h_sel_w[11] = 1'b1;
     logic [11:0] h_sel_q;
     logic [31:0] h_cnt [0:11];

@@ -31,6 +31,7 @@ set board_part(pt_v2) xc7a100tfgg484-2
 
 set part      ""
 set gs50t     0
+set l1istore  0
 set jobs      4
 set keep_open 0
 set synth_only 0
@@ -69,6 +70,7 @@ for {set i 0} {$i < $argc} {incr i} {
         --board { incr i; set board [lindex $argv $i] }
         -part   { incr i; set part [lindex $argv $i] }
         -gs50t  { set gs50t 1 }
+        -l1i-store { set l1istore 1 }
         -outdir { incr i; set outdir [lindex $argv $i] }
         -synth_only { set synth_only 1 }
         -open   { set keep_open 1 }
@@ -284,7 +286,7 @@ if {$snoop || $master} {
         # L2: the a2 card's set cache; the gs card's CAM (docs/CORE_REFACTOR_65816.md
         # "The CAM-L2") beside its branch scanner (rung 4).
         if {$card eq "gs"} {
-            add_files -norecurse [list [file join $root rtl gs iscan.sv] [file join $root rtl gs page_cam.sv]]
+            add_files -norecurse [list [file join $root rtl gs iscan.sv] [file join $root rtl gs page_cam.sv] [file join $root rtl gs l1i_store.sv] [file join $root rtl gs store_ram.sv]]
         } else {
             add_files -norecurse [list [file join $root rtl a2 page_cache.sv]]
         }
@@ -350,6 +352,10 @@ if {$stamp_date != 0 || $stamp_time != 0} {
 # plain build must present Vivado with exactly the source it always did, so
 # that "bit-identical at GS = 0" is a statement about the toolchain's input
 # and not only about the RTL's meaning.
+if {$gs && $l1istore} {
+    # The instruction store (rung 8, parked) instead of the two-line L1-I.
+    set_property verilog_define [concat [get_property verilog_define [current_fileset]] [list L1I_STORE]] [current_fileset]
+}
 if {$gs && $gs50t} {
     # THE 50T CANDIDATE (docs/CORE_REFACTOR_65816.md): the CAM-L2 at 32 slots,
     # no Mockingboard, no slot mouse card, the register file at MINIMAL.
