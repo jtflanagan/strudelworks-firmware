@@ -303,16 +303,40 @@ module page_cam #(
     wire [N-1:0]  unref_w  = ~refb;
     wire [N-1:0]  unprot_w = ~d_ref;
     wire [N-1:0]  plru_w   = plru_victim(plr);
-    wire [N-1:0]  c_vic_c  = (|free_w)                       ? lowest_bit(free_w) :
-                             (|(plru_w & unref_w & unprot_w)) ? plru_w :
+    // THE CHOICE READS THE REGISTERED DECODE, NOT THE LIVE ONE (2026-09-20).
+    // The 63-node tree decode and the five-way choice below used to be one
+    // clock from `plr`: 18 levels, 11.9 ns, four fifths of it route, and the
+    // build's worst path by 1.9 ns (the MUXF7/MUXF8 cluster in the decode is
+    // the first ten of those levels).  `plru_q` already held that decode a
+    // clock later and nothing wanted it sooner, so the choice takes it from
+    // there - the decode retires into plru_q, the choice into vic_q, and
+    // neither half is more than about six ns.
+    // WHAT DOES NOT CHANGE: the directory's own terms.  free/unref/unprot are
+    // read live, so the victim is still never a slot the directory says is
+    // free-excluded, referenced or protected; only the PLRU's PREFERENCE is a
+    // clock older, and a preference is a heuristic - the cost of a stale one
+    // is a fill, not a wrong line.  The victim was already a clock behind
+    // `plr` before this (vic_q is a register); this widens that to two, and a
+    // fill is many clocks long, so no fill picks a victim the fill before it
+    // has not already accounted for.
+    wire [N-1:0]  c_vic_c  = (|free_w)                        ? lowest_bit(free_w) :
+                             (|(plru_q & unref_w & unprot_w)) ? plru_q :
                              (|(unref_w & unprot_w))          ? lowest_bit(unref_w & unprot_w) :
-                             (|(plru_w & unref_w))            ? plru_w :
-                             (|unref_w)                       ? lowest_bit(unref_w) : plru_w;
+                             (|(plru_q & unref_w))            ? plru_q :
+                             (|unref_w)                       ? lowest_bit(unref_w) : plru_q;
     logic [SW-1:0] vic_q;
-    logic [N-1:0]  plru_q;
+    logic [N-1:0]  plru_q, plru_q2;
     always_ff @(posedge clk) begin
-        vic_q  <= enc(c_vic_c);
-        plru_q <= plru_w;
+        vic_q   <= enc(c_vic_c);
+        plru_q  <= plru_w;
+        // ...and the decode the victim was chosen FROM, carried one clock
+        // further so it stays beside it.  `skipped` downstream asks whether
+        // the victim WAS the PLRU's pick (s_plru[s_vslot]) and gives up a
+        // protected slot's reference when it was not, so the two must come
+        // from the same evaluation: compared against the newer decode, a
+        // victim chosen from the older one reads as a skip that never
+        // happened, and a d_ref bit is cleared for it.
+        plru_q2 <= plru_q;
     end
     wire [SW-1:0] c_vslot = vic_q;
     wire [15:0]   c_vtag  = d_tag[c_vslot];
@@ -346,7 +370,7 @@ module page_cam #(
             s_vslot    <= c_vslot;
             s_vtag     <= c_vtag;
             s_vdty     <= c_vdty;
-            s_plru     <= plru_q;
+            s_plru     <= plru_q2;      // the decode vic_q was chosen from
         end
         if (p1_wr) begin
             wl_slot <= c_slot;

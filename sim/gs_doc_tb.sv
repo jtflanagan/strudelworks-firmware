@@ -262,6 +262,25 @@ module gs_doc_tb;
         if (irq) ok("...with one interrupt raised and still pending");
         else fail("the swap pair raised no interrupt at all");
 
+        // ---- ONLY $E0-$FF ARE THE GLOBALS ----------------------------------
+        // The enable count lives at $E1, which is oscillator 1 of register
+        // TYPE 7.  Every other type's oscillator 1 - frequency low $01, high
+        // $21, volume $41, pointer $81, control $A1, size $C1 - shares that
+        // low five bits and must leave the count alone.  It did not: with
+        // the per-oscillator registers moved out to RAM the `default` arm
+        // that meant type 7 swallowed every type, so starting voice 1 rewrote
+        // the count and the oscillators above it stopped being scanned.
+        // Checked by reading the count back through $E1 rather than by
+        // peering inside, so the bench tests the chip and not the RTL.
+        reg_wr(8'hE1, 8'h3E);                        // 32 oscillators enabled
+        reg_wr(8'h01, 8'h00); reg_wr(8'h21, 8'h00);  // oscillator 1's own
+        reg_wr(8'h41, 8'h00); reg_wr(8'h81, 8'h00);
+        reg_wr(8'hC1, 8'h00); reg_wr(8'hA1, 8'h01);  // ...including control
+        reg_rd(8'hE1, v);
+        chk(v, 8'h3E, "oscillator 1's own registers leave the enable count alone");
+        reg_wr(8'hE1, 8'h02); reg_rd(8'hE1, v);
+        chk(v, 8'h02, "...and $E1 itself still sets it");
+
         $display("%0d checks, %0d errors", checks, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL");
         $finish;

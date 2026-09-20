@@ -1,6 +1,6 @@
 # The 65816 card: the core / L1 / L2 refactor ladder
 
-Status: **2026-09-20: THE I SIDE'S FIRST CUT ON HARDWARE (gs_pt52, MET +0.000: the early landing and the target serve back, the Nox map 55.0x -> 58.8x; fw 26cf946 / host ff59838). THE INSTRUCTION STORE (rung 8) WORKS IN SIM (suite 18/18, Nox 37.93 M against 39.86 M) and MISSES TIMING ON THE CARD (gs_pt54 -1.894 ns, 32,140 LUTs): its fix is decided (register the read for the din-dependent loads, keep two ways) and WAITS ON THE LUT WORK, which is under way: the DOC's registers in LUTRAM (-1.75 k), the books folded into one RAM, the ROM loader's drain one word a clock - measured by synthesis-only builds against the 50T's 32,600.** The 50T candidate met timing 2026-09-19 (gs_50t2: +0.082, 28,514 LUTs = 87.5%, 48 RAMB36).  The 65C02 card's
+Status: **2026-09-20 LATEST: THE DOC's REGISTER DECODE FIXED AND THE VICTIM CHAIN CUT, BOTH ON HARDWARE (bit `viccut1`, TIMING MET +0.005 / whs +0.027, 0 of 81,874; fw built 2026-09-20 09:44:48, SRAM).** The LUT work's `default:` arm had swallowed every register type once types 0/1/2/4/6 moved to RAM, so any write to OSCILLATOR 1 - its control register above all, which starts and stops voice 1 - rewrote the enable count and every oscillator above it stopped being scanned: notes that cut off or hung, sound still playing (gs_doc_tb 27/27, the check mutation-tested; USER CONFIRMED FIXED ON HARDWARE).  And the build it was found in missed by -1.924 on ONE family, the CAM-L2's `plr -> plru_victim -> the five-way choice -> vic_q` in a single clock (18 levels, 77% route): the choice now reads the already-registered `plru_q`, with `plru_q2` carrying the decode the victim was chosen FROM so `skipped` still compares like with like (else a false skip clears a `d_ref`).  A/B on the GS/OS row: fills 289,098 against 292,780 (-1.3%), 292.42 M clocks against 292.70 M, 14/0 both arms - the staler preference costs nothing.  **2026-09-20: THE I SIDE'S FIRST CUT ON HARDWARE (gs_pt52, MET +0.000: the early landing and the target serve back, the Nox map 55.0x -> 58.8x; fw 26cf946 / host ff59838). THE INSTRUCTION STORE (rung 8) WORKS IN SIM (suite 18/18, Nox 37.93 M against 39.86 M) and MISSES TIMING ON THE CARD (gs_pt54 -1.894 ns, 32,140 LUTs): its fix is decided (register the read for the din-dependent loads, keep two ways) and WAITS ON THE LUT WORK, which is under way: the DOC's registers in LUTRAM (-1.75 k), the books folded into one RAM, the ROM loader's drain one word a clock - measured by synthesis-only builds against the 50T's 32,600.** The 50T candidate met timing 2026-09-19 (gs_50t2: +0.082, 28,514 LUTs = 87.5%, 48 RAMB36).  The 65C02 card's
 ladder, done, is docs/CORE_REFACTOR_65C02.md; the requirements are docs/REQ_65816.md (this card's
 differences) over docs/REQ_65C02.md (the common items); the design idea is docs/L1_RETHINK.md.
 The user's direction (2026-09-19): develop and test on the Pt, watch resources against a 50T
@@ -414,6 +414,51 @@ the losses: retire 60.0%; **DEC_D 17.0% (84.9 M) + D fill 5.2% (26.0 M) = the D 
 6.2% (31.1 M) + post-fast 2.0% (10.1 M) = the dispatcher 8.2%; **I fill 5.0% (24.9 M) + DEC_I 3.8%
 (18.9 M) = the I side 8.8%** (the old bucketing had charged I prefetches in flight under D ops to the I
 side: "15.3%"); settle 0.7%, bus 0.1%. The D side is the larger lever by a factor of two and a half.
+
+**THE SAME CENSUS ON THE GS/OS SCREEN (2026-09-20, lut1 on hardware, gs_nox.conf on system6.hdv,
+the Finder idle at the desktop, three 5 s windows agreeing to four figures): 43.5x, not the map's
+58.8x - 221.91 M ops over 5.10 M Apple cycles.** The losses are bucketed differently here, and the
+difference is the finding: the DISPATCHER doubles its share and the settles grow fourfold.
+
+| bucket | clocks (5 s) | the GS/OS screen | the Nox map |
+|---|---|---|---|
+| retire | 221.79 M | **44.4%** | 60.0% |
+| DEC_D | 102.17 M | 20.4% | 17.0% |
+| D fill | 29.59 M | 5.9% | 5.2% |
+| **the D side** | **131.77 M** | **26.4%** | **22.2%** |
+| SEQ_FAST | 68.96 M | 13.8% | 6.2% |
+| post-fast | 11.27 M | 2.3% | 2.0% |
+| **the dispatcher** | **80.23 M** | **16.0%** | **8.2%** |
+| I fill | 22.28 M | 4.5% | 5.0% |
+| DEC_I | 30.99 M | 6.2% | 3.8% |
+| **the I side** | **53.28 M** | **10.7%** | **8.8%** |
+| settle | 12.78 M | **2.6%** | 0.7% |
+| bus | 0.15 M | 0.03% | 0.1% |
+| held | 0 | 0 | 0 |
+
+By kind, with what each op costs in clocks (its bucket share plus its retire clock):
+
+| kind | ops (5 s) | clocks/op | its clocks |
+|---|---|---|---|
+| dline (data) | 115.01 M | 2.15 | 247 M (49%) |
+| turbo (fetch) | 95.62 M | 1.56 | 149 M (30%) |
+| **fast (the dispatcher)** | **11.28 M** | **8.11** | **91.5 M (18%)** |
+| bus | 1,012 | - | ~0 |
+
+**THE FAST OPS ARE 5.1% OF THE WORK AND 18% OF THE CLOCKS** - eight clocks each against a fetch's
+one and a half - and 58% of them are kind I (6.50 M of 11.28 M; RAM 3.08 M, WR 1.57 M, CX 0.12 M,
+ROM 20 k, KBD 3 k, LC 80), instruction fetches falling through L1-I to the dispatcher. The I-side
+counters agree: il_notres 36.8 M in the window, il_restart 2.0 M. On the map the dispatcher is half
+this share, which is why the map reads 58.8x and the desktop 43.5x. The other difference is SETTLE
+at 2.6% against 0.7%: GS/OS moves PBR and DBR far more than a game loop does, and that is the
+clock rung 5 ("the bank registers leave the map") is written to take back.
+
+The levers as this screen prices them: the dispatcher's fast ops down to a 2-clock op returns ~69 M
+clocks = 13.8% (~50x); rung 5's settles ~2.6% (~44.6x on their own); the D side is the biggest
+absolute block at 49% of the clocks but already runs at 2.15 clocks an op - a grind, not a cliff.
+The supporting counters over the same window: dl_serves 114.9 M (= the dline ops), dl_cam_serves
+14.8 M, dl_decl 3.66 M, dl_claims 0, dl_reval_revive 42.95 M / dl_reval_drop 1.23 M, il_acks 6.82 M,
+il_inst 876 k, pc_il_i / pc_il_d / pc_decline all 0.
 
 ## The L2 geometry on GS/OS (2026-09-19, `--l2=SETSxWAYS` before the CAM, the 50T question)
 

@@ -379,12 +379,24 @@ module gs_doc #(
             if (wr_c03d) begin
                 case (w_type)
                     // 0, 1, 2, 4, 6: the RAMs above.  3 is read only, 5 below.
-                    default:
+                    // TYPE 7 AND NOTHING ELSE reaches the globals: these are
+                    // the $E0-$FF registers, and `default` here once meant
+                    // them because types 0-6 all had a branch of their own.
+                    // When those branches moved to the RAM block a bare
+                    // `default` swallowed every type, so a write to
+                    // oscillator 1's frequency, volume, pointer, size or
+                    // CONTROL register - starting or stopping voice 1 -
+                    // rewrote the enable count as well, and every oscillator
+                    // above the new count stopped being scanned: notes that
+                    // never ended, never interrupted and never freed their
+                    // voice (2026-09-20).
+                    3'd7:
                         // $E1 is the enable count: ((val & 0x3e) >> 1) + 1,
                         // floored at one (doc.c:951).  $E0 is read-only in
                         // practice and $E2 is the A/D.
                         if (w_osc == 5'd1)
                             osc_en <= {1'b0, op_wdata[5:1]} + 6'd1;
+                    default: ;
                 endcase
             end
             // The pointer steps on either direction of $C03D when the control
