@@ -51,7 +51,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     parameter integer TARGET = 0,
                     parameter integer MAX_INSTRS = 200000,
                     parameter integer TLB_N = 16,        // the TLB's entries (--tlb=N: a census lever)
-                    parameter integer L2_SETS = 64,      // the CAM-L2's slots (--l2=N)
+                    parameter integer L2_SETS = 32,      // the CAM-L2's slots (--l2=N; gs_top's default since 2026-09-20)
                     parameter integer L2_WAYS = 2,       // nominal: a one-bit way, always zero
                     parameter integer FAST_DMA = 1,      // 0: the hard disk's blocks land by the bus (--slowdma)
                     parameter integer ROOM_P = 12,       // the merge's no-room model (--room=P; 0 = never)

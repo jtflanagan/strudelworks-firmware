@@ -9,7 +9,7 @@
 #   sim/run_boot_gs_tb.sh [options]
 #     --instrs=N       run length in INSTRUCTIONS (default 20000)
 #     --tlb=N          the TLB's entries (default 16; docs/CORE_REFACTOR_65816.md's census lever)
-#     --l2=N           the CAM-L2's slots (default 64; docs/CORE_REFACTOR_65816.md)
+#     --l2=N           the CAM-L2's slots (default 32, gs_top's; docs/CORE_REFACTOR_65816.md)
 #     --clks=N         hard ceiling in 100 MHz clocks (default 400000000)
 #     --mode=N         accel mode (default 2)
 #     --target=N       governor target, 8.8 fixed point (0 = unlimited)
@@ -65,7 +65,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$root/sim/boot_work"
 mkdir -p "$work"
 
-tlbn=16 l2sets=64 l2ways=2 waydefs= fastdma=1 instrs=20000 clks=400000000 mode=2 target=0 ddrlat=12 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0 keyhold=20000 btnat=0 btnhold=2000000 mirror="" pagewatch=0
+tlbn=16 l2sets=32 l2ways=2 waydefs= fastdma=1 instrs=20000 clks=400000000 mode=2 target=0 ddrlat=12 tag=gs vl=1 ref="" floor="" disktrace=0 lctrace=0 wfrom=0 wto=0 engtrace=0 bram="" keyat=0 keycode=0 keymods=0 keyhold=20000 btnat=0 btnhold=2000000 mirror="" pagewatch=0
 rom="$root/../strudelworks-host/assets/apple2gs_rom3.bin"
 hdrom="$root/../strudelworks-host/assets/hdc_smartport_gs.bin"
 hdv=""

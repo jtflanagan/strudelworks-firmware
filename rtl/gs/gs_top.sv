@@ -80,12 +80,27 @@ module gs_top #(
     // occupies five of every set's eight ways.  64 x 8 is the cheap fallback
     // if the block RAM is ever wanted elsewhere; both are proven by
     // sim/run_page_cache_tb.sh's sweep.
-    parameter integer MEM_SETS = 64,    // the CAM-L2's slots (rtl/gs/page_cam.sv)
+    // THE CAM-L2's SLOTS, 32 SINCE 2026-09-20 (the user, measured on hardware).
+    // 64 is faster and 32 is what fits: against the 64-slot build of the same
+    // commit this costs the Finder 51.6x -> 47.9x (-7.2%, the same census:
+    // gs_nox.conf on system6.hdv, idle at the desktop) AND COSTS THE NOX MAP
+    // NOTHING (59.5x, against 58.8x at 64): the cost is a working-set cliff,
+    // not a tax - 32 slots is 8 KB, the map's loop fits in it and the idle
+    // desktop does not.  It buys
+    // 1,844 LUTs design-wide - page_cam's own 1,460 plus the slot index
+    // narrowing six bits to five everywhere it travels, through the TLB and
+    // both L1 sides - and five levels of logic depth (max 23 -> 18, the tail
+    // >= 14 587 -> 321). 90.3% -> 84.6% of a 50T's 32.6k, and the depth is
+    // headroom against the congestion that closes or fails that board rather
+    // than its capacity. The BLOCK RAM DOES NOT CHANGE: the row is 128 bits
+    // wide and 128 bits needs four RAMB36 whatever the depth.
+    // build.tcl's `-gsslots N` builds any other count for an A/B.
+    parameter integer MEM_SETS = 32,    // the CAM-L2's slots (rtl/gs/page_cam.sv)
     parameter integer MEM_WAYS = 2,     // nominal: one bit of way, always zero
     // THE 50T VARIANT (docs/CORE_REFACTOR_65816.md "The 50T candidate", 2026-09-19):
     // the Mockingboard and the slot mouse card generated out (the IIgs's own
     // mouse is ADB), the register file at its MINIMAL (build.tcl -gs50t sets
-    // the three, with MEM_SETS = 32).
+    // them; its MEM_SETS = 32 is the default now and kept only for explicitness).
     parameter bit HAS_MB       = 1'b1,
     parameter bit HAS_MOUSE    = 1'b1,
     parameter bit MINIMAL_REGS = 1'b0,

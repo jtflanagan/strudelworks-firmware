@@ -31,6 +31,7 @@ set board_part(pt_v2) xc7a100tfgg484-2
 
 set part      ""
 set gs50t     0
+set gsslots   0
 set l1istore  0
 set jobs      4
 set keep_open 0
@@ -70,6 +71,7 @@ for {set i 0} {$i < $argc} {incr i} {
         --board { incr i; set board [lindex $argv $i] }
         -part   { incr i; set part [lindex $argv $i] }
         -gs50t  { set gs50t 1 }
+        -gsslots { incr i; set gsslots [lindex $argv $i] }
         -l1i-store { set l1istore 1 }
         -outdir { incr i; set outdir [lindex $argv $i] }
         -synth_only { set synth_only 1 }
@@ -367,6 +369,16 @@ if {$gs && $gs50t} {
     # not just this variant (below).
     set_property generic [concat [get_property generic [current_fileset]] \
         [list MEM_SETS=32 MINIMAL_REGS=1]] [current_fileset]
+}
+if {$gs && $gsslots > 0} {
+    # The CAM-L2's slots on their own (docs/CORE_REFACTOR_65816.md "The CAM-L2").
+    # -gs50t sets 32 AND MINIMAL_REGS together, which is the 50T variant, not a
+    # slot count: an A/B of N alone has to leave the register file where it is
+    # or it is comparing two things at once.  APPENDED, like the block above -
+    # set_property replaces the list and that is how a build once lost its stamp.
+    puts " the CAM-L2 at $gsslots slots"
+    set_property generic [concat [get_property generic [current_fileset]] \
+        [list MEM_SETS=$gsslots]] [current_fileset]
 }
 if {$gs} {
     # GS is a localparam of gs_top since the tree split (2026-09-18): nothing to
