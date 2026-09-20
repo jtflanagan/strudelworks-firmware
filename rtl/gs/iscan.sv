@@ -78,7 +78,21 @@ module iscan (
                      C_BRL = 3'd3,   // BRL: rel16, followed
                      C_ABS = 3'd4,   // JMP/JSR abs: the target, followed
                      C_LNG = 3'd5,   // JSL/JML abs long: followed if the bank is ours
-                     C_END = 3'd6;   // RTS/RTL/RTI/BRK/COP/indirect: the trail ends
+                     C_END = 3'd6,   // RTS/RTL/RTI/BRK/COP/indirect: the trail ends
+                     // MVN/MVP: A BLOCK MOVE IS A TRANSFER TO ITSELF (2026-09-20).
+                     // It moves ONE BYTE per execution and the microcode rewinds
+                     // PC to its own opcode for the next - seven cycles a byte,
+                     // three of them fetches of this very instruction.  That
+                     // rewind is not a branch opcode, so the table never knew
+                     // it, and L1-I's `exp_q` said ptr+3 every time: a recover
+                     // bubble EVERY BYTE MOVED (199,881 of them in a 200,000
+                     // byte microbenchmark, all at a sync).  Classed here, the
+                     // target is the instruction's own address and l1i's
+                     // ordinary target path serves the rewind with no bubble -
+                     // it matches on the address, so no taken/not-taken guess
+                     // is needed, and the last iteration (which falls through)
+                     // costs the one recover it always did.
+                     C_MV  = 3'd7;
 
     // {class, length}: a wrong length only derails the walk.
     function automatic [5:0] opdec(input [7:0] op, input m, input x);
@@ -108,7 +122,7 @@ module iscan (
                 endcase
                 4'h3: l = 3'd2;                                    // sr,S ; (sr,S),Y
                 4'h4: case (op[7:4])
-                    4'h4, 4'h5: l = 3'd3;                          // MVP, MVN
+                    4'h4, 4'h5: begin c = C_MV; l = 3'd3; end      // MVP, MVN
                     4'hF: l = 3'd3;                                // PEA
                     default: l = 3'd2;                             // dp forms, PEI
                 endcase
@@ -168,7 +182,8 @@ module iscan (
     // The target, from registers only: a relative's ptr already advanced to
     // the fall-through, so the target is ptr + the signed offset; an
     // absolute's is a concatenation.
-    wire [15:0] tgt        = (cls_q == C_ABS || cls_q == C_LNG) ? {o2_q, o1_q} :
+    wire [15:0] tgt        = (cls_q == C_MV) ? op_ptr :
+                             (cls_q == C_ABS || cls_q == C_LNG) ? {o2_q, o1_q} :
                              (cls_q == C_BRL) ? {ptr_hi, ptr_lo} + {o2_q, o1_q}
                                               : {ptr_hi, ptr_lo} + {{8{o1_q[7]}}, o1_q};
     wire [11:0] tgt_tag    = tgt[15:4];
@@ -221,6 +236,14 @@ module iscan (
                             end
                         end
                         C_END: st <= S_IDLE;
+                        // The block move's operands say WHICH banks, never
+                        // where to go, so the walk needs neither: straight to
+                        // S_TGT, where the target is op_ptr.
+                        C_MV: begin
+                            cls_q  <= dec_cls; st <= S_TGT;
+                            op_ptr <= {ptr_hi, ptr_lo};
+                            op_q   <= rd_byte;
+                        end
                         default: begin
                             cls_q  <= dec_cls; st <= S_O1;
                             op_ptr <= {ptr_hi, ptr_lo};
@@ -278,6 +301,12 @@ module iscan (
                 S_TGT: begin
                     if (cls_q == C_LNG && !tgt_ours) begin
                         st <= S_IDLE;                   // out of the bank: the trail ends
+                    end else if (cls_q == C_MV) begin
+                        // The entry is issued this beat; the trail STOPS.
+                        // Following a transfer to itself would walk this one
+                        // instruction for ever, and what comes after a block
+                        // move is only reached when the count runs out.
+                        st <= S_IDLE;
                     end else begin
                         if (cls_q != C_REL) begin      // BRA, BRL, JMP/JSR, JSL/JML followed
                             ptr_hi    <= tgt_tag;

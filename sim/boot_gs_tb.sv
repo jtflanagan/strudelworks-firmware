@@ -386,6 +386,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // machine was doing or waiting on (the a2 ladder's rung-6 instrument).
     longint cc_retire = 0, cc_ifill = 0, cc_dread = 0, cc_dserve = 0, cc_fast = 0, cc_bus = 0,
             cc_held = 0, cc_null = 0, cc_settle = 0, cc_dpend = 0, cc_claim = 0, cc_decide = 0,
+            cc_dp_null = 0, cc_dp_i = 0, cc_dp_w = 0, cc_dp_d = 0,
             cc_stall = 0, cc_other = 0, cc_all = 0, cc_cl_leash = 0, cc_cl_room = 0, cc_cl_d = 0, cc_cl_i = 0, cc_ovr = 0;
     always @(posedge clk) if (boot_go) begin
         cc_all = cc_all + 1;
@@ -400,7 +401,18 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         else if (u_l1d.l2_pend || u_l1d.l2_v_q)           cc_dread  = cc_dread + 1;
         else if (u_l1d.sv_hit_q)                          cc_dserve = cc_dserve + 1;
         else if (l1_settling)                             cc_settle = cc_settle + 1;
-        else if (d_pending_w)                             cc_dpend  = cc_dpend + 1;
+        else if (d_pending_w) begin
+            cc_dpend  = cc_dpend + 1;
+            // WHAT THE BARRIER IS ACTUALLY HOLDING (2026-09-20).  S_DECIDE lets
+            // nothing out while a posted write is short of the banks, but a
+            // fetch retires in L1-I and an internal cycle in l1d without ever
+            // leaving the state - so the cost is not obvious from the rule.
+            // Split the bucket by what the core had up.
+            if      (cyc_internal) cc_dp_null = cc_dp_null + 1;
+            else if (cpu_cyc_is_i) cc_dp_i    = cc_dp_i + 1;
+            else if (!cpu_rw)      cc_dp_w    = cc_dp_w + 1;
+            else                   cc_dp_d    = cc_dp_d + 1;
+        end
         else if (turbo_claim || d_claim_w) begin
             cc_claim = cc_claim + 1;
             if (!turbo_ok)            cc_cl_leash = cc_cl_leash + 1;
@@ -3157,6 +3169,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 end
             end
         end
+        $display("    the drain bucket: %0d clocks - internal %0d, fetch %0d, write %0d, read %0d",
+                 cc_dpend, cc_dp_null, cc_dp_i, cc_dp_w, cc_dp_d);
         begin : slow_hist
             // The slow fetches by {bank, page}: where the bubbles live.
             integer k, best, bi;
