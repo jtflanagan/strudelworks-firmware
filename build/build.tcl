@@ -359,15 +359,30 @@ if {$gs && $l1istore} {
 if {$gs && $gs50t} {
     # THE 50T CANDIDATE (docs/CORE_REFACTOR_65816.md): the CAM-L2 at 32 slots,
     # no Mockingboard, no slot mouse card, the register file at MINIMAL.
-    puts " variant: the 50T candidate (32 slots, no MB, no mouse, MINIMAL regs)"
+    puts " variant: the 50T candidate (32 slots, MINIMAL regs)"
     # APPENDED to the fileset's generics: set_property replaces the list, and the
     # first build of this variant lost its build stamp that way (the host then
     # called the gateware unknown and never configured the hard disk's slot).
+    # HAS_MB / HAS_MOUSE are NOT here any more - every GS build drops them now,
+    # not just this variant (below).
     set_property generic [concat [get_property generic [current_fileset]] \
-        [list MEM_SETS=32 HAS_MB=0 HAS_MOUSE=0 MINIMAL_REGS=1]] [current_fileset]
+        [list MEM_SETS=32 MINIMAL_REGS=1]] [current_fileset]
 }
 if {$gs} {
-    # GS is a localparam of gs_top since the tree split (2026-09-18): nothing to pass.
+    # GS is a localparam of gs_top since the tree split (2026-09-18): nothing to
+    # pass for the machine itself.
+    #
+    # THE IIe's TWO SLOT CARDS ARE NOT BUILT ON A IIgs (2026-09-20, the user).
+    # The AppleMouse card is a IIe's mouse; a IIgs's is ADB, inside gs_io's
+    # u_adb.  The Mockingboard is a IIe's sound; a IIgs has the Ensoniq.  Both
+    # generate blocks were compiled into every GS bitstream and reached by
+    # nothing - 1,705 LUTs for u_mb and 1,112 for u_mouse, 2,817 together,
+    # found by diffing the hierarchy of two builds (docs/CORE_REFACTOR_65816.md).
+    # They were excluded only by the 50T variant, which is why its LUT count
+    # looked so much better than the Pt's and why the two were never comparable.
+    puts " IIgs: no Mockingboard, no slot mouse card (the ADB's is in gs_io)"
+    set_property generic [concat [get_property generic [current_fileset]] \
+        [list HAS_MB=0 HAS_MOUSE=0]] [current_fileset]
 }
 if {$ck_phase >= 0} {
     puts "CK_PHASE_SHIFT = $ck_phase ([expr {$ck_phase ? "the DDR3 write-levels its own CK" : "asked for OFF: CK on the commands' clock"}])"

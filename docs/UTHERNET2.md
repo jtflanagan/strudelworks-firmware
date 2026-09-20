@@ -331,12 +331,47 @@ control socket for the sockets' states, the counters and the backend.
   a disk on this card; the user's flow is the menu, and a test that
   wants a booted machine goes through it (`boot_menu=on`, `continue`).
 
+## What Marinetti and Webber exercised (2026-09-20)
+
+The first real traffic through this card, and the first thing ever to reach the
+MACRAW ring's WRAP. Webber 1.1.5 (a IIgs web browser, http only) over Marinetti
+on the starter kit image, slirp behind it:
+
+| | frames | bytes | the ring |
+|---|---|---|---|
+| DHCP alone | 2 tx / 2 rx | 684 / 1,184 | nowhere near it |
+| one page | 29 tx / 25 rx | 3,619 / 8,048 | 144 bytes short of the first wrap |
+| a second page | 139 tx / 105 rx | 16,749 / **26,778** | **3.3 times round** |
+
+At the end: `s0 rsr 0, unread 0/8192, fsr 8192` - the ring empty and whole, so
+`Sn_RX_WR` and `Sn_RX_RD` crossed the 8 KB boundary at least three times with
+nothing stranded. 273 commands. DNS, TCP and HTTP all ride above MACRAW in
+Marinetti's own software, so the card sees only raw frames either way - the
+same shape Contiki gives it, and a great deal more of it.
+
+SLOT 4 IS THE GS's PLACE FOR THIS CARD and it needs no "Your Card" mark: the
+Uthernet is DEVICE SELECT only, `hit_dev` decodes $C0n4-$C0n7 from the assigned
+slot alone with no SLOTROMSEL term, and the MMU routes the range through
+`slot_dev(swi_u2_slot)`. The host was marking the slot anyway, which would have
+cost slot 4 the machine's own ADB mouse (and slot 3 its 80-column firmware);
+that is fixed in the host's `pipeline.cpp`.
+
 ## Deliberately not there
 
 - **Interrupts.** The W5100 has IR/IMR and the card can route INT to the
   slot's IRQ, but neither driver in the wild uses it and AppleWin does not
   model it. If a program appears that does, the mouse's short route is
   there.
+  **MARINETTI TESTED AND IT DOES NOT (2026-09-20).** The IIgs's TCP/IP stack
+  was the obvious candidate to break this bet - a GS/OS stack that runs under
+  the Scheduler had every reason to want an interrupt - so it was run on the
+  machine: Ewen Wannop's Uthernet II link layer under Marinetti 3.0b11, from
+  his GS/OS starter kit, with the card in SLOT 4. It opens socket 0 in MACRAW,
+  writes SHAR, and POLLS, exactly as Contiki and IP65 do. The DHCP handshake
+  (DISCOVER / OFFER / REQUEST / ACK, 2 frames each way) completed, and both
+  replies were READ OUT of the RX ring - `rsr 0`, `unread 0/8192` - which is
+  the proof it found them by polling and not by waiting on an interrupt that
+  this card cannot raise.
 - **AppleWin's virtual DNS.** A register extension real hardware lacks,
   invented to work around the Npcap bridge's host problem; with slirp the
   guest resolves names itself. `PTIMER` reads `$28` as on the real chip.
