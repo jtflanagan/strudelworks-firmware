@@ -213,6 +213,103 @@ say so either. rtl/common/wb_regfile.sv keeps the IIgs's registers (fd35, ADB, c
 DBG pair) under MINIMAL now; their sources are constants on the 65C02 card, so nothing is lost there.
 The rule: a cut named for one card is checked against what the other still needs. Pt bit gs_pt51.
 
+**THE NOX CENSUS ON THE 50T SET (bit gs_pt51 on the Pt, the overworld map, unlimited, 5 s window
+= 500.0 M clocks, 2026-09-19).** 280.9 M ops retired = 55.0x over 5.10 M bus cycles (the Pt set
+cache measured 38.7x here at rung 3). The clock budget, every bucket of the census (h_sel, one per
+clock, the sum exact):
+
+| bucket | clocks | share | what it is |
+|---|---|---|---|
+| retire | 280.9 M | 56.2% | an op retired |
+| DEC_D | 65.5 M | 13.1% | a data op up, deciding: the second clock of every registered serve (31.5 M non-internal one-clock serves), the L2-served reads' four (12.15 M), the fast ops' first clock |
+| I fill wait | 63.4 M | 12.7% | an I-line on the way from L2: 27.4 M line fills, 2.3 clocks each |
+| DEC_I | 44.2 M | 8.8% | an instruction fetch up, deciding, no fill busy: the line switch, the TLB waits (1.0 M), the target table's misses (0.98 M) |
+| SEQ_FAST | 25.6 M | 5.1% | the dispatcher's 9.36 M fast ops in S_FAST (2.7 clocks each): 6.71 M WRITES (LC/aux/pair-bank), 1.84 M RAM reads the TLB missed, 0.82 M fetches |
+| D fill wait | 16.5 M | 3.3% | a D-line fill |
+| settle | 3.3 M | 0.7% | |
+| bus + held | 0.66 M | 0.1% | 4,215 bus ops |
+
+The ops: 180.3 M turbo fetches (1 clock), 91.2 M L1-D serves (47.5 M of them internal cycles at one
+clock, 17.1 M long reads, 12.15 M from L2, 6.9 M keyboard polls, 9.9 M posted writes), 9.36 M
+dispatcher fast ops, 4,215 bus. The I side: 27.4 M line fills for 180 M fetched bytes = 6.6 bytes a
+fill (a 16-byte line): the two-line L1-I refills constantly on Nox's loops; 18.6 M next-line
+prefetches, 2.12 M branch-target prefetches, 16.0 M taken branches whose target line was already
+held, 0.98 M branches the table did not know. The D side: the registered serve costs a second clock
+on every non-internal serve (6.3% of all clocks by itself).
+
+**Where the clocks go, largest first:** (1) the I side, 21.5% = the line fills' wait + the decide
+clocks - the two-line design's refill rate on loop-heavy code is the lever (a third line, or keeping
+the loop's lines: the a2's rung 6/7 question); (2) DEC_D 13.1% - the second clock of the registered
+serve (a one-clock serve for the common case is the 65C02 card's shape) and the L2 read's four;
+(3) the dispatcher's writes, 6.7 M in 5 s = the largest fast class (LC and aux writes on a IIe
+program): serving them in L1-D (the a2's second-clock LC write) takes SEQ_FAST and their DEC_D clock
+with them; (4) the D fills, 3.3%.
+
+**THE I SIDE, FIRST CUT (2026-09-19, the Nox boot on the bench, 4 M instructions, `--hdv=nox_los.HDV
+--l2=32`, four runs):** the fill lands a clock earlier (page_cam exports the row straight off the RAM's
+port B, `dr_erow`, and l1i takes it at F_W1) and THE BYPASS serves the waited-for byte off the landing
+row into the serve register the same clock (two of a demand fill's five clocks) - 60.79 M -> 59.14 M
+clocks (-2.7%), gs suite 18/18. The next-line prefetch at the HALF line and a LOOP GUARD from the
+target table were both measured and both lose: the guard 59.98 M (a suppressed prefetch is a demand
+miss on the loop's exit), the half line + guard 59.58 M with a third more fills (a target landing in a
+line's upper half evicts the line it came from at once). Both stay as bench switches (-DL1I_NX_HALF,
+-DL1I_LOOP_GUARD). The lesson: with two slots an earlier prefetch has nothing to evict but the line
+behind; more lookahead needs more slots - the user's four consecutive lines (a window of the line
+behind, the current and two ahead, the next-line want two lines out, the victim the slot furthest
+behind) is the next rung; it does not touch the call/return demand fills (lever 1).
+
+**THE BENCH'S ROOM MODEL WAS DISTORTING THE I SIDE (2026-09-19).** boot_gs_tb's merge back-pressure
+model started a no-room burst with 12/256 probability per free clock, bursts averaging 32 clocks: the
+modelled link had no room ~60% of the time, and the fetch stood 13.8 M of the Nox row's 59.1 M clocks
+on it (a new l1i book, "resident-not-retiring", split by cause, found it). The model is `--room=P`
+now (12 = as it was, kept as the default for the back-pressure paths that once hung on hardware; 0 =
+room always, for a performance row). The Nox row at --room=0 on the early landing: **40.35 M clocks**;
+the I side's real waits: not-resident (a fill on the way) 2.13 M clocks over ~0.74 M demand fills
+(~3 each), the RECOVER bubble 0.80 M (every fetch to an address the predictor did not expect - a
+taken transfer's target - costs one clock even with its line resident: the serve byte is registered
+and the 816's din is register-direct; the a2's l1i keeps a TARGET SERVE, a pre-read byte at the
+resolved target, and the two-line rewrite left it out), ifill 2.67 M. The bubble books are the l1i
+debug words 10-13 now (il_res_bubble, il_res_recover, il_notres, il_noroom in the host's map), for
+the card's DEC_I split on the next bit.
+
+**THE PAGE BRAM, RE-READ AGAINST THOSE NUMBERS.** A page store whose read address comes from a tag
+compare lands a line at the same clock as L2 does today (the dr port is nearly always free: 2.3
+clocks per fill against a floor of 2), so as a FILL SOURCE it buys ~nothing. Its worth is as the
+FETCH SOURCE, addressed by the PC directly with no compare on the address path (direct-mapped by
+pc[11:0] for one tile / 16 pages; two-way with two tiles / 32 pages, the tags compared in parallel
+and gating the retire, not the address): then ANY resident byte is one clock from its address -
+the recover bubble's cost - and the resident set is 4-8 KB instead of two lines, so the ~3-clock
+demand fills become 1-clock recovers, and with a target pre-read through the second port (the
+target serve) the taken transfers to resident code retire with no bubble at all. The scanner
+would read its bytes through that second port too. That is a rewrite of l1i's serve, not a bolt-on;
+the target serve is the piece both designs need and the cheap first step.
+
+**THE TARGET SERVE IS BACK (2026-09-20, rtl/gs/l1i.sv, from the a2's):** the target's byte is pre-read
+into its own register the clock the target is known - the table's opcode-time decision, or the
+operand-time resolution for a JMP/JSR (the high byte's clock, as the a2 does it) or a branch the table
+did not know - kept fresh while its line is held, and the fetch that arrives there retires from it the
+same clock. The Nox row at --room=0: **40.35 M -> 39.86 M clocks (-1.2%)**, the recover bubbles 0.80 M
+-> 0.23 M (the rest are returns, indirect jumps and targets whose line was not held), gs suite 18/18,
+14/14 checks. The row is 43.5% bus time (the boot's scan and disk), so on the map screen the share is
+about double. The count is l1i debug word 15 (il_tgt_serves).
+GS/OS 20 M instructions at --room=0 with it: 187.45 M clocks, 14/14 (the 306.9 M and 312.5 M rows
+above ran under the old room model and are not comparable); its I side: 11.18 M not-resident clocks
+against 1.21 M recovers - GS/OS misses lines, Nox mispredicts them.
+
+**ON HARDWARE, gs_pt52 (early landing + target serve + the DEC_I split; TIMING MET +0.000, 0 of
+74,623, a NEW DEEP TAIL of 403 endpoints b_ppn -> i_byte_q through the target select's retire terms,
+cut in the tree after the build: the select is `tgt_serve` alone now). THE NOX MAP, 5 s = 500 M
+clocks: 299.95 M ops = 58.8x (gs_pt51: 280.9 M = 55.0x, +6.8%). Buckets: retire 60.0%, DEC_D 14.1%
+(70.7 M), I fill wait 10.3% (51.4 M), SEQ_FAST 5.9% (29.3 M; 10.06 M fast ops, 7.17 M writes), DEC_I
+5.0% (25.1 M, was 44.2 M), D fill 3.9%, settle 0.7%. The I side 21.5% -> 15.3%. The new books, per
+5 s: 10.03 M target serves; 4.85 M recover bubbles left (returns, indirect jumps, RTI - the
+unpredictable transfers); 29.7 M not-resident clocks over ~8.9 M demand fills (31.0 M fills, 19.8 M
+next-line prefetches, 2.27 M target prefetches, 17.0 M taken transfers whose line was held); 0 no-room.
+Unexplained: ~42 M I-side clocks with the fetch up and neither resident-waiting nor line-waiting =
+turbo_ok low (the books gate on it) - the next bit splits those by reason. The page-BRAM fetch source's
+hardware target from these numbers: the 29.7 M demand-fill clocks -> ~8.9 M, the 4.85 M recovers stay
+one clock each: ~5% of the map's clocks, more on GS/OS.
+
 ## The L2 geometry on GS/OS (2026-09-19, `--l2=SETSxWAYS` before the CAM, the 50T question)
 
 The user has an immediate chance to build 50T boards (32,600 LUTs / 75 RAMB36) and keeps the

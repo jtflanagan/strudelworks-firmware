@@ -108,6 +108,11 @@ module page_cam #(
     output wire                    dr_ack,
     output logic                   dr_done,
     output logic [127:0]           dr_row,
+    // ...and the same row ONE CLOCK EARLIER, straight off the RAM's port B
+    // (way_ram's b_rdata, valid the clock after the ack): l1i lands its line
+    // from it and saves the register clock (docs/CORE_REFACTOR_65816.md,
+    // the I side's census 2026-09-19).
+    output wire  [127:0]           dr_erow,
     // The image.
     input  wire        serve,
     input  wire        inval,
@@ -251,6 +256,7 @@ module page_cam #(
     logic [127:0]    eb_wdata;
     wire [127:0] a_row;
     wire [127:0] b_row;
+    assign dr_erow = b_row;
     wire land = wl_v;
     way_ram #(.ROWS (N * 16)) u_ram (
         .clk     (clk),

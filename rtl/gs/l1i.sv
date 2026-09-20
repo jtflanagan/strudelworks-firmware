@@ -116,6 +116,7 @@ module l1i #(
     input  wire        dr_ack,
     input  wire        dr_done,
     input  wire [127:0] dr_row,
+    input  wire [127:0] dr_erow,      // the row the clock before dr_row (page_cam dr_erow)
     input  wire        op_place_v,
     input  wire [15:0] op_place_ppn,
     input  wire [SIDX-1:0] op_place_set,
@@ -159,6 +160,12 @@ module l1i #(
         excl = pair_q && ((tag[11:4] == 8'hC3 && !intc8rom_q) || (tag == 12'hCFF));
     endfunction
 
+    localparam integer TB_N = 4;      // the target table's entries (below)
+    logic        te_v   [0:TB_N-1];
+    logic [23:0] te_addr[0:TB_N-1];
+    logic [7:0]  te_op  [0:TB_N-1];
+    logic [15:0] te_tgt [0:TB_N-1];
+    logic [1:0]  te_rr;
     // ---- the serve (iline's, without the target serve) --------------------
     wire [19:0] pc_tag = {pc_bank, pc_addr[15:4]};
     wire hit0 = v[0] && (pc_tag == vtag[0]);
@@ -199,6 +206,33 @@ module l1i #(
     wire [15:0] res_tgt   = (bk_q == BK_BR) ? br_tgt : {i_din, lo_q};
     wire        res_taken = (bk_q == BK_BR) ? br_taken : 1'b1;
 
+    // ---- THE TARGET SERVE (the a2's, back; 2026-09-20) ----------------------
+    // A fetch to an address the predictor did not expect - the target of a
+    // taken transfer - cost one clock even with its line held: the serve
+    // byte is registered and the 816's din is register-direct.  So the
+    // target's byte is pre-read into its own register the clock the target
+    // is known (the opcode-time decision from the table, or the operand-time
+    // resolution for a JMP/JSR or a branch the table did not know) and kept
+    // fresh while the line is held; the fetch that arrives at that address
+    // retires from it the same clock (docs/CORE_REFACTOR_65816.md, the I
+    // side's census).  Same bank as the transfer: pc_bank at the decision.
+    logic        tgt_v;
+    logic [23:0] tgt_q;
+    logic        tgt_lhit_q;
+    logic [7:0]  tgt_byte_q;
+    wire        spec_pending = (bk_q == BK_ABS && bk_hi);
+    wire [15:0] spec_tgt = {i_byte_q, lo_q};
+    wire [15:0] tgt_look = spec_pending ? spec_tgt : tgt_q[15:0];
+    wire [15:0] tgt_inc  = tgt_q[15:0] + 16'd1;
+    wire        ht0 = v[0] && ({pc_bank, tgt_look[15:4]} == vtag[0]);
+    wire        ht1 = v[1] && ({pc_bank, tgt_look[15:4]} == vtag[1]);
+    wire        hg0 = v[0] && ({pc_bank, tgt_inc[15:4]}  == vtag[0]);
+    wire        hg1 = v[1] && ({pc_bank, tgt_inc[15:4]}  == vtag[1]);
+    wire [7:0]  b_tgt    = ht0 ? ldata[0][8 * tgt_look[3:0] +: 8] : ldata[1][8 * tgt_look[3:0] +: 8];
+    wire [7:0]  b_tgtinc = hg0 ? ldata[0][8 * tgt_inc[3:0]  +: 8] : ldata[1][8 * tgt_inc[3:0]  +: 8];
+    wire        tgt_here  = tgt_v && cyc_is_i && cpu_rw && ({pc_bank, pc_addr} == tgt_q);
+    wire        tgt_serve = tgt_here && tgt_lhit_q && !(lhit_q && (exp_q == pc_addr));
+
     // ---- the snoops, combinational: an image write against the buffers ------
     wire snp = cl_valid && !cl_rw && cl_wr_image;
     wire snp_kill0 = (snp      && v[0] && (b_ppn[0] == cl_ppn) && (vtag[0][3:0] == cl_off[7:4])) ||
@@ -218,11 +252,12 @@ module l1i #(
 
     // ---- the retire ---------------------------------------------------------
     wire retire = !cpu_rst && ihit && turbo_ok && !kill_now && ev_room &&
-                  lhit_q && (exp_q == pc_addr);
+                  ((lhit_q && (exp_q == pc_addr)) || tgt_serve);
     assign turbo_commit = retire;
     assign turbo_sync   = retire && cpu_sync;
     assign cyc_en       = accel_cyc_en || retire;
-    assign i_din        = lhit_q ? i_byte_q : accel_din;
+    assign i_din        = tgt_serve ? tgt_byte_q :
+                          lhit_q    ? i_byte_q  : accel_din;
 
     // ---- the branch scanner and the target table (rtl/gs/iscan.sv) --------------
     wire        sc_rd_slot;
@@ -244,12 +279,6 @@ module l1i #(
     );
     // Four entries {bank, opcode address, opcode, target}, replaced round-robin
     // (an entry for the same opcode is refreshed in place), cleared with the map.
-    localparam integer TB_N = 4;
-    logic        te_v   [0:TB_N-1];
-    logic [23:0] te_addr[0:TB_N-1];
-    logic [7:0]  te_op  [0:TB_N-1];
-    logic [15:0] te_tgt [0:TB_N-1];
-    logic [1:0]  te_rr;
     // The lookup, by the fetch's full address: register-direct pc_bank/pc_addr
     // against registered entries, its result registered into the want.
     logic        th_hit;
@@ -281,7 +310,38 @@ module l1i #(
     logic [11:0] ew_tag;
     wire [11:0]  nx_tag = exp_q[15:4] + 12'd1;
     wire nx_held = (v[0] && vtag[0] == {pc_bank, nx_tag}) || (v[1] && vtag[1] == {pc_bank, nx_tag});
-    wire want_next = turbo_en && lhit_q && exp_q[3:2] == 2'b11 && !nx_held;
+    // THE LOOP GUARD (a bench switch, off - see below): the next line's fill
+    // takes the other slot, and when a branch in the current line points back
+    // into that slot's line (the table knows it: a backward branch of a loop
+    // that spans the two), the prefetch would evict the loop's first half
+    // every iteration.
+    logic loop_guard;
+    always_comb begin
+        loop_guard = 1'b0;
+        for (int i = 0; i < TB_N; i = i + 1)
+            if (te_v[i] && te_addr[i][23:4] == {pc_bank, exp_q[15:4]} &&
+                v[!cur] && vtag[!cur] == {pc_bank, te_tgt[i][15:4]})
+                loop_guard = 1'b1;
+    end
+    // MEASURED 2026-09-19 (the Nox boot, 4 M instructions, sim/run_boot_gs_tb.sh
+    // --hdv=nox_los.HDV --l2=32): the want in the LAST QUARTER and NO guard is
+    // the best of the four - 59.14 M clocks against the base's 60.79 M with the
+    // early landing below; the guard 59.98 M (a suppressed prefetch is a demand
+    // miss when the loop exits or falls through); the half line with the guard
+    // 59.58 M and a third more fills (a target landing in a line's upper half
+    // evicts the line it came from at once).  Both stay as bench switches:
+    // -DL1I_NX_HALF, -DL1I_LOOP_GUARD.
+`ifdef L1I_NX_HALF
+    wire nx_point = exp_q[3];
+`else
+    wire nx_point = exp_q[3:2] == 2'b11;
+`endif
+`ifdef L1I_LOOP_GUARD
+    wire nx_guard = loop_guard;
+`else
+    wire nx_guard = 1'b0;
+`endif
+    wire want_next = turbo_en && lhit_q && nx_point && !nx_held && !nx_guard;
     wire want_any  = want_fetch || bt_v || ew_v || want_next;
     wire [11:0] want_tag = want_fetch ? pc_addr[15:4] : bt_v ? bt_tag : ew_v ? ew_tag : nx_tag;
     wire        want_is_fetch = want_fetch;
@@ -300,7 +360,7 @@ module l1i #(
 
     assign la_vpage = {pc_bank, want_tag[11:4]};
     assign p_addr   = {pc_bank, want_tag, 4'h0};
-    assign fill_busy = (fst == F_DR) || (fst == F_W1) || (fst == F_W2);
+    assign fill_busy = (fst == F_DR) || (fst == F_W1);
     assign claim = turbo_en && cyc_is_i && cpu_rw &&
                    (ihit || (fill_busy && (f_vtag == pc_tag)));
 
@@ -316,15 +376,51 @@ module l1i #(
     wire step    = retire || (accel_cyc_en && cyc_is_i && cpu_rw && (pc_addr == exp_q));
     wire recover = turbo_en && cyc_is_i && cpu_rw && !step && (pc_addr != exp_q);
 
+    wire [15:0] w_addr   = step ? exp_inc : recover ? pc_addr : exp_q;   // what exp_q becomes
+    wire        land_now = (fst == F_W1) && !f_restart && turbo_en;
+    wire        land_hit = land_now && ({pc_bank, w_addr[15:4]} == f_vtag);
     always_ff @(posedge clk) begin
         if (rst || cpu_rst) begin
             exp_q <= 16'd0; lhit_q <= 1'b0; i_byte_q <= 8'd0;
             bk_q <= BK_NONE; bk_hi <= 1'b0; br_op <= 8'd0; lo_q <= 8'd0;
+            tgt_v <= 1'b0; tgt_q <= 24'd0; tgt_lhit_q <= 1'b0; tgt_byte_q <= 8'd0;
         end else begin
-            exp_q    <= step ? exp_inc : recover ? pc_addr : exp_q;
-            lhit_q   <= step    ? (hi0 || hi1) :
-                        recover ? (hc0 || hc1) : (hh0 || hh1);
-            i_byte_q <= step ? b_inc : recover ? b_cur : b_hold;
+            if (tgt_serve) begin
+                // The stream continues from the served target.  On tgt_serve
+                // alone, not the retire: the retire's kill and room terms
+                // put the snoop compare in front of the serve register (a
+                // new deep tail of 403 endpoints on gs_pt52, met at +0.000).
+                // A serve that does not retire this clock reloads the same
+                // values next clock, so nothing is lost.
+                exp_q    <= tgt_inc;
+                lhit_q   <= (hg0 || hg1);
+                i_byte_q <= b_tgtinc;
+            end else begin
+                exp_q    <= step ? exp_inc : recover ? pc_addr : exp_q;
+                // THE BYPASS: the line landing this clock is the one the stream
+                // wants next - the serve register takes its byte off the landing
+                // row now, and the fetch retires next clock instead of waiting a
+                // clock for the buffer's copy and another for the lookup
+                // (2026-09-19; two of a demand fill's five clocks).
+                lhit_q   <= land_hit ? 1'b1 :
+                            step    ? (hi0 || hi1) :
+                            recover ? (hc0 || hc1) : (hh0 || hh1);
+                i_byte_q <= land_hit ? dr_erow[8 * w_addr[3:0] +: 8] :
+                            step ? b_inc : recover ? b_cur : b_hold;
+            end
+            // The target's byte, kept fresh while its line is held (a line
+            // that lands after the decision is picked up the clock it does).
+            tgt_lhit_q <= (spec_pending ? (lhit_q && !tgt_serve) : tgt_v) && (ht0 || ht1) && !kill_now;
+            tgt_byte_q <= b_tgt;
+            if (i_serve && cpu_sync) tgt_v <= 1'b0;      // served, or passed by
+            if (th_go) begin                             // the opcode-time decision
+                tgt_v <= 1'b1;
+                tgt_q <= {pc_bank, th_tgt};
+            end
+            if (resolving && res_taken) begin            // the operand-time resolution
+                tgt_v <= 1'b1;
+                tgt_q <= {pc_bank, res_tgt};
+            end
             if (i_serve) begin
                 if (cpu_sync) begin
                     bk_q  <= (turbo_en && op_is_branch) ? BK_BR :
@@ -374,6 +470,11 @@ module l1i #(
         end
     end
 `ifndef SYNTHESIS
+    logic w1_q;
+    always @(posedge clk) begin
+        w1_q <= (fst == F_W1) && !f_restart && !rst;
+        if (w1_q && !dr_done) $error("l1i: no dr_done the clock after the landing");
+    end
     // The flags at the opcode fetch are the flags the branch uses: checked at
     // the operand, where the truth is computed as before.
     always @(posedge clk)
@@ -400,7 +501,30 @@ module l1i #(
     end
 
     // ---- the books -----------------------------------------------------------
-    logic [31:0] cnt_slow_i, cnt_fills, cnt_kills, cnt_unserv, cnt_tlb_waits, cnt_prefetch, cnt_bt, cnt_bt_held, cnt_bt_miss;
+    // THE BUBBLE BOOKS (2026-09-19; the debug words 10-13, the card's DEC_I split): clocks a turbo fetch stands
+    // with its line RESIDENT and does not retire - the predictor's recover
+    // (the address was not the expected one: a taken branch, a jump, a
+    // return) against a fetch whose line is still landing - and, for the
+    // recover, whether the opcode was a sync (the target of a transfer).
+    logic [31:0] cnt_res_bubble, cnt_res_recover, cnt_res_sync, cnt_notres;
+    logic [31:0] cnt_res_nolhit, cnt_res_kill, cnt_res_noroom, cnt_res_other;
+    always_ff @(posedge clk) begin
+        if (rst || cpu_rst) begin
+            cnt_res_bubble <= 32'd0; cnt_res_recover <= 32'd0; cnt_res_sync <= 32'd0; cnt_notres <= 32'd0;
+            cnt_res_nolhit <= 32'd0; cnt_res_kill <= 32'd0; cnt_res_noroom <= 32'd0; cnt_res_other <= 32'd0;
+        end else if (turbo_en && cyc_is_i && cpu_rw && !retire && turbo_ok) begin
+            if (hit0 || hit1) begin
+                cnt_res_bubble <= cnt_res_bubble + 32'd1;
+                if (pc_addr != exp_q) cnt_res_recover <= cnt_res_recover + 32'd1;
+                else if (!lhit_q)     cnt_res_nolhit <= cnt_res_nolhit + 32'd1;
+                else if (kill_now)    cnt_res_kill <= cnt_res_kill + 32'd1;
+                else if (!ev_room)    cnt_res_noroom <= cnt_res_noroom + 32'd1;
+                else                  cnt_res_other <= cnt_res_other + 32'd1;
+                if (pc_addr != exp_q && cpu_sync) cnt_res_sync <= cnt_res_sync + 32'd1;
+            end else cnt_notres <= cnt_notres + 32'd1;
+        end
+    end
+    logic [31:0] cnt_slow_i, cnt_fills, cnt_kills, cnt_unserv, cnt_tlb_waits, cnt_prefetch, cnt_bt, cnt_bt_held, cnt_bt_miss, cnt_tgt_serves;
 
     // ---- the engine, the buffers, the events -----------------------------------
     always_ff @(posedge clk) begin
@@ -426,7 +550,7 @@ module l1i #(
             tev_bank <= 8'd0;
             cnt_slow_i <= 32'd0; cnt_fills <= 32'd0;
             cnt_kills <= 32'd0; cnt_unserv <= 32'd0; cnt_tlb_waits <= 32'd0; cnt_prefetch <= 32'd0;
-            cnt_bt <= 32'd0; cnt_bt_held <= 32'd0; cnt_bt_miss <= 32'd0;
+            cnt_bt <= 32'd0; cnt_bt_held <= 32'd0; cnt_bt_miss <= 32'd0; cnt_tgt_serves <= 32'd0;
         end else begin
             if (accel_cyc_en && cyc_is_i && cpu_rw) cnt_slow_i <= cnt_slow_i + 32'd1;
 
@@ -436,6 +560,7 @@ module l1i #(
             // The table's books: taken decisions whose line was held, and
             // opcode fetches of a relative branch the table did not know.
             if (th_go && th_held) cnt_bt_held <= cnt_bt_held + 32'd1;
+            if (retire && tgt_serve) cnt_tgt_serves <= cnt_tgt_serves + 32'd1;
             if (i_serve && cpu_sync && !th_hit && turbo_en && op_is_branch) cnt_bt_miss <= cnt_bt_miss + 32'd1;
 
             if (kill0) begin v[0] <= 1'b0; cnt_kills <= cnt_kills + 32'd1; end
@@ -487,12 +612,11 @@ module l1i #(
                     end
                 end
                 F_DR: if (dr_ack) begin dr_req <= 1'b0; fst <= F_W1; end
-                F_W1: fst <= F_W2;
-                F_W2: begin
-`ifndef SYNTHESIS
-                    if (!dr_done) $error("l1i: no dr_done two clocks after the ack");
-`endif
-                    ldata[f_slot] <= dr_row;
+                F_W1: begin
+                    // The row is on the RAM's output this clock (page_cam
+                    // dr_erow); it was taken a clock later from dr_row until
+                    // 2026-09-19.  dr_done follows next clock, checked below.
+                    ldata[f_slot] <= dr_erow;
                     v[f_slot]     <= 1'b1;
                     vtag[f_slot]  <= f_vtag;
                     b_ppn[f_slot] <= f_ppn;
@@ -521,8 +645,13 @@ module l1i #(
             4'd7:  dbg_val = cnt_bt;
             4'd8:  dbg_val = cnt_bt_held;
             4'd9:  dbg_val = cnt_bt_miss;
+            4'd10: dbg_val = cnt_res_bubble;
+            4'd11: dbg_val = cnt_res_recover;
+            4'd12: dbg_val = cnt_notres;
+            4'd13: dbg_val = cnt_res_noroom;
             4'd14: dbg_val = {v[1], v[0], fst, cur, bt_v, 1'b0, turbo_en, serve, inval,
                               intc8rom_q, lhit_q, ew_v, dr_req, pair_q, 16'd0};
+            4'd15: dbg_val = cnt_tgt_serves;
             default: dbg_val = 32'hDEAD_0001;
         endcase
     end

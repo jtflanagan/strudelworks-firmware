@@ -713,7 +713,7 @@ module gs_top #(
     wire [3:0]  fi_reg_w, fj_reg_w, dr_line_w, dr_line_i, dr_line_d;
     wire        fi_fold_w, fj_fold_w;
     wire        dr_req_w, dr_ack_w, dr_done_w, dr_req_i, dr_ack_i, dr_done_i, dr_req_d, dr_ack_d, dr_done_d;
-    wire [127:0] dr_row_w;
+    wire [127:0] dr_row_w, dr_erow_w;
     wire [31:0] tlb_fills_w, tlb_deaths_w;
 
     // ---- the soft CPU -------------------------------------------------------
@@ -1301,7 +1301,7 @@ module gs_top #(
         .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
         .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
         .dr_req (dr_req_i), .dr_set (dr_set_i), .dr_way (dr_way_i), .dr_line (dr_line_i),
-        .dr_ack (dr_ack_i), .dr_done (dr_done_i), .dr_row (dr_row_w),
+        .dr_ack (dr_ack_i), .dr_done (dr_done_i), .dr_row (dr_row_w), .dr_erow (dr_erow_w),
         .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
         .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
@@ -2065,7 +2065,7 @@ module gs_top #(
         .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
         .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w), .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
-        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w),
+        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w), .dr_erow (dr_erow_w),
         // The line-row port has no user on this card since rung 3: both L1
         // sides read by the direct way read.
         .il_req      (1'b0),

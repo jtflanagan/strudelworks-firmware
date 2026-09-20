@@ -54,6 +54,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     parameter integer L2_SETS = 64,      // the CAM-L2's slots (--l2=N)
                     parameter integer L2_WAYS = 2,       // nominal: a one-bit way, always zero
                     parameter integer FAST_DMA = 1,      // 0: the hard disk's blocks land by the bus (--slowdma)
+                    parameter integer ROOM_P = 12,       // the merge's no-room model (--room=P; 0 = never)
                     parameter integer MAX_CLKS = 400000000,
                     parameter integer PHI0_HIGH = 49,
                     // What the IIe backplane puts on the data pins when
@@ -475,7 +476,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [3:0]  fi_reg_w, fj_reg_w, dr_line_w, dr_line_i, dr_line_d;
     wire        fi_fold_w, fj_fold_w;
     wire        dr_req_w, dr_ack_w, dr_done_w, dr_req_i, dr_ack_i, dr_done_i, dr_req_d, dr_ack_d, dr_done_d;
-    wire [127:0] dr_row_w;
+    wire [127:0] dr_row_w, dr_erow_w;
     wire [31:0] tlb_fills_w, tlb_deaths_w;
     assign dr_req_w  = dr_req_d | dr_req_i;
     assign dr_set_w  = dr_req_d ? dr_set_d  : dr_set_i;
@@ -498,7 +499,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     always_ff @(posedge clk) begin
         room_lfsr <= {room_lfsr[30:0], room_lfsr[31] ^ room_lfsr[21] ^ room_lfsr[1] ^ room_lfsr[0]};
         if (room_burst != 6'd0) room_burst <= room_burst - 6'd1;
-        else if (room_lfsr[7:0] < 8'd12) room_burst <= room_lfsr[13:8];   // ~5%: a burst of no room
+        // ROOM_P of 256 per free clock starts a burst (12 = the model as it
+        // was: a burst averages 32 clocks, so the modelled link has no room
+        // about 60% of the time - the bench's I-side numbers carried that
+        // until 2026-09-19; 0 = room always, for a performance row).
+        else if (room_lfsr[7:0] < 8'(ROOM_P)) room_burst <= room_lfsr[13:8];
         room_q   <= (room_burst == 6'd0);
         room_w_q <= room_q;
     end
@@ -564,7 +569,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
         .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
         .dr_req (dr_req_i), .dr_set (dr_set_i), .dr_way (dr_way_i), .dr_line (dr_line_i),
-        .dr_ack (dr_ack_i), .dr_done (dr_done_i), .dr_row (dr_row_w),
+        .dr_ack (dr_ack_i), .dr_done (dr_done_i), .dr_row (dr_row_w), .dr_erow (dr_erow_w),
         .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
         .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
@@ -1167,7 +1172,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
         .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w), .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
-        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w),
+        .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w), .dr_erow (dr_erow_w),
         .il_req (1'b0), .il_ppn (16'd0), .il_line (4'd0), .il_src (1'b1),
         .il_ack (il_ack), .il_done (il_done), .il_ok (il_ok), .il_row (il_row),
         .serve (serve), .inval (1'b0), .cnt_clr (1'b0), .image_ready (image_ready),
@@ -3097,6 +3102,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         $display("    L1-I: fetches the sequencer served %0d (the bubbles); line fills %0d (next-line prefetches %0d, opcode-time target fetches %0d, TLB waits %0d), kills %0d, unservable %0d; targets already held %0d, branches the table did not know %0d; turbo (one-clock) fetches %0d",
                  u_l1i.cnt_slow_i, u_l1i.cnt_fills, u_l1i.cnt_prefetch, u_l1i.cnt_bt, u_l1i.cnt_tlb_waits,
                  u_l1i.cnt_kills, u_l1i.cnt_unserv, u_l1i.cnt_bt_held, u_l1i.cnt_bt_miss, turbo_ops);
+        $display("    L1-I bubbles: resident-not-retiring clocks %0d (recover %0d, of which at a sync %0d; expected but byte register empty %0d; kill_now %0d; no event room %0d; other %0d); not-resident clocks %0d",
+                 u_l1i.cnt_res_bubble, u_l1i.cnt_res_recover, u_l1i.cnt_res_sync, u_l1i.cnt_res_nolhit, u_l1i.cnt_res_kill, u_l1i.cnt_res_noroom, u_l1i.cnt_res_other, u_l1i.cnt_notres);
         $display("    slot fast ops: %0d, %0d clocks from present to commit on average", sl_lat_n, sl_lat_n == 0 ? 0 : sl_lat_sum / sl_lat_n);
         $display("    clock census of %0d clocks: retire %0d (%s%%), ifill %0d (%s%%), dread %0d (%s%%), dserve2 %0d (%s%%), seq fast %0d (%s%%), seq bus %0d (%s%%), held %0d, null %0d, disk stall %0d (%s%%), settle %0d (%s%%), drain %0d (%s%%), claim %0d (%s%%), decide %0d (%s%%), other %0d (%s%%)",
                  cc_all, cc_retire, bc_pct(cc_retire, cc_all), cc_ifill, bc_pct(cc_ifill, cc_all), cc_dread, bc_pct(cc_dread, cc_all),

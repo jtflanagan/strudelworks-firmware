@@ -49,6 +49,8 @@
 #     --button=AT[:HOLD]  hold the MOUSE BUTTON (PB0) down at instruction AT
 #                      for HOLD clocks.  The XMAS demo's "CLICK MOUSE" prompt
 #                      does NOT take a key - it polls $C061 for the button.
+#     --vflags=FLAGS   extra Verilator flags (a -D for an RTL switch)
+#     --room=P         the merge's no-room model: P of 256 per clock starts a burst (12; 0 = never)
 #     --key=CODE:AT[:MODS]  press an ADB keycode at instruction AT, with the
 #                      modifier byte MODS in $C025's order (1 shift, 2 ctrl,
 #                      4 caps, $40 option, $80 command)
@@ -96,6 +98,8 @@ for a in "$@"; do
         --engtrace) engtrace=1 ;;
         --bram=*) bram="${a#*=}" ;;
         --key=*) IFS=: read -r keycode keyat keymods <<< "${a#*=}"; keymods="${keymods:-0}" ;;
+        --vflags=*) vflags="${a#*=}" ;;
+        --room=*) roomp="${a#*=}" ;;
         --button=*) IFS=: read -r btnat btnhold <<< "${a#*=}"; btnhold="${btnhold:-2000000}" ;;
         --hold=*) keyhold="${a#*=}" ;;
         --mirror=*) mirror="${a#*=}" ;;
@@ -194,7 +198,7 @@ echo "== boot_gs_tb: rom=$(basename "$rom") ($chunks chunks) mode=$mode target=$
 
 if [ "$vl" = 1 ]; then
     obj="$work/obj_gs_$tag"
-    verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module boot_gs_tb \
+    verilator --binary --timing -j 4 -O2 -Wno-fatal --top-module boot_gs_tb ${vflags:-} \
         -I"$root/rtl/common" -I"$root/rtl/gs" \
         -GUCODE="\"$root/rtl/gs/cpu65816_ucode.hex\"" \
         -GUCODE0="\"$root/rtl/gs/cpu65816_ucode0.hex\"" \
@@ -207,7 +211,7 @@ if [ "$vl" = 1 ]; then
         -GDDR_LAT="$ddrlat" \
         -GMAX_INSTRS="$instrs" \
         -GTLB_N="$tlbn" \
-        -GL2_SETS="$l2sets" -GL2_WAYS="$l2ways" $waydefs -GFAST_DMA="$fastdma" \
+        -GL2_SETS="$l2sets" -GL2_WAYS="$l2ways" $waydefs -GFAST_DMA="$fastdma" -GROOM_P="${roomp:-12}" \
         -GMAX_CLKS="$clks" \
         -GHDROMF="\"$work/hdrom.hex\"" \
         -GGS_HD_ROM=$gs_hd_rom \
