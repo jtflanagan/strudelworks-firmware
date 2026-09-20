@@ -440,14 +440,18 @@ module apple_mmu #(
     // recomputes a held line's validity from its stored region against
     // these, without re-classifying the line's address.
     output wire [NREG*RT_W-1:0] rt_rd_flat,
-    output wire [7:0]  rwb_p1,
-    // THE 65816's BANK REGISTERS ARE PART OF THE MAP (docs/GS.md rung 6):
-    // the fronts' lines are valid in the bank they were fetched in, and a
-    // JSL, a PLB or an RTL moves the bank exactly as a switch moves the
-    // side - so both join map_now and a change of either is a map change,
-    // revalidating every held line.  Zero on a IIe, where they fold away.
-    input  wire [7:0]  core_dbr,
-    input  wire [7:0]  core_pbr
+    output wire [7:0]  rwb_p1
+    // THE BANK REGISTERS ARE NOT PART OF THE MAP ANY MORE (rung 5,
+    // 2026-09-20).  They joined it at rung 6 because the fronts' lines were
+    // "valid in the bank they were fetched in" - a line carried no bank, so a
+    // JSL, a PLB or an RTL moved the bank out from under every held line and
+    // the only safe answer was to call it a map change and revalidate all of
+    // them.  Rungs 2 and 3 ended that: the TLB is keyed by {bank, page}, L1-I
+    // tags its buffers {bank, addr[15:4]} and l1d's candidate is 24 bits, so
+    // EVERY HELD LINE CARRIES ITS OWN BANK.  A bank-register write translates
+    // nothing differently; a lookup in another bank simply misses.  So PBR and
+    // DBR are out of map_now, and with them the settle every write of one used
+    // to cost.
 );
 
     // RamWorks banks: 0..RW_BANKS-1 exist; a write of any other number is
@@ -1293,11 +1297,11 @@ module apple_mmu #(
     // map_changed is bit-for-bit what the IIe sweep has always seen.
     // STATEREG needs no entry: its write moves the seven switches that are
     // already in sw_state.
-    logic [52:0] map_q;
+    logic [36:0] map_q;
     logic        map_s1, map_s2;
     // CYAREG's shadow-in-all-banks bit moves where a write to banks $03-$7F
     // lands a second time, so it is part of the map like SHADOW.
-    wire [52:0] map_now = {gs_allbanks, core_dbr, core_pbr, gs_shadow, gs_sltrom, sw_state, intc8rom, rw_bank};
+    wire [36:0] map_now = {gs_allbanks, gs_shadow, gs_sltrom, sw_state, intc8rom, rw_bank};
     always_ff @(posedge clk) begin
         map_q       <= map_now;
         map_changed <= rst || !res_sync || (map_q != map_now);

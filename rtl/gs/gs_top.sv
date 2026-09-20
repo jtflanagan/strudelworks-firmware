@@ -831,14 +831,16 @@ module gs_top #(
 
     end endgenerate
 
-    // THE BANK HOLD (docs/GS.md rung 6).  DBR and PBR are part of the map, so
-    // a write to either is a map change - but map_changed rises one clock
-    // after the write, and on the clock between, the next fetch is already
-    // at the new PBR while every front's valid bit still describes the old
-    // one.  The core's registered bank_wr covers exactly that clock; OR'd
-    // into the settle every consumer already honours, nothing else changes.
-    // Zero at GS = 0.
-    wire l1_settling = map_settling || cpu_bank_wr;
+    // THE BANK HOLD IS GONE (rung 5, 2026-09-20).  It existed because DBR and
+    // PBR were part of the map: map_changed rose a clock after the write, and
+    // on the clock between, the next fetch was already at the new PBR while
+    // every front's valid bit still described the old one - so the core's
+    // registered bank_wr covered exactly that clock.  With the bank in every
+    // tag (the TLB's key, L1-I's buffers, l1d's candidate) a bank write is not
+    // a map change and there is no window to cover: PHB, PLB, every JSL and
+    // every RTL stop costing a settle.  cpu_bank_wr stays in the snapshot word
+    // below, where it is a diagnostic and nothing depends on it.
+    wire l1_settling = map_settling;
 
     // ---- driving ------------------------------------------------------------
     wire [15:0] addr_drive;
@@ -1798,9 +1800,7 @@ module gs_top #(
         .map_changed (map_changed),
         .map_settling (map_settling),
         .rt_rd_flat (rt_rd_flat),
-        .rwb_p1     (rwb_p1_w),
-        .core_dbr   (cpu_dbr),
-        .core_pbr   (cpu_pc_bank)
+        .rwb_p1     (rwb_p1_w)
     );
 
     // ---- the IIgs chipset on $C0xx (docs/GS.md rung 3b, rung 4) -------------

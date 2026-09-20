@@ -165,10 +165,30 @@ module page_cam #(
     function automatic [N-1:0] lowest_bit(input [N-1:0] v);
         lowest_bit = v & (-v);
     endfunction
+    // ONE-HOT TO BINARY, BY OR AND NOT BY PRIORITY (2026-09-20).  Written as
+    // `if (oh[i]) enc = i`, this is a SIXTY-FOUR DEEP PRIORITY CHAIN: each
+    // iteration must override every one before it, so synthesis builds the
+    // slots in series and the index falls out at the far end.  It sits in the
+    // middle of every path into the cache - the entrant's slot (slot0), the
+    // victim (vic_q) and the PLRU's pick - and the rung5 build's worst path
+    // walked it slot by slot (d_v_reg[49] -> [41] -> [36] -> ...) for eight of
+    // its twelve ns, ending at the way RAM's address.
+    //
+    // OR is associative where an override is not, so the same loop written
+    // with `|` is a BALANCED TREE: each output bit is the OR of the inputs
+    // whose index carries it, six 32-input reductions, two LUT6 levels.
+    //
+    // THIS IS ONLY EQUAL TO THE PRIORITY FORM FOR A ONE-HOT INPUT - for two
+    // set bits it returns the OR of their indices, which is a third slot.
+    // Every caller is one-hot: `m0` is a page compared against a directory
+    // that holds it once (a fill happens only on a miss and the single engine
+    // serialises fills; the assertion below watches it anyway), the victim is
+    // `lowest_bit`'s output or the PLRU tree's own pick, and `s_plru` is that
+    // pick carried down the pipeline.
     function automatic [SW-1:0] enc(input [N-1:0] oh);
         int i;
         enc = '0;
-        for (i = 0; i < N; i = i + 1) if (oh[i]) enc = SW'(i);
+        for (i = 0; i < N; i = i + 1) if (oh[i]) enc = enc | SW'(i);
     endfunction
     function automatic [N-1:0] plru_victim(input [NODES-1:0] b);
         int l, node;
@@ -232,6 +252,16 @@ module page_cam #(
     always_comb for (int i = 0; i < N; i = i + 1) m0[i] = d_v[i] && (d_tag[i] == en_ppn);
     wire          hit0  = |m0;
     wire [SW-1:0] slot0 = enc(m0);
+`ifndef SYNTHESIS
+    // enc() IS AN OR-REDUCTION AND ASSUMES ONE-HOT (above).  A directory that
+    // ever held one page in two slots would make it answer a third, so the
+    // assumption is watched rather than trusted: this fires on the first
+    // duplicate, in every bench, for ever.
+    always_ff @(posedge clk)
+        if (!rst && e_any && hit0 && ((m0 & (m0 - 1)) != {N{1'b0}}))
+            $error("page_cam: page $%04x is in more than one slot (m0=%b): enc() assumes one-hot",
+                   en_ppn, m0);
+`endif
     wire [AW-1:0] en_row = {slot0, en_ln};
 
     // ---- the landing register (P1 -> the row) ------------------------------

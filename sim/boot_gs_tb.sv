@@ -450,11 +450,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
 
     // The fronts, as master_top chains them (rung 6): the sequencer's cyc_en
     // and byte pass through iline then dline to the core; the books ride
-    // turbo_commit/d_commit; the bank-write hold joins the settle.
+    // turbo_commit/d_commit.  THE BANK-WRITE HOLD IS GONE AT RUNG 5 - and it
+    // had to be taken out HERE as well as in gs_top, which holds its own copy
+    // of this wire: the first run after the map change read byte-identical
+    // because the bench was still applying the hold.
     wire        seq_cyc_en, iline_cyc_en, turbo_en, turbo_ok, turbo_commit, turbo_sync;
     wire        turbo_claim, turbo_wr, turbo_tick, dline_tick, seq_fast_tick;
     wire        d_commit_w, d_claim_w, d_pending_w;
-    wire        l1_settling = map_settling || cpu_bank_wr;
+    wire        l1_settling = map_settling;
     wire        tev_valid, tev_sync, dev_valid, dev_rw;
     wire [15:0] tev_addr, dev_addr;
     wire [7:0]  tev_data, dev_data, tev_bank, dev_bank;
@@ -858,8 +861,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .cl_ppn (cl_ppn_w), .pf_ppn (pf_ppn_w),
         .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
-        .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w),
-        .core_dbr (cpu_dbr), .core_pbr (cpu_pc24[23:16])
+        .map_settling (map_settling), .rt_rd_flat (rt_rd_flat), .rwb_p1 (rwb_p1_w)
     );
 
     // ---- the IIgs chipset on $C0xx ------------------------------------------------
