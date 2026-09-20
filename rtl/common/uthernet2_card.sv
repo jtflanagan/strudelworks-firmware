@@ -188,48 +188,78 @@ module uthernet2_card #(
                           (ptr == 16'h7FFF) ? 16'h6000 : ptr + 16'd1;
 
     // ---- the regions from RMSR/TMSR (AppleWin's setRXSizes/setTXSizes) --------------
-    // Two bits a socket, 1 KB << bits, laid end to end and clamped at 8 KB.
-    function automatic [13:0] region_base(input [7:0] msr, input [1:0] n);
-        integer i; logic [14:0] sum;
-        begin
-            sum = 15'd0;
-            for (i = 0; i < 4; i = i + 1)
-                if (i < n) sum = sum + (15'd1024 << msr[2*i +: 2]);
-            region_base = (sum > 15'd8192) ? 14'd8192 : sum[13:0];
-        end
-    endfunction
-    function automatic [13:0] region_size(input [7:0] msr, input [1:0] n);
-        logic [14:0] base, top;
-        begin
-            base = {1'b0, region_base(msr, n)};
-            top  = base + (15'd1024 << msr[2*n +: 2]);
-            if (top > 15'd8192) top = 15'd8192;
-            region_size = top[13:0] - base[13:0];
-        end
-    endfunction
+    // Two bits a socket, 1 KB << bits, laid end to end and clamped at 8 KB -
+    // which is a RUNNING SUM, and was written as one that starts over for
+    // every socket: region_base(n) summed n terms, region_size(n) called
+    // region_base twice more, and the whole thing was rebuilt every clock
+    // for four sockets and two registers.  A dozen adders, standing, for two
+    // bytes that move once at setup and never again.
+    //
+    // Here it is what it is: an accumulator and a step.  A write to RMSR or
+    // TMSR (or a chip reset) kicks a four-step walk that lays the four
+    // regions down, one socket a clock, RX and TX together - two adders in
+    // place of two dozen.  The core is held while it walks, because the
+    // masks are live wiring; four clocks, once, at setup.
+    localparam [14:0] REG_TOP = 15'd8192;
     logic [13:0] rx_base [0:3], rx_size [0:3], tx_base [0:3], tx_size [0:3];
     logic [12:0] rx_mask [0:3], tx_mask [0:3];
-    integer ri;
+    logic [2:0]  rg_n;                  // 0..3 walking, 4 = laid down
+    logic [14:0] rg_racc, rg_tacc;      // where the next region starts
+    wire         rg_busy = (rg_n != 3'd4);
+    wire [1:0]   rg_s    = rg_n[1:0];
+    wire [14:0]  rg_rsum = rg_racc + (15'd1024 << rmsr[2*rg_s +: 2]);
+    wire [14:0]  rg_tsum = rg_tacc + (15'd1024 << tmsr[2*rg_s +: 2]);
+    wire [14:0]  rg_rend = (rg_rsum > REG_TOP) ? REG_TOP : rg_rsum;
+    wire [14:0]  rg_tend = (rg_tsum > REG_TOP) ? REG_TOP : rg_tsum;
+    wire [13:0]  rg_rlen = rg_rend[13:0] - rg_racc[13:0];
+    wire [13:0]  rg_tlen = rg_tend[13:0] - rg_tacc[13:0];
+    // Sn_TX_FSR, a clock behind, for the one socket whose pointers or region
+    // just moved - the same clock's lag the four-at-once form had, and one
+    // subtractor instead of four.
+    logic [1:0]  fs_n;
+    logic        fs_pend;
+    wire         fs_kick_sock = reg_write && p_sock &&
+                                ((ptr[5:0] == 6'h24) || (ptr[5:0] == 6'h25));
     always_ff @(posedge clk) begin
-        for (ri = 0; ri < 4; ri = ri + 1) begin : regions
-            logic [13:0] rs, ts;
-            rs = region_size(rmsr, ri[1:0]);
-            ts = region_size(tmsr, ri[1:0]);
-            rx_base[ri] <= region_base(rmsr, ri[1:0]);
-            rx_size[ri] <= rs;
-            tx_base[ri] <= region_base(tmsr, ri[1:0]);
-            tx_size[ri] <= ts;
-            rx_mask[ri] <= rs[12:0] - 13'd1;    // 8192 - 1 = $1FFF, the low 13 bits wrap to it
-            tx_mask[ri] <= ts[12:0] - 13'd1;
-            fsr_q[ri]   <= {2'b00, tx_size[ri]} - {3'b000, (tx_wr[ri][12:0] - tx_rd[ri][12:0]) & tx_mask[ri]};
+        if (rg_kick) begin
+            rg_n <= 3'd0; rg_racc <= 15'd0; rg_tacc <= 15'd0;
+            fs_pend <= 1'b0;
+        end else if (rg_busy) begin
+            rx_base[rg_s] <= rg_racc[13:0];
+            rx_size[rg_s] <= rg_rlen;
+            rx_mask[rg_s] <= rg_rlen[12:0] - 13'd1;  // 8192 - 1 = $1FFF, the low 13 bits wrap to it
+            tx_base[rg_s] <= rg_tacc[13:0];
+            tx_size[rg_s] <= rg_tlen;
+            tx_mask[rg_s] <= rg_tlen[12:0] - 13'd1;
+            rg_racc <= rg_rend;
+            rg_tacc <= rg_tend;
+            rg_n    <= rg_n + 3'd1;
+            fs_n    <= rg_s;            // its FSR follows one clock behind
+            fs_pend <= 1'b1;
+        end else if (fs_kick_sock || cr_write) begin
+            fs_n    <= cr_sock;
+            fs_pend <= 1'b1;
+        end else begin
+            fs_pend <= 1'b0;
         end
+        if (fs_pend)
+            fsr_q[fs_n] <= {2'b00, tx_size[fs_n]} -
+                           {3'b000, (tx_wr[fs_n][12:0] - tx_rd[fs_n][12:0]) & tx_mask[fs_n]};
     end
 
     // ---- the register file -----------------------------------------------------------
     // Four byte lanes of 128 entries, {block, word}: block 0 the common
     // registers, 1-4 the sockets.  A fresh byte reads as its reset value.
     logic [7:0]   rf0 [0:127], rf1 [0:127], rf2 [0:127], rf3 [0:127];
-    logic [127:0] fresh0, fresh1, fresh2, fresh3;
+    // ONE fresh bit per WORD, not per byte.  Per byte it was four 128-bit
+    // vectors - 512 flip flops, 43% of this card's, each with its own
+    // lane-qualified clear - to say a thing the word can say once: a byte
+    // lane is never read without the rest of its word being readable, so a
+    // program write into a still-fresh word stamps the OTHER three lanes
+    // with their reset constants at the same commit (rf_merge below) and the
+    // word is whole from then on.  Same reads, same one-clock reset, a
+    // quarter of the state.
+    logic [127:0] fresh;
 
     // The reset value of every byte, as a 128-word table built once: a
     // function call in a combinational path is what a simulator's
@@ -265,31 +295,84 @@ module uthernet2_card #(
     end
 
 
-    // The program's read, at the pointer: the stored word with the fresh
-    // bytes replaced by their reset values, then the computed registers
-    // laid over it (MR; Sn_SR, IR, CR; Sn_TX_FSR/RD; Sn_RX_RSR, TX_WR; RX_RD).
-    wire [1:0]   p_n = p_idx[5:4] - 2'd1;      // block 1..4 -> socket 0..3
-    wire [31:0]  p_rst = rst_tab[p_idx];
-    wire [31:0]  rf_raw_cpu = {fresh3[p_idx] ? p_rst[31:24] : rf3[p_idx],
-                               fresh2[p_idx] ? p_rst[23:16] : rf2[p_idx],
-                               fresh1[p_idx] ? p_rst[15:8]  : rf1[p_idx],
-                               fresh0[p_idx] ? p_rst[7:0]   : rf0[p_idx]};
-    logic [31:0] rf_word_cpu;
+    // ---- ONE read of the register file, time-shared -------------------------
+    // Two readers want this file: the program, one byte at the pointer, and
+    // the sender, the 24 words a U2_CMD carries.  Built twice it is the
+    // whole overlay twice over - the stored word, the reset constants, the
+    // four sockets' registers the chip computes rather than stores - for a
+    // reader that wants it a few dozen clocks a packet.  So the sender
+    // BORROWS the port on the clocks the program is not using it, and waits
+    // a clock when it loses.  The program never waits: its read is
+    // registered at op_present and its write reads the word at op_commit,
+    // and on both of those clocks the port is its own by construction.
+    // The sender pays one extra clock a word - 48 a command instead of 24,
+    // a couple of microseconds a packet, and never a clock of the core's -
+    // and the card carries one of these instead of two.
+    typedef enum logic [2:0] {
+        X_IDLE,
+        X_CMD_HDR,
+        X_CMD_DATA,     // take a register word off the shared port
+        X_CMD_OFFER,    // ...and offer it: 24 words
+        X_TX_HDR,
+        X_TX_FETCH,     // port B reads the word
+        X_TX_LAND,      // ...which is there now
+        X_TX_OFFER
+    } xstate_t;
+    xstate_t     xs;
+    logic [1:0]  x_sock;
+    logic [4:0]  x_i;                   // register word 0..23
+
+    // The register word the sender offers: the common block, then the socket's.
+    wire [6:0]  x_idx = (x_i < 5'd12) ? {3'd0, x_i[3:0]}
+                                      : {{1'b0, x_sock} + 3'd1, x_i[3:0] - 4'd12};
+    wire        x_wants = (xs == X_CMD_DATA);
+    wire        x_gets  = x_wants && !op_present && !op_commit;
+    // ...AND THE WAIT IS BOUNDED, because asking is not enough.  x_gets wants
+    // a clock the program is using for neither phase, and a stream can have
+    // none: the IIgs sequencer's fast override presents an op on the clock
+    // the last one commits (rtl/gs/accel_seq.sv, S_OVR), so present and
+    // commit can cover every clock between them for as long as the override
+    // run lasts.  A sender that only ever asks then never gets past the
+    // header - the U2_CMD never reaches the host, the host never answers,
+    // and the driver polls Sn_SR for a status that will never come.  That is
+    // a hung machine, and it hung one (2026-09-20).
+    //
+    // So after 15 clocks of waiting the sender TAKES a clock: x_urgent joins
+    // stall_o, the sequencer starts no new op (fast_ok, ovr_ok, turbo_ok and
+    // disp_pay all gate on it), the op in flight goes quiet, and the next
+    // clock is free.  An ordinary stream serves the sender within three
+    // clocks, so five times that is a threshold it never reaches; the worst
+    // stream pays 15 clocks a word - bounded, a few microseconds a command,
+    // and one held clock is what the floppy's fill does routinely.
+    logic [3:0] x_wait;
+    wire        x_urgent = &x_wait;
+    always_ff @(posedge clk) begin
+        if (rst || !x_wants || x_gets) x_wait <= 4'd0;
+        else if (!x_urgent)            x_wait <= x_wait + 4'd1;
+    end
+
+    wire [6:0]   g_idx   = x_gets ? x_idx : p_idx;
+    wire [1:0]   g_n     = g_idx[5:4] - 2'd1;   // block 1..4 -> socket 0..3
+    wire [31:0]  g_rst   = rst_tab[g_idx];
+    wire         g_fresh = fresh[g_idx];
+    wire [31:0]  g_raw   = g_fresh ? g_rst
+                                   : {rf3[g_idx], rf2[g_idx], rf1[g_idx], rf0[g_idx]};
+    logic [31:0] g_word;
     always_comb begin
-        rf_word_cpu = rf_raw_cpu;
-        if (p_idx[6:4] == 3'd0) begin
-            if (p_idx[3:0] == 4'd0) rf_word_cpu[7:0] = mr;
+        g_word = g_raw;
+        if (g_idx[6:4] == 3'd0) begin
+            if (g_idx[3:0] == 4'd0) g_word[7:0] = mr;
         end else begin
-            case (p_idx[3:0])
-                4'd0:  rf_word_cpu = {sr[p_n], 8'h00, 8'h00, rf_raw_cpu[7:0]};
-                4'd8:  rf_word_cpu = {tx_rd[p_n][7:0], tx_rd[p_n][15:8], fsr_q[p_n][7:0], fsr_q[p_n][15:8]};
-                4'd9:  rf_word_cpu = {rsr[p_n][7:0], rsr[p_n][15:8], tx_wr[p_n][7:0], tx_wr[p_n][15:8]};
-                4'd10: rf_word_cpu = {rf_raw_cpu[31:16], rx_rd[p_n][7:0], rx_rd[p_n][15:8]};
+            case (g_idx[3:0])
+                4'd0:  g_word = {sr[g_n], 8'h00, 8'h00, g_raw[7:0]};
+                4'd8:  g_word = {tx_rd[g_n][7:0], tx_rd[g_n][15:8], fsr_q[g_n][7:0], fsr_q[g_n][15:8]};
+                4'd9:  g_word = {rsr[g_n][7:0], rsr[g_n][15:8], tx_wr[g_n][7:0], tx_wr[g_n][15:8]};
+                4'd10: g_word = {g_raw[31:16], rx_rd[g_n][7:0], rx_rd[g_n][15:8]};
                 default: ;
             endcase
         end
     end
-    wire [7:0]  reg_byte    = rf_word_cpu[8 * p_lane +: 8];
+    wire [7:0]  reg_byte    = g_word[8 * p_lane +: 8];
 
     // ---- the data port -------------------------------------------------------------------
     wire dp_commit = op_commit && hit_q;
@@ -406,7 +489,7 @@ module uthernet2_card #(
                                (op_addr[1:0] == 2'd1) ? ptr[15:8] :
                                (op_addr[1:0] == 2'd2) ? ptr[7:0] : data_rd;
 
-    assign stall_o = enabled && p_buf && !cur_v && !land_cur_now;
+    assign stall_o = enabled && ((p_buf && !cur_v && !land_cur_now) || rg_busy || x_urgent);
 
     // ---- the command queue -------------------------------------------------------------------
     // {sock, cmd, tx offset, tx length}: what a U2_CMD needs that the live
@@ -461,8 +544,16 @@ module uthernet2_card #(
     wire        pw_drain = !reg_write && !soft_hold && pw_valid[0];
     wire        rf_we    = reg_write || pw_drain;
     wire [6:0]  rf_widx  = reg_write ? p_idx : pw_idx[0];
-    wire [31:0] rf_wword = reg_write ? {4{op_wdata}} : pw_word[0];
-    wire [3:0]  rf_wlane = reg_write ? (4'b0001 << p_lane) : 4'b1111;
+    // A write into a word still carrying its reset constants writes the
+    // whole word: the addressed lane takes the program's byte, the other
+    // three the constants they were reading anyway (p_rst, a read of the
+    // sparse reset table, never of the file - no RAM-to-RAM path).
+    wire [31:0] rf_merge = {(p_lane == 2'd3) ? op_wdata : g_rst[31:24],
+                            (p_lane == 2'd2) ? op_wdata : g_rst[23:16],
+                            (p_lane == 2'd1) ? op_wdata : g_rst[15:8],
+                            (p_lane == 2'd0) ? op_wdata : g_rst[7:0]};
+    wire [31:0] rf_wword = reg_write ? (g_fresh ? rf_merge : {4{op_wdata}}) : pw_word[0];
+    wire [3:0]  rf_wlane = (reg_write && !g_fresh) ? (4'b0001 << p_lane) : 4'b1111;
 
     always_ff @(posedge clk) begin
         if (rf_we && rf_wlane[0]) rf0[rf_widx] <= rf_wword[7:0];
@@ -473,12 +564,15 @@ module uthernet2_card #(
 
     // ---- the chip, clock by clock -----------------------------------------------------------
     wire chip_reset = rst || soft_hold || mr_rst_commit;
+    // The regions are laid down again whenever the registers that size them
+    // move: a reset restores $55/$55, a program write sets what it likes.
+    wire rg_kick    = chip_reset || (reg_write && p_common &&
+                                     ((ptr[5:0] == 6'h1A) || (ptr[5:0] == 6'h1B)));
     integer n;
     always_ff @(posedge clk) begin
         // ---- the register file's freshness, the shadows, the pointer ----
         if (chip_reset) begin
-            fresh0 <= {128{1'b1}}; fresh1 <= {128{1'b1}};
-            fresh2 <= {128{1'b1}}; fresh3 <= {128{1'b1}};
+            fresh <= {128{1'b1}};
             mr   <= 8'd0;
             rmsr <= 8'h55; tmsr <= 8'h55;
             for (n = 0; n < 4; n = n + 1) begin
@@ -487,12 +581,7 @@ module uthernet2_card #(
             end
             dropped <= 1'b0;
         end else begin
-            if (rf_we) begin
-                if (rf_wlane[0]) fresh0[rf_widx] <= 1'b0;
-                if (rf_wlane[1]) fresh1[rf_widx] <= 1'b0;
-                if (rf_wlane[2]) fresh2[rf_widx] <= 1'b0;
-                if (rf_wlane[3]) fresh3[rf_widx] <= 1'b0;
-            end
+            if (rf_we) fresh[rf_widx] <= 1'b0;
             if (dp_write && (op_addr[1:0] == 2'd0)) mr <= {1'b0, op_wdata[6:0]};
             if (reg_write && p_common) begin
                 if (ptr[5:0] == 6'h1A) rmsr <= op_wdata;
@@ -512,7 +601,7 @@ module uthernet2_card #(
                 case (op_wdata)
                     CR_OPEN: begin
                         // The protocol from Sn_MR, byte 0 of the same word.
-                        case (rf_raw_cpu[3:0])
+                        case (g_raw[3:0])
                             MR_MACRAW: sr[cr_sock] <= SR_MACRAW;
                             MR_IPRAW:  sr[cr_sock] <= SR_IPRAW;
                             MR_UDP:    sr[cr_sock] <= SR_UDP;
@@ -686,50 +775,14 @@ module uthernet2_card #(
     wire [QW-1:0] q_out = q_mem[q_rp[2:0]];
 
     // ---- card -> host: U2_CMD and U2_TX ------------------------------------------------------
-    typedef enum logic [2:0] {
-        X_IDLE,
-        X_CMD_HDR,
-        X_CMD_DATA,     // 24 register words
-        X_TX_HDR,
-        X_TX_FETCH,     // port B reads the word
-        X_TX_LAND,      // ...which is there now
-        X_TX_OFFER
-    } xstate_t;
-    xstate_t     xs;
-    logic [1:0]  x_sock;
     logic [7:0]  x_cmd;
     logic [12:0] x_pos;                 // the next byte's offset in the TX region
     logic [13:0] x_left;                // bytes still to send
-    logic [4:0]  x_i;                   // register word 0..23
     logic [7:0]  x_wleft;               // words left this chunk
     logic [11:0] x_cbytes;              // this chunk's bytes
     logic        x_first;
     logic [31:0] x_data;
     logic [7:0]  cmds;
-
-    // The register word offered: the common block, then the socket's.
-    wire [6:0]  x_idx = (x_i < 5'd12) ? {3'd0, x_i[3:0]} : {{1'b0, x_sock} + 3'd1, x_i[3:0] - 4'd12};
-    wire [1:0]   x_n = x_idx[5:4] - 2'd1;
-    wire [31:0]  x_rst = rst_tab[x_idx];
-    wire [31:0]  rf_raw_x = {fresh3[x_idx] ? x_rst[31:24] : rf3[x_idx],
-                             fresh2[x_idx] ? x_rst[23:16] : rf2[x_idx],
-                             fresh1[x_idx] ? x_rst[15:8]  : rf1[x_idx],
-                             fresh0[x_idx] ? x_rst[7:0]   : rf0[x_idx]};
-    logic [31:0] x_reg_word;
-    always_comb begin
-        x_reg_word = rf_raw_x;
-        if (x_idx[6:4] == 3'd0) begin
-            if (x_idx[3:0] == 4'd0) x_reg_word[7:0] = mr;
-        end else begin
-            case (x_idx[3:0])
-                4'd0:  x_reg_word = {sr[x_n], 8'h00, 8'h00, rf_raw_x[7:0]};
-                4'd8:  x_reg_word = {tx_rd[x_n][7:0], tx_rd[x_n][15:8], fsr_q[x_n][7:0], fsr_q[x_n][15:8]};
-                4'd9:  x_reg_word = {rsr[x_n][7:0], rsr[x_n][15:8], tx_wr[x_n][7:0], tx_wr[x_n][15:8]};
-                4'd10: x_reg_word = {rf_raw_x[31:16], rx_rd[x_n][7:0], rx_rd[x_n][15:8]};
-                default: ;
-            endcase
-        end
-    end
 
     // Port B's read of the word at x_pos: byte k of the word is lane
     // (x_pos + k) & 3 at that byte's own address.
@@ -753,9 +806,9 @@ module uthernet2_card #(
     wire [11:0] x_cw12     = (x_cb_next + 12'd3) >> 2;
     wire [7:0]  x_cw_next  = x_cw12[7:0];
 
-    assign tx_valid = (xs == X_CMD_HDR) || (xs == X_CMD_DATA) || (xs == X_TX_HDR) || (xs == X_TX_OFFER);
+    assign tx_valid = (xs == X_CMD_HDR) || (xs == X_CMD_OFFER) ||
+                      (xs == X_TX_HDR)  || (xs == X_TX_OFFER);
     assign tx_word  = (xs == X_CMD_HDR)  ? {x_cmd, 6'd0, x_sock, T_U2_CMD, 8'd24} :
-                      (xs == X_CMD_DATA) ? x_reg_word :
                       (xs == X_TX_HDR)   ? {x_cbytes, x_last, x_first, x_sock, T_U2_TX, x_wleft} :
                                            x_data;
     assign q_pop = (xs == X_IDLE) && !q_empty;
@@ -782,7 +835,12 @@ module uthernet2_card #(
                     cmds <= cmds + 8'd1;
                     xs   <= X_CMD_DATA;
                 end
-                X_CMD_DATA: if (tx_take) begin
+                // The shared port, when the program is not using it.
+                X_CMD_DATA: if (x_gets) begin
+                    x_data <= g_word;
+                    xs     <= X_CMD_OFFER;
+                end
+                X_CMD_OFFER: if (tx_take) begin
                     x_i <= x_i + 5'd1;
                     if (x_i == 5'd23) begin
                         if ((x_cmd == CR_SEND) && (x_left != 14'd0)) begin
@@ -790,7 +848,7 @@ module uthernet2_card #(
                             x_wleft  <= x_cw_next;
                             xs       <= X_TX_HDR;
                         end else xs <= X_IDLE;
-                    end
+                    end else xs <= X_CMD_DATA;   // back for the next word
                 end
                 X_TX_HDR: if (tx_take) begin
                     x_left <= x_left - {2'd0, x_cbytes};

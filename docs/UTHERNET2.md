@@ -394,3 +394,115 @@ that is fixed in the host's `pipeline.cpp`.
 2. `slirp` as the default over `tap`. The design assumes it.
 3. Whether `U2_STAT`'s two numbers are the right ones to watch, or socket 0's
    `Sn_SR` and the command count would serve a bring-up better.
+
+## Making it smaller (2026-09-20)
+
+With the card proven on the GS, the next question was what it costs. In the
+50T candidate's build it was **2564 LUTs, 1181 flip flops and 4 block RAMs** -
+about a tenth of the whole design, and about 7% of a 50T's 32.6k LUTs. Three
+cuts, each measured on its own by an out-of-context synthesis of the card at
+100 MHz (`build/synth_ooc.sh --top uthernet2_card --src rtl/common/uthernet2_card.sv
+--src rtl/common/fd_bank.sv`), with `sim/run_uthernet2_vl.sh` green after each:
+
+| | LUTs | of which logic | LUTRAM | FFs |
+|---|---|---|---|---|
+| baseline | 2717 | 2499 | 218 | 1158 |
+| the fresh bit per word | 2266 | 2048 | 218 | 936 |
+| one register read, time-shared | 1863 | 1741 | 122 | 931 |
+| the regions walked | 1804 | 1650 | 154 | 882 |
+
+**−913 LUTs, −34%** out of context. Measured in the IIgs build's routed
+checkpoint, where the card was **2575 LUTs / 1181 FFs**, the finished work -
+the three cuts plus the bounded wait the second one turned out to need
+(below) - leaves it at **1889 LUTs / 952 FFs: −686 LUTs, −26%, −229 flip
+flops.** The bounded wait itself cost 135 of those LUTs back.
+
+- **The fresh bit per WORD, not per byte.** Four 128-bit vectors - 512 flip
+  flops, each with its own lane-qualified clear - said what one vector says:
+  a byte lane is never read without the rest of its word being readable. A
+  program write into a still-fresh word now stamps the other three lanes with
+  their reset constants at the same commit, so the word is whole from then on.
+  Same reads, same one-clock reset. No cycles. −451 LUTs, −222 flip flops.
+- **One read of the register file, time-shared.** The program reads a byte at
+  the pointer and the sender reads the 24 words a `U2_CMD` carries; that was
+  the whole overlay built twice - the stored word, the reset constants, the
+  four sockets' computed registers. The sender now BORROWS the port on the
+  clocks the program is not using it and waits a clock when it loses, which it
+  can afford: the program's read is registered at `op_present` and its write
+  reads at `op_commit`, and the sequencer's earliest next present is a commit
+  plus two, so there is always a free clock in an op. It costs the sender one
+  extra clock a word - 48 a command instead of 24, at worst one word per op
+  cycle under the tightest stream - and never a clock of the core's.
+  −403 LUTs, and the register file's second read port with them (LUTRAM 218
+  -> 122). This is the cycles-for-logic trade, and it is the biggest one here.
+  **It also hung a IIgs - see below. Asking for a free clock is not enough;
+  the wait has to be bounded.**
+- **The regions walked, not unrolled.** `region_base(n)` summed n terms and
+  `region_size(n)` called it twice more, for four sockets and two registers,
+  rebuilt every clock - a dozen adders standing for two bytes that move once
+  at setup. A write to RMSR or TMSR (or a chip reset) now kicks a four-step
+  walk with one accumulator apiece, and `stall_o` holds the core while it
+  runs because the masks are live wiring. `Sn_TX_FSR` follows the same way:
+  one subtractor for the socket whose pointers just moved, a clock behind,
+  which is exactly the lag the four-at-once form already had. −59 LUTs net.
+
+**Measured and rejected:** collapsing the four per-lane port-B ring addresses
+into one shared computer (two adders where the per-lane form builds eight).
+It came out **35 LUTs WORSE** - Vivado was already sharing those
+subexpressions, and the muxes needed to run one engine for both the host's
+append and the sender's read cost more than the adders saved. Reverted.
+
+**A bench trap found on the way.** `sim/uthernet2_tb.sv` modelled the host's
+FIFO face as a continuous assign off `rx_mem[rx_rd]`. Verilator does not
+re-evaluate that when the MEMORY is written while the index stands still, so
+the first word of every message - pushed while `rx_rd` sits at the empty mark
+- read as the stale initial zero and the parser framed on garbage from there.
+Every card->host test passed throughout, which made it look like an RTL bug in
+the receive path. The face is sampled on the falling edge now, which is what
+FWFT means anyway. `sim/run_uthernet2_vl.sh` is the Verilator run of the
+bench; `sim/run_uthernet2_tb.sh` (iverilog) is kept as the second opinion.
+
+### The sender that waited forever (2026-09-20)
+
+The time-shared read port above shipped with an assumption taken from this
+card's own notes: *"a write to the pointer fetches its word on the clock of
+the commit that sets it, so the byte is there for the earliest next op the
+sequencer can present (the commit's clock + 2)"*. If the earliest next
+present is a commit plus two, then every op leaves a clock where the program
+is using neither phase, and a sender that asks for one always gets it.
+
+**That is the 65C02 card's sequencer, and the IIgs runs a different one.**
+`rtl/gs/accel_seq.sv` raises `u_present` at five sites, and the one in
+`S_OVR` presents an op on the clock an override commits, chaining the next -
+so through an override run `op_present` and `op_commit` can cover every clock
+between them. `x_gets` is then never true, the sender stops after the header,
+the `U2_CMD` for a socket's OPEN never reaches the host, the host never
+answers, and the driver polls `Sn_SR` for a status that will never come. A
+live machine in a tight loop, which is what the user found the first time
+they tried to use the card on this bitstream.
+
+Reproduced in the bench (`op_nogap`, a stream where present and commit
+alternate so neither is ever both-low): the sender put **1 word out of the 25
+it owed** across 400 back-to-back ops.
+
+The fix is that the sender stops merely asking. After 15 clocks of waiting
+`x_urgent` joins `stall_o`; the IIgs sequencer gates `fast_ok`, `ovr_ok`,
+`turbo_ok` and `disp_pay` on `!stall_q`, so it starts no new op, the op in
+flight goes quiet, and the next clock is free. An ordinary stream serves the
+sender within three clocks and never reaches the threshold; the worst one
+pays 15 clocks a word, bounded, a few microseconds a command - and one held
+clock is what the floppy's track fill does routinely.
+
+**Two things the bench had to learn.** It presented ops straight through an
+asserted `stall_o`, which no sequencer does, so the hold it was being asked
+to prove did nothing there. And the first version of the test checked that a
+`U2_CMD` came out *after* the burst, which it always does - the starvation is
+that there is no "after" while a driver is spinning. The test now counts the
+words the sender lands **during** the gapless stream, and it is
+mutation-tested: take `x_urgent` out of `stall_o` and it fails with "the
+sender put 1 words out during 400 gapless ops, wanted 25".
+
+**The general lesson:** a cut that makes one part of the card wait on another
+part's timing has to name whose timing, and both cards' sequencers have to
+agree. `rtl/common` is built by `a2_top` and `gs_top` alike; a contract read
+out of the 65C02 card's notes is not a contract the 65816 card has signed.

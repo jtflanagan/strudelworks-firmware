@@ -33,6 +33,7 @@ __pycache__/
 /sim/*.out
 /sim/cpu_work/
 /sim/trace_work/
+/sim/uthernet2_work/
 /sim/bustest_work/
 
 # apple/build.sh output: the assembled exerciser and its disk image

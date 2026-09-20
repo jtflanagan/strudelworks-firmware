@@ -58,10 +58,25 @@ module uthernet2_tb;
     // ---- host -> card: a FIFO the real parser reads -------------------------
     reg  [31:0] rx_mem [0:16383];
     integer     rx_wr = 0, rx_rd = 0;
-    wire        rx_empty = (rx_rd >= rx_wr);
-    wire [31:0] rx_dout  = rx_empty ? 32'd0 : rx_mem[rx_rd];
     wire        rx_rd_en;
     always @(posedge clk) if (rx_rd_en && !rx_empty) rx_rd <= rx_rd + 1;
+    // The FIFO's FWFT face, SAMPLED ON THE FALLING EDGE.  As a continuous
+    // assign off rx_mem[rx_rd] this is a Verilator trap: the assign is not
+    // re-evaluated when the MEMORY is written while the index stands still,
+    // so the first word of every message - pushed while rx_rd sits at the
+    // empty mark - reads as the stale initial zero and the parser frames on
+    // garbage from there (card->host tests pass throughout, which is what
+    // makes it look like an RTL bug).  A negedge sample re-reads every half
+    // cycle and lands settled data at the posedge the parser reads on, which
+    // is what FWFT means.  See sim/README and the same lesson in
+    // sim/mockingboard_tb.sv.
+    reg         rx_empty;
+    reg  [31:0] rx_dout;
+    always @(negedge clk) begin
+        rx_empty <= (rx_rd >= rx_wr);
+        rx_dout  <= (rx_rd >= rx_wr) ? 32'd0 : rx_mem[rx_rd];
+    end
+    initial begin rx_empty = 1'b1; rx_dout = 32'd0; end
     task push_word(input [31:0] w);
         begin rx_mem[rx_wr] = w; rx_wr = rx_wr + 1; end
     endtask
@@ -117,6 +132,7 @@ module uthernet2_tb;
     reg  [31:0] out_mem [0:65535];
     integer     out_n = 0;
     integer     parse_pos = 0;
+    integer     nogap_n0 = 0;
     always @(posedge clk) begin
         tx_take <= ($urandom % 4) != 0;
         if (tx_valid && tx_take) begin
@@ -225,6 +241,31 @@ module uthernet2_tb;
     reg slow = 1'b0;
     reg last_claim;
     reg [7:0] last_rd;
+    // A stream with NO idle clock: present and commit alternate, so
+    // (!op_present && !op_commit) is never true.  Not a hypothetical shape -
+    // the IIgs sequencer's fast override path presents an op on the clock an
+    // override commits (rtl/gs/accel_seq.sv, S_OVR).
+    task op_nogap(input integer n);
+        integer i;
+        begin
+            for (i = 0; i < n; i = i + 1) begin
+                // The sequencer starts no new op while a card holds it:
+                // rtl/gs/accel_seq.sv gates fast_ok, ovr_ok, turbo_ok and
+                // disp_pay on !stall_q.  A bench that presents through a
+                // stall is not modelling the machine.
+                while (stall) begin
+                    op_present = 1'b0; op_commit = 1'b0;
+                    @(posedge clk); #1;
+                end
+                op_addr = 16'hC0B7; op_rw = 1'b1; op_wdata = 8'h00;
+                op_present = 1'b1; op_commit = 1'b0;
+                @(posedge clk); #1;
+                op_present = 1'b0; op_commit = 1'b1;
+                @(posedge clk); #1;
+            end
+            op_commit = 1'b0;
+        end
+    endtask
     task op(input [15:0] addr, input rw, input [7:0] wdata);
         begin
             op_addr = addr; op_rw = rw; op_wdata = wdata;
@@ -603,6 +644,31 @@ module uthernet2_tb;
         drain;
         expect_cmd(2'd0, 8'h00, "reset by RES'");
         $display("  ok: resets");
+
+        // ---- 12b. the sender under a stream with NO idle clock -----------------------------
+        // The sender shares the register file's one read port with the
+        // program and waits for a clock the program is not using.  Under a
+        // gapless stream there is none, and a sender that only asks stops
+        // after the header: the U2_CMD never reaches the host, the host never
+        // answers, and the driver polls Sn_SR forever.  It hung a IIgs
+        // (2026-09-20).  The bounded wait takes a clock instead; this is the
+        // test that says so.
+        drain; parse_pos = out_n;
+        wreg(sreg(0, 8'h00), 8'h44);           // Sn_MR = MACRAW
+        wreg(sreg(0, 8'h01), 8'h01);           // CR = OPEN, which queues a U2_CMD
+        nogap_n0 = out_n;
+        op_nogap(400);
+        // DURING the burst, not after it: a driver polling Sn_SR never stops
+        // presenting ops, so there is no "later" for the sender to finish in.
+        // A whole U2_CMD is a header and 24 words.
+        if ((out_n - nogap_n0) < 25) begin
+            $display("  the sender put %0d words out during 400 gapless ops, wanted 25",
+                     out_n - nogap_n0);
+            fail("the sender starves under a gapless op stream");
+        end
+        drain;
+        expect_cmd(2'd0, 8'h01, "a U2_CMD gets out under a gapless op stream");
+        $display("  ok: a gapless op stream does not starve the sender");
 
         // ---- 13. what is never claimed ----------------------------------------------------
         op(16'hC0A4, 1'b1, 8'h00); if (last_claim) fail("another slot's DEVICE SELECT was claimed");
