@@ -112,6 +112,23 @@ module cpu65816 #(
     // (sim/boot_gs_tb.sv, sim/cpu816_irq_tb.sv) and nothing changes.
     input  wire  [7:0]  i_din,
     input  wire  [7:0]  d_din,
+    // THE FETCH CANDIDATES, UNMUXED (docs/CORE_REFACTOR_65816.md "The
+    // binding loop retimed", 2026-09-20).  L1-I serves a fetch from one of
+    // two REGISTERS - the stream's held byte or a taken transfer's target
+    // byte - and only the choice between them is live.  So the slot-0
+    // sequencing (cond, alt) is read from a decode ROM per candidate,
+    // addressed by the REGISTER ITSELF, and the fetch cycle picks between
+    // the two eight-bit results by the front's registered selects; the
+    // ROM read no longer waits behind the byte select.  (Reading the ROMs
+    // from the registers' D inputs into a register, a cycle early, was
+    // built first and hung the candidate on the retire's deep cone - the
+    // hd's ovr_en through turbo_ok - 17 levels on the Pt: reverted.)
+    // i_sel_tgt / i_sel_held are the front's own selects (the target byte
+    // first); both low is the bus arm, sequenced from i_din live as before.
+    input  wire  [7:0]  i_byte_r,
+    input  wire  [7:0]  tgt_byte_r,
+    input  wire         i_sel_tgt,
+    input  wire         i_sel_held,
 
     input  wire         irq_n,      // level sensitive, active low
     input  wire         nmi_n,      // edge sensitive, active low
@@ -138,6 +155,17 @@ module cpu65816 #(
     // the load arms below, combinationally; pc_addr itself when cyc_en is
     // low or no arm loads.
     output wire  [23:0] pc_d,
+    // THE NEXT PC OVER THE SIMPLE ARMS, for L1-I's stream flag (2026-09-20):
+    // pc_addr's low sixteen bits as they will be next clock IF cyc_en is
+    // high, over the arms whose value is a register or its increment - no
+    // load, INC, MD (RTS/RTI's pull), JMPL - and pc_ds_v low for the rest
+    // (the AGU's sum, a din byte, the block move's rewind).  The flag
+    // compares against this and says "not at the expected address" for the
+    // arms it does not cover, which costs a recover clock only when a
+    // transfer lands exactly where the stream already was; comparing the
+    // AGU's sum put five carry chains in front of the flag (18 levels).
+    output wire  [15:0] pc_ds1,
+    output wire         pc_ds_v1,
     // The data-stream prediction: the address, direction and BANK CLASS of
     // the NEXT cycle, valid when that cycle is a data access (VDA and not
     // VPA - an internal cycle is neither and predicts nothing).  Not a
@@ -265,7 +293,17 @@ module cpu65816 #(
     initial $readmemh(USEQ0_FILE, useq0);
 
     wire [7:0] fetch_op = take_int ? 8'h00 : i_din;
-    wire [7:0] seq0     = useq0[fetch_op];
+    // Slot 0's sequencing per candidate (the ports above): two more copies
+    // of the eight-bit ROM, each addressed by a serve register directly.
+    // The bus arm reads the ROM from i_din live, as every fetch did before.
+    (* rom_style = "distributed" *) logic [7:0] useq0_h [0:255];
+    (* rom_style = "distributed" *) logic [7:0] useq0_t [0:255];
+    initial $readmemh(USEQ0_FILE, useq0_h);
+    initial $readmemh(USEQ0_FILE, useq0_t);
+    wire [7:0] seq0_brk = useq0[8'h00];
+    wire [7:0] seq0     = take_int   ? seq0_brk            :
+                          i_sel_tgt  ? useq0_t[tgt_byte_r] :
+                          i_sel_held ? useq0_h[i_byte_r]   : useq0[i_din];
     // The wide slot-0 word, read from the same arriving opcode.  A separate
     // combinational wire, so the distributed-ROM inference is the one the
     // rom_style attribute names (a registered read of a 256-word array is
@@ -732,6 +770,18 @@ module cpu65816 #(
     // slot that carries the test.
     wire mv_done = (a == 16'hFFFF);
 
+`ifndef SYNTHESIS
+    // The candidate the front names must be the byte it serves, on every
+    // fetch that retires: that is the contract the ROM copies rest on.
+    always_ff @(posedge clk)
+        if (!rst && cyc_en && f_sync && !take_int) begin
+            if (i_sel_tgt && tgt_byte_r != i_din)
+                $error("cpu65816: i_sel_tgt but tgt_byte_r $%02x is not i_din $%02x", tgt_byte_r, i_din);
+            if (!i_sel_tgt && i_sel_held && i_byte_r != i_din)
+                $error("cpu65816: i_sel_held but i_byte_r $%02x is not i_din $%02x", i_byte_r, i_din);
+        end
+`endif
+
     // ---- the NEXT microinstruction's sequencing ------------------------------
     // `urom` is the block RAM output during this cycle, and it holds the
     // microinstruction that will run NEXT cycle.  Its cond/alt fields are
@@ -1055,6 +1105,23 @@ module cpu65816 #(
     wire [7:0] pbr_d = (cyc_en && f_ld_pc == UC_LD_PC_JMP && f_asel == UC_ADDR_VEC1) ? 8'h00 :
                        (cyc_en && f_wb == UC_WB_PBR) ? din : pbr;
     assign pc_d = {pbr_d, pc_d16};
+    // The simple arms alone, assuming cyc_en (the port's note above).
+    logic [15:0] pc_ds1_c;
+    logic        pc_ds_v1_c;
+    always_comb begin
+        pc_ds1_c   = pc;
+        pc_ds_v1_c = 1'b1;
+        case (f_ld_pc)
+            UC_LD_PC_INC:    if (!int_pc_hold) pc_ds1_c = pc_inc;
+            UC_LD_PC_MD:     pc_ds1_c = md;
+            UC_LD_PC_JMPL:   pc_ds1_c = {md[15:8], md[7:0]};
+            UC_LD_PC_AGU, UC_LD_PC_AGU_LO, UC_LD_PC_AGU_HI,
+            UC_LD_PC_JMP, UC_LD_PC_M3C: pc_ds_v1_c = 1'b0;
+            default: ;
+        endcase
+    end
+    assign pc_ds1   = pc_ds1_c;
+    assign pc_ds_v1 = pc_ds_v1_c;
     always_ff @(posedge clk) begin
         if (rst) begin
             a <= 16'h0000; x <= 16'h0000; y <= 16'h0000;
