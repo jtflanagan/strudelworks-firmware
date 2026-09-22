@@ -311,6 +311,19 @@ module page_cam #(
     wire [LEV-1:0] way0  = way_enc(m0);
     wire [SW-1:0]  slot0 = {en_set, way0};
 `ifndef SYNTHESIS
+    // The P1 read must address exactly the row P0's compare chose, and a
+    // landing must never steal a hit's read clock (it never has: land_clash is
+    // zero over a 20 M-instruction row, the ops being three clocks apart).
+    logic [AW-1:0] en_row_q;
+    logic          en_row_qv;
+    always_ff @(posedge clk) begin
+        en_row_q  <= en_row;
+        en_row_qv <= e_any && hit0 && !rst;
+        if (!rst && en_row_qv && p1_rd && (p1_row !== en_row_q))
+            $error("page_cam: the P1 row address %0d is not the row P0 chose (%0d)", p1_row, en_row_q);
+        if (!rst && land && p1_rd)
+            $error("page_cam: a landing took the row read's clock - the op's row is the landing's");
+    end
     // way_enc() IS AN OR-REDUCTION AND ASSUMES ONE-HOT (above).  A set that
     // ever held one page in two ways would make it answer a third, so the
     // assumption is watched rather than trusted: this fires on the first
@@ -320,6 +333,8 @@ module page_cam #(
             $error("page_cam: page $%04x is in more than one way of set %0d (m0=%b): way_enc() assumes one-hot",
                    en_ppn, en_set, m0);
 `endif
+    // en_row is what the lookup WOULD have addressed at P0; the read is issued
+    // at P1 from p1_row now (below).  Kept for the assertion that the two agree.
     wire [AW-1:0] en_row = {slot0, en_ln};
 
     // ---- the landing register (P1 -> the row) ------------------------------
@@ -348,11 +363,21 @@ module page_cam #(
     wire [127:0] b_row;
     assign dr_erow = b_row;
     wire land = wl_v;
+    // THE ROW READ IS ISSUED AT P1 (2026-09-22), from the slot the lookup
+    // registered, not at P0 from the compare's own output: the address used to
+    // arrive at the RAM through the op's translation, the set hash, the
+    // directory's LUTRAM and the eight tag compares, and that was the 50T's
+    // worst path.  way_ram's port A lost its second output register in the
+    // same change, so the row is still out at P2 and nothing downstream moves.
+    // A read is issued only for a HIT: a miss has no row to read (the engine
+    // fills it), and a landing still owns the port on its own clock.
+    wire            p1_rd  = e1_v && c_hit;
+    wire [AW-1:0]   p1_row = {c_slot, e1_line};
     way_ram #(.ROWS (N * 16)) u_ram (
         .clk     (clk),
-        .a_en    (e_any || land),
+        .a_en    (p1_rd || land),
         .a_we    (land ? wl_be  : 16'd0),
-        .a_addr  (land ? wl_row : en_row),
+        .a_addr  (land ? wl_row : p1_row),
         .a_wdata (wl_data),
         .a_rdata (a_row),
         .b_en    (eb_en || dr_ack),
@@ -467,7 +492,7 @@ module page_cam #(
             wl_addr <= {cl_ppn[7:0], cl_off};
         end
     end
-    wire [127:0] mux_row = a_row;     // two clocks after P0's read: at P2
+    wire [127:0] mux_row = a_row;     // one clock after P1's read: at P2
     wire [7:0]   rbyte   = mux_row[8 * s_off[3:0] +: 8];
     // The victim's tag, for the flush: read at P2 from the LUTRAM at the
     // op's set (a retag is the only writer of a tag and never the victim's).
@@ -564,7 +589,7 @@ module page_cam #(
             if (dr_ack)                           cnt_dr         <= cnt_dr + 32'd1;
             if (il_ack && !il_src)                cnt_il_i       <= cnt_il_i + 32'd1;
             if (il_ack &&  il_src)                cnt_il_d       <= cnt_il_d + 32'd1;
-            if (wl_v && e_any)                    cnt_land_clash <= cnt_land_clash + 32'd1;
+            if (land && p1_rd)                    cnt_land_clash <= cnt_land_clash + 32'd1;
             if (cl_valid && (!e1_op || e1_ppn != cl_ppn || e1_line != cl_off[7:4]))
                                                   cnt_ppn_clash  <= cnt_ppn_clash + 32'd1;
             if (dec_read && s_hit && !eng_idle)   cnt_hit_uc     <= cnt_hit_uc + 32'd1;

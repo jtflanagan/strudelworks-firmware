@@ -282,6 +282,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [23:0] cpu_pc_d;
     wire [1:0]  cpu_d_pred_bcls;
     wire        cpu_d_pred_vpb;
+    wire [33:0] cpu_d_pred_arms;
     wire [7:0]  cpu_p_flags, cpu_dbr, i_din_w, d_din_w, seq_din;
     wire [7:0]  i_byte_r_w, tgt_byte_r_w;
     wire        i_sel_tgt_w, i_sel_held_w;
@@ -295,7 +296,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .i_byte_r (i_byte_r_w), .tgt_byte_r (tgt_byte_r_w), .i_sel_tgt (i_sel_tgt_w), .i_sel_held (i_sel_held_w),
         .pc_ds1 (cpu_pc_ds1), .pc_ds_v1 (cpu_pc_ds_v1),
         .cyc_is_i (cpu_cyc_is_i), .pc_addr (cpu_pc24), .pc_d (cpu_pc_d), .d_pred (cpu_d_pred),
-        .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls), .d_pred_vpb (cpu_d_pred_vpb),
+        .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
         .p_flags (cpu_p_flags), .dbr_o (cpu_dbr), .bank_wr (cpu_bank_wr),
         // The chipset's one interrupt line, active low into the core.
         .irq_n (!gsio_irq), .nmi_n (1'b1),
@@ -639,7 +640,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .io_flat (gs_shadow_w[6]), .io_vec (io_vec_q), .swi_busy (swi_commit),
         .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
-        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb),
+        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
         .cpu_addr (cpu_addr_eff), .cpu_bank (cpu_bank_eff), .cyc_int (cyc_internal),
         .cpu_rw (cpu_rw_eff), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (iline_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (seq_din), .i_din (i_din_w),

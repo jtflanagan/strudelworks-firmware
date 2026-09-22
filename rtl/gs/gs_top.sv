@@ -451,6 +451,7 @@ module gs_top #(
     wire [23:0] cpu_d_pred;
     wire [15:0] dev_addr;
     wire        cpu_d_pred_v, cpu_d_pred_rw, cpu_d_pred_vpb;
+    wire [33:0] cpu_d_pred_arms;
     // THE FRONTS ON THE IIgs (docs/GS.md rung 6): the predicted bank's class,
     // the program bank, the data bank register, the bank-write hold, and the
     // banks the two fronts' events carry.  All zero at GS = 0.
@@ -827,6 +828,7 @@ module gs_top #(
         .d_pred_rw (cpu_d_pred_rw),
         .d_pred_bcls (cpu_d_pred_bcls),
         .d_pred_vpb (cpu_d_pred_vpb),
+        .d_pred_arms (cpu_d_pred_arms),
         .p_flags (cpu_p_flags),
         .dbr_o  (cpu_dbr),
         .bank_wr (cpu_bank_wr),
@@ -1384,7 +1386,7 @@ module gs_top #(
     // books ride the sequencer's d_commit.
     l1d #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1d (
         .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst),
-        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb),
+        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
         .cpu_addr (cpu_addr), .cpu_bank (cpu_bank), .cyc_int (cyc_internal),
         .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (iline_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),

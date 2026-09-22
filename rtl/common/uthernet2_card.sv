@@ -303,7 +303,8 @@ module uthernet2_card #(
     // reader that wants it a few dozen clocks a packet.  So the sender
     // BORROWS the port on the clocks the program is not using it, and waits
     // a clock when it loses.  The program never waits: its read is
-    // registered at op_present and its write reads the word at op_commit,
+    // registered at op_present and its write reads the word at k_v (the
+    // registered commit),
     // and on both of those clocks the port is its own by construction.
     // The sender pays one extra clock a word - 48 a command instead of 24,
     // a couple of microseconds a packet, and never a clock of the core's -
@@ -326,7 +327,10 @@ module uthernet2_card #(
     wire [6:0]  x_idx = (x_i < 5'd12) ? {3'd0, x_i[3:0]}
                                       : {{1'b0, x_sock} + 3'd1, x_i[3:0] - 4'd12};
     wire        x_wants = (xs == X_CMD_DATA);
-    wire        x_gets  = x_wants && !op_present && !op_commit;
+    // ...nor on k_v, the registered commit's clock, where the program's
+    // write now reads its word (THE COMMIT, REGISTERED, below).
+    logic       k_v;
+    wire        x_gets  = x_wants && !op_present && !op_commit && !k_v;
     // ...AND THE WAIT IS BOUNDED, because asking is not enough.  x_gets wants
     // a clock the program is using for neither phase, and a stream can have
     // none: the IIgs sequencer's fast override presents an op on the clock
@@ -375,22 +379,45 @@ module uthernet2_card #(
     wire [7:0]  reg_byte    = g_word[8 * p_lane +: 8];
 
     // ---- the data port -------------------------------------------------------------------
-    wire dp_commit = op_commit && hit_q;
-    wire dp_write  = dp_commit && !op_rw;
-    wire dp_data   = (op_addr[1:0] == 2'd3);
+    // THE COMMIT, REGISTERED (2026-09-22, the 50T census; the user's
+    // interlock).  Every effect of a data-port op - the ring write, the
+    // pointer's step, MR, a register or command write, Sn_SR - is applied
+    // from k_*, the op as it committed, ONE CLOCK AFTER op_commit.  Written
+    // off op_commit, the sequencer's state reached the lane RAMs' address
+    // and the socket status registers through the whole commit decode (ten
+    // and eleven levels).  Nothing can see the clock: stall_o holds from the
+    // claim through k_v (below), and the sequencer - which samples stall_o a
+    // clock late, as stall_q - presents nothing new until the effects and
+    // any ring read they started have landed.  About two clocks per
+    // Uthernet access; nothing anywhere else.
+    wire         op_done = op_commit && hit_q;   // the real commit: ends the claim
+    logic [1:0]  k_port;
+    logic        k_rw;
+    logic [7:0]  k_wdata;
+    always_ff @(posedge clk) begin
+        k_v <= op_done && !rst;
+        if (op_done) begin
+            k_port  <= op_addr[1:0];
+            k_rw    <= op_rw;
+            k_wdata <= op_wdata;
+        end
+    end
+    wire dp_commit = k_v;
+    wire dp_write  = dp_commit && !k_rw;
+    wire dp_data   = (k_port == 2'd3);
     wire dp_ai     = dp_data && mr[1];
     // What the pointer becomes at this commit: an address register WRITTEN
     // sets a half, a data-port access steps it; reading the address back
     // moves nothing.
-    wire        wr_ah     = dp_write && (op_addr[1:0] == 2'd1);
-    wire        wr_al     = dp_write && (op_addr[1:0] == 2'd2);
+    wire        wr_ah     = dp_write && (k_port == 2'd1);
+    wire        wr_al     = dp_write && (k_port == 2'd2);
     wire        ptr_moves = dp_commit && (wr_ah || wr_al || dp_ai);
-    wire [15:0] ptr_next  = wr_ah ? {op_wdata, ptr[7:0]} :
-                            wr_al ? {ptr[15:8], op_wdata} :
+    wire [15:0] ptr_next  = wr_ah ? {k_wdata, ptr[7:0]} :
+                            wr_al ? {ptr[15:8], k_wdata} :
                             dp_ai ? ptr_inc : ptr;
     wire        ptr_next_in_buf = (ptr_next[15:14] == 2'b01);
     wire [11:0] ptr_next_widx   = ptr_next[13:2];
-    wire        mr_rst_commit   = dp_write && (op_addr[1:0] == 2'd0) && op_wdata[7];
+    wire        mr_rst_commit   = dp_write && (k_port == 2'd0) && k_wdata[7];
 
     // A register write lands in its lane at the commit; the command
     // register is never stored (it reads 0).
@@ -413,7 +440,7 @@ module uthernet2_card #(
                 .clk     (clk),
                 .a_we    (a_we[gk]),
                 .a_addr  (a_addr),
-                .a_wdata (op_wdata),
+                .a_wdata (k_wdata),
                 .a_rdata (a_rdata[gk]),
                 .b_we    (b_we[gk]),
                 .b_addr  (b_addr[gk]),
@@ -489,7 +516,8 @@ module uthernet2_card #(
                                (op_addr[1:0] == 2'd1) ? ptr[15:8] :
                                (op_addr[1:0] == 2'd2) ? ptr[7:0] : data_rd;
 
-    assign stall_o = enabled && ((p_buf && !cur_v && !land_cur_now) || rg_busy || x_urgent);
+    assign stall_o = enabled && ((p_buf && !cur_v && !land_cur_now) || rg_busy || x_urgent ||
+                                 hit_q || k_v);
 
     // ---- the command queue -------------------------------------------------------------------
     // {sock, cmd, tx offset, tx length}: what a U2_CMD needs that the live
@@ -548,11 +576,11 @@ module uthernet2_card #(
     // whole word: the addressed lane takes the program's byte, the other
     // three the constants they were reading anyway (p_rst, a read of the
     // sparse reset table, never of the file - no RAM-to-RAM path).
-    wire [31:0] rf_merge = {(p_lane == 2'd3) ? op_wdata : g_rst[31:24],
-                            (p_lane == 2'd2) ? op_wdata : g_rst[23:16],
-                            (p_lane == 2'd1) ? op_wdata : g_rst[15:8],
-                            (p_lane == 2'd0) ? op_wdata : g_rst[7:0]};
-    wire [31:0] rf_wword = reg_write ? (g_fresh ? rf_merge : {4{op_wdata}}) : pw_word[0];
+    wire [31:0] rf_merge = {(p_lane == 2'd3) ? k_wdata : g_rst[31:24],
+                            (p_lane == 2'd2) ? k_wdata : g_rst[23:16],
+                            (p_lane == 2'd1) ? k_wdata : g_rst[15:8],
+                            (p_lane == 2'd0) ? k_wdata : g_rst[7:0]};
+    wire [31:0] rf_wword = reg_write ? (g_fresh ? rf_merge : {4{k_wdata}}) : pw_word[0];
     wire [3:0]  rf_wlane = (reg_write && !g_fresh) ? (4'b0001 << p_lane) : 4'b1111;
 
     always_ff @(posedge clk) begin
@@ -582,23 +610,23 @@ module uthernet2_card #(
             dropped <= 1'b0;
         end else begin
             if (rf_we) fresh[rf_widx] <= 1'b0;
-            if (dp_write && (op_addr[1:0] == 2'd0)) mr <= {1'b0, op_wdata[6:0]};
+            if (dp_write && (k_port == 2'd0)) mr <= {1'b0, k_wdata[6:0]};
             if (reg_write && p_common) begin
-                if (ptr[5:0] == 6'h1A) rmsr <= op_wdata;
-                if (ptr[5:0] == 6'h1B) tmsr <= op_wdata;
+                if (ptr[5:0] == 6'h1A) rmsr <= k_wdata;
+                if (ptr[5:0] == 6'h1B) tmsr <= k_wdata;
             end
             if (reg_write && p_sock) begin
                 case (ptr[5:0])
-                    6'h24: tx_wr[cr_sock][15:8] <= op_wdata;
-                    6'h25: tx_wr[cr_sock][7:0]  <= op_wdata;
-                    6'h28: rx_rd[cr_sock][15:8] <= op_wdata;
-                    6'h29: rx_rd[cr_sock][7:0]  <= op_wdata;
+                    6'h24: tx_wr[cr_sock][15:8] <= k_wdata;
+                    6'h25: tx_wr[cr_sock][7:0]  <= k_wdata;
+                    6'h28: rx_rd[cr_sock][15:8] <= k_wdata;
+                    6'h29: rx_rd[cr_sock][7:0]  <= k_wdata;
                     default: ;
                 endcase
             end
             // The command register (AppleWin's setCommandRegister).
             if (cr_write) begin
-                case (op_wdata)
+                case (k_wdata)
                     CR_OPEN: begin
                         // The protocol from Sn_MR, byte 0 of the same word.
                         case (g_raw[3:0])
@@ -650,10 +678,10 @@ module uthernet2_card #(
             // The program's write patches a held copy (after a landing, so
             // the fresh byte wins).
             if (buf_write) begin
-                if (cur_v && (cur_a == p_widx)) cur_w[8 * p_lane +: 8] <= op_wdata;
-                if (a_rd_q && a_rd_cur_q && (a_rd_addr_q == p_widx)) cur_w[8 * p_lane +: 8] <= op_wdata;
-                if (nxt_v && (nxt_a == p_widx)) nxt_w[8 * p_lane +: 8] <= op_wdata;
-                if (a_rd_q && !a_rd_cur_q && (a_rd_addr_q == p_widx)) nxt_w[8 * p_lane +: 8] <= op_wdata;
+                if (cur_v && (cur_a == p_widx)) cur_w[8 * p_lane +: 8] <= k_wdata;
+                if (a_rd_q && a_rd_cur_q && (a_rd_addr_q == p_widx)) cur_w[8 * p_lane +: 8] <= k_wdata;
+                if (nxt_v && (nxt_a == p_widx)) nxt_w[8 * p_lane +: 8] <= k_wdata;
+                if (a_rd_q && !a_rd_cur_q && (a_rd_addr_q == p_widx)) nxt_w[8 * p_lane +: 8] <= k_wdata;
             end
             // The pointer moves: the held words follow it.
             if (ptr_moves) begin
@@ -747,14 +775,14 @@ module uthernet2_card #(
             q_push = enabled;
             q_in   = {2'd0, 8'h00, 13'd0, 14'd0};
         end else if (cr_write && enabled) begin
-            case (op_wdata)
+            case (k_wdata)
                 CR_OPEN, CR_LISTEN, CR_CONNECT, CR_DISCON, CR_CLOSE, CR_RECV: begin
                     q_push = 1'b1;
-                    q_in   = {cr_sock, op_wdata, 13'd0, 14'd0};
+                    q_in   = {cr_sock, k_wdata, 13'd0, 14'd0};
                 end
                 CR_SEND: begin
                     q_push = 1'b1;
-                    q_in   = {cr_sock, op_wdata, tx_rd[cr_sock][12:0] & tx_mask[cr_sock],
+                    q_in   = {cr_sock, k_wdata, tx_rd[cr_sock][12:0] & tx_mask[cr_sock],
                               {1'b0, (tx_wr[cr_sock][12:0] - tx_rd[cr_sock][12:0]) & tx_mask[cr_sock]}};
                 end
                 default: ;
@@ -898,7 +926,7 @@ module uthernet2_card #(
             rd_data  <= 8'd0;
             hit_q    <= 1'b0;
         end else begin
-            if (dp_commit) hit_q <= 1'b0;
+            if (op_done) hit_q <= 1'b0;
             if (op_present) begin
                 hit_q    <= hit_dev;
                 rd_claim <= hit_dev && op_rw;

@@ -190,6 +190,10 @@ module cpu65816 #(
     // index - it rides the dispatcher, counted.
     output wire  [1:0]  d_pred_bcls,
     output wire         d_pred_vpb,  // ...and it is a vector pull (the board redirects its bank)
+    // ...and d_pred's two late choices with the arms they choose between,
+    // {bk_moved, bank if moved, bank if not, hi_carry, high byte if carried,
+    // high byte if not}: l1d decodes each arm and lets the carry pick last.
+    output wire  [33:0] d_pred_arms,
     output wire  [7:0]  p_flags,    // {N,V,M,X,D,I,Z,C} register-direct: what
                                     // a branch will test (rtl/iline.sv)
     output wire  [7:0]  dbr_o,      // the data bank register, for the data
@@ -1049,6 +1053,7 @@ module cpu65816 #(
     assign d_pred = {bk_moved ? pred_bk_c : pred_bk_nc,
                      hi_carry ? pred_hi_c : pred_hi_nc,
                      d_pred_mux[7:0]};
+    assign d_pred_arms = {bk_moved, pred_bk_c, pred_bk_nc, hi_carry, pred_hi_c, pred_hi_nc};
 `ifndef SYNTHESIS
     always_ff @(posedge clk)
         if (!rst && !$isunknown(d_pred_mux) && d_pred != d_pred_mux)
