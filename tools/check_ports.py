@@ -63,11 +63,70 @@ def strip_comments(t):
     t = re.sub(r'/\*.*?\*/', '', t, flags=re.S)
     return re.sub(r'//[^\n]*', '', t)
 
-ports = {'common': {}, 'a2': {}, 'gs': {}}   # per tree; sim/ benches define none we check
-for f in files:
+
+COND_RE = re.compile(r'^\s*`(ifdef|ifndef|elsif|else|endif)\s*(\w*)')
+
+
+def select(text, defined):
+    """The text a preprocessor with these macros defined would hand the parser.
+
+    An inactive branch becomes BLANK LINES, not nothing, so the line numbers
+    this tool reports stay the file's own.  It has to be done: an
+    instantiation can span a conditional whose other branch opens a second
+    instantiation (boot_gs_tb's l1i / l1i_store, gs_top's), and a parser that
+    reads both at once never closes the first one's port list - it swallows
+    every connection after it and blames them all on the first module.  That
+    was 1,170 reports from two instantiations (2026-09-22).
+    """
+    out, stack = [], []          # stack of (active_now, any_branch_taken)
+    for line in text.split('\n'):
+        m = COND_RE.match(line)
+        if m:
+            kind, name = m.group(1), m.group(2)
+            if kind in ('ifdef', 'ifndef'):
+                on = (name in defined) if kind == 'ifdef' else (name not in defined)
+                on = on and all(a for a, _ in stack)
+                stack.append((on, on))
+            elif kind == 'elsif':
+                if stack:
+                    _, taken = stack[-1]
+                    on = (not taken) and (name in defined) and all(a for a, _ in stack[:-1])
+                    stack[-1] = (on, taken or on)
+            elif kind == 'else':
+                if stack:
+                    _, taken = stack[-1]
+                    on = (not taken) and all(a for a, _ in stack[:-1])
+                    stack[-1] = (on, True)
+            elif kind == 'endif':
+                if stack:
+                    stack.pop()
+            out.append('')
+            continue
+        out.append(line if all(a for a, _ in stack) else '')
+    return '\n'.join(out)
+
+
+def macros_in(texts):
+    found = set()
+    for t in texts:
+        for m in re.finditer(r'`(?:ifdef|ifndef|elsif)\s+(\w+)', t):
+            found.add(m.group(1))
+    return found
+
+raw = {f: strip_comments(f.read_text(errors='ignore')) for f in files}
+# Every branch of every conditional gets checked, not just the default build's:
+# nothing defined, then each macro on its own, then all of them.  A report is
+# printed once however many passes find it.
+MACROS = sorted(macros_in(raw.values()))
+passes = [frozenset()] + [frozenset([m]) for m in MACROS] + [frozenset(MACROS)]
+
+
+def collect(defined):
+  ports = {'common': {}, 'a2': {}, 'gs': {}}   # per tree; sim/ benches define none we check
+  for f in files:
     t = tree_of(f)
     if t not in ports: continue
-    text = strip_comments(f.read_text(errors='ignore'))
+    text = select(raw[f], defined)
     for m in mod_re.finditer(text):
         name = m.group(1)
         # the port list: from the '(' the match ends on to its matching ')'
@@ -79,15 +138,19 @@ for f in files:
                 if depth == 0: break
             i += 1
         ports[t][name] = port_names(text[m.end():i])
+  return ports
 
 inst_re = re.compile(r'\b([A-Za-z_]\w*)\s*(?:#\s*\((?:[^()]|\([^()]*\))*\)\s*)?'
                      r'([A-Za-z_]\w*)\s*(\()\s*\.\s*\w', re.S)
 kw = {'if', 'else', 'for', 'while', 'case', 'begin', 'end', 'assign', 'always',
       'always_ff', 'always_comb', 'return', 'function', 'task', 'module'}
 
-bad = 0
-for f in files:
-    text = strip_comments(f.read_text(errors='ignore'))
+seen = {}
+
+
+def check(defined, ports):
+  for f in files:
+    text = select(raw[f], defined)
     order = lookup_order(tree_of(f))
     for m in inst_re.finditer(text):
         mod, inst = m.group(1), m.group(2)
@@ -108,8 +171,14 @@ for f in files:
         for p in re.findall(r'\.\s*(\w+)\s*\(', body):
             if p not in found:
                 line = text[:m.start()].count('\n') + 1
-                print(f"{f.relative_to(root)}:{line}: {mod} {inst}: no port '{p}'")
-                bad += 1
+                seen[(str(f.relative_to(root)), line, mod, inst, p)] = True
 
+
+for d in passes:
+    check(d, collect(d))
+
+for (fn, line, mod, inst, p) in sorted(seen):
+    print(f"{fn}:{line}: {mod} {inst}: no port '{p}'")
+bad = len(seen)
 print(f"{'FAIL' if bad else 'PASS'}: {bad} unknown named port connection(s)")
 sys.exit(1 if bad else 0)

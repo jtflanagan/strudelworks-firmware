@@ -359,24 +359,25 @@ if {$gs && $l1istore} {
     set_property verilog_define [concat [get_property verilog_define [current_fileset]] [list L1I_STORE]] [current_fileset]
 }
 if {$gs && $gs50t} {
-    # THE 50T CANDIDATE (docs/CORE_REFACTOR_65816.md): the CAM-L2 at 32 slots,
-    # no Mockingboard, no slot mouse card, the register file at MINIMAL.
-    puts " variant: the 50T candidate (32 slots, MINIMAL regs)"
+    # THE 50T CANDIDATE (docs/CORE_REFACTOR_65816.md): the L2 at its default
+    # geometry, no Mockingboard, no slot mouse card, the register file at MINIMAL.
+    puts " variant: the 50T candidate (the default L2, MINIMAL regs)"
     # APPENDED to the fileset's generics: set_property replaces the list, and the
     # first build of this variant lost its build stamp that way (the host then
     # called the gateware unknown and never configured the hard disk's slot).
     # HAS_MB / HAS_MOUSE are NOT here any more - every GS build drops them now,
     # not just this variant (below).
     set_property generic [concat [get_property generic [current_fileset]] \
-        [list MEM_SETS=32 MINIMAL_REGS=1]] [current_fileset]
+        [list MINIMAL_REGS=1]] [current_fileset]
 }
 if {$gs && $gsslots > 0} {
-    # The CAM-L2's slots on their own (docs/CORE_REFACTOR_65816.md "The CAM-L2").
+    # The L2's SETS on their own (docs/CORE_REFACTOR_65816.md "The L2 in sets";
+    # the ways a set are gs_top's MEM_WAYS).
     # -gs50t sets 32 AND MINIMAL_REGS together, which is the 50T variant, not a
     # slot count: an A/B of N alone has to leave the register file where it is
     # or it is comparing two things at once.  APPENDED, like the block above -
     # set_property replaces the list and that is how a build once lost its stamp.
-    puts " the CAM-L2 at $gsslots slots"
+    puts " the L2 at $gsslots sets"
     set_property generic [concat [get_property generic [current_fileset]] \
         [list MEM_SETS=$gsslots]] [current_fileset]
 }

@@ -1,6 +1,6 @@
 # The 65816 card: the core / L1 / L2 refactor ladder
 
-Status: **2026-09-20 LATEST: THE CAM-L2 IS 32 SLOTS BY DEFAULT** (the user,
+Status: **2026-09-20 LATEST: THE BINDING LOOP RETIMED, THE Pt MET, THE 50T STILL MISSES - ON A DIFFERENT FAMILY** (branch l2_sets, the retimes uncommitted).  pc_reg -> the microcode ROM's address is GONE from the worst paths: the slot-0 sequencing is read from L1-I's two serve registers through a decode ROM each, and the serve select runs on a one-sided flag of the stream's position computed a cycle early over the core's simple PC arms and selected late by the retire and the core's cycle enable.  Pt bit `bloop2`: TIMING MET +0.045 / whs +0.058, 0 of 72,719; 27,739 LUTs (+141), 54 RAMB36; gs suite 18/18, the 20 M row 14/0 with the assertions silent (the flag conservatively low on 27 k of 257 M clocks: MVN/MVP's rewind arm).  The 50T (`50t_bloop2`, the same source): TIMING MISS -0.391 on 122 of 68,931, 27,377 LUTs = 84.0%, 50 RAMB36 - the worst path the sequencer's bank register into the page RAM's port-B address (the TLB direct-read cone), 13 levels, 74% route.  Stopped at the user's rule.  Section "The binding loop retimed" below.  **EARLIER: THE L2 IN SETS
 measured on hardware, bit `l2s32`, TIMING MET +0.014, 0 of 70,313).  An A/B on
 one commit (fw 588c81a), one generic apart, both Pt GS builds: the Finder
 **47.9x** at 32 slots against **51.6x** at 64 (bit `enc1`, the last round's
@@ -502,6 +502,185 @@ absolute block at 49% of the clocks but already runs at 2.15 clocks an op - a gr
 The supporting counters over the same window: dl_serves 114.9 M (= the dline ops), dl_cam_serves
 14.8 M, dl_decl 3.66 M, dl_claims 0, dl_reval_revive 42.95 M / dl_reval_drop 1.23 M, il_acks 6.82 M,
 il_inst 876 k, pc_il_i / pc_il_d / pc_decline all 0.
+
+## The L2 in sets (the user's direction, 2026-09-20; built and measured the same day)
+
+The user, with the 32-slot CAM's working-set cliff on the Finder in hand: 32 ways fully
+associative is expensive and it was the LUT expense that brought it down to 32 - can the
+working-set policy (the TLB's pinning of the ways it points at, the referenced bit) let L2 go
+back to a LARGER cache at a good associativity, eight ways, insulated from a stream by the same
+hints?  Test the smaller geometry first, 16 x 8, on hardware; the benches are too short to bite;
+the 50T question waits on the performance.
+
+**THE SHAPE THAT WORKS IS THE CAM's, PARTITIONED.**  One RAM per way is out - way_ram is true
+dual port at 128 bits, four RAMB36 an instance whatever its depth, so eight ways would be 32
+tiles - so the store stays ONE block RAM and a slot is {set, way}; the directory is decided
+before the row read as the CAM did, with the compare narrowed to a set.  rtl/gs/page_cam.sv
+(SETS x WAYS): per way, SETS words of {tag, referenced, last offset} in LUTRAM (16 x 25, RAM32M
+x 15 a way), read ASYNCHRONOUSLY by the entrant's set in P0 - the compare and the hit way's row
+read stay in P0; three read addresses (the entrant's set, the op's set at P2, the direct read's
+set) and one write a clock a way, by priority: the fill's retag (its slot is valid the same
+clock, so its tag must land), the op's touch, a skipped pick's reference given up, the direct
+read's touch (a lost touch is a lost hint).  The valid, dirty and TLB-pointed bits are flop
+vectors, a bit a slot: each has more than one writer a clock.  The victim is chosen at P1
+within the entrant's set from the bits registered at P0 (the engine's own slot masked; the
+landings of the P0 and P1 clocks forwarded into the dirty bits - a stale dirty bit would drop
+a page's writes, a stale pointed bit only costs a TLB kill); the victim's tag is read at P2 from
+the LUTRAM at the op's set.  The set is a fold of the whole page number (bank byte included: the
+64-set bug).  The PLRU is seven nodes a set in LUTRAM.  The L1 sides and the TLB are untouched:
+their SIDX/LEV parameters were built for sets and ways and carry 4 + 3 bits where they carried
+5 + 1.  Everything behind P0 is the CAM's, by name.
+
+WHY LUTRAM AND NOT BLOCK RAM, AND NOT FLOPS.  L1's fills never consult the directory - the TLB
+names {set, way} and a fill is a direct way read - so the lookup serves the op path (the
+dispatcher's ops that bypass L1, the TLB's misses) and what matters there is LATENCY: a block
+RAM directory reads synchronously and would cost every one of those a clock (about 3% on the
+Nox census), plus a tile a way for the independent write ports, plus a walk to clear.  Flops
+were the CAM's cost: 46 LUTs and 33 flops a slot, the index-decoded next-state selects and the
+N:1 reads, linear in slots.  In LUTRAM the cost is per WAY.
+
+**MEASURED (the Pt, gs_zelda.conf, the Finder idle at the desktop, accel 2 unlimited, three 5 s
+windows = 500.0 M clocks each, both arms the same evening, all three agreeing to three figures):**
+
+| | CAM 32 slots (fw 16:31) | 16 x 8 = 128 slots (fw 18:22) |
+|---|---|---|
+| ops retired / 5.10 M bus cycles | 242.8 M = **47.6x** | 281.3 M = **55.1x** (+15.8%) |
+| L2 fills / flushes a window | 2.53 M / 366 k | 0.84 M / 80 k |
+| DEC_D | 80.8 M | 71.0 M |
+| SEQ_FAST | 73.4 M | 45.9 M |
+| DEC_I | 35.6 M | 24.8 M |
+| D fill wait / I fill wait | 30.0 M / 26.6 M | 34.3 M / 31.6 M |
+
+The 64-slot CAM had measured 51.6x here: 128 slots at eight ways is past it, and the fill
+rate says why - three quarters of the Finder's fills were re-fills of pages the 32 slots could
+not hold.  The line-fill waits GREW while the L2 fills fell by three: the L1 sides are now fed
+from L2 at a higher rate instead of waiting behind L2's own misses, and DEC_D and SEQ_FAST are
+where the clocks came back from.  (The baseline's open window was GSHardDrive, the new bit's
+ClassicsGS: the same idle loop, not the same pixels.)
+
+**THE COST (the Pt, both TIMING MET; utilization_hier_gs_l2s16x8.rpt against l2s32):**
+
+| module | LUTs | flops | RAMB36 |
+|---|---|---|---|
+| page_cam | 2,905 -> 2,810 (484 of them LUTRAM) | 2,470 -> 1,889 | 4 -> 8 |
+| tlb | 1,045 -> 1,437 | 956 -> 992 | |
+| l1i | 1,654 -> 1,579 | 1,363 -> 1,373 | |
+| l1d | 1,531 -> 1,365 | 1,220 -> 1,224 | |
+| design | 27,587 -> 27,598 | 23,132 -> 22,533 | 50 -> 54 |
+
+LUT-NEUTRAL for four times the slots: the TLB's wider entries (7 bits of {set, way} against 5)
+are paid for by page_cam and both L1 sides.  Depth: max 20, tail >= 14 482 (the l2s32 build:
+18 / 321) - named, not a miss.  gs suite 18/18 (boot_gs 12/0), lint 73 OK; the bench's
+`--l2=N --ways=N` are sets and ways; build.tcl's `-gsslots N` is the set count, `-gs50t` no
+longer names a geometry.
+
+**THE 50T CANDIDATE, THIS GEOMETRY (gs_50t_l2s16x8, 2026-09-20 19:05, the 50T part with the au_v2
+pins, -gs50t): TIMING MISS -0.158 / whs +0.037, 40 of 68,917 endpoints; 27,316 LUTs = 83.8% (gs_50t2
+with the CAM: 28,514 = 87.5%), flops 32.2%, 54 RAMB36 = 72% (48).**  The path hunt on the routed
+checkpoint (build/results/paths_gs_50t_l2s16x8.txt): 38 of the 40 endpoints leave
+`g_65816.u_cpu/pc_reg` - 29 into the microcode ROM's address (`urom`), 3 into l1i's `f_ppn`, the rest
+l1d's `dq_pair` / `dq_kbd` / `dq_bz`, l1i's `i_byte_q` and the scan pointer, the core's `f_z`; the
+other two from the hard disk's `pidx_reg` into `dq_addr`.  The worst: pc_reg[1] -> urom address, 12
+levels, 77% route.  THAT IS THE CORE's BINDING LOOP (the PC into the next microcode word and the
+L1 sides' next address), NOT THE CACHE - the same family the Pt build carries at its margin, now
+under the 50T's congestion with four more tiles placed.  The bit is kept as
+master_top_gs_50t_l2s16x8_MISS.bit, never to load.  Stopped here at the user's rule (a miss ends the
+round; the options are the user's).
+
+NEXT (the user's plan, in order): the Nox map (fits 8 KB already; a drop would be the hash or
+the pipeline), XMAS at 2.8 (write sweeps, the write-around's case), a read stream through the
+cache (a large Finder copy, then the Finder measured again - the set-conflict case the CAM did
+not have); then, if wanted, 32 x 8 = 256 slots (16 RAMB36, the 50T's ceiling), with the LUT
+count expected flat.
+
+## The binding loop retimed (2026-09-20, the evening; built the same evening)
+
+The 50T candidate with the L2 in sets missed on ONE family: 38 of 40 endpoints from the core's
+`pc_reg`, 29 of them into the microcode ROM's address (12-13 levels, 77% route; the hunt in
+build/results/paths_gs_50t_l2s16x8.txt).  The chain, link by link, on an opcode fetch: the PC
+into L1-I's expected-address compare (`exp_q == pc_addr`, a 16-bit carry chain, 3 levels), the
+serve select (1), the byte mux - target byte, held byte, or the bus - in l1i and again in the
+core's din mux (2), the slot-0 lookahead - the decode ROM `useq0[fetch_op]` (a 256-entry LUT
+ROM), the condition, the successor slot (5) - and the `uaddr` mux into the block RAM (1).  The
+user: no placement constraints ("every attempt at placement constraints in this project has
+failed and generally made things worse"); try both retimes.
+
+WHAT IS LIVE ON THE PC IS ONLY THE CHOICE.  On a straight-line fetch the opcode byte is already
+a flop (L1-I's `i_byte_q`, loaded at the previous edge with the byte at `exp_q`), and a taken
+transfer's target byte is a flop too (`tgt_byte_q`).  So:
+
+**Retime 1 - the slot-0 lookahead per candidate.**  L1-I exports its two serve REGISTERS
+(`i_byte_r`, `tgt_byte_r`) and its selects (`i_sel_tgt`, `i_sel_held`, registers); the core
+reads the eight-bit slot-0 ROM once per candidate, addressed by the register itself, and picks
+between the two results by the selects; the bus arm reads the ROM from `i_din` live as before.
+The ROM read no longer waits behind the byte select.  (The first cut read the ROMs from the
+registers' D INPUTS into a register a cycle early - 7 levels on the fetch path - and hung the
+candidate on the retire's deep cone: the hd's `ovr_en` through `turbo_ok` into `step` into the
+byte select into the ROM, 17 levels on the Pt, six of the forty worst.  Reverted to the
+registers: 9-10 levels on the fetch path, no new path.)
+
+**Retime 2 - the stream's position as a flag.**  `at_exp_q` says `pc_addr == exp_q`, computed
+a cycle early: the core exports `pc_ds1` / `pc_ds_v1`, the next PC over its SIMPLE arms only
+(no load, INC, MD - RTS/RTI's pull - and JMPL) assuming cyc_en, and L1-I compares that against
+its four possible next expected addresses (`tgt_inc`, `exp_inc`, `pc_addr`, `exp_q`) in
+parallel, choosing by `tgt_serve` and the shallow step/recover terms, and LAST by the two deep
+signals: the retire (turbo_ok, the room, the kills) and the core's cycle enable.  ONE-SIDED: on
+an AGU / din / block-move arm the flag is low whatever the address, which costs a recover clock
+only when a transfer lands exactly where the stream stood; a high flag where the compare would
+say no would serve a wrong byte, and sim asserts it never happens.  The true compares stay on
+the RETIRE (`tgt_here`'s 24-bit, the C3 kill's 8-bit), where they already were; the byte select
+(`sel_tgt`, `lhit_q`) is registers alone.  The first cut compared the core's full `pc_d` (the
+AGU's sum: five carry chains, 18 levels from L1-D's `dq_addr`) and reconstructed the core's
+cycle enable as `retire || accel_cyc_en` - and the core's cycle enable is L1-D's, which carries
+its own data-cycle commits: an RTS loads the PC on a data cycle, the flag stayed high, and the
+20 M row's assertion caught the PC at $FE3C with the stream at $7629.  L1-I now takes the core's
+cycle enable as an input (`core_cyc_en`).  The counted conservative lows (27,055 serve clocks
+in 257 M on the row, 3 in the 250 k boot) are MVN/MVP's rewind arm at each loop's end and
+branches that land on the fall-through; the user: not material.
+
+**THE Pt (bit `bloop2`, 2026-09-20 20:12): TIMING MET +0.045 / whs +0.058, 0 of 72,719.**
+27,739 LUTs (the geometry alone 27,598: the core 1,385 -> 1,435 for the two ROM copies, their
+mux and `pc_ds1`; l1i 1,579 -> 1,602 for the flag's compares), flops 22,596 (+63), 54 RAMB36.
+Depth max 18, the tail >= 14 364 (the geometry alone 482; the first retime cut 1,043).  The
+worst path now `pc_reg` -> l1i's `dr_set` (a fill want) at 13 levels, MET.  gs suite 18/18, the
+20 M GS/OS row 14/0 in 257.5 M clocks (the 32-slot CAM's row this morning: 312.5 M; the 128x8
+set cache's: 279.8 M).  Not loaded (the hardware off for the night); the bit kept as
+build/results/master_top_gs_bloop2.bit.  The first retime cut's Pt build (`bloop1`) MISSED
+-0.132 on 12 endpoints, none of them `pc_reg` -> the ROM: the candidate register (6), the
+flag's AGU compare (1), the TLB direct-read cone (the rest).
+
+**THE 50T (`50t_bloop2`, 2026-09-20 20:26, the same source, -gs50t): TIMING MISS -0.391 /
+whs +0.056, 122 of 68,931; 27,377 LUTs = 84.0%, flops 32.2%, 50 RAMB36 = 67%.**  The worst path
+`u_seq/u_bank_reg` -> `u_cache/u_ram` port-B address, 13 levels (CARRY4 x2, RAMD32 x1), 74%
+route.  The hunt (build/results/paths_gs_50t_bloop2.txt), the sixty worst by family:
+
+| family | endpoints | worst | what it is |
+|---|---|---|---|
+| sequencer `u_addr` / `u_bank` -> the page RAM's port-B address | 17 (+3 from L1-D's `dq_addr`) | -0.601 | the L2-in-sets' direct-read cone: the op's page into the TLB's {bank, page} compare, the hit into `dr_req` / `dr_ack`, into the port-B address mux; the Pt closes it at its margin |
+| sequencer `st_reg` -> the Uthernet's lane RAMs | 12 | -0.396 | the sequencer's state into the W5100's memory ports |
+| L1-D `dq_addr` -> the microcode ROM's address | 9 | -0.338 | THE D SIDE's BINDING LOOP: the served byte into the early-carry adder (`esum_x`/`esum_y`/`esum_pc`) into `cond_next` -> `slot_n2` -> `uaddr` - the family the early-carry fold cut on the Pt this morning, exposed on the 50T now the I side's is gone |
+| L1-D `dq_addr` -> the core's X, Y, f_z and L1-D's own decides | 6 | -0.352 | the same byte into the AGU and the register writes |
+| TLB `ins_busy` -> `kill_ppn` / `ref_on` | 6 | -0.209 | the TLB's install |
+| L1-I `vtag` -> `cnt_prefetch` | 4 | -0.169 | a counter |
+
+`pc_reg` is the SOURCE OF NONE OF THEM: the I side's binding loop is closed on both parts.  What
+the 50T misses on now is the D side's (the byte into the early carry into the ROM address) and
+the L2's direct-read cone, both route-bound.  The bit kept as master_top_gs_50t_bloop2.bit,
+never to load.  Stopped at the user's rule.
+
+WHAT THE 50T NEEDS NEXT (the analysis, for the next round; the order is the slack's):
+(1) the L2's direct-read cone - the op's page into the TLB's sixteen {bank, page} compares,
+the hit into dr_req, the grant (`dr_ack`: eng_idle, !iv_run, !pw_pending, !dr_clash) into the
+port-B address mux - is the L2-in-sets' own path and the worst on the 50T by a margin; it is
+the shape the I side just had (a compare in front of a select) and takes the same cure: the
+grant's terms are registers or can be, and the address the TLB names can be registered a
+clock before the request; (2) the D side's binding loop - L1-D's served byte into the early-
+carry adder into cond_next -> slot_n2 -> uaddr - is the morning's family, closed on the Pt by
+the fold and exposed on the 50T; the byte's arrival is L1-D's registered serve, so the early
+carry's three sums could be formed from the serve register's D input as the I side's ROM copies
+are formed from the serve registers; (3) the Uthernet's lane RAMs from the sequencer's state
+(12 endpoints, one module, the LUT diet's shape) - the last resort the 50T notes already name.
+pc_reg sources nothing now; no placement constraint (the user's rule).
 
 ## The L2 geometry on GS/OS (2026-09-19, `--l2=SETSxWAYS` before the CAM, the 50T question)
 

@@ -8,13 +8,14 @@
 // address space but SETS pages of anywhere in the 16 MB physical space, and
 // there are WAYS of them (rtl/phys_cache.sv, docs/MEMORY_REFACTOR.md Part 3).
 //
-// Port A is the op path's: the entrant's read (an op's P0, a posted write's,
-// a front's line request) and, two clocks later, a write landing.  Its read
-// side carries TWO output registers - the block RAM's own optional output
-// register is the second - so the row is out at the entrant's clock + 2, the
-// way mux and the byte select have a whole stage, and the write that lands in
-// the same clock cannot disturb a row already captured (a_rdata takes the old
-// a_q on that edge).
+// Port A is the op path's: the row read the entrant's LOOKUP chose (issued at
+// P1 from the registered slot, 2026-09-22) and a write landing.  ONE output
+// register, like port B: the read is issued a clock later than it used to be,
+// so the row is still out at P2 and the way mux and the byte select still have
+// their stage.  The second register was what paid for issuing at P0, where the
+// address came the whole way from the translation and the directory compare -
+// the 50T's worst path (docs/CORE_REFACTOR_65816.md).  Read-first, so a write
+// landing in the same clock as a read of its row still hands back the old row.
 //
 // Port B is the page engine's: the dirty victim's snapshot, a fill's installs
 // and the write miss's patch.  One output register - the engine has a clock
@@ -36,7 +37,7 @@ module way_ram #(
     input  wire [15:0]   a_we,        // one per byte lane
     input  wire [AW-1:0] a_addr,
     input  wire [127:0]  a_wdata,
-    output logic [127:0] a_rdata,     // two clocks after a_en
+    output logic [127:0] a_rdata,     // one clock after a_en
 
     input  wire          b_en,
     input  wire [15:0]   b_we,
@@ -47,16 +48,13 @@ module way_ram #(
 
     (* ram_style = "block" *) logic [127:0] mem [0:ROWS-1];
 
-    logic [127:0] a_q;
-
     always_ff @(posedge clk) begin
         if (a_en) begin
             for (int i = 0; i < 16; i = i + 1) begin
                 if (a_we[i]) mem[a_addr][8*i +: 8] <= a_wdata[8*i +: 8];
             end
-            a_q <= mem[a_addr];
+            a_rdata <= mem[a_addr];
         end
-        a_rdata <= a_q;
     end
 
     always_ff @(posedge clk) begin

@@ -62,6 +62,7 @@ module l1d #(
     input  wire        d_pred_v,
     input  wire        d_pred_rw,
     input  wire        d_pred_vpb,    // the predicted cycle is a vector pull
+    input  wire [33:0] d_pred_arms,   // d_pred's late choices and their arms (cpu65816)
     input  wire [15:0] cpu_addr,
     input  wire [7:0]  cpu_bank,      // as the board presents it (the vector pull's $FF included)
     input  wire        cyc_int,       // VDA and VPA both low: an internal cycle
@@ -206,6 +207,35 @@ module l1d #(
     // GS/OS boot's first interrupt deadlocked that way (2026-09-19).
     wire [7:0] pred_bank = (d_pred_vpb && !io_flat) ? 8'hFF : d_pred[23:16];
     (* KEEP = "TRUE" *) logic [3:0] dq_ix_sh;
+    // THE CARRY PICKS LAST (2026-09-22, the 50T census): the three decodes
+    // were taken of d_pred after its carry and bank-move selects, so the
+    // compare and is_pair sat behind din's adder and both selects.  Each is
+    // decoded on both arms instead, and the late bit chooses - one mux
+    // after the carry.  KEPT, or synthesis folds the select back in first.
+    wire        a_bkm   = d_pred_arms[33];
+    wire [7:0]  a_bk_c  = d_pred_arms[32:25];
+    wire [7:0]  a_bk_nc = d_pred_arms[24:17];
+    wire        a_hic   = d_pred_arms[16];
+    wire [7:0]  a_hi_c  = d_pred_arms[15:8];
+    wire [7:0]  a_hi_nc = d_pred_arms[7:0];
+    wire        a_vec   = d_pred_vpb && !io_flat;
+    (* keep = "true" *) wire kbd_c   = (a_hi_c  == 8'hC0);
+    (* keep = "true" *) wire kbd_nc  = (a_hi_nc == 8'hC0);
+    (* keep = "true" *) wire bz_c    = (a_bk_c  == 8'd0);
+    (* keep = "true" *) wire bz_nc   = (a_bk_nc == 8'd0);
+    (* keep = "true" *) wire pair_c  = is_pair(a_bk_c);
+    (* keep = "true" *) wire pair_nc = is_pair(a_bk_nc);
+    wire kbd_pick  = (d_pred[7:0] == 8'h00) && (a_hic ? kbd_c : kbd_nc);
+    wire bz_pick   = a_vec ? 1'b0             : a_bkm ? bz_c   : bz_nc;
+    wire pair_pick = a_vec ? is_pair(8'hFF)   : a_bkm ? pair_c : pair_nc;
+`ifndef SYNTHESIS
+    always_ff @(posedge clk)
+        if (!rst && cyc_en && !$isunknown(d_pred) &&
+            (kbd_pick  != (d_pred[15:0] == 16'hC000) ||
+             bz_pick   != (pred_bank == 8'd0) ||
+             pair_pick != is_pair(pred_bank)))
+            $error("l1d: the carry-picked decodes differ from d_pred's (%06x)", d_pred);
+`endif
     always_ff @(posedge clk) begin
         if (rst || cpu_rst || inval) begin
             dq_v <= 1'b0; dq_wv <= 1'b0;
@@ -216,9 +246,9 @@ module l1d #(
         if (cyc_en) begin
             dq_addr  <= {pred_bank, d_pred[15:0]};
             dq_ix_sh <= d_pred[3:0];
-            dq_kbd   <= (d_pred[15:0] == 16'hC000);
-            dq_bz    <= (pred_bank == 8'd0);
-            dq_pair  <= is_pair(pred_bank);
+            dq_kbd   <= kbd_pick;
+            dq_bz    <= bz_pick;
+            dq_pair  <= pair_pick;
         end
     end
     assign dq_rw = !dq_wv;

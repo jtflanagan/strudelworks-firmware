@@ -233,6 +233,12 @@ module uthernet2_tb;
         .cmds_o (cmds), .rx_chunks_o (rx_chunks), .s0_rsr_o (s0_rsr), .s0_fsr_o (s0_fsr)
     );
     integer stall_clocks = 0;
+    // The sequencer samples the stall REGISTERED (rtl/gs/accel_seq.sv
+    // stall_q), so it can present on the clock after a card raises it - the
+    // blind spot the card's interlock has to cover.  The op tasks wait on
+    // this copy, not on stall itself, or they hide the blind spot.
+    reg stall_q = 1'b0;
+    always @(posedge clk) stall_q <= stall;
     always @(posedge clk) if (stall) stall_clocks <= stall_clocks + 1;
 
     // ---- the op model ---------------------------------------------------------------
@@ -253,7 +259,7 @@ module uthernet2_tb;
                 // rtl/gs/accel_seq.sv gates fast_ok, ovr_ok, turbo_ok and
                 // disp_pay on !stall_q.  A bench that presents through a
                 // stall is not modelling the machine.
-                while (stall) begin
+                while (stall_q) begin
                     op_present = 1'b0; op_commit = 1'b0;
                     @(posedge clk); #1;
                 end
@@ -268,6 +274,7 @@ module uthernet2_tb;
     endtask
     task op(input [15:0] addr, input rw, input [7:0] wdata);
         begin
+            while (stall_q) begin @(posedge clk); #1; end
             op_addr = addr; op_rw = rw; op_wdata = wdata;
             op_present = 1'b1;
             @(posedge clk); #1; op_present = 1'b0;

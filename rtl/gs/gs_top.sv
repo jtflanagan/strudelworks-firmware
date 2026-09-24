@@ -95,8 +95,14 @@ module gs_top #(
     // than its capacity. The BLOCK RAM DOES NOT CHANGE: the row is 128 bits
     // wide and 128 bits needs four RAMB36 whatever the depth.
     // build.tcl's `-gsslots N` builds any other count for an A/B.
-    parameter integer MEM_SETS = 32,    // the CAM-L2's slots (rtl/gs/page_cam.sv)
-    parameter integer MEM_WAYS = 2,     // nominal: one bit of way, always zero
+    // 2026-09-20 LATER, THE L2 IN SETS (the user's direction): SETS x WAYS
+    // slots in the one block RAM with the directory in LUTRAM per way -
+    // 16 x 8 = 128 slots = 32 KB = eight RAMB36 - the working-set policy
+    // per set, the TLB naming {set, way} as the set cache's did.  Measured
+    // on hardware before any sizing up (docs/CORE_REFACTOR_65816.md "The
+    // L2 in sets"); build.tcl's `-gsslots N` is the SET count now.
+    parameter integer MEM_SETS = 16,    // the L2's sets (rtl/gs/page_cam.sv)
+    parameter integer MEM_WAYS = 8,     // ...and its ways a set
     // THE 50T VARIANT (docs/CORE_REFACTOR_65816.md "The 50T candidate", 2026-09-19):
     // the Mockingboard and the slot mouse card generated out (the IIgs's own
     // mouse is ADB), the register file at its MINIMAL (build.tcl -gs50t sets
@@ -445,6 +451,7 @@ module gs_top #(
     wire [23:0] cpu_d_pred;
     wire [15:0] dev_addr;
     wire        cpu_d_pred_v, cpu_d_pred_rw, cpu_d_pred_vpb;
+    wire [33:0] cpu_d_pred_arms;
     // THE FRONTS ON THE IIgs (docs/GS.md rung 6): the predicted bank's class,
     // the program bank, the data bank register, the bank-write hold, and the
     // banks the two fronts' events carry.  All zero at GS = 0.
@@ -481,7 +488,7 @@ module gs_top #(
 
     card_link #(
         .MINIMAL_REGS (MINIMAL_REGS),
-        .MEM_PAGES_LOG2 ($clog2(MEM_SETS)),
+        .MEM_PAGES_LOG2 ($clog2(MEM_SETS * MEM_WAYS)),
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
         .CAN_MASTER (1'b1),
@@ -763,6 +770,10 @@ module gs_top #(
     wire        core_vpb;
     wire        cpu_rw;
     wire [7:0]  cpu_dout, cpu_din, cpu_p_flags;
+    wire [7:0]  i_byte_r_w, tgt_byte_r_w;      // l1i's fetch candidates, unmuxed
+    wire        i_sel_tgt_w, i_sel_held_w;     // ...and their selects
+    wire [15:0] cpu_pc_ds1;                    // the core's next PC over its simple arms
+    wire        cpu_pc_ds_v1;
     wire        cpu_cyc_en, cpu_sync;
     // The 65816's "this cycle touches nothing" (VDA and VPA both low), and
     // zero on a 65C02, which has no such cycle.  The dispatcher skips it.
@@ -803,6 +814,11 @@ module gs_top #(
         .rw     (core_rw),
         .dout   (cpu_dout),
         .i_din  (front_bypass ? cpu_din : i_din_w),   // the instruction front's byte
+        // The fetch candidates a cycle early and their selects (l1i's); the
+        // bypass sequences every fetch from i_din live, as it always did.
+        .i_byte_r (i_byte_r_w), .tgt_byte_r (tgt_byte_r_w),
+        .i_sel_tgt (front_bypass ? 1'b0 : i_sel_tgt_w), .i_sel_held (front_bypass ? 1'b0 : i_sel_held_w),
+        .pc_ds1 (cpu_pc_ds1), .pc_ds_v1 (cpu_pc_ds_v1),
         .d_din  (front_bypass ? cpu_din : d_din_w),   // the data front's, or the sequencer's through it
         .cyc_is_i (cpu_cyc_is_i),   // = VPA
         .pc_addr ({cpu_pc_bank, cpu_pc_addr}),
@@ -812,6 +828,7 @@ module gs_top #(
         .d_pred_rw (cpu_d_pred_rw),
         .d_pred_bcls (cpu_d_pred_bcls),
         .d_pred_vpb (cpu_d_pred_vpb),
+        .d_pred_arms (cpu_d_pred_arms),
         .p_flags (cpu_p_flags),
         .dbr_o  (cpu_dbr),
         .bank_wr (cpu_bank_wr),
@@ -1310,8 +1327,11 @@ module gs_top #(
     // the bench's --vflags=-DL1I_STORE).
 `ifndef L1I_STORE
     l1i #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
-        .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst),
+        .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst), .pc_ds1 (cpu_pc_ds1), .pc_ds_v1 (cpu_pc_ds_v1), .core_cyc_en (cpu_cyc_en),
+        .i_byte_r (i_byte_r_w), .tgt_byte_r (tgt_byte_r_w), .i_sel_tgt (i_sel_tgt_w), .i_sel_held (i_sel_held_w),
 `else
+    // The parked store has no candidates: the core sequences from i_din live.
+    assign i_byte_r_w = 8'd0; assign tgt_byte_r_w = 8'd0; assign i_sel_tgt_w = 1'b0; assign i_sel_held_w = 1'b0;
     l1i_store #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
         .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst), .pc_d (cpu_pc_d),
 `endif
@@ -1366,7 +1386,7 @@ module gs_top #(
     // books ride the sequencer's d_commit.
     l1d #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1d (
         .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst),
-        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb),
+        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
         .cpu_addr (cpu_addr), .cpu_bank (cpu_bank), .cyc_int (cyc_internal),
         .cpu_rw (cpu_rw), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (iline_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (cpu_din), .i_din (i_din_w),
@@ -2059,7 +2079,7 @@ module gs_top #(
     wire [7:0]  pw_any_off   = pw_off_w;
     wire [7:0]  pw_any_data  = pw_data_w;
 
-    page_cam #(.N (MEM_SETS)) u_cache (
+    page_cam #(.SETS (MEM_SETS), .WAYS (MEM_WAYS)) u_cache (
         .clk         (apple_clk),
         .rst         (apple_rst),
         .cl_valid    (cl_valid),

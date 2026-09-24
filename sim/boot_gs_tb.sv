@@ -51,8 +51,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                     parameter integer TARGET = 0,
                     parameter integer MAX_INSTRS = 200000,
                     parameter integer TLB_N = 16,        // the TLB's entries (--tlb=N: a census lever)
-                    parameter integer L2_SETS = 32,      // the CAM-L2's slots (--l2=N; gs_top's default since 2026-09-20)
-                    parameter integer L2_WAYS = 2,       // nominal: a one-bit way, always zero
+                    parameter integer L2_SETS = 16,      // the L2's sets (--l2=N; gs_top's default, 2026-09-20)
+                    parameter integer L2_WAYS = 8,       // ...and its ways a set (--ways=N)
                     parameter integer FAST_DMA = 1,      // 0: the hard disk's blocks land by the bus (--slowdma)
                     parameter integer ROOM_P = 12,       // the merge's no-room model (--room=P; 0 = never)
                     parameter integer MAX_CLKS = 400000000,
@@ -282,14 +282,21 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [23:0] cpu_pc_d;
     wire [1:0]  cpu_d_pred_bcls;
     wire        cpu_d_pred_vpb;
+    wire [33:0] cpu_d_pred_arms;
     wire [7:0]  cpu_p_flags, cpu_dbr, i_din_w, d_din_w, seq_din;
+    wire [7:0]  i_byte_r_w, tgt_byte_r_w;
+    wire        i_sel_tgt_w, i_sel_held_w;
+    wire [15:0] cpu_pc_ds1;
+    wire        cpu_pc_ds_v1;
     wire [7:0]  cpu_din = cpu_cyc_is_i ? i_din_w : d_din_w;
 
     cpu65816 #(.UCODE_FILE (UCODE), .UCODE0_FILE (UCODE0), .USEQ0_FILE (USEQ0)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_a24), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (d_din_w),
+        .i_byte_r (i_byte_r_w), .tgt_byte_r (tgt_byte_r_w), .i_sel_tgt (i_sel_tgt_w), .i_sel_held (i_sel_held_w),
+        .pc_ds1 (cpu_pc_ds1), .pc_ds_v1 (cpu_pc_ds_v1),
         .cyc_is_i (cpu_cyc_is_i), .pc_addr (cpu_pc24), .pc_d (cpu_pc_d), .d_pred (cpu_d_pred),
-        .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls), .d_pred_vpb (cpu_d_pred_vpb),
+        .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
         .p_flags (cpu_p_flags), .dbr_o (cpu_dbr), .bank_wr (cpu_bank_wr),
         // The chipset's one interrupt line, active low into the core.
         .irq_n (!gsio_irq), .nmi_n (1'b1),
@@ -567,8 +574,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // sequencer, in the program's bank.
 `ifndef L1I_STORE
     l1i #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
-        .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .pc_ds1 (cpu_pc_ds1), .pc_ds_v1 (cpu_pc_ds_v1), .core_cyc_en (cpu_cyc_en),
+        .i_byte_r (i_byte_r_w), .tgt_byte_r (tgt_byte_r_w), .i_sel_tgt (i_sel_tgt_w), .i_sel_held (i_sel_held_w),
 `else
+    assign i_byte_r_w = 8'd0; assign tgt_byte_r_w = 8'd0; assign i_sel_tgt_w = 1'b0; assign i_sel_held_w = 1'b0;
     l1i_store #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .pc_d (cpu_pc_d),
 `endif
@@ -631,7 +640,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .io_flat (gs_shadow_w[6]), .io_vec (io_vec_q), .swi_busy (swi_commit),
         .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
-        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb),
+        .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
         .cpu_addr (cpu_addr_eff), .cpu_bank (cpu_bank_eff), .cyc_int (cyc_internal),
         .cpu_rw (cpu_rw_eff), .cpu_dout (cpu_dout), .cyc_is_i (cpu_cyc_is_i),
         .il_cyc_en (iline_cyc_en), .seq_cyc_en (seq_cyc_en), .accel_din (seq_din), .i_din (i_din_w),
@@ -1175,7 +1184,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .busy (rom_busy), .overruns (rom_overruns), .rom_ok (rom_loaded)
     );
 
-    page_cam #(.N (L2_SETS)) u_cache (
+    page_cam #(.SETS (L2_SETS), .WAYS (L2_WAYS)) u_cache (
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_ppn (cl_ppn_w), .cl_off (cl_off[7:0]),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_wdata (cl_wdata), .cl_posted (cl_posted),
@@ -2914,7 +2923,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // holds it - else the DDR3 stub has it.  The bench needs this to check
     // that a block the host DMA'd in actually landed where the machine will
     // look for it.
-    localparam integer MEM_SETS = L2_SETS;
+    localparam integer MEM_SETS = L2_SETS * L2_WAYS;   // slots: a slot is {set, way}
     localparam integer SIDX = $clog2(MEM_SETS);
     function automatic [7:0] card_byte(input [15:0] ppn, input [7:0] off);
         int w, hit;
@@ -3037,6 +3046,13 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         $readmemh(HDROMF, hd_rom);
         $readmemh(HDVF, himg);
         for (a = 0; a < IMG; a = a + 1) smem[a] = 8'h00;
+        // The oracle knows the ROM from the image: the loader's lines are how
+        // it reaches the card, and a page of it can be read before its line
+        // was written (see THE READ ORACLE at the end of this file).
+        for (a = 0; a < 262144; a = a + 1) begin
+            or_gold[((16'hFC00 + (a >> 8)) << 8) | (a & 8'hFF)] = rom_img[a];
+            or_wclk[((16'hFC00 + (a >> 8)) << 8) | (a & 8'hFF)] = 0;
+        end
         hm_clear();
 
         $display("boot_gs_tb: GS=1 MODE %0d TARGET %04x ROM %0d chunks, max %0d instructions / %0d clocks",
@@ -3427,9 +3443,172 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                            rom_bad_got, rom_bad_want));
         else ok("every byte read from banks $FC-$FF was the ROM image's");
 
+        // THE READ ORACLE's two verdicts (see the end of this file).
+        or_clean_sweep;
+        $display("    the read oracle: %0d settled rows and %0d known bytes compared, %0d rows skipped unsettled; %0d served bytes checked",
+                 or_rows, or_bytes, or_skip_unsettled, or_sub_checked);
+        if (or_reports != 0 || or_sub_reports != 0)
+            fail($sformatf("%0d rows and %0d served bytes were not the last byte written there (named above)",
+                           or_reports, or_sub_reports));
+        else if (or_bytes == 0)
+            fail("the read oracle compared nothing - it is not watching the cache");
+        else ok("every byte the cache returned or served was the last one written to it");
+
         $display("%0d checks, %0d errors", checks, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL");
         $fclose(tf);
         $finish;
     end
+    // ---- THE READ ORACLE (sim-only, 2026-09-22) -----------------------------
+    // Every byte the L2 hands back is compared with the last byte written to
+    // that physical address.  A byte NOBODY has written is not compared: RAM
+    // comes up undefined on the machine this models, and a dummy or
+    // speculative read of one is not an error.  Nor is a row read across the
+    // fill that installs it: the directory's tag is written on the fill's LAST
+    // beat, so between the first beat and that the row already carries the new
+    // page while the tag still names the old one - the reader discards those.
+    // So a row is compared only while it is SETTLED: the slot valid, the tag
+    // unchanged from the ack to the landing, and no write into that row in
+    // between.
+    //
+    // The writers, all of them: an op's landing (wl_*), the engine's patch and
+    // its write-around (e_wr_stb), and the ROM loader's line (ld_take).  The
+    // ROM image is seeded, since the loader's lines are how it gets there and
+    // a page of it can be read before its line was written.  The DDR3 stub is
+    // written by nothing else - the bench never writes the machine's memory
+    // behind the card's back - so what the card wrote is the whole truth.
+    byte unsigned or_gold [int];            // physical byte -> last written
+    int           or_wclk [int];            // ...and when (a row's freshness)
+    bit           or_seen [int];            // a row reported once
+    int or_rows = 0, or_bytes = 0, or_reports = 0, or_skip_unsettled = 0;
+    // The acks pipeline: l1i and l1d both issue direct reads, so a row can be
+    // acked while another is in flight - the requests are queued here in the
+    // order page_cam answers them (dr_sr), or a row gets compared against the
+    // wrong request's expectations.
+    localparam integer ORQ = 8;
+    int or_q_tag [ORQ], or_q_line [ORQ], or_q_slot [ORQ], or_q_clk [ORQ], or_q_exp [ORQ][16];
+    int or_wp = 0, or_rp = 0;
+    int or_sub_addr, or_sub_exp, or_sub_pending, or_sub_checked = 0, or_sub_reports = 0;
+    int or_tag, or_line, or_slot, or_ack_clk, or_ack_state, or_ack_eslot;
+    int or_retag_clk [int];     // slot -> when its tag last landed
+    int or_exp [16];
+
+    task automatic or_write(input int addr, input byte unsigned v);
+        begin
+            or_gold[addr] = v;
+            or_wclk[addr] = now;
+        end
+    endtask
+
+    always @(posedge clk) begin
+        // A row lands two clocks after its ack: compare it, if it settled.
+        if (u_cache.dr_done && (or_rp != or_wp)) begin
+            bit settled;
+            or_tag  = or_q_tag[or_rp % ORQ];
+            or_line = or_q_line[or_rp % ORQ];
+            or_slot = or_q_slot[or_rp % ORQ];
+            or_ack_clk = or_q_clk[or_rp % ORQ];
+            settled = u_cache.d_v[or_slot] && (u_cache.d_tag[or_slot] == or_tag[15:0]);
+            for (int b = 0; b < 16; b = b + 1)
+                if (or_q_exp[or_rp % ORQ][b] >= 0 &&
+                    or_wclk[(or_tag << 8) | (or_line << 4) | b] > or_ack_clk)
+                    settled = 1'b0;         // written while the read was in flight
+            if (!settled) or_skip_unsettled = or_skip_unsettled + 1;
+            else begin
+                or_rows = or_rows + 1;
+                for (int b = 0; b < 16; b = b + 1)
+                    if (or_q_exp[or_rp % ORQ][b] >= 0) begin
+                        or_bytes = or_bytes + 1;
+                        if (u_cache.dr_row[8*b +: 8] != or_q_exp[or_rp % ORQ][b][7:0] &&
+                            !or_seen.exists((or_tag << 4) | or_line)) begin
+                            or_seen[(or_tag << 4) | or_line] = 1;
+                            or_reports = or_reports + 1;
+                            $display("ORACLE at clk %0d instr %0d: ppn $%04x line %0d byte %0d = $%02x, last written $%02x at clk %0d, DDR3 has $%02x (slot %0d, tag $%04x, v %0d, engine state %0d, acked at clk %0d)",
+                                     now, trace_instrs, or_tag, or_line, b,
+                                     u_cache.dr_row[8*b +: 8], or_q_exp[or_rp % ORQ][b][7:0],
+                                     or_wclk[(or_tag << 8) | (or_line << 4) | b],
+                                     smem[(or_tag << 8) | (or_line << 4) | b],
+                                     or_slot, u_cache.d_tag[or_slot], u_cache.d_v[or_slot],
+                                     u_cache.state, or_ack_clk);
+                        end
+                    end
+            end
+            or_rp = or_rp + 1;
+        end
+        if (u_cache.dr_ack) begin
+            int sl;
+            sl = int'({u_cache.dr_set, u_cache.dr_way});
+            or_q_tag[or_wp % ORQ]  = int'(u_cache.d_tag[sl]);
+            or_q_line[or_wp % ORQ] = int'(u_cache.dr_line);
+            or_q_slot[or_wp % ORQ] = sl;
+            or_q_clk[or_wp % ORQ]  = now;
+            for (int b = 0; b < 16; b = b + 1) begin
+                int a;
+                a = (int'(u_cache.d_tag[sl]) << 8) | (int'(u_cache.dr_line) << 4) | b;
+                or_q_exp[or_wp % ORQ][b] = (u_cache.d_v[sl] && or_gold.exists(a)) ? int'(or_gold[a]) : -1;
+            end
+            or_wp = or_wp + 1;
+        end
+        // ---- the OTHER consumer: the byte the cache serves the sequencer.
+        // A hit serves its row's byte, a fill serves the critical beat; both
+        // are registered, so the address is taken the clock the decision is
+        // made and the byte compared the clock it appears.
+        if (or_sub_pending && u_cache.sub_en) begin
+            if (or_sub_exp >= 0 && u_cache.sub_data != or_sub_exp[7:0] && or_sub_reports < 20) begin
+                or_sub_reports = or_sub_reports + 1;
+                $display("ORACLE SERVE at clk %0d instr %0d: the cache served $%02x for $%06x, last written $%02x at clk %0d, DDR3 has $%02x",
+                         now, trace_instrs, u_cache.sub_data, or_sub_addr, or_sub_exp[7:0],
+                         or_wclk[or_sub_addr], smem[or_sub_addr]);
+            end
+            or_sub_checked = or_sub_checked + 1;
+        end
+        or_sub_pending = 0;
+        if (u_cache.dec_read && u_cache.s_hit && u_cache.serve_this && !u_cache.dec_block) begin
+            or_sub_addr = (int'(u_cache.s_ppn) << 8) | int'(u_cache.s_off);
+            or_sub_exp  = or_gold.exists(or_sub_addr) ? int'(or_gold[or_sub_addr]) : -1;
+            or_sub_pending = 1;
+        end else if ((u_cache.state == 3'd2) && u_cache.pr_valid && (u_cache.resp_n == 5'd0) &&
+                     u_cache.e_rw && u_cache.e_serve && !u_cache.op_present) begin
+            or_sub_addr = (int'(u_cache.e_ppn) << 8) | int'(u_cache.e_addr[7:0]);
+            or_sub_exp  = or_gold.exists(or_sub_addr) ? int'(or_gold[or_sub_addr]) : -1;
+            or_sub_pending = 1;
+        end
+        if (u_cache.eng_retag) or_retag_clk[int'(u_cache.e_slot)] = now;
+        // ---- the writers ----
+        if (u_cache.wl_v)
+            or_write(int'({u_cache.wl_bank, u_cache.wl_addr}), u_cache.wl_data[7:0]);
+        if (u_cache.e_wr_stb)
+            or_write(int'({u_cache.e_ppn, u_cache.e_addr[7:0]}), u_cache.e_wbyte);
+        if (u_cache.ld_take)
+            for (int b = 0; b < 16; b = b + 1)
+                or_write(int'({u_cache.pq_line, 4'(b)}), u_cache.ld_wdata_q[8*b +: 8]);
+    end
+    // ...and the invariant that needs no map at all: a CLEAN resident page is
+    // the backing store's, byte for byte.  A dirty page may differ (its writes
+    // have not been flushed); a clean one may not.
+    task automatic or_clean_sweep;
+        int bad_pages, bad_bytes, first_ppn, first_off;
+        begin
+            bad_pages = 0; bad_bytes = 0; first_ppn = -1;
+            for (int sl = 0; sl < L2_SETS * L2_WAYS; sl = sl + 1)
+                if (u_cache.d_v[sl] && !u_cache.d_d[sl]) begin
+                    int n;
+                    n = 0;
+                    for (int off = 0; off < 256; off = off + 1) begin
+                        logic [127:0] row;
+                        row = u_cache.u_ram.mem[{sl[$clog2(L2_SETS*L2_WAYS)-1:0], 4'(off >> 4)}];
+                        if (row[8 * (off & 15) +: 8] !== smem[(int'(u_cache.d_tag[sl]) << 8) | off]) begin
+                            n = n + 1;
+                            if (first_ppn < 0) begin first_ppn = int'(u_cache.d_tag[sl]); first_off = off; end
+                        end
+                    end
+                    if (n > 0) begin bad_pages = bad_pages + 1; bad_bytes = bad_bytes + n; end
+                end
+            if (bad_pages == 0)
+                ok("every clean resident page is the backing store's");
+            else
+                fail($sformatf("%0d clean resident pages differ from the backing store (%0d bytes); first ppn $%04x off $%02x",
+                               bad_pages, bad_bytes, first_ppn, first_off));
+        end
+    endtask
 endmodule
