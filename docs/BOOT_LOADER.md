@@ -1,10 +1,12 @@
-# The boot loader: three stages, a golden image, and the DDR3 fenced out of boot
+# The boot loader: one image that can replace itself, and the DDR3 fenced out of boot
 
 Status: **2026-09-25, branch `boot_loader` (from fw master 9ddb33d / host master 758bbe7). BL1 DONE in
-simulation: `rtl/common/flash_exec.sv` against `sim/sst26_model.sv`, `flash_exec_tb` 25 checks PASS at
-SPI clk/4 and clk/6, 8 of 8 mutants killed, `suite quick` 35/35. No bitstream.** The design was settled with the user in one session on 2026-09-25;
-this document records the decisions and the order of work. It extends REQ_65C02.md 1.10 (a DDR3-free
-boot path), which applies to both cards (REQ_65816.md 1.10).
+simulation (`flash_exec`, 25 checks, 8/8 mutants). The golden image was built (TIMING MET) and then
+DROPPED by the user the same day - see "History". BL2 ON HARDWARE 2026-09-25: GS build `gs_bl2a` TIMING
+MET (28,898 LUTs), flashed over JTAG with its record; identify / QUERY / READ / LINK_RESET (IPROG, the
+FT601 re-enumerating) all work over USB3. `suite quick` 36/36, `suite gs` 18/18.** The design was settled with the
+user on 2026-09-25; this records the decisions and the order of work. It extends REQ_65C02.md 1.10
+(a DDR3-free boot path), which applies to both cards (REQ_65816.md 1.10).
 
 ## Why
 
@@ -24,9 +26,12 @@ boot path), which applies to both cards (REQ_65816.md 1.10).
 
 ## Principles (the user's, 2026-09-25)
 
-- **Three stages, in order, each started by the host.** Nothing advances on its own.
+- **One image in flash, at address 0.** Every image carries the means to replace itself.
+- **Two stages, in order, each advanced by the host.** Nothing advances on its own.
 - **The card never times out waiting for the host.** The card is powered from the Pi's USB3 and
   configures long before a cold-booting Pi can talk to it.
+- **We know what is in the flash, so a start reloads nothing it does not need to.** Pushing the bit
+  on every swhost start was a workaround for not knowing what was already there.
 - **Once in full operation, all messaging may ride the DDR3 ring.** A wedge is not detected on the
   card: the host notices that the card's heartbeats have stopped and sends LINK_RESET.
 - **LINK_RESET is a full reset, sparing nothing.**
@@ -34,84 +39,56 @@ boot path), which applies to both cards (REQ_65816.md 1.10).
   the card is. The USB3 path is for user-level image loads at runtime.
 - **JTAG is the recovery path of last resort, and it needs no special equipment:** it is the
   Alchitry's ordinary USB cable, plugged into the Pi, driven by the host software. Slow is fine.
-- **Golden's protocol is defined once and frozen at release.** It may change while this is fleshed
-  out; after release, the host speaks it forever.
-- **We know what is in the flash, so a start reloads nothing it does not need to.** Pushing the bit
-  on every swhost start was a workaround for not knowing what was already there; QUERY answers that.
-- **RES' is not cared about until stage 3 asserts control.** It may glitch during FPGA resets on the
+- **The flash protocol is versioned and additive.** Any image must be able to load any other, so the
+  flash block's registers and FLASH_PAGE are defined once, may change while this is fleshed out, and
+  after release only grow. The host refuses a package whose protocol version it does not speak.
+- **RES' is not cared about until stage 2 asserts control.** It may glitch during FPGA resets on the
   prototype; accepted until the deadman hardware exists.
 
 ## The boot, stage by stage
 
 ```
- power-on / LINK_RESET / watchdog / swhost start
+ power-on / LINK_RESET / watchdog
         |
         v
- STAGE 1  golden image (flash 0)          link + stage-1 commands only; waits forever
-        |  host: QUERY -> match?  -- no -->  LOAD image, QUERY, LINK_RESET (back to stage 1)
-        |  yes: BOOT (IPROG to the user image)
-        v
- STAGE 2  user image, bootstrap           link + registers on the boot lane, DDR3 calibrates,
-        |                                  the Apple held; no DDR3 dependency anywhere
-        |  host: reads calibration. Failed -> stop, tell the user, the user decides.
+ STAGE 1  bootstrap, in the image       link + registers on the boot lane; the flash block;
+        |                                DDR3 calibrating; the Apple held; waits forever
+        |  host: identify.  Not the wanted image?
+        |     validate the package, ERASE, pages stop-and-wait, QUERY (the flash's CRC against
+        |     the record), LINK_RESET, reconnect, check the build stamp -> stage 1 of the new image
+        |  host: read calibration.  Failed -> stop, tell the user, the user decides.
         |  good: OPERATE
         v
- STAGE 3  user image, full operation      ROM push, ring engaged, capture, RES' released;
-                                           all messaging rides the DDR3 ring
+ STAGE 2  full operation                ROM push, ring engaged, capture, RES' released;
+                                         all messaging rides the DDR3 ring
 ```
 
-Every reset of every kind lands in stage 1, and the host walks the whole sequence again.
+Every reset of every kind lands in stage 1 of whatever image is in flash.
 
-### Stage 1: the golden image
+**While a load runs, the old image keeps running.** The FPGA never reads its flash again after
+configuring, so ERASE and the pages change nothing about the image that is doing the writing. A
+failed or interrupted load is retried from the start as long as the card stays up; only a power loss
+or a reset between the ERASE and a good QUERY leaves a flash that cannot configure (JTAG, below).
 
-A separate, small design at flash address 0, flashed once over JTAG and never written by the card.
-It contains the FT601 link, the message parser, a small register file, the flash executor and the
-IPROG primitive. It has no DDR3 and no core, and it drives nothing on the Apple side: every Apple-side
-pin is left as an unconfigured FPGA's, the power-on state. RES' is not cared about until stage 3
-asserts control (user, 2026-09-25); no effort goes into narrowing the window before the deadman
-hardware exists, and with it the Apple holds in reset by itself.
+**RECONFIGURATION DROPS THE LINK.** After LINK_RESET every FPGA pin floats (PUDC_B is strapped high)
+until the image is up again, and the image pulses the FT601's RESET# for 1 ms, which re-enumerates it.
+The host expects the loss: it closes, waits, reopens, and speaks first (silent-until-asked). Then it
+reads `BOOT_ID` and the build stamp, and for a load compares the stamp with the record it verified.
 
-It obeys the silent-until-asked rule (PROTOCOL.md) and waits for the host indefinitely.
+### Stage 1: bootstrap
 
-**Commands.** Golden speaks the existing framing (PROTOCOL.md: header block, 0-255 payload blocks) and
-the existing REG_READ / REG_WRITE / REG_VALUE messages, plus one new host->card type for a flash page.
-Its register map is small and frozen at release:
+The image comes up as today's card does before the host engages the ring: every register answers on
+the ring's **boot lane** (TX_RING.md), the DDR3 calibrates on its own, the soft core is held
+(`start_hold`). The flash block (below) is in `card_link`, beside the register file, and depends on
+nothing but the link. The host reads LINK_STAT / RING_STATUS / DDR3_DBG1..4; if the DDR3 has not
+calibrated, nothing proceeds: the host tells the user and waits for the user's decision. It does not
+exit (today `start()` fails and swhost stays down, `pipeline.cpp:1827` -> `main.cpp` exit 1).
 
-| Command | What golden does |
-|---|---|
-| identify | answers a register: "stage 1", golden's protocol version, its build stamp, its part |
-| QUERY | reads the user region's record; reads the whole image back from flash and computes its CRC32; answers valid (with the record's fields) only if the CRC matches the record. About 0.5 s for 2.2 MB at the 40 MHz read clock. |
-| ERASE | unlocks ONLY the user region's blocks (`WBPR 42h`) and block-erases (`D8h`) the blocks the new package needs |
-| page | host->card FLASH_PAGE message: one address word + 64 data words (256 B). Golden programs the page (`02h`) and polls BUSY; the host reads a status register (busy / pages done / error) as the acknowledgement before sending the next page. Stop-and-wait: no buffer beyond one page, so the receiver, which has no back-pressure (`ft601_fifo.sv`, "The receiver is assumed never full"), cannot overrun. |
-| BOOT | ICAPE2 IPROG with WBSTAR = the user bitstream's address. Refused unless the last QUERY since reset or since the last write said valid. |
-| LINK_RESET | IPROG with WBSTAR = 0: golden reloads itself (a full reset, as everywhere) |
+### Stage 2: full operation
 
-A status register with a busy bit and a completion count is the acknowledgement for every command,
-so no new card->host message type is needed (memory `new-message-types-need-routing`).
-
-**The load sequence (host):** identify -> QUERY -> if the record matches the wanted image, BOOT. Otherwise
-validate the package (below) -> ERASE -> pages, bitstream first, record sector last -> QUERY (must say
-valid) -> LINK_RESET -> identify -> QUERY -> BOOT. A failure anywhere leaves golden running and the
-host retries from the start; nothing is lost but the user image.
-
-The host does not read the image back itself: the record carries the host's CRC of the bitstream and
-golden checks the flash against it, which is the end-to-end check.
-
-### Stage 2: bootstrap inside the user image
-
-After BOOT the user image configures and comes up in the state the card is in today before the host
-engages the ring: the link and every register answer on the ring's **boot lane** (TX_RING.md; built
-2026-09-18 for REQ 1.10), the DDR3 calibrates on its own, and the soft core is held (`start_hold`).
-
-The host reads LINK_STAT / RING_STATUS / DDR3_DBG1..4. If the DDR3 has not calibrated, nothing
-proceeds: the host tells the user and waits for the user's decision. It does not exit (today
-`start()` fails and swhost stays down, `pipeline.cpp:1827` -> `main.cpp` exit 1).
-
-### Stage 3: full operation
-
-One host-driven transition, OPERATE, entered only after calibration has been read good:
-the ROM push, the ring engage (`RING_CTRL`), BUS_ENABLE, telemetry, and the START release that lets
-RES' go. From then on every card->host word rides the DDR3 ring.
+One host-driven transition, OPERATE, entered only after calibration has been read good: the ROM push,
+the ring engage (`RING_CTRL`), BUS_ENABLE, telemetry, and the START release that lets RES' go. From then
+on every card->host word rides the DDR3 ring.
 
 The ROM push moves here from before the calibration check. It needs the DDR3 by its nature (the ROM
 lives in the image: `rom_loader.sv:170`, `pw_valid = draining && image_ready && in_window`, and
@@ -121,117 +98,121 @@ calibration (`pipeline.cpp:1715` vs `:1827`), so an uncalibrated card burns ever
 ### LINK_RESET: a full reset
 
 LINK_RESET (0x01, already decoded in `ft601_msg_rx` as the header is taken) becomes ICAPE2 IPROG with
-WBSTAR = 0, in both golden and the user image. The FPGA reconfigures from flash: every register, RAM,
-MMCM and the DDR3 controller start as at power-on, and the card lands in stage 1. The card's link
-watchdog expiry (`link_watchdog.sv`, a host that went silent mid-capture) and the other causes that
-feed today's reset stretcher (`card_link.sv:520`: no FT601 clock, TX stalled) take the same path.
+WBSTAR = 0 (`rtl/common/iprog.sv`): the FPGA reconfigures from flash, and every register, RAM, MMCM and
+the DDR3 controller start as at power-on. The link watchdog's expiry (a host that went silent
+mid-capture) takes the same path. The link's two self-recoveries - a CLKOUT that never came back and a
+TX side that stopped - keep today's 1 ms soft reset of the link: reconfiguring on them would loop
+every half second (and recalibrate the DDR3 each time) while a Pi boots with the FT601 dark.
 
-Cost: golden's configuration (a small image, well under 0.5 s) plus the user image's (2.2 MB at
-33 MHz x1, about 0.55 s) plus calibration. Every swhost start already is a reset (memory
-`start-then-reset`); it becomes this one.
+Cost: about 0.55 s of configuration (2.2 MB at 33 MHz x1) plus calibration. Every swhost start already
+is a reset (memory `start-then-reset`).
 
-The wedge detector is the host: its existing silence detection (`drive_link_health`,
-`pipeline.cpp`) sends LINK_RESET. No card-side DDR3 progress watchdog.
+## The flash block
+
+`rtl/common/flash_ctrl.sv` (it was `rtl/golden/golden_ctrl.sv`) in `card_link`, a second slave beside
+`wb_regfile` on the register bus: the addresses 0x8000_0E00-0x8000_0FFF are its, everything else the
+register file's (whose read data and ack are flops, so the 2:1 after them is not on its read path).
+
+| Address | Name | |
+|---|---|---|
+| 0x8000_0F00 | BOOT_ID | RO `{0x424C "BL", protocol version, stage}` |
+| 0x8000_0F04 | BOOT_PART | RO the IDCODE the image was built for; a package must match it |
+| 0x8000_0F08 | FLASH_CMD | W start a command `[3:0]`; reads back the last |
+| 0x8000_0F0C | FLASH_ADDR | RW READ's address |
+| 0x8000_0F10 | FLASH_LEN | RW ERASE's bitstream length, READ's length |
+| 0x8000_0F14 | FLASH_STAT | RO `[0]` busy `[1]` verified `[4:2]` executor error `[11:8]` result `[23:16]` commands finished |
+| 0x8000_0F18 | FLASH_PAGES | RO `[15:0]` pages programmed `[31:16]` pages refused |
+| 0x8000_0F1C | FLASH_ID | RO the JEDEC ID (read at reset) |
+| 0x8000_0F20 | FLASH_CRC | RO the CRC32 of the last read (zlib's) |
+| 0x8000_0F24/28 | IMAGE_END / REC_ADDR | RO the layout |
+| 0x8000_0F40+ | REC[0..15] | RO the record as the last QUERY read it |
+| 0x8000_0E00+ | BUF[0..63] | RO the executor's 256-byte buffer |
+
+Commands: 1 ID; 2 QUERY - read the record at REC_ADDR (magic, version, its own CRC, the part), then the
+bitstream from 0 for the record's length, and compare its CRC32 (about 0.5 s for 2.2 MB); 3 ERASE -
+unlock, erase the record's block FIRST, then the blocks covering FLASH_LEN bytes from 0; 5 READ -
+FLASH_LEN bytes from FLASH_ADDR into the CRC, the first 256 into BUF. Results: OK, EXEC, NO_RECORD,
+RECORD_CRC, IMAGE_CRC, BAD_PART, BAD_ARG, PAGE_REFUSED, BUSY.
+
+FLASH_PAGE (host -> card, 0x40, len 65): `[flash address] [64 words, little-endian bytes]`, programmed
+when it arrives if nothing runs, else refused and counted. The host sends one and reads FLASH_PAGES
+until a count moves: stop-and-wait, so the receiver's lack of back-pressure (`ft601_fifo.sv`, "The
+receiver is assumed never full") never matters, and no new card->host message type is needed (memory
+`new-message-types-need-routing`). Any ERASE or page clears `verified`.
 
 ## The flash
 
 The part is a Microchip **SST26VF032B** on both the Au V2 and the Pt V2 (4 MB; JEDEC ID `BF 26 42`;
 Au from Alchitry's forum and their loader, Pt from the SST26 pin names on U3 in the Pt schematic;
-golden reads the ID first anyway). Datasheet DS20005218E.
+the image reads the ID at reset anyway). Datasheet DS20005218E.
 
 - **It powers up write-protected.** Its block-protection register is volatile and resets to "all
-  locked". Every erase or program aimed at a protected block is ignored (datasheet 5.18). Golden
-  unlocks only the user region's blocks with `WBPR 42h`, never the global unlock `98h`, so its own
-  blocks stay locked and a bug in golden's address arithmetic cannot erase golden.
-- **Every erase costs about the same:** sector (`20h`, 4 KB), block (`D8h`, 64 KB in the middle of
-  the chip, 8 and 32 KB in the bottom and top 64 KB) and chip (`C7h`) are 18 / 18 / 35 ms typical.
-  Chip erase takes no range and is ignored if any block is protected, so **it is never used.**
-  Golden block-erases a 2.25 MB package in 36 operations, about 0.65 s.
+  write-locked" (`5555_FFFFFFFF_FFFFFFFF`; the datasheet's footnote prints a third word). An erase or
+  program aimed at a locked block is ignored (5.18). ERASE unlocks with `WBPR 42h` and confirms it with
+  `RBPR 72h`.
+- **Every erase costs about the same:** sector (`20h`, 4 KB), block (`D8h`: 8 KB x4 then 32 KB at the
+  bottom, 64 KB x62, 32 KB then 8 KB x4 at the top) and chip (`C7h`) are 18 / 18 / 35 ms typical. ERASE
+  walks the real block map with `D8h`: a 2.2 MB image is about 40 blocks, under 1 s. Chip erase is
+  never used.
 - **Programming is the floor:** 256 B pages at 55 us + 3.75 us/byte, about 1 ms per page; a 2.24 MB
-  Pt image is about 9 s. Faster SPI does not help.
-- `03h` read is limited to 40 MHz (`0Bh` goes to 104 MHz, an option if QUERY's 0.5 s ever matters).
-- In x1 SPI, D02 is WP# and D03 is HOLD#: golden drives both high.
+  Pt image is about 9 s.
+- `03h` read is limited to 40 MHz; the executor runs clk/4 (25 MHz) and samples MISO late, at the end
+  of SCK's high phase, because SCK leaves through STARTUPE2 with some ns of delay.
+- In x1 SPI, D02 is WP# and D03 is HOLD#: driven high.
 - CCLK is reachable only through STARTUPE2 `USRCCLKO`; the first 3 clocks after configuration are
-  swallowed. FCS_B and D00-D03 are ordinary user I/O after configuration (Pt: D00-D03 = P22 R22 P21
-  R21, `ref/alchitry_pt_v2_pins.tsv`; FCS_B to be confirmed from the pinout).
+  swallowed (the executor sends 8). FCS_B and D00-D03 are ordinary user I/O after configuration (Pt:
+  FCS_B T19, D00-D03 P22 R22 P21 R21, from Alchitry Labs' PtV2TopPin.kt; `constr/pt_v2/flash_pins.xdc`).
 
-### Layout (Pt)
-
-```
-0x000000 - 0x0FFFFF   golden (1 MB reserved until its real size is known; JTAG-written, stays locked)
-0x100000              user package: record sector (4 KB)
-0x101000              user bitstream (raw .bin)
-          - 0x3EFFFF  end of the user region: 0x2F0000 = 2.94 MB for record + bitstream
-0x3F0000 - 0x3FFFFF   unused (the top 64 KB is 8 and 32 KB blocks)
-```
-
-The user region starts on a 64 KB boundary above the bottom 64 KB stretch and ends below the top one,
-so it is all uniform 64 KB blocks for golden's `D8h`. The size ceiling (about 2.9 MB against today's
-2.24 MB compressed Pt image; a full 100T bitstream is 3.8 MB uncompressed) was accepted by the user.
-If golden builds under 512 KB, the user region can start at 0x080000. The Au gets its own golden and
-its own numbers.
-
-### The package
-
-`build.sh` emits, next to the `.bit`, one file that both writers put at the user offset:
+### Layout
 
 ```
-+0x0000  record, one 4 KB sector (the rest FF):
-           magic, record version
-           bitstream length, CRC32 of the bitstream
-           part / IDCODE, board, machine (IIe / GS), golden-protocol version it expects
-           build stamp (the one BUILD_DATE reports)
-           CRC32 of the record itself
-+0x1000  the bitstream: Vivado's raw .bin, not the .bit with its header
+0x000000              the bitstream (Vivado's raw .bin), up to IMAGE_END
+0x3FF000 - 0x3FFFFF   the record (one 4 KB sector in the top 8 KB block; the rest of it FF)
 ```
 
-BOOT jumps to +0x1000. The record's position does not change the cost of trusting it: whoever writes
-the package and in whatever order, golden checks the data against the record on every QUERY.
+The record cannot sit in front of the bitstream: configuration reads from address 0 and scans for the
+sync word, and arbitrary record bytes there are a risk nobody needs. At the top it is written LAST by
+both writers, so a load that stops early leaves no valid record - ERASE clears it first. The whole
+flash below it is the image's: even an uncompressed 100T bitstream (3.8 MB) fits.
 
-The host validates a package before ERASE: the part, the board, the golden-protocol version, and
-that the machine matches the swhost conf it will restart with (memory `name-the-conf`).
+### The record and the package
+
+The record's 64 bytes (little-endian words): `w0` magic 0x4B525753 ("SWRK"), `w1` record version 1,
+`w2` bitstream length, `w3` its CRC32, `w4` IDCODE, `w5` `[7:0]` board `[15:8]` machine, `w6` the flash
+protocol version, `w7` BUILD_DATE, `w8` BUILD_TIME, `w9..w14` zero, `w15` CRC32 of `w0..w14`.
+
+The build emits a package beside the `.bit`: the record, then the bitstream, as one file for
+distribution. The host validates it before ERASE (the part against BOOT_PART, the protocol version, the
+record's CRC, the bitstream's CRC, the machine against the swhost conf it will restart with - memory
+`name-the-conf`), writes the bitstream at 0 and the record at REC_ADDR.
 
 ### Writers
 
-- **Development and recovery (JTAG):** `openFPGALoader -c ft2232 --fpga-part xc7a100tfgg484 -f
-  -o 0x100000 --verify <package>`. Read in openFPGALoader v0.12.0's source (sibling clone
+- **Development and recovery (JTAG):** openFPGALoader, two writes in order: the bitstream at `-o 0`,
+  then the record at `-o 0x3FF000`. Read in openFPGALoader v0.12.0's source (sibling clone
   `~/repos/openFPGALoader`): `-o` passes to the flash write (`src/xilinx.cpp:689-696`); a flash write
   of a `.bin` is raw, not bit-reversed (`xilinx.cpp:579-580`); it erases only the written range, in
   4 KB sectors, because its SST26 entry has block erase off (`src/spiFlashdb.hpp:250-261`,
-  `src/spiFlash.cpp:182-235`); it sends the global unlock before writing (`spiFlash.cpp:356-363`) but
-  touches nothing outside its range; afterwards it resets the FPGA, which boots golden. Expect about
-  30-40 s (560 sector erases alone are about 10 s). Slow is fine. Golden itself is written once the
-  same way with `-o 0`.
-- **User loads (USB3):** golden, as above: about 0.65 s erase + 9 s programming + 0.5 s QUERY.
+  `src/spiFlash.cpp:182-235`); it sends the global unlock first (`spiFlash.cpp:356-363`); afterwards it
+  resets the FPGA, which boots the image. Expect 30-40 s. Slow is fine.
+- **User loads (USB3):** the image's own flash block: ERASE under 1 s, about 9 s of pages, 0.5 s QUERY.
 
 ### Recovery
 
-- A USB3 load that fails part-way (power cut, dropped link, host crash): golden is untouched and
-  QUERY says invalid; the host reloads.
-- A user image that configures but does not work: power-on and LINK_RESET always land in golden, so
-  the host loads a different image. No JTAG.
-- A user image that fails to configure (CRC or IDCODE error): user images are built with
-  `BITSTREAM.CONFIG.CONFIGFALLBACK ENABLE`, so the FPGA falls back to address 0, golden
-  (Xilinx XAPP1247). Golden refuses BOOT on an unverified image, so no barrier images or watchdog
-  timer settings are needed.
-- Golden itself broken: JTAG, from the Pi, with the ordinary Alchitry USB cable.
+- A USB3 load that fails part-way while the card stays up: the old image is still running; reload.
+- A power loss or reset between ERASE and a good QUERY, or an image that configures but cannot
+  reflash itself: JTAG, from the Pi, with the ordinary Alchitry USB cable.
 
 ## RES' and the deadman
 
 The prototype cannot hold RES' through an FPGA reconfiguration; glitches during resets are accepted.
 The planned deadman hardware: a MOSFET holds RES' low from the moment the Apple powers on, until the
-FPGA actively releases it with a GPIO driven high. The deadman input is pulled down (it must work
-with the 3V3 rail dead), and PUDC_B is strapped high on the board (verified by the user), so every
-user pin floats during configuration and the deadman holds. The release is a static level; a toggling
-release was considered and rejected as overkill.
-
-With it, every reset path is safe with no special handling: power-on, IPROG and fallback leave the
-pin unconfigured (held); golden and stage 2 never drive it; the OPERATE transition's START release
-drives it high.
-
-A future snoop-capable card (the Apple's own CPU running, the card watching) needs a different class
-of hardware support: most likely a board jumper that disables the deadman, set by a card intended to
-run snoop-only.
+FPGA actively releases it with a GPIO driven high. The deadman input is pulled down (it must work with
+the 3V3 rail dead), and PUDC_B is strapped high on the board (verified by the user), so every user pin
+floats during configuration and the deadman holds. The release is a static level; a toggling release
+was considered and rejected as overkill. Power-on and IPROG leave the pin unconfigured (held); stage 1
+never drives it; OPERATE's START release drives it high. A future snoop-capable card needs a different
+class of support: most likely a board jumper that disables the deadman.
 
 ## What exists today (audit, 2026-09-25, on master)
 
@@ -241,15 +222,13 @@ registers, the slot ROMs in LUTRAM.
 
 Leaks and conflicts this plan removes:
 
-1. **The ROM push needs the DDR3** and runs before the calibration check (stage 3 above).
+1. **The ROM push needs the DDR3** and runs before the calibration check (stage 2 above).
 2. **An engaged ring never lets go except by reset;** a `RING_CTRL=0` write reads back 0 but the ring
-   stays engaged (`tx_ring.sv:303`, `wb_regfile.sv`). Under this plan only a reset leaves stage 3, so
-   a disengage write should be refused loudly rather than silently ignored.
-3. **The link reset spares the DDR3 controller** (`card_link.sv:668-677`: its reset is the clock
-   lock only). LINK_RESET = IPROG supersedes this.
-4. **`clk_ctrl` is CLKOUT0 of the DDR3's MMCM** (`clk_gen.v:89`). Nothing breaks today, but DDR3
-   clocking work (write-leveling phase shifts, a frequency plan) moves the clock the link runs on.
-   The control plane should get its own clock from the 100 MHz oscillator.
+   stays engaged (`tx_ring.sv:303`, `wb_regfile.sv`). Only a reset leaves stage 2 now, so a
+   disengage write should be refused loudly rather than silently ignored.
+3. **The link reset spares the DDR3 controller** (`card_link.sv:668-677`). LINK_RESET = IPROG supersedes it.
+4. **`clk_ctrl` is CLKOUT0 of the DDR3's MMCM** (`clk_gen.v:89`). DDR3 clocking work moves the clock
+   the link runs on; the control plane should get its own clock from the 100 MHz oscillator.
 5. **The host has no way to stay up without the DDR3,** and the mock always reports calibrated
    (`mock_card.cpp`), so the uncalibrated path is never tested.
 6. **Stale comments** say every word rides the ring with no path around it: `card_link.sv:26-31`,
@@ -262,10 +241,10 @@ Leaks and conflicts this plan removes:
   a reload or a power cycle" is reworded there: LINK_RESET *is* a reload, from flash, by the card
   itself; what stays is that no recovery needs a human or a second cable.
 - **CLEAN_START.md CS1's "a IIe with no host still runs on its motherboard"** dates from the
-  snoop-only testing days and was already overridden by that document's decision 3 (a full hold on
-  both machines). It is marked there as a development heuristic.
-- **CLAUDE.md, `build/load.sh`, `build/load_card.sh`, the `fw-load` skill:** "SRAM, volatile" becomes
-  a flash write of the package to the user region.
+  snoop-only testing days and was already overridden by that document's decision 3. It is marked there
+  as a development heuristic.
+- **CLAUDE.md, `build/load.sh`, `build/load_card.sh`, the `fw-load` skill:** "SRAM, volatile" becomes a
+  flash write of the bitstream and its record (BL3). `load.sh` has `FLASH_OFFSET` already.
 - **The card survives a Pi reboot** once flashed (memory `pi-reboot-wipes-bit` goes stale).
 
 ## Rungs
@@ -273,40 +252,61 @@ Leaks and conflicts this plan removes:
 Each rung is explained before it runs; a bench failure is a finding; a bitstream that misses timing
 stops the work.
 
-- **BL0 - this plan** and the REQ_65C02.md 1.10 amendment.
-- **BL1 - the flash executor, in simulation.** A module on STARTUPE2 (USRCCLKO) with the SST26
-  command set: read ID, WBPR (partial unlock), D8h block erase, 02h page program, 03h read, BUSY poll,
-  and a CRC32 engine over a read range. A behavioural SST26 model for the bench (protection that
-  ignores writes, erase and program times scaled down). Gate: ID, a protected block's erase ignored,
-  erase/program/read-back of a page, the CRC of a region.
-  **DONE 2026-09-25 (sim).** `flash_exec` runs OP_ID / OP_UNLOCK (WBPR then an RBPR compare) /
-  OP_ERASE / OP_PROG / OP_READ (CRC32 = zlib's, first 256 bytes into the buffer), with its own address
-  fence, eight dummy clocks after reset, and every BUSY poll bounded.  `sst26_model` is written from
-  the datasheet and strict: protection, WEL, BUSY, whole-byte commands, 40 MHz reads, HOLD#/WP#.  The
-  bench: 25 checks including "123456789" -> CBF43926, a stuck BUSY -> E_TIMEOUT, a dropped WBPR ->
-  E_BPR, and golden's 1 MB seeded and found intact.  Mutants killed: golden unlocked, no fence, no
-  dummy clocks, MISO never sampled, no WREN, SPI at 50 MHz, no BUSY poll, no timeout.  Found on the
-  way: the datasheet's power-on BPR footnote prints 28 hex digits for an 80-bit register (it is
-  `5555_FFFFFFFF_FFFFFFFF`), and the half-period counter was one bit short for odd HALF.
-- **BL2 - golden, built and flashed.** `golden_top.sv`: FT601 link, parser, the stage-1 register map,
-  the executor, ICAPE2 IPROG. A host-side stage-1 client (a small tool first, swhost later). Gate on
-  hardware: identify answers; QUERY on an empty user region says invalid; LINK_RESET reloads golden.
-- **BL3 - the package and the development load.** `build.sh` writes the package; `load.sh` /
-  `load_card.sh` write it with `openFPGALoader -o`; the `fw-load` skill follows. Gate: a JTAG load,
-  QUERY valid, BOOT, today's user image comes up and runs today's startup; openFPGALoader's time
-  measured.
-- **BL4 - LINK_RESET = IPROG in the user image,** and swhost's start becomes identify / QUERY / BOOT.
-  Gate: the CS7-style ladder (20 swhost restarts, 20 LINK_RESETs, each back to a running machine).
-- **BL5 - the user load over USB3.** ERASE and FLASH_PAGE in golden, the host's validation and
-  stop-and-wait load, swhost restarting with the image's conf. Gate: switch between a IIe and a GS
-  image and back; a load killed mid-way leaves QUERY invalid and golden answering.
-- **BL6 - the stage 2 / stage 3 fence.** The host: calibration read before anything that needs the
+- **BL0 - this plan** and the REQ_65C02.md 1.10 amendment. Done, fw 6c1c2ed; revised for one image.
+- **BL1 - the flash executor, in simulation.** **DONE 2026-09-25 (sim), fw 609ba2e.** `flash_exec`
+  runs OP_ID / OP_UNLOCK (WBPR then an RBPR compare) / OP_ERASE / OP_PROG / OP_READ (CRC32 = zlib's,
+  first 256 bytes into the buffer), with its own address fence, eight dummy clocks after reset, and
+  every BUSY poll bounded. `sst26_model` is written from the datasheet and strict: protection, WEL,
+  BUSY, whole-byte commands, 40 MHz reads, HOLD#/WP#. The bench: 25 checks including "123456789" ->
+  CBF43926, a stuck BUSY -> E_TIMEOUT, a dropped WBPR -> E_BPR. Mutants killed: 8 of 8. Since: MISO is
+  sampled late (STARTUPE2's delay), the page buffer is four 64 x 8 LUTRAM lanes (it had been 6.5k
+  LUTs of flops), and the block map is the chip's real one (the whole flash is now the image's).
+- **BL2 - the flash block in the card.** `flash_ctrl` + `iprog` in `card_link`, STARTUPE2/ICAPE2, the
+  flash pins on the tops, LINK_RESET and the watchdog to IPROG, FLASH_PAGE a card type, `BOOT_ID`.
+  `flash_ctrl_tb` (golden_tb's checks, moved). A Pt build of a card. On hardware: the image and its
+  record written over JTAG; `swboot identify` / `query` / `read`; `swboot reset` reconnects to the
+  same image.
+  **DONE 2026-09-25 on hardware** (fw build `gs_bl2a`, stamp 20260925 162826, TIMING MET, 28,898
+  LUTs). `flash_ctrl_tb` 18 checks. `tools/mkpkg.py` made `.bin` / `.rec` / `.pkg`; openFPGALoader
+  wrote the 2,766,884-byte image at 0 (about 90 s with --verify) and the record at 0x3FF000. Then,
+  over USB3 with `swboot` on the Pi: FLASH_ID `bf2642` - the Pt V2's flash IS the SST26VF032B,
+  until then inferred from the schematic - and the SPI path through STARTUPE2 works; QUERY before
+  the record: NO_RECORD; after it: OK, the card's CRC of the whole image matching mkpkg's
+  (`ed6a7453`), 0.91 s round trip; READ of the record back byte for byte; LINK_RESET: the Pi's
+  kernel logged `USB disconnect, device number 4` then `new SuperSpeed USB device number 5` 0.35 s
+  later, and `swboot` reconnected on its first try to the same stamp. LINK_RESET no longer pulls
+  the soft reset, so the re-enumeration is the reconfiguration's. swhost on this image (the
+  Pi's swhost is master's, byte for byte): with `gs_nox.conf` the IIgs boots fine (the user's
+  check). A first run with a conf derived from the stale `gs_swhost.conf` came up broken - wrong
+  graphics, constant noise, no keys - because it crossed swhost's behaviour for one soft core with
+  the bit's for the other; that was the conf, not the image (memory `conf-must-match-the-bit`).
+  Nox, though, was broken on this image - and on master's since 60f485c, the 65816 binding-loop
+  retime (bisected; docs/CORE_REFACTOR_65816.md Status). The retime is reverted on this branch;
+  the flashed image is now `gs_unretime1` (stamp 20260925 171833, TIMING MET), and Nox's title and
+  menu are right.
+- **BL3 - the package and the development load.** `build.sh` writes the record and the package;
+  `load.sh` / `load_card.sh` write the bitstream and then the record into flash by default; the
+  `fw-load` skill follows. openFPGALoader's time measured.
+- **BL4 - the user load over USB3.** `swboot load` + `swboot reset`: switch between a IIe and a GS
+  image and back; a load killed part-way leaves the old image running, QUERY invalid, and a retry
+  succeeding.
+- **BL5 - swhost's start.** identify -> compare with the conf's image -> load if needed -> reconnect;
+  reconnect after LINK_RESET as an expected loss.
+- **BL6 - the stage 1 / stage 2 fence.** The host: calibration read before anything that needs the
   DDR3, OPERATE as one step, stay up and report on a failed calibration, the mock's uncalibrated mode.
-  The card: a `RING_CTRL` disengage write refused loudly. Gate: a card held uncalibrated (a bench,
-  then hardware if a way to force it exists) answers everything in stage 2 and never enters stage 3.
-- **BL7 - the control clock off the DDR3's MMCM.** Its own clock for the link and registers. Gate:
-  timing met on the Pt; the BL4 ladder again.
-- **BL8 - the deadman release,** when the hardware exists: one GPIO, driven high only by the OPERATE
-  transition's START release.
+  The card: a `RING_CTRL` disengage write refused loudly; BOOT_ID's stage 2 after OPERATE.
+- **BL7 - the control clock off the DDR3's MMCM.**
+- **BL8 - the deadman release,** when the hardware exists.
 
-The user decides the order at each rung; BL1 to BL5 are the boot loader proper, BL6 and BL7 the fence.
+## History
+
+- **The golden image (2026-09-25, dropped the same day).** The first design had a separate golden
+  bitstream at flash 0 - link, registers, flash executor, IPROG, nothing else - that always booted
+  first, waited for the host, and IPROGed to the user image. Built for the Pt (`golden_bl2c`): TIMING
+  MET, 1,833 LUTs, and a 1.27 MB compressed bitstream. A compressed Artix bitstream drops only
+  frames that are wholly empty, and golden's pins span the die (the FT601's placement blocks sit at
+  both edges, the flash on bank 14, the clock on W19), so almost no frame was empty. That left the user
+  image about 2.4 MB of the 4 MB flash, some 8% above today's Pt image. The user judged the approach
+  fragile: what golden bought was automatic recovery from a load killed mid-write and from an image
+  that cannot reflash itself, and both are rare enough for the JTAG path. Its stage-1 register map and
+  bench became the card's flash block.

@@ -11,26 +11,31 @@
 //   OP_ID      9Fh, three bytes back into `id`.
 //   OP_UNLOCK  WREN, WBPR 42h with BPR (below), wait, then RBPR 72h and compare:
 //              E_BPR if the chip did not take it.
-//   OP_ERASE   WREN, D8h block erase of the 64 KB block at `cmd_addr`, poll BUSY.
+//   OP_ERASE   WREN, D8h block erase of the block at `cmd_addr` (the chip's own map: 8 KB x4
+//              and 32 KB at the bottom, 64 KB x62, 32 KB and 8 KB x4 at the top), poll BUSY.
 //   OP_PROG    WREN, 02h page program of the 256-byte buffer at `cmd_addr`, poll BUSY.
 //   OP_READ    03h from `cmd_addr` for `cmd_len` bytes: every byte into the CRC32
 //              (`crc`, zlib's), the first 256 into the buffer.
 //
 // THE FLASH POWERS UP WRITE-PROTECTED, and an erase or program aimed at a protected
-// block is IGNORED by the chip - no error, nothing changes.  OP_UNLOCK clears only
-// the user region's write-locks; the golden image's blocks stay locked, so even a
-// wrong address that got past the fence below could not touch golden.  Chip erase
-// (C7h) and the global unlock (98h) are never sent.
+// block is IGNORED by the chip - no error, nothing changes.  OP_UNLOCK clears the
+// write-locks of the blocks wholly inside [USER_BASE, USER_END) and no others.  Chip
+// erase (C7h) and the global unlock (98h) are never sent.
 //
 // THE FENCE.  OP_ERASE and OP_PROG refuse (E_FENCE, nothing sent) any address
-// outside [USER_BASE, USER_END) or not aligned to its block / page.  With the BPR
-// that makes two independent guards on golden.
+// outside [USER_BASE, USER_END) or not aligned to its block / page.  With a region
+// narrower than the chip, the fence and the BPR are two independent guards on what
+// lies outside it (the bench runs one; the card's region is the whole chip).
 //
 // Every BUSY poll is bounded by TIMEOUT_CLKS (E_TIMEOUT): the executor never hangs.
 //
 // The SPI clock is clk / (2*HALF).  03h is limited to 40 MHz by the datasheet, so
-// HALF >= 2 at a 100 MHz clk.  MISO is sampled as SCK rises (mode 0), a half period
-// after the flash drove it on the falling edge.  On hardware SCK reaches the CCLK
+// HALF >= 2 at a 100 MHz clk.  MISO is sampled LATE: at the end of SCK's high phase,
+// as SCK is driven low, which still reads the bit the flash drove on the PREVIOUS
+// falling edge.  On hardware SCK reaches the pin through STARTUPE2 some ns after
+// the register that drives it, so sampling as SCK rises (mode 0's textbook point)
+// would leave that delay plus the flash's 8 ns tV inside a 20 ns half period;
+// sampling late leaves a half period on each side.  On hardware SCK reaches the CCLK
 // pin through STARTUPE2's USRCCLKO, which swallows the first three clocks after
 // configuration: the executor starts with eight clocks under a high chip select.
 // That primitive is instantiated by the top, not here, so this module simulates.
@@ -42,8 +47,8 @@
 module flash_exec #(
     parameter integer      HALF         = 2,           // clk cycles per SCK half period
     parameter integer      TIMEOUT_CLKS = 10_000_000,  // 100 ms at 100 MHz; erase max is 25 ms
-    parameter logic [23:0] USER_BASE    = 24'h100000,  // first byte of the user region
-    parameter logic [23:0] USER_END     = 24'h3F0000   // first byte past it (the top 64 KB is 8/32 KB blocks)
+    parameter logic [23:0] USER_BASE    = 24'h000000,  // first byte the executor may erase or program
+    parameter logic [23:0] USER_END     = 24'h400000   // first byte past it (24 bits: 0x400000 is the whole chip)
 ) (
     input  wire         clk,
     input  wire         rst,
@@ -83,19 +88,40 @@ module flash_exec #(
     assign spi_wp_n   = 1'b1;
     assign spi_hold_n = 1'b1;
 
-    // ---- the Block-Protection Register we write -----------------------------
+    // ---- the block map and the Block-Protection Register we write ----------
     // Datasheet Table 5-6: BPR[61:0] are the 64 KB blocks at 0x010000..0x3EFFFF
-    // (block k at k<<16 is bit k-1), [62]/[63] the 32 KB blocks at the bottom and
-    // top, [79:64] the eight 8 KB blocks (even bits write-lock, odd bits read-lock).
-    // Power-on is 5555_FFFFFFFF_FFFFFFFF; we clear the user region's bits.
-    function automatic logic [79:0] user_bpr(input logic [23:0] base, input logic [23:0] lim);
+    // (block k at k<<16 is bit k-1), [62]/[63] the 32 KB blocks at 0x008000 and
+    // 0x3F0000, [79:64] the eight 8 KB blocks, bottom four then top four (even bits
+    // write-lock, odd bits read-lock).  Power-on is 5555_FFFFFFFF_FFFFFFFF; we clear
+    // the write-lock of every block wholly inside [base, lim).
+    function automatic int block_base(input int a);
+        if (a < 'h8000)   return a & ~'h1FFF;
+        if (a < 'h10000)  return 'h8000;
+        if (a < 'h3F0000) return a & ~'hFFFF;
+        if (a < 'h3F8000) return 'h3F0000;
+        return a & ~'h1FFF;
+    endfunction
+    function automatic int block_size(input int a);
+        if (a < 'h8000 || a >= 'h3F8000) return 'h2000;
+        if (a < 'h10000 || a >= 'h3F0000) return 'h8000;
+        return 'h10000;
+    endfunction
+    function automatic int wl_bit(input int a);
+        if (a < 'h8000)   return 64 + 2 * (a >> 13);
+        if (a < 'h10000)  return 62;
+        if (a < 'h3F0000) return (a >> 16) - 1;
+        if (a < 'h3F8000) return 63;
+        return 72 + 2 * ((a - 'h3F8000) >> 13);
+    endfunction
+    function automatic logic [79:0] user_bpr(input logic [23:0] base, input logic [24:0] lim);
         logic [79:0] b;
         b = 80'h5555_FFFFFFFF_FFFFFFFF;
-        for (int k = 1; k < 63; k++)
-            if ((k << 16) >= int'(base) && (k << 16) < int'(lim)) b[k-1] = 1'b0;
+        for (int a = 0; a < 'h400000; a += block_size(a))
+            if (a >= int'(base) && a + block_size(a) <= int'(lim)) b[wl_bit(a)] = 1'b0;
         return b;
     endfunction
-    localparam logic [79:0] BPR = user_bpr(USER_BASE, USER_END);
+    localparam logic [24:0] USER_LIM = (USER_END == 24'h0) ? 25'h400000 : {1'b0, USER_END};
+    localparam logic [79:0] BPR = user_bpr(USER_BASE, USER_LIM);
 
     function automatic logic [31:0] crc_byte(input logic [31:0] c, input logic [7:0] d);
         logic [31:0] x;
@@ -105,9 +131,30 @@ module flash_exec #(
     endfunction
 
     // ---- the page buffer ----------------------------------------------------
-    logic [7:0] pbuf [0:255];
-    assign buf_rdata = {pbuf[{buf_raddr, 2'd3}], pbuf[{buf_raddr, 2'd2}],
-                        pbuf[{buf_raddr, 2'd1}], pbuf[{buf_raddr, 2'd0}]};
+    // Four 64 x 8 lanes (distributed RAM): the host writes a word to all four, a
+    // received byte goes to one, and both read sides take a word asynchronously.
+    // Written as one 256-byte array it became 2,048 flops and their multiplexers -
+    // 6.5k LUTs, most of the golden image, and a bitstream that would not compress.
+    logic [7:0] lane0 [0:63], lane1 [0:63], lane2 [0:63], lane3 [0:63];
+    logic       pb_we;
+    logic [3:0] pb_lanes;
+    logic [5:0] pb_addr;
+    logic [31:0] pb_data;
+    always_ff @(posedge clk) if (pb_we) begin
+        if (pb_lanes[0]) lane0[pb_addr] <= pb_data[7:0];
+        if (pb_lanes[1]) lane1[pb_addr] <= pb_data[15:8];
+        if (pb_lanes[2]) lane2[pb_addr] <= pb_data[23:16];
+        if (pb_lanes[3]) lane3[pb_addr] <= pb_data[31:24];
+    end
+    assign buf_rdata = {lane3[buf_raddr], lane2[buf_raddr], lane1[buf_raddr], lane0[buf_raddr]};
+    function automatic logic [7:0] pbuf_byte(input logic [7:0] k);
+        case (k[1:0])
+        2'd0: return lane0[k[7:2]];
+        2'd1: return lane1[k[7:2]];
+        2'd2: return lane2[k[7:2]];
+        default: return lane3[k[7:2]];
+        endcase
+    endfunction
 
     // ---- the transaction engine ---------------------------------------------
     // One chip-select-low transaction: an opcode, optionally three address bytes,
@@ -145,7 +192,7 @@ module flash_exec #(
         if (t_addr3 && i == 3)        return t_addr[7:0];
         p = i - 25'(nhdr);
         if (p < 25'(t_ntx))
-            return (t_src == SRC_BUF) ? pbuf[p[7:0]] : BPR[79 - 8*p[3:0] -: 8];
+            return (t_src == SRC_BUF) ? pbuf_byte(p[7:0]) : BPR[79 - 8*p[3:0] -: 8];
         return 8'h00;
     endfunction
 
@@ -185,17 +232,17 @@ module flash_exec #(
             E_BYTE: begin
                 if (hc == HC_HALF) begin
                     hc <= '0;
-                    if (!ph) begin              // rising edge: the flash samples MOSI, we sample MISO
+                    if (!ph) begin              // rising edge: the flash samples MOSI
                         spi_sck <= 1'b1;
-                        rxb     <= {rxb[6:0], spi_miso};
                         ph      <= 1'b1;
-                    end else begin              // falling edge: next bit out
+                    end else begin              // falling edge: MISO sampled late, next bit out
                         spi_sck <= 1'b0;
                         ph      <= 1'b0;
+                        rxb     <= {rxb[6:0], spi_miso};
                         if (bitn == 3'd7) begin
                             if (bidx >= 25'(nhdr) + 25'(t_ntx) && !t_nocs) begin
                                 rx_valid <= 1'b1;
-                                rx_byte  <= rxb;
+                                rx_byte  <= {rxb[6:0], spi_miso};
                                 rx_idx   <= 24'(bidx - 25'(nhdr) - 25'(t_ntx));
                             end
                             if (bidx + 1'b1 == bytes_total) begin
@@ -238,8 +285,17 @@ module flash_exec #(
     assign busy = (qs != Q_IDLE);
     assign crc  = ~crc_q;
 
-    wire fence_erase = (cmd_addr[15:0] != 16'h0) || (cmd_addr < USER_BASE) || (cmd_addr >= USER_END);
-    wire fence_prog  = (cmd_addr[7:0]  != 8'h0)  || (cmd_addr < USER_BASE) || (cmd_addr >= USER_END);
+    // The chip's block map, as logic: the 64 KB middle, then the 8 / 32 KB ends.
+    wire        at_ends     = (cmd_addr < 24'h010000) || (cmd_addr >= 24'h3F0000);
+    wire        in_8k       = (cmd_addr < 24'h008000) || (cmd_addr >= 24'h3F8000);
+    wire        blk_aligned = !at_ends ? (cmd_addr[15:0] == 16'h0)
+                            : in_8k    ? (cmd_addr[12:0] == 13'h0)
+                            :            (cmd_addr[14:0] == 15'h0);
+    /* verilator lint_off UNSIGNED */      // always true at the card's base of 0
+    wire        in_region   = (cmd_addr >= USER_BASE) && ({1'b0, cmd_addr} < USER_LIM);
+    /* verilator lint_on UNSIGNED */
+    wire fence_erase = !blk_aligned || !in_region;
+    wire fence_prog  = (cmd_addr[7:0] != 8'h0) || !in_region;
     wire bad_read    = (cmd_len == 24'd0) || ({1'b0, cmd_addr} + {1'b0, cmd_len} > 25'h400000);
 
     // start a transaction and wait for it in Q_WAIT
@@ -252,8 +308,9 @@ module flash_exec #(
     endtask
 
     always_ff @(posedge clk) begin
-        t_go <= 1'b0;
-        done <= 1'b0;
+        t_go  <= 1'b0;
+        done  <= 1'b0;
+        pb_we <= 1'b0;
         if (rst) begin
             qs <= Q_INIT; err <= E_NONE; id <= '0; crc_q <= 32'hFFFFFFFF;
             t_nocs <= 1'b0; t_ntx <= '0; t_nrx <= '0; t_addr3 <= 1'b0; t_op <= '0;
@@ -265,14 +322,16 @@ module flash_exec #(
                 DST_ID:     id <= {id[15:0], rx_byte};
                 DST_BUFCRC: begin
                     crc_q <= crc_byte(crc_q, rx_byte);
-                    if (rx_idx < 24'd256) pbuf[rx_idx[7:0]] <= rx_byte;
+                    if (rx_idx < 24'd256) begin
+                        pb_we <= 1'b1; pb_addr <= rx_idx[7:2]; pb_data <= {4{rx_byte}};
+                        pb_lanes <= 4'b0001 << rx_idx[1:0];
+                    end
                 end
                 DST_BPRCMP: if (rx_byte != BPR[79 - 8*rx_idx[3:0] -: 8]) bpr_bad <= 1'b1;
                 DST_STATUS: st_busy <= rx_byte[0];
                 endcase
             end else if (buf_we && qs == Q_IDLE) begin
-                {pbuf[{buf_waddr, 2'd3}], pbuf[{buf_waddr, 2'd2}],
-                 pbuf[{buf_waddr, 2'd1}], pbuf[{buf_waddr, 2'd0}]} <= buf_wdata;
+                pb_we <= 1'b1; pb_addr <= buf_waddr; pb_data <= buf_wdata; pb_lanes <= 4'b1111;
             end
 
             case (qs)

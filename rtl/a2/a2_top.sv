@@ -75,6 +75,10 @@
 module a2_top #(
     parameter integer BUILD_DATE = 0,   // YYYYMMDD
     parameter integer BUILD_TIME = 0,   // HHMMSS
+    // The part this image is built for, as its JTAG IDCODE (build.tcl sets it from
+    // the part): the flash block's BOOT_PART, and what a package's record must name
+    // (docs/BOOT_LOADER.md).  The default is the Pt V2's xc7a100t.
+    parameter logic [31:0] IDCODE = 32'h13631093,
     // The page cache's geometry (rtl/page_cache.sv, docs/PAGE_CACHE.md):
     // 128 x 8 pages of 256 bytes is 256 KB, and the whole IIe plus its ROM
     // occupies five of every set's eight ways.  64 x 8 is the cheap fallback
@@ -103,6 +107,14 @@ module a2_top #(
     output wire [7:0]  led,
     input  wire        usb_rx,
     output wire        usb_tx,
+
+    // The configuration flash after configuration (constr/<board>/flash_pins.xdc);
+    // its clock is CCLK, driven through STARTUPE2 inside card_link.
+    output wire        flash_cs_n,
+    output wire        flash_mosi,
+    input  wire        flash_miso,
+    output wire        flash_wp_n,
+    output wire        flash_hold_n,
 
     // Apple II bus (constr/apple_bus.xdc).  INOUT here - this build drives.
     inout  wire [7:0]  apple_data_pin,
@@ -488,10 +500,13 @@ module a2_top #(
         .BUILD_TIME (BUILD_TIME),
         .CAN_MASTER (1'b1),
         .GS (GS),
-        .CK_PHASE_SHIFT (CK_PHASE_SHIFT)
+        .CK_PHASE_SHIFT (CK_PHASE_SHIFT),
+        .IDCODE (IDCODE)
     ) u_card (
         .clk_pin (clk_pin), .rst_n (rst_n), .led (led),
         .usb_rx (usb_rx), .usb_tx (usb_tx),
+        .flash_cs_n (flash_cs_n), .flash_mosi (flash_mosi), .flash_miso (flash_miso),
+        .flash_wp_n (flash_wp_n), .flash_hold_n (flash_hold_n),
         .apple_clk (apple_clk), .apple_rst (apple_rst),
         .capture_on (capture_on), .capture_real (capture_real),
         .real_data (real_data_b), .real_valid (real_valid),

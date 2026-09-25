@@ -56,7 +56,8 @@ module flash_exec_tb;
     wire [31:0] buf_rdata;
     wire sck, cs_n, mosi, miso, wp_n, hold_n;
 
-    flash_exec #(.HALF (2), .TIMEOUT_CLKS (20_000)) dut (
+    // A region narrower than the chip, so the fence and the partial unlock have something to guard.
+    flash_exec #(.HALF (2), .TIMEOUT_CLKS (20_000), .USER_BASE (24'h100000), .USER_END (24'h3F0000)) dut (
         .clk (clk), .rst (rst),
         .cmd_valid (cmd_valid), .cmd_op (cmd_op), .cmd_addr (cmd_addr), .cmd_len (cmd_len),
         .busy (busy), .done (done), .err (err), .id (id), .crc (crc),

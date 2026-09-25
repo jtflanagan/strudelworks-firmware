@@ -151,7 +151,16 @@ for iface in /sys/bus/usb/drivers/ftdi_sio/*:1.0; do
     sleep 1
 done
 
-echo "loading $(basename "$bit") into the FPGA (SRAM, volatile)"
-"$LOADER" "${LOADER_ARGS[@]}" "$bit"
+# FLASH_OFFSET=N writes the configuration flash at byte offset N instead
+# (docs/BOOT_LOADER.md): -o N, verified by reading back, and the FPGA then
+# reconfigures from flash address 0 - which is golden once golden is there.
+# openFPGALoader erases only the 4 KB sectors it writes (BOOT_LOADER.md, Writers).
+if [ -n "${FLASH_OFFSET:-}" ]; then
+    echo "writing $(basename "$bit") into the FLASH at offset $FLASH_OFFSET (persistent), verified"
+    "$LOADER" "${LOADER_ARGS[@]}" -f -o "$FLASH_OFFSET" --verify "$bit"
+else
+    echo "loading $(basename "$bit") into the FPGA (SRAM, volatile)"
+    "$LOADER" "${LOADER_ARGS[@]}" "$bit"
+fi
 echo
 echo "done.  UART report:  build/report.sh   (or: /dev/ttyUSB1 at 115200)"

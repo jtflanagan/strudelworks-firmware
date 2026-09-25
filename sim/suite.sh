@@ -59,6 +59,7 @@ declare -A B=(
   [ft601_msg]="sim/run_ft601_msg_tb.sh|^PASS$"
   [ft601_msg_rx]="sim/run_ft601_msg_rx_tb.sh|^PASS$"
   [flash_exec]="sim/run_flash_exec_tb.sh|^PASS$"
+  [flash_ctrl]="sim/run_flash_ctrl_tb.sh|^PASS$"
   [hd_card]="sim/run_hd_card_tb.sh|^PASS$"
   [kbd_inject]="sim/run_kbd_inject_tb.sh|^PASS$"
   [mockingboard]="sim/run_mockingboard_vl.sh|^PASS$"
@@ -117,7 +118,7 @@ declare -A B=(
   [page_cache]="sim/run_page_cache_tb.sh|^PASS$"
   [fb_sim_vl]="sim/run_fb_sim_vl.sh|^PASS$"
 )
-QUICK="lint microcode boot_hold start_hold rom_loader flash_exec bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map telem mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
+QUICK="lint microcode boot_hold start_hold rom_loader flash_exec flash_ctrl bus_event_filter bus_snoop bus_write bustest cpu_cycles cpu_irq floppy_card ft601_fifo ft601_msg ft601_msg_rx hd_card kbd_inject mockingboard audio mouse_card msg_arb no_slot_clock reg_map telem mmu_xlate ports report ssi263 tx_ring uthernet2 vbeam_vl vidhd_card trace_selftest mmu_xlate_gs"
 CPU="cpu_tb cpu_cycles cpu_irq cpu_predict"
 GS="microcode816 adb_keymap adb_revmap gs_adb gs_kbd_a2 gs_doc gs_io_claim gs_iwm_write cpu816_cycles cpu816_trace cpu816_irq mmu_xlate_gs boot_gs gspanel gspanel_svc gspanel_set gspanel_wp gspanel_eject"
 BATTERY="$QUICK accel_vl mem_integ page_cache fb_sim_vl"

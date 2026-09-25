@@ -68,6 +68,10 @@ echo "== build/load.sh $bit"
 "$root/build/load.sh" "$bit" || { echo "LOAD FAILED"; exit 2; }
 # The board re-enumerates for a few seconds after programming (docs/DERISK.md).
 sleep 4
+if [ -n "${FLASH_OFFSET:-}" ]; then
+    echo "written: $(basename "$bit") into the flash at $FLASH_OFFSET; the FPGA booted from flash address 0."
+    exit 0
+fi
 echo "loaded: $(basename "$bit") in SRAM (volatile).  Confirm over USB3: start swhost and read 'firmware: built ...' (mcp swhost action=start)."
 if [ "$uart" = 1 ]; then
     echo "== build/report.sh -n 1 (UART)"

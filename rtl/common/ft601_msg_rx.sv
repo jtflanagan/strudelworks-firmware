@@ -109,6 +109,7 @@ module ft601_msg_rx (
     // Consumed here, or skipped and reported.  A type missing from this list
     // still costs nothing but a notice - the payload is walked by its
     // length either way.
+    localparam [7:0] T_FLASH_PAGE = 8'h40;   // rtl/common/flash_ctrl.sv (docs/BOOT_LOADER.md)
     wire hdr_known = (hdr_type == T_IDLE)      || (hdr_type == T_BUS_ENABLE) ||
                      (hdr_type == T_REG_READ)  || (hdr_type == T_REG_WRITE)  ||
                      (hdr_type == T_HD_ROM)    || (hdr_type == T_HD_DONE)    ||
@@ -120,7 +121,7 @@ module ft601_msg_rx (
                      (hdr_type == T_PRINTER_ROM) ||
                      (hdr_type == T_GS_BRAM)    || (hdr_type == T_ADB_KEY)   ||
                      (hdr_type == T_GS_TIME)    || (hdr_type == T_FD35_TRACK) ||
-                     (hdr_type == T_PANEL_DMA)  ||
+                     (hdr_type == T_PANEL_DMA)  || (hdr_type == T_FLASH_PAGE) ||
                      (hdr_type == T_LINK_RESET);
 
     always_ff @(posedge clk) begin
