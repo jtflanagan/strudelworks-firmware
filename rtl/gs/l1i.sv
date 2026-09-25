@@ -61,35 +61,12 @@ module l1i #(
     // The core: pc_addr and pc_bank REGISTER-DIRECT (rtl/gs/cpu65816.sv).
     input  wire [15:0] pc_addr,
     input  wire [7:0]  pc_bank,
-    // The core's NEXT PC over its simple arms (rtl/gs/cpu65816.sv pc_ds1:
-    // what pc_addr becomes if cyc_en is high, valid for no load / INC / a
-    // register-direct load, low for the AGU's sum and a din byte): the
-    // serve select's compare against the stream's expected address is made
-    // a cycle early from this, into a flag, so the byte the core fetches is
-    // chosen by registers alone (docs/CORE_REFACTOR_65816.md "The binding
-    // loop retimed", 2026-09-20).
-    input  wire [15:0] pc_ds1,
-    input  wire        pc_ds_v1,
-    // ...and the core's cycle enable AS THE CORE SEES IT (L1-D's, which
-    // carries its own data-cycle commits besides this side's retire and
-    // the sequencer's): the flag must know whether the PC loads this
-    // clock, and an RTS loads it on a DATA cycle - the first cut assumed
-    // "no retire, no sequencer cycle, so the PC holds" and the 20 M row's
-    // assertion caught the PC leaving under a high flag.
-    input  wire        core_cyc_en,
     input  wire        cpu_rw,
     input  wire        cpu_sync,
     input  wire        cyc_is_i,
     input  wire [7:0]  p_flags,
     output wire        cyc_en,
     output wire [7:0]  i_din,
-    // The fetch candidates unmuxed, for the core's slot-0 lookahead: the
-    // two serve registers themselves, and the selects that pick between
-    // them (the target first) - registers all.
-    output wire [7:0]  i_byte_r,
-    output wire [7:0]  tgt_byte_r,
-    output wire        i_sel_tgt,
-    output wire        i_sel_held,
     // The sequencer's path through (rtl/gs/accel_seq.sv).
     input  wire        accel_cyc_en,
     input  wire [7:0]  accel_din,
@@ -253,26 +230,8 @@ module l1i #(
     wire        hg1 = v[1] && ({pc_bank, tgt_inc[15:4]}  == vtag[1]);
     wire [7:0]  b_tgt    = ht0 ? ldata[0][8 * tgt_look[3:0] +: 8] : ldata[1][8 * tgt_look[3:0] +: 8];
     wire [7:0]  b_tgtinc = hg0 ? ldata[0][8 * tgt_inc[3:0]  +: 8] : ldata[1][8 * tgt_inc[3:0]  +: 8];
-    // THE STREAM's POSITION AS A FLAG (2026-09-20): at_exp_q says
-    // (pc_addr == exp_q), computed a cycle early from the core's next PC and
-    // the stream's next expected address, so the serve select - the head of
-    // the core's binding loop, pc_reg to the microcode ROM's address - reads
-    // a register where it read a sixteen-bit compare (three levels and a
-    // die of route on the 50T).  ONE-SIDED: a low flag where the compare
-    // would say equal costs a recover clock (the arms the core's pc_ds1
-    // does not cover, a link reset); a high flag where they differ would
-    // serve a wrong byte, and that is what the sim asserts never happens.
-    logic        at_exp_q;
     wire        tgt_here  = tgt_v && cyc_is_i && cpu_rw && ({pc_bank, pc_addr} == tgt_q);
-    wire        tgt_serve = tgt_here && tgt_lhit_q && !(lhit_q && at_exp_q);
-    // THE BYTE SELECT DOES NOT WAIT FOR THE TARGET COMPARE: while a target
-    // is pending with its line held and the stream is not at the PC, the
-    // target byte is put up on registers alone.  If the PC is in fact
-    // elsewhere the retire (tgt_serve, the compare) refuses it, the core
-    // does not move, and the recover below re-aims the stream - the clock
-    // the fetch would have spent recovering anyway.  The compare stays on
-    // the retire, where it already was.
-    wire        sel_tgt   = tgt_v && cyc_is_i && cpu_rw && tgt_lhit_q && !(lhit_q && at_exp_q);
+    wire        tgt_serve = tgt_here && tgt_lhit_q && !(lhit_q && (exp_q == pc_addr));
 
     // ---- the snoops, combinational: an image write against the buffers ------
     wire snp = cl_valid && !cl_rw && cl_wr_image;
@@ -293,16 +252,12 @@ module l1i #(
 
     // ---- the retire ---------------------------------------------------------
     wire retire = !cpu_rst && ihit && turbo_ok && !kill_now && ev_room &&
-                  ((lhit_q && at_exp_q) || tgt_serve);
+                  ((lhit_q && (exp_q == pc_addr)) || tgt_serve);
     assign turbo_commit = retire;
     assign turbo_sync   = retire && cpu_sync;
     assign cyc_en       = accel_cyc_en || retire;
-    assign i_din        = sel_tgt ? tgt_byte_q :
-                          lhit_q  ? i_byte_q  : accel_din;
-    assign i_sel_tgt    = sel_tgt;
-    assign i_sel_held   = lhit_q;
-    assign i_byte_r     = i_byte_q;
-    assign tgt_byte_r   = tgt_byte_q;
+    assign i_din        = tgt_serve ? tgt_byte_q :
+                          lhit_q    ? i_byte_q  : accel_din;
 
     // ---- the branch scanner and the target table (rtl/gs/iscan.sv) --------------
     wire        sc_rd_slot;
@@ -418,59 +373,12 @@ module l1i #(
     wire victim = !cur;
 
     // ---- the predictor's update (iline's) ----------------------------------
-    wire step    = retire || (accel_cyc_en && cyc_is_i && cpu_rw && at_exp_q);
-    wire recover = turbo_en && cyc_is_i && cpu_rw && !step && !at_exp_q;
+    wire step    = retire || (accel_cyc_en && cyc_is_i && cpu_rw && (pc_addr == exp_q));
+    wire recover = turbo_en && cyc_is_i && cpu_rw && !step && (pc_addr != exp_q);
 
     wire [15:0] w_addr   = step ? exp_inc : recover ? pc_addr : exp_q;   // what exp_q becomes
     wire        land_now = (fst == F_W1) && !f_restart && turbo_en;
     wire        land_hit = land_now && ({pc_bank, w_addr[15:4]} == f_vtag);
-    // What the two serve registers become at this edge, and the stream's
-    // next expected address: exactly the block below, as expressions.
-    wire [7:0] i_byte_d   = (rst || cpu_rst) ? 8'd0 :
-                            tgt_serve ? b_tgtinc :
-                            land_hit  ? dr_erow[8 * w_addr[3:0] +: 8] :
-                            step      ? b_inc : recover ? b_cur : b_hold;
-    wire [7:0] tgt_byte_d = (rst || cpu_rst) ? 8'd0 : b_tgt;
-    // THE FLAG, SELECTED LATE.  Its two deep terms - the retire (turbo_ok:
-    // the hd's ovr_en, the room, the kills) and the core's cycle enable
-    // (L1-D's commits, the retire, the sequencer's) - decide only WHICH of
-    // a few shallow compares is the answer, and enter at the last muxes.
-    // Case by case, what exp_q and the PC become:
-    //   the retire:   exp steps (or continues from a served target); the
-    //                 PC loads - pc_ds1 if the arm is simple, else unknown
-    //   no retire, the core's cycle enable:  the PC loads the same way; the
-    //                 stream steps if the sequencer's cycle found it at the
-    //                 PC, recovers if a turbo fetch is elsewhere, else holds
-    //   no cycle enable:  the PC holds; the stream recovers to it (equal,
-    //                 then), continues from a served target (not equal: the
-    //                 PC is at the target, exp becomes its successor), steps
-    //                 (not equal), or holds
-    // cpu_rst zeroes both sides (the core's rst is cpu_rst); a link reset
-    // alone zeroes exp and says no, conservatively.
-    wire        eq_ti = (pc_ds1 == tgt_inc);
-    wire        eq_ei = (pc_ds1 == exp_inc);
-    wire        eq_pc = (pc_ds1 == pc_addr);
-    wire        eq_ex = (pc_ds1 == exp_q);
-    wire        step_x = accel_cyc_en && cyc_is_i && cpu_rw && at_exp_q;   // step without a retire
-    wire        rec_x  = turbo_en && cyc_is_i && cpu_rw && !at_exp_q;      // recover without a retire
-    wire        eq_r  = pc_ds_v1 && (tgt_serve ? eq_ti : eq_ei);
-    wire        eq_c  = pc_ds_v1 && (tgt_serve ? eq_ti : step_x ? eq_ei : rec_x ? eq_pc : eq_ex);
-    wire        eq_n  = tgt_serve ? 1'b0 : step_x ? 1'b0 : rec_x ? 1'b1 : at_exp_q;
-    wire        at_exp_d = cpu_rst ? 1'b1 : rst ? 1'b0 :
-                           retire ? eq_r : core_cyc_en ? eq_c : eq_n;
-    always_ff @(posedge clk) at_exp_q <= at_exp_d;
-`ifndef SYNTHESIS
-    // Never falsely high; and how often it was falsely low where a serve
-    // was on offer (a recover clock each), printed at the end of a run.
-    logic [31:0] cnt_flag_lost = 32'd0;
-    always_ff @(posedge clk) begin
-        if (!rst && at_exp_q && pc_addr != exp_q)
-            $error("l1i: at_exp_q is high but pc_addr $%04x exp_q $%04x", pc_addr, exp_q);
-        if (!rst && turbo_en && cyc_is_i && cpu_rw && lhit_q && !at_exp_q && pc_addr == exp_q)
-            cnt_flag_lost <= cnt_flag_lost + 32'd1;
-    end
-    final $display("l1i: the stream flag was conservatively low on %0d serve clocks", cnt_flag_lost);
-`endif
     always_ff @(posedge clk) begin
         if (rst || cpu_rst) begin
             exp_q <= 16'd0; lhit_q <= 1'b0; i_byte_q <= 8'd0;
@@ -486,7 +394,7 @@ module l1i #(
                 // values next clock, so nothing is lost.
                 exp_q    <= tgt_inc;
                 lhit_q   <= (hg0 || hg1);
-                i_byte_q <= i_byte_d;
+                i_byte_q <= b_tgtinc;
             end else begin
                 exp_q    <= step ? exp_inc : recover ? pc_addr : exp_q;
                 // THE BYPASS: the line landing this clock is the one the stream
@@ -497,12 +405,13 @@ module l1i #(
                 lhit_q   <= land_hit ? 1'b1 :
                             step    ? (hi0 || hi1) :
                             recover ? (hc0 || hc1) : (hh0 || hh1);
-                i_byte_q <= i_byte_d;
+                i_byte_q <= land_hit ? dr_erow[8 * w_addr[3:0] +: 8] :
+                            step ? b_inc : recover ? b_cur : b_hold;
             end
             // The target's byte, kept fresh while its line is held (a line
             // that lands after the decision is picked up the clock it does).
             tgt_lhit_q <= (spec_pending ? (lhit_q && !tgt_serve) : tgt_v) && (ht0 || ht1) && !kill_now;
-            tgt_byte_q <= tgt_byte_d;
+            tgt_byte_q <= b_tgt;
             if (i_serve && cpu_sync) tgt_v <= 1'b0;      // served, or passed by
             if (th_go) begin                             // the opcode-time decision
                 tgt_v <= 1'b1;
@@ -606,12 +515,12 @@ module l1i #(
         end else if (turbo_en && cyc_is_i && cpu_rw && !retire && turbo_ok) begin
             if (hit0 || hit1) begin
                 cnt_res_bubble <= cnt_res_bubble + 32'd1;
-                if (!at_exp_q) cnt_res_recover <= cnt_res_recover + 32'd1;
+                if (pc_addr != exp_q) cnt_res_recover <= cnt_res_recover + 32'd1;
                 else if (!lhit_q)     cnt_res_nolhit <= cnt_res_nolhit + 32'd1;
                 else if (kill_now)    cnt_res_kill <= cnt_res_kill + 32'd1;
                 else if (!ev_room)    cnt_res_noroom <= cnt_res_noroom + 32'd1;
                 else                  cnt_res_other <= cnt_res_other + 32'd1;
-                if (!at_exp_q && cpu_sync) cnt_res_sync <= cnt_res_sync + 32'd1;
+                if (pc_addr != exp_q && cpu_sync) cnt_res_sync <= cnt_res_sync + 32'd1;
             end else cnt_notres <= cnt_notres + 32'd1;
         end
     end

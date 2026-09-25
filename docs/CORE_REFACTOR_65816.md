@@ -1,6 +1,17 @@
 # The 65816 card: the core / L1 / L2 refactor ladder
 
-Status: **2026-09-20 LATEST: THE BINDING LOOP RETIMED, THE Pt MET, THE 50T STILL MISSES - ON A DIFFERENT FAMILY** (branch l2_sets, the retimes uncommitted).  pc_reg -> the microcode ROM's address is GONE from the worst paths: the slot-0 sequencing is read from L1-I's two serve registers through a decode ROM each, and the serve select runs on a one-sided flag of the stream's position computed a cycle early over the core's simple PC arms and selected late by the retire and the core's cycle enable.  Pt bit `bloop2`: TIMING MET +0.045 / whs +0.058, 0 of 72,719; 27,739 LUTs (+141), 54 RAMB36; gs suite 18/18, the 20 M row 14/0 with the assertions silent (the flag conservatively low on 27 k of 257 M clocks: MVN/MVP's rewind arm).  The 50T (`50t_bloop2`, the same source): TIMING MISS -0.391 on 122 of 68,931, 27,377 LUTs = 84.0%, 50 RAMB36 - the worst path the sequencer's bank register into the page RAM's port-B address (the TLB direct-read cone), 13 levels, 74% route.  Stopped at the user's rule.  Section "The binding loop retimed" below.  **EARLIER: THE L2 IN SETS
+Status: **2026-09-25: THE BINDING-LOOP RETIME (fw 60f485c, "The binding loop retimed" below) IS REVERTED
+- IT BROKE NOX ON HARDWARE.** It went to master tested in simulation only (its bit `bloop2` was "not
+loaded"). Bisected on the Pt 2026-09-25 with SRAM loads, `gs_nox.conf` booting `nox_los.HDV`, judged by
+Nox's title (a flaming crown; RETURN reaches the main menu): GOOD pt52, l2s32, l2s16x8 (= 2b881f9, the
+L2 in sets); BAD bloop2 (= the retime), pread1 (ecfb3c8's era) and the boot_loader branch's image - a
+garbled title, constant noise, keys ignored; System 6 and Arkanoid still ran. All seven bits met timing
+except bloop1 (-0.132, loaded by mistake, not evidence). Reverted on branch `boot_loader`: rtl/gs/l1i.sv,
+rtl/gs/cpu65816.sv and the gs_top / boot_gs_tb / cpu816_irq_tb wiring back to 2b881f9's, keeping
+ecfb3c8's d_pred_arms. The 50T, which the retime was for, is deprioritised by the user. The text
+below is history.
+
+Earlier status: **2026-09-20 LATEST: THE BINDING LOOP RETIMED, THE Pt MET, THE 50T STILL MISSES - ON A DIFFERENT FAMILY** (branch l2_sets, the retimes uncommitted).  pc_reg -> the microcode ROM's address is GONE from the worst paths: the slot-0 sequencing is read from L1-I's two serve registers through a decode ROM each, and the serve select runs on a one-sided flag of the stream's position computed a cycle early over the core's simple PC arms and selected late by the retire and the core's cycle enable.  Pt bit `bloop2`: TIMING MET +0.045 / whs +0.058, 0 of 72,719; 27,739 LUTs (+141), 54 RAMB36; gs suite 18/18, the 20 M row 14/0 with the assertions silent (the flag conservatively low on 27 k of 257 M clocks: MVN/MVP's rewind arm).  The 50T (`50t_bloop2`, the same source): TIMING MISS -0.391 on 122 of 68,931, 27,377 LUTs = 84.0%, 50 RAMB36 - the worst path the sequencer's bank register into the page RAM's port-B address (the TLB direct-read cone), 13 levels, 74% route.  Stopped at the user's rule.  Section "The binding loop retimed" below.  **EARLIER: THE L2 IN SETS
 measured on hardware, bit `l2s32`, TIMING MET +0.014, 0 of 70,313).  An A/B on
 one commit (fw 588c81a), one generic apart, both Pt GS builds: the Finder
 **47.9x** at 32 slots against **51.6x** at 64 (bit `enc1`, the last round's

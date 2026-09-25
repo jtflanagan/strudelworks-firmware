@@ -770,10 +770,6 @@ module gs_top #(
     wire        core_vpb;
     wire        cpu_rw;
     wire [7:0]  cpu_dout, cpu_din, cpu_p_flags;
-    wire [7:0]  i_byte_r_w, tgt_byte_r_w;      // l1i's fetch candidates, unmuxed
-    wire        i_sel_tgt_w, i_sel_held_w;     // ...and their selects
-    wire [15:0] cpu_pc_ds1;                    // the core's next PC over its simple arms
-    wire        cpu_pc_ds_v1;
     wire        cpu_cyc_en, cpu_sync;
     // The 65816's "this cycle touches nothing" (VDA and VPA both low), and
     // zero on a 65C02, which has no such cycle.  The dispatcher skips it.
@@ -814,11 +810,6 @@ module gs_top #(
         .rw     (core_rw),
         .dout   (cpu_dout),
         .i_din  (front_bypass ? cpu_din : i_din_w),   // the instruction front's byte
-        // The fetch candidates a cycle early and their selects (l1i's); the
-        // bypass sequences every fetch from i_din live, as it always did.
-        .i_byte_r (i_byte_r_w), .tgt_byte_r (tgt_byte_r_w),
-        .i_sel_tgt (front_bypass ? 1'b0 : i_sel_tgt_w), .i_sel_held (front_bypass ? 1'b0 : i_sel_held_w),
-        .pc_ds1 (cpu_pc_ds1), .pc_ds_v1 (cpu_pc_ds_v1),
         .d_din  (front_bypass ? cpu_din : d_din_w),   // the data front's, or the sequencer's through it
         .cyc_is_i (cpu_cyc_is_i),   // = VPA
         .pc_addr ({cpu_pc_bank, cpu_pc_addr}),
@@ -1327,11 +1318,8 @@ module gs_top #(
     // the bench's --vflags=-DL1I_STORE).
 `ifndef L1I_STORE
     l1i #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
-        .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst), .pc_ds1 (cpu_pc_ds1), .pc_ds_v1 (cpu_pc_ds_v1), .core_cyc_en (cpu_cyc_en),
-        .i_byte_r (i_byte_r_w), .tgt_byte_r (tgt_byte_r_w), .i_sel_tgt (i_sel_tgt_w), .i_sel_held (i_sel_held_w),
+        .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst),
 `else
-    // The parked store has no candidates: the core sequences from i_din live.
-    assign i_byte_r_w = 8'd0; assign tgt_byte_r_w = 8'd0; assign i_sel_tgt_w = 1'b0; assign i_sel_held_w = 1'b0;
     l1i_store #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
         .clk (apple_clk), .rst (apple_rst), .cpu_rst (cpu_rst), .pc_d (cpu_pc_d),
 `endif

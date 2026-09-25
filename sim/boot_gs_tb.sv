@@ -284,17 +284,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        cpu_d_pred_vpb;
     wire [33:0] cpu_d_pred_arms;
     wire [7:0]  cpu_p_flags, cpu_dbr, i_din_w, d_din_w, seq_din;
-    wire [7:0]  i_byte_r_w, tgt_byte_r_w;
-    wire        i_sel_tgt_w, i_sel_held_w;
-    wire [15:0] cpu_pc_ds1;
-    wire        cpu_pc_ds_v1;
     wire [7:0]  cpu_din = cpu_cyc_is_i ? i_din_w : d_din_w;
 
     cpu65816 #(.UCODE_FILE (UCODE), .UCODE0_FILE (UCODE0), .USEQ0_FILE (USEQ0)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
         .addr (cpu_a24), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (d_din_w),
-        .i_byte_r (i_byte_r_w), .tgt_byte_r (tgt_byte_r_w), .i_sel_tgt (i_sel_tgt_w), .i_sel_held (i_sel_held_w),
-        .pc_ds1 (cpu_pc_ds1), .pc_ds_v1 (cpu_pc_ds_v1),
         .cyc_is_i (cpu_cyc_is_i), .pc_addr (cpu_pc24), .pc_d (cpu_pc_d), .d_pred (cpu_d_pred),
         .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
         .p_flags (cpu_p_flags), .dbr_o (cpu_dbr), .bank_wr (cpu_bank_wr),
@@ -574,10 +568,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // sequencer, in the program's bank.
 `ifndef L1I_STORE
     l1i #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
-        .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .pc_ds1 (cpu_pc_ds1), .pc_ds_v1 (cpu_pc_ds_v1), .core_cyc_en (cpu_cyc_en),
-        .i_byte_r (i_byte_r_w), .tgt_byte_r (tgt_byte_r_w), .i_sel_tgt (i_sel_tgt_w), .i_sel_held (i_sel_held_w),
+        .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
 `else
-    assign i_byte_r_w = 8'd0; assign tgt_byte_r_w = 8'd0; assign i_sel_tgt_w = 1'b0; assign i_sel_held_w = 1'b0;
     l1i_store #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1i (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .pc_d (cpu_pc_d),
 `endif
