@@ -5,14 +5,17 @@
 
     tools/mkpkg.py build/results/master_top_gs.bit [--stamp YYYYMMDD HHMMSS | --log LOG]
 
+build/run_build.sh runs it after every card build.
+
 Writes three files beside the .bit:
 
     <name>.bin   the raw bitstream (the .bit's data field; what goes at flash 0)
     <name>.rec   the record sector: 4 KB, the 64-byte record then FF (what goes at 0x3FF000)
     <name>.pkg   the package for the USB3 loader: the record sector, then the bitstream
 
-The record's build stamp must be the one the image reports (BUILD_DATE / BUILD_TIME),
-so it comes from --stamp or from the build log's "build stamp: YYYYMMDD HHMMSS" line.
+The record's build stamp must be the one the image reports (BUILD_DATE / BUILD_TIME):
+from <name>.stamp, which build.tcl writes beside the bitstream, else --stamp, else the
+build log's "build stamp: YYYYMMDD HHMMSS" line.
 """
 import argparse
 import re
@@ -68,15 +71,18 @@ def main():
     board = board_file.read_text().strip() if board_file.exists() else "pt_v2"
     machine = "gs" if a.bit.stem.endswith("_gs") else "iie"
 
+    stamp_file = a.bit.with_suffix(".stamp")
     if a.stamp:
         date, time = int(a.stamp[0]), int(a.stamp[1])
+    elif stamp_file.exists():
+        date, time = (int(x) for x in stamp_file.read_text().split())
     elif a.log:
         m = re.search(r"build stamp: (\d{8}) (\d{6})", a.log.read_text(errors="replace"))
         if not m:
             sys.exit(f"mkpkg: no 'build stamp:' line in {a.log}")
         date, time = int(m.group(1)), int(m.group(2))
     else:
-        sys.exit("mkpkg: give --stamp DATE TIME or --log BUILD_LOG (the stamp the image reports)")
+        sys.exit(f"mkpkg: no {stamp_file.name}: give --stamp DATE TIME or --log BUILD_LOG (the stamp the image reports)")
 
     words = [REC_MAGIC, REC_VERSION, len(data), zlib.crc32(data) & 0xFFFFFFFF, idcode,
              BOARDS.get(board, 0) | (MACHINES[machine] << 8), FLASH_PROTOCOL, date, time] + [0] * 6

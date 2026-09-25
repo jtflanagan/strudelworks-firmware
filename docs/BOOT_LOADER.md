@@ -287,6 +287,15 @@ stops the work.
 - **BL3 - the package and the development load.** `build.sh` writes the record and the package;
   `load.sh` / `load_card.sh` write the bitstream and then the record into flash by default; the
   `fw-load` skill follows. openFPGALoader's time measured.
+  **DONE 2026-09-25 on hardware, except the build-side packaging, which runs at the next build.**
+  build.tcl writes `<bit>.stamp` beside `.board`; `tools/mkpkg.py` reads it by default (else
+  `--stamp`, else `--log`); `run_build.sh` runs mkpkg after every card build. The JTAG load
+  script writes the flash by default - the image at 0, then `<bit>.rec` at 0x3FF000, both with
+  `--verify` - refuses a bit with no record before touching the board, and keeps `--sram` for a
+  volatile load; `load_card.sh` passes `--sram` through; the `fw-load` skill and CLAUDE.md say
+  so. Measured: **93 s** for both writes of the 2.84 MB GS image (`gs_unretime1`); then swboot
+  identify (stamp 171833) and QUERY OK. After any JTAG load the first swhost start leaves the
+  native 6502 driving; the second latches the soft core (pre-existing, noted in the skill).
 - **BL4 - the user load over USB3.** `swboot load` + `swboot reset`: switch between a IIe and a GS
   image and back; a load killed part-way leaves the old image running, QUERY invalid, and a retry
   succeeding.

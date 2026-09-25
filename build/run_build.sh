@@ -82,6 +82,13 @@ done
 # unservable, every posted write into page zero (docs/GS.md rung 6).
 # tools/check_generate_scope.py catches it before the build; this line is
 # the gate on the log itself.
+# The package (docs/BOOT_LOADER.md): the raw bitstream, its record and the USB3
+# package, beside the .bit, so a development load can flash the image with its
+# record.  Whatever the timing verdict - the verdict decides whether anyone loads it.
+bit="build/results/$bitname.bit"
+if [ -f "$bit" ] && [ "$(stat -c %Y "$bit")" -ge "$(stat -c %Y "$log")" ]; then
+    python3 tools/mkpkg.py "$bit" --log "$log" | sed 's/^/package: /'
+fi
 ud=$(grep -c "Synth 8-3848" "$log" 2>/dev/null || true)
 if [ "${ud:-0}" != "0" ]; then
     echo "UNDRIVEN: $ud net(s) without a driver - NOT GREEN, a generate block names a later declaration:"

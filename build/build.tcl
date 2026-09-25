@@ -593,6 +593,11 @@ if {[file exists $bit]} {
     set fh [open [file join $results $bitname.board] w]
     puts $fh $board
     close $fh
+    # ...and its build stamp, the BUILD_DATE / BUILD_TIME the image reports, for the
+    # record tools/mkpkg.py puts beside it (docs/BOOT_LOADER.md).
+    set fh [open [file join $results $bitname.stamp] w]
+    puts $fh [format "%08d %06d" $stamp_date $stamp_time]
+    close $fh
 }
 foreach r {timing_summary.rpt utilization.rpt logic_depth.rpt design_analysis.rpt ddr3_forensics.txt} {
     if {[file exists [file join $outdir $r]]} {

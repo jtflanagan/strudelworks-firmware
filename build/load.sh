@@ -2,13 +2,22 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
 #
-# Load a bitstream into the Alchitry board over JTAG, VOLATILE (SRAM) - it is
-# gone at power-off, which is what you want for test iterations.
+# Load a bitstream into the Alchitry board over JTAG.  BY DEFAULT INTO THE FLASH
+# (docs/BOOT_LOADER.md, the development load): the bitstream at 0, then its
+# record - <bitstream>.rec beside it, made by tools/mkpkg.py (run_build.sh runs it)
+# - at 0x3FF000, both verified, and the FPGA then boots from flash.  The card now
+# boots that image at every power-up and every LINK_RESET, and QUERY checks it.
 #
-#   build/load.sh                      # loads build/results/au_top.bit
-#   build/load.sh path/to/other.bit
+#   build/load.sh path/to/card.bit     # flash: the image, then its record
+#   build/load.sh --sram path/x.bit    # VOLATILE (SRAM): gone at power-off; the
+#                                      # flash image returns at the next reset
+#   FLASH_OFFSET=N build/load.sh f     # write one file raw at flash offset N
 #   build/load.sh --detach             # hand the board back to Windows
 #   BOARD=au_v2 build/load.sh ...      # override the board (see below)
+#
+# A bitstream with no record is refused in flash mode: flashing an image the
+# card cannot identify leaves QUERY answering NO_RECORD.  Make the record
+# (python3 tools/mkpkg.py BIT) or load it with --sram.
 #
 # WHICH BOARD: build/build.tcl writes <bitstream>.board beside every bitstream
 # it produces (au_v2 | pt_v2), and that is what decides the
@@ -94,10 +103,23 @@ if [ "${1:-}" = "--detach" ]; then
     exit 0
 fi
 
-busid="${BUSID:-$(find_busid)}"
-
-bit="${1:-$root/build/results/au_top.bit}"
+sram=0
+bit=""
+for a in "$@"; do
+    case "$a" in
+        --sram) sram=1 ;;
+        *)      bit="$a" ;;
+    esac
+done
+bit="${bit:-$root/build/results/au_top.bit}"
 [ -f "$bit" ] || { echo "No bitstream at $bit - run build/build.sh first" >&2; exit 1; }
+rec="${bit%.bit}.rec"
+if [ "$sram" = 0 ] && [ -z "${FLASH_OFFSET:-}" ] && [ ! -f "$rec" ]; then
+    echo "No record at $rec: make it (python3 tools/mkpkg.py $bit) or load with --sram (volatile)" >&2
+    exit 1
+fi
+
+busid="${BUSID:-$(find_busid)}"
 
 # The board: BOARD= if given, else the sidecar build.tcl wrote, else pt_v2.
 sidecar="${bit%.bit}.board"
@@ -151,16 +173,24 @@ for iface in /sys/bus/usb/drivers/ftdi_sio/*:1.0; do
     sleep 1
 done
 
-# FLASH_OFFSET=N writes the configuration flash at byte offset N instead
-# (docs/BOOT_LOADER.md): -o N, verified by reading back, and the FPGA then
-# reconfigures from flash address 0 - which is golden once golden is there.
-# openFPGALoader erases only the 4 KB sectors it writes (BOOT_LOADER.md, Writers).
-if [ -n "${FLASH_OFFSET:-}" ]; then
+# The flash writes (docs/BOOT_LOADER.md, Writers): -o N, verified by reading
+# back; openFPGALoader erases only the 4 KB sectors it writes, and afterwards the
+# FPGA reconfigures from flash address 0.  The record goes SECOND, so a load that
+# stops early leaves no record and QUERY says so.  (--file-type bin: the record's
+# .rec extension means nothing to openFPGALoader.)
+t0=$SECONDS
+if [ "$sram" = 1 ]; then
+    echo "loading $(basename "$bit") into the FPGA (SRAM, volatile)"
+    "$LOADER" "${LOADER_ARGS[@]}" "$bit"
+elif [ -n "${FLASH_OFFSET:-}" ]; then
     echo "writing $(basename "$bit") into the FLASH at offset $FLASH_OFFSET (persistent), verified"
     "$LOADER" "${LOADER_ARGS[@]}" -f -o "$FLASH_OFFSET" --verify "$bit"
 else
-    echo "loading $(basename "$bit") into the FPGA (SRAM, volatile)"
-    "$LOADER" "${LOADER_ARGS[@]}" "$bit"
+    echo "writing $(basename "$bit") into the FLASH at 0 (persistent), verified"
+    "$LOADER" "${LOADER_ARGS[@]}" -f -o 0 --verify "$bit"
+    echo "writing its record $(basename "$rec") at 0x3FF000, verified"
+    "$LOADER" "${LOADER_ARGS[@]}" -f -o 0x3FF000 --file-type bin --verify "$rec"
 fi
+echo "load time: $((SECONDS - t0)) s"
 echo
 echo "done.  UART report:  build/report.sh   (or: /dev/ttyUSB1 at 115200)"

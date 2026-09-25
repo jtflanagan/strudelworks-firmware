@@ -19,8 +19,10 @@ session: `git status` both repos and get old work committed before editing.
   2-3 in docs/CORE_REFACTOR_65816.md - its TLB is keyed by {bank, page}).
   "front" is retired and its identifiers are renamed as modules are touched.
 - The card design is `build/build.sh --master` (a2_top) or `--gs` (gs_top); the bit is
-  `build/results/master_top.bit`, loaded with `build/load.sh build/results/master_top.bit`
-  (SRAM, volatile). Use the skills: `/strudelworks-firmware:fw-build TAG`,
+  `build/results/master_top.bit` (`master_top_gs.bit`), packaged by run_build.sh
+  (tools/mkpkg.py: `.bin`, `.rec`, `.pkg`) and loaded INTO FLASH with `build/load_card.sh BIT`
+  - the image and its record, so the card boots it from then on (docs/BOOT_LOADER.md);
+  `--sram` for a volatile load. Use the skills: `/strudelworks-firmware:fw-build TAG`,
   `/strudelworks-firmware:fw-sim SUITE`, `/strudelworks-firmware:fw-load`.
 - A timing miss is a WARNING to build.tcl: the build exits 0 and still
   writes a .bit. Read WNS (`build/wns.sh`), never the exit status. A miss is
