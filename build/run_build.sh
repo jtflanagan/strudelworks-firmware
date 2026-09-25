@@ -47,6 +47,7 @@ python3 tools/check_generate_scope.py > "$root/build/genscope_$tag.log" 2>&1 || 
 echo "lint: OK ($(grep -c ' OK$' "$root/build/lint_$tag.log") modules)"
 
 flag="--master"; [ "$gs" = 1 ] && flag="--gs"
+t_start=$(date +%s)     # a bitstream older than this is not this build's
 echo "== build/build.sh $flag $* -> $log"
 build/build.sh "$flag" "$@" 2>&1 | tee "$log"
 rc="${PIPESTATUS[0]}"
@@ -85,8 +86,10 @@ done
 # The package (docs/BOOT_LOADER.md): the raw bitstream, its record and the USB3
 # package, beside the .bit, so a development load can flash the image with its
 # record.  Whatever the timing verdict - the verdict decides whether anyone loads it.
+# (Only a bit written by THIS build: compared against the build's start, since the
+# log is appended to the end and is always newer than the bit.)
 bit="build/results/$bitname.bit"
-if [ -f "$bit" ] && [ "$(stat -c %Y "$bit")" -ge "$(stat -c %Y "$log")" ]; then
+if [ -f "$bit" ] && [ "$(stat -c %Y "$bit")" -ge "$t_start" ]; then
     python3 tools/mkpkg.py "$bit" --log "$log" | sed 's/^/package: /'
 fi
 ud=$(grep -c "Synth 8-3848" "$log" 2>/dev/null || true)

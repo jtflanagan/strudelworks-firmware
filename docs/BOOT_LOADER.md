@@ -299,6 +299,14 @@ stops the work.
 - **BL4 - the user load over USB3.** `swboot load` + `swboot reset`: switch between a IIe and a GS
   image and back; a load killed part-way leaves the old image running, QUERY invalid, and a retry
   succeeding.
+  **SWITCHING DONE 2026-09-25 on hardware** (the killed-load case not yet run). With swhost
+  stopped, over USB3 alone, `swboot load PKG --reboot` on the Pi: GS -> IIe (`bl4iie`, stamp
+  174631, TIMING MET): ERASE 805 ms, 9,882 pages in 15.1 s (~1.5 ms each with the round trip),
+  QUERY 809 ms, LINK_RESET, reconnect, stamp confirmed - 18.2 s in all; then swhost on the user's
+  IIe conf (now `machine = iie`) reached Nox's map with the Mockingboard playing (the user's
+  check). IIe -> GS (`gs_unretime1`, stamp 171833): 20.3 s, the same shape, and System 6 up.
+  Found on the way: run_build.sh's packaging compared the bit against the log's mtime, which is
+  always newer (the log is appended to the end); it compares against the build's start now.
 - **BL5 - swhost's start.** identify -> compare with the conf's image -> load if needed -> reconnect;
   reconnect after LINK_RESET as an expected loss.
 - **BL6 - the stage 1 / stage 2 fence.** The host: calibration read before anything that needs the
