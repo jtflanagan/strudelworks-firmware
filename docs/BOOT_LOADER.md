@@ -65,10 +65,11 @@ user on 2026-09-25; this records the decisions and the order of work. It extends
 
 Every reset of every kind lands in stage 1 of whatever image is in flash.
 
-**While a load runs, the old image keeps running.** The FPGA never reads its flash again after
-configuring, so ERASE and the pages change nothing about the image that is doing the writing. A
-failed or interrupted load is retried from the start as long as the card stays up; only a power loss
-or a reset between the ERASE and a good QUERY leaves a flash that cannot configure (JTAG, below).
+**A FAILED LOAD IS UNRECOVERABLE OVER USB3 (the user, 2026-09-25): the fallback is a JTAG load, and
+nothing tries anything cleverer.** The old image does keep running while the flash is rewritten (the
+FPGA never reads its flash after configuring), but no path relies on that: once ERASE has run, the
+flash holds no valid image until a good QUERY, and a load that stops in between - a failed page, a
+killed host, a power cut - is recovered over JTAG (below).
 
 **RECONFIGURATION DROPS THE LINK.** After LINK_RESET every FPGA pin floats (PUDC_B is strapped high)
 until the image is up again, and the image pulses the FT601's RESET# for 1 ms, which re-enumerates it.
@@ -199,9 +200,11 @@ record's CRC, the bitstream's CRC, the machine against the swhost conf it will r
 
 ### Recovery
 
-- A USB3 load that fails part-way while the card stays up: the old image is still running; reload.
-- A power loss or reset between ERASE and a good QUERY, or an image that configures but cannot
-  reflash itself: JTAG, from the Pi, with the ordinary Alchitry USB cable.
+- A USB3 load that fails for any reason, or an image that configures but cannot reflash itself:
+  JTAG, with the ordinary Alchitry USB cable (from the Pi, in the finished product).  No retry
+  path, no resynchronisation: a host killed mid-message would leave the card's parser inside
+  that message, and LINK_RESET - the only framing recovery - boots the half-written flash.  That
+  is accepted, not worked around.
 
 ## RES' and the deadman
 
@@ -297,9 +300,8 @@ stops the work.
   identify (stamp 171833) and QUERY OK. After any JTAG load the first swhost start leaves the
   native 6502 driving; the second latches the soft core (pre-existing, noted in the skill).
 - **BL4 - the user load over USB3.** `swboot load` + `swboot reset`: switch between a IIe and a GS
-  image and back; a load killed part-way leaves the old image running, QUERY invalid, and a retry
-  succeeding.
-  **SWITCHING DONE 2026-09-25 on hardware** (the killed-load case not yet run). With swhost
+  image and back.  (A killed load is JTAG's - the user, 2026-09-25 - so there is no retry to test.)
+  **DONE 2026-09-25 on hardware.** With swhost
   stopped, over USB3 alone, `swboot load PKG --reboot` on the Pi: GS -> IIe (`bl4iie`, stamp
   174631, TIMING MET): ERASE 805 ms, 9,882 pages in 15.1 s (~1.5 ms each with the round trip),
   QUERY 809 ms, LINK_RESET, reconnect, stamp confirmed - 18.2 s in all; then swhost on the user's
