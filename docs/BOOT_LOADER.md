@@ -1,7 +1,8 @@
 # The boot loader: three stages, a golden image, and the DDR3 fenced out of boot
 
-Status: **PLAN, 2026-09-25, branch `boot_loader` (from fw master 9ddb33d / host master 758bbe7). Nothing
-built; no bench, no bitstream.** The design was settled with the user in one session on 2026-09-25;
+Status: **2026-09-25, branch `boot_loader` (from fw master 9ddb33d / host master 758bbe7). BL1 DONE in
+simulation: `rtl/common/flash_exec.sv` against `sim/sst26_model.sv`, `flash_exec_tb` 25 checks PASS at
+SPI clk/4 and clk/6, 8 of 8 mutants killed, `suite quick` 35/35. No bitstream.** The design was settled with the user in one session on 2026-09-25;
 this document records the decisions and the order of work. It extends REQ_65C02.md 1.10 (a DDR3-free
 boot path), which applies to both cards (REQ_65816.md 1.10).
 
@@ -278,6 +279,15 @@ stops the work.
   and a CRC32 engine over a read range. A behavioural SST26 model for the bench (protection that
   ignores writes, erase and program times scaled down). Gate: ID, a protected block's erase ignored,
   erase/program/read-back of a page, the CRC of a region.
+  **DONE 2026-09-25 (sim).** `flash_exec` runs OP_ID / OP_UNLOCK (WBPR then an RBPR compare) /
+  OP_ERASE / OP_PROG / OP_READ (CRC32 = zlib's, first 256 bytes into the buffer), with its own address
+  fence, eight dummy clocks after reset, and every BUSY poll bounded.  `sst26_model` is written from
+  the datasheet and strict: protection, WEL, BUSY, whole-byte commands, 40 MHz reads, HOLD#/WP#.  The
+  bench: 25 checks including "123456789" -> CBF43926, a stuck BUSY -> E_TIMEOUT, a dropped WBPR ->
+  E_BPR, and golden's 1 MB seeded and found intact.  Mutants killed: golden unlocked, no fence, no
+  dummy clocks, MISO never sampled, no WREN, SPI at 50 MHz, no BUSY poll, no timeout.  Found on the
+  way: the datasheet's power-on BPR footnote prints 28 hex digits for an 80-bit register (it is
+  `5555_FFFFFFFF_FFFFFFFF`), and the half-period counter was one bit short for odd HALF.
 - **BL2 - golden, built and flashed.** `golden_top.sv`: FT601 link, parser, the stage-1 register map,
   the executor, ICAPE2 IPROG. A host-side stage-1 client (a small tool first, swhost later). Gate on
   hardware: identify answers; QUERY on an empty user region says invalid; LINK_RESET reloads golden.
