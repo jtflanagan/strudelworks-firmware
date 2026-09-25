@@ -28,7 +28,9 @@ Status: 2026-09-15, branch `gs_control_panel` (fw ebb96ef / host fbf9f96, not pu
 - **The ROM goes in only while the CPU is held.**
 - **Start from a known place of control, every time**: a power-on, a bit load, a link reset, a
   watchdog, a swhost restart and every Apple RES' all end in the same checklist.
-- **A recovery never needs a reload or a power cycle.**  Anything that does is a bug.
+- **A recovery never needs a human: no manual reload, no power cycle, no second cable.**  Anything
+  that does is a bug.  (Reworded 2026-09-25: LINK_RESET now reloads the FPGA from flash by itself,
+  docs/BOOT_LOADER.md.)
 
 ## Pieces that exist (file:line from the 2026-09-15 research)
 
@@ -56,8 +58,8 @@ Status: 2026-09-15, branch `gs_control_panel` (fw ebb96ef / host fbf9f96, not pu
   and by every RES' assertion (`apple_res_sync` low); CLEARED only by a host write of
   START_RELEASE.  Cause bits latched {card reset, RES'} and an 8-bit count of holds.
 - While pending, the SOFT core is held in reset: `cpu_rst |= start_pending`.  It replaces
-  `gs_rom_hold`.  The native 6502 (CPU_SOURCE not active) is never held - a IIe with no host
-  still runs on its motherboard.
+  `gs_rom_hold`.  (The native 6502 not being held was a development heuristic from the
+  snoop-only testing days, not a requirement either way; decision 3 below holds the whole machine.)
 - The hold lasts past RES' de-assertion; on release the core runs its reset sequence as today, so
   the IIe's MMU reset rides the bus and `boot_hold` (if armed) still parks at the first fetch.
 - Register START_STAT {pending, cause_card, cause_res, count} and START_RELEASE (W1, refused -
