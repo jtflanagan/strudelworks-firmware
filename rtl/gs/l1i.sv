@@ -97,6 +97,12 @@ module l1i #(
     input  wire [15:0] la_ppn,
     input  wire [SIDX-1:0] la_set,
     input  wire [LEV-1:0]  la_way,
+    // ...and lookup C, the prefetch's page (see THE TWO LOOKUPS)
+    output wire [15:0] lc_vpage,
+    input  wire        lc_hit,
+    input  wire [15:0] lc_ppn,
+    input  wire [SIDX-1:0] lc_set,
+    input  wire [LEV-1:0]  lc_way,
     output logic       fi_v,
     output logic [15:0] fi_vpage,
     output logic [15:0] fi_ppn,
@@ -358,7 +364,18 @@ module l1i #(
     logic            f_fold;
     logic            f_slot;
 
-    assign la_vpage = {pc_bank, want_tag[11:4]};
+    // THE TWO LOOKUPS: the demand fetch's page straight from the core's
+    // register-direct pc (A), the prefetch's from its registered tags (C), both
+    // looked up in parallel; the hit checks that decide which one is wanted only
+    // pick between two finished lookups, a mux before the fill's registers
+    // (gs_rvredir1: the pc -> hit -> want -> TLB -> f_set chain) - no clock added.
+    wire [11:0] pf_tag = bt_v ? bt_tag : ew_v ? ew_tag : nx_tag;
+    assign la_vpage = {pc_bank, pc_addr[15:8]};
+    assign lc_vpage = {pc_bank, pf_tag[11:4]};
+    wire             t_hit = want_is_fetch ? la_hit : lc_hit;
+    wire [15:0]      t_ppn = want_is_fetch ? la_ppn : lc_ppn;
+    wire [SIDX-1:0]  t_set = want_is_fetch ? la_set : lc_set;
+    wire [LEV-1:0]   t_way = want_is_fetch ? la_way : lc_way;
     assign p_addr   = {pc_bank, want_tag, 4'h0};
     assign fill_busy = (fst == F_DR) || (fst == F_W1);
     assign claim = turbo_en && cyc_is_i && cpu_rw &&
@@ -573,15 +590,15 @@ module l1i #(
                 F_IDLE: if (want_any && !map_settling) begin
                     if (excl(want_tag) || (!want_is_fetch && want_held)) begin
                         cnt_unserv <= cnt_unserv + 32'd1;   // the fetch rides the sequencer; a held want drops
-                    end else if (la_hit) begin
+                    end else if (t_hit) begin
                         f_vtag  <= {pc_bank, want_tag};
-                        f_ppn   <= la_ppn;
-                        f_set   <= la_set;
-                        f_way   <= la_way;
+                        f_ppn   <= t_ppn;
+                        f_set   <= t_set;
+                        f_way   <= t_way;
                         f_slot  <= victim;
                         dr_req  <= 1'b1;
-                        dr_set  <= la_set;
-                        dr_way  <= la_way;
+                        dr_set  <= t_set;
+                        dr_way  <= t_way;
                         dr_line <= want_tag[3:0];
                         if (!want_is_fetch && !bt_v && !ew_v) cnt_prefetch <= cnt_prefetch + 32'd1;
                         if (!want_is_fetch && bt_v) cnt_bt <= cnt_bt + 32'd1;

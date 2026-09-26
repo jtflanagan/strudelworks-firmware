@@ -52,6 +52,9 @@
 #                      does NOT take a key - it polls $C061 for the button.
 #     --vflags=FLAGS   extra Verilator flags (a -D for an RTL switch)
 #     --room=P         the merge's no-room model: P of 256 per clock starts a burst (12; 0 = never)
+#     --eng-slice=N    the RISC-V engine's RUN slice at reset, in clocks (4096)
+#     --eng-yield=P    force a RUN yield request on P of 256 clocks (0)
+#     --eng-tn=N       the engine's page table entries (4)
 #     --key=CODE:AT[:MODS]  press an ADB keycode at instruction AT, with the
 #                      modifier byte MODS in $C025's order (1 shift, 2 ctrl,
 #                      4 caps, $40 option, $80 command)
@@ -102,10 +105,16 @@ for a in "$@"; do
         --key=*) IFS=: read -r keycode keyat keymods <<< "${a#*=}"; keymods="${keymods:-0}" ;;
         --vflags=*) vflags="${a#*=}" ;;
         --room=*) roomp="${a#*=}" ;;
+        --eng-slice=*) engslice="${a#*=}" ;;
+        --eng-yield=*) engyield="${a#*=}" ;;
+        --eng-tn=*) engtn="${a#*=}" ;;
         --button=*) IFS=: read -r btnat btnhold <<< "${a#*=}"; btnhold="${btnhold:-2000000}" ;;
         --hold=*) keyhold="${a#*=}" ;;
         --mirror=*) mirror="${a#*=}" ;;
         --page-watch=*) pagewatch="${a#*=}" ;;
+        --engine=*) engine_vm="${a#*=}" ;;
+        --guest=*) engine_guest="${a#*=}" ;;
+        --guest-at=*) engine_at="${a#*=}" ;;
         --watch=*) wfrom="${a#*=}"; wto="${wfrom#*:}"; wfrom="${wfrom%%:*}" ;;
         --iverilog) vl=0 ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
@@ -195,7 +204,31 @@ srcs=(
     "$root/rtl/gs/apple_mmu.sv" "$root/rtl/gs/rom_loader.sv" "$root/rtl/gs/page_cam.sv"
     "$root/rtl/gs/way_ram.sv" "$root/rtl/common/page_client.sv" "$root/rtl/common/wb_arb.sv"
     "$root/rtl/common/hd_card.sv" "$root/rtl/common/ft601_msg_rx.sv" "$root/rtl/common/fd_bank.sv"
+    "$root/rtl/gs/rv_engine.sv" "$root/rtl/gs/rv_pipe.sv" "$root/rtl/gs/rv_mem.sv"
 )
+# THE RISC-V ENGINE (docs/REQ_RVVM.md): --engine=VM.bin (apple/rvvm/rvengine.s,
+# assembled for bank $F1) --guest=PROG.bin [--guest-at=ADDR, default $020000]
+# runs the guest through the engine instead of booting the ROM.
+if [ -n "${engine_vm:-}" ]; then
+    [ -f "$engine_vm" ] && [ -f "${engine_guest:-}" ] || { echo "--engine needs the VM and --guest" >&2; exit 2; }
+    # the header's guest pc (+12) and sp (+16): the guest's load address, and a
+    # stack top in RAM ($80-$DF is VOID until the engine's memory work lands)
+    engine_at_dec=$(( ${engine_at:-0x020000} ))
+    python3 - "$engine_vm" "$work/engine_vm_$tag.bin" "$engine_at_dec" <<'PY'
+import sys, struct
+b = bytearray(open(sys.argv[1], 'rb').read())
+b[12:16] = struct.pack('<I', int(sys.argv[3]))
+b[16:20] = struct.pack('<I', 0x7E0000)
+open(sys.argv[2], 'wb').write(b)
+PY
+    xxd -p -c1 "$work/engine_vm_$tag.bin" > "$work/engine_vm_$tag.hex"
+    xxd -p -c1 "$engine_guest" > "$work/engine_guest_$tag.hex"
+    engine_on=1
+    engine_at_dec=$(( ${engine_at:-0x020000} ))
+    # the VM's entry: its header's offset at +6, in bank $F1
+    engine_entry_dec=$(( 0xF10000 + $(od -An -tu2 -j6 -N2 "$engine_vm") ))
+    ref=none
+fi
 echo "== boot_gs_tb: rom=$(basename "$rom") ($chunks chunks) mode=$mode target=$target instrs=$instrs"
 
 if [ "$vl" = 1 ]; then
@@ -213,7 +246,7 @@ if [ "$vl" = 1 ]; then
         -GDDR_LAT="$ddrlat" \
         -GMAX_INSTRS="$instrs" \
         -GTLB_N="$tlbn" \
-        -GL2_SETS="$l2sets" -GL2_WAYS="$l2ways" $waydefs -GFAST_DMA="$fastdma" -GROOM_P="${roomp:-12}" \
+        -GL2_SETS="$l2sets" -GL2_WAYS="$l2ways" $waydefs -GFAST_DMA="$fastdma" -GROOM_P="${roomp:-12}" -GENG_SLICE="${engslice:-4096}" -GENG_YIELD="${engyield:-0}" -GENG_TN="${engtn:-4}" \
         -GMAX_CLKS="$clks" \
         -GHDROMF="\"$work/hdrom.hex\"" \
         -GGS_HD_ROM=$gs_hd_rom \
@@ -224,6 +257,8 @@ if [ "$vl" = 1 ]; then
         -GLC_TRACE="$lctrace" \
         -GWATCH_FROM="$wfrom" -GWATCH_TO="$wto" \
         -GENG_TRACE="$engtrace" \
+        -GENGINE="${engine_on:-0}" -GXROMF="\"$work/engine_vm_$tag.hex\"" -GGUESTF="\"$work/engine_guest_$tag.hex\"" \
+        -GGUEST_AT="${engine_at_dec:-131072}" -GVM_ENTRY="${engine_entry_dec:-14811136}" \
         -GKEY_AT="$keyat" -GKEY_CODE="$keycode" -GKEY_MODS="$keymods" \
         -GBTN_AT="$btnat" -GBTN_HOLD="$btnhold" \
         -GKEY_HOLD="$keyhold" -GPAGE_WATCH="${pagewatch:-0}" \
@@ -257,7 +292,7 @@ else
     vvp -N "$out" | tee "$work/boot_gs_$tag.log" | grep -v '^\$finish'
 fi
 
-if [ -n "$ref" ]; then
+if [ -n "$ref" ] && [ "$ref" != none ]; then
     [ -f "$ref" ] || { echo "no reference trace at $ref" >&2; exit 2; }
     dargs=()
     if [ -n "$floor" ]; then dargs+=(--floor "$floor"); fi

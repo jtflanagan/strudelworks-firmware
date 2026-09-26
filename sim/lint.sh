@@ -140,9 +140,11 @@ run cpu65c02      -Irtl/common -Irtl/a2 rtl/a2/cpu65c02.sv
 # The exploratory 65816 (branch ucode_65816).  Same generated-include
 # arrangement as the 65C02 core.
 run cpu65816      -Irtl/common -Irtl/gs rtl/gs/cpu65816.sv
-# The RISC-V engine (docs/REQ_RVVM.md section 9): its core and its memory side.
+# The RISC-V engine (docs/REQ_RVVM.md section 9): its core, its memory side,
+# and the core behind its $EF window.
 run rv_pipe       rtl/gs/rv_pipe.sv
 run rv_mem        rtl/gs/rv_mem.sv
+run rv_engine     rtl/gs/rv_engine.sv rtl/gs/rv_pipe.sv
 
 # ---- the two tops ---------------------------------------------------------
 # The tops used to be on the "not linted" list below, because they

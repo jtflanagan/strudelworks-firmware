@@ -273,7 +273,13 @@ module apple_mmu #(
     // Shadowed writes that arrived while one was still in hand.  Must be 0:
     // see the note on the duplicate's depth.  A bench asserts on it.
     output logic [7:0]  shd_drops,
-    output logic [7:0]  cl_wdata,      // the write's byte
+    // The write's data: a byte replicated into all four lanes (an op, a
+    // posted byte, a duplicate), or the RISC-V engine's word.  cl_be are its
+    // lanes from cl_off: 4'b0001 for a byte, the engine's enables for a word
+    // (cl_off word aligned), so the row's lanes are cl_be << cl_off[3:0].
+    output logic [31:0] cl_wdata,
+    output logic [3:0]  cl_be,
+    output logic        cl_eng,        // the engine's write: no L1 holds its bytes
     // The posted FIFO's head, and the page cache's leave to take it.
     input  wire         pw_valid,
     input  wire [15:0]  pw_ppn,        // the entry's PHYSICAL page, stamped at its retire
@@ -281,6 +287,16 @@ module apple_mmu #(
     input  wire [7:0]   pw_data,
     input  wire         pw_ready,      // the page cache's pipeline is clear
     output wire         pw_take,       // pulse: cl_* carries it next clock
+    // THE RISC-V ENGINE'S STORES (docs/REQ_RVVM.md, rung 3b): an aligned word
+    // with byte enables, already a physical page (the engine's banks are
+    // RAM under every map), posted the same way after L1-D's FIFO - the
+    // 65816's writes are the older ones.
+    input  wire         pe_valid,
+    input  wire [15:0]  pe_ppn,
+    input  wire [7:0]   pe_off,        // word aligned
+    input  wire [3:0]   pe_be,
+    input  wire [31:0]  pe_data,
+    output wire         pe_take,       // pulse: cl_* carries it next clock
     // THE SHADOW DUPLICATE'S ENTRANT, for the same reason pw_take is one:
     // it sets cl_valid a clock later exactly as a posted write does, so the
     // cache must open a P0 for it or it arrives with no directory read of
@@ -1441,6 +1457,7 @@ module apple_mmu #(
     // an op that has already been classified, and holding it back behind a
     // queue would let a later read of $E0 see the write that had not landed.
     assign pw_take = pw_valid && pw_ready && !op_present && !shd_valid && !rst;
+    assign pe_take = pe_valid && pw_ready && !op_present && !shd_valid && !pw_valid && !rst;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -1454,7 +1471,7 @@ module apple_mmu #(
                 // on: cl_ppn's bank bit 0 IS that side.
                 shd_ppn   <= {7'h70, cl_ppn[8], cl_ppn[7:0]};
                 shd_off   <= cl_off[7:0];
-                shd_data  <= cl_wdata;
+                shd_data  <= cl_wdata[7:0];
             end else if (shd_take) begin
                 shd_valid <= 1'b0;
             end
@@ -1471,11 +1488,15 @@ module apple_mmu #(
             cl_rw       <= 1'b1;
             cl_wr_image <= 1'b0;
             cl_posted   <= 1'b0;
-            cl_wdata    <= 8'd0;
+            cl_wdata    <= 32'd0;
+            cl_be       <= 4'b0001;
+            cl_eng      <= 1'b0;
             cl_ppn      <= 16'd0;
             cl_sh       <= 1'b0;
         end else begin
-            cl_valid <= op_present || pw_take || shd_take;
+            cl_valid <= op_present || pw_take || shd_take || pe_take;
+            cl_be    <= 4'b0001;
+            cl_eng   <= 1'b0;
             if (op_present) begin
                 cl_cls      <= n_cls;
                 cl_aux      <= n_aux;
@@ -1484,7 +1505,7 @@ module apple_mmu #(
                 cl_rw       <= op_rw;
                 cl_wr_image <= n_wr_image;
                 cl_posted   <= 1'b0;
-                cl_wdata    <= op_wdata;
+                cl_wdata    <= {4{op_wdata}};
                 cl_ppn      <= pf_ppn;
                 cl_sh       <= n_sh;
             end else if (shd_take) begin
@@ -1497,7 +1518,7 @@ module apple_mmu #(
                 cl_rw       <= 1'b0;
                 cl_wr_image <= 1'b1;
                 cl_posted   <= 1'b1;
-                cl_wdata    <= shd_data;
+                cl_wdata    <= {4{shd_data}};
                 cl_ppn      <= shd_ppn;
                 cl_sh       <= 1'b0;
             end else if (pw_take) begin
@@ -1514,12 +1535,27 @@ module apple_mmu #(
                 cl_rw       <= 1'b0;
                 cl_wr_image <= 1'b1;
                 cl_posted   <= 1'b1;
-                cl_wdata    <= pw_data;
+                cl_wdata    <= {4{pw_data}};
                 // A posted write was already classified at its retire and
                 // carries its page; its shadow is the front's to stamp when
                 // the fronts serve a IIgs (docs/GS.md, rung 6).  Nothing
                 // posts on the GS build yet.
                 cl_ppn      <= pw_ppn;
+                cl_sh       <= 1'b0;
+            end else if (pe_take) begin
+                // The engine's word: RAM class in $02-$DF, never shadowed
+                // (REQ_RVVM: $C036 bit 4 is kept clear under the engine).
+                cl_cls      <= CLS_RAM;
+                cl_aux      <= (pe_ppn[15:8] != 8'd0);
+                cl_bank     <= pe_ppn[15:8] - 8'd1;
+                cl_off      <= {pe_ppn[7:0], pe_off};
+                cl_rw       <= 1'b0;
+                cl_wr_image <= 1'b1;
+                cl_posted   <= 1'b1;
+                cl_wdata    <= pe_data;
+                cl_be       <= pe_be;
+                cl_eng      <= 1'b1;
+                cl_ppn      <= pe_ppn;
                 cl_sh       <= 1'b0;
             end
         end

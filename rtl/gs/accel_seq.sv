@@ -275,6 +275,13 @@ module accel_seq #(
     // Status and counters (ACCEL_STAT and friends).
     output wire         accel_on,
     output wire         held_governor,  // the core is waiting for credit
+    // THE RISC-V ENGINE is the governor's fourth consumer (docs/REQ_RVVM.md
+    // "RUN"): each instruction it retires is one op, as a core cycle is.  It
+    // commits a write-back only with the token (gov_ok) and says so (gov_pay);
+    // the 65816 is stalled inside the engine's window read meanwhile, so no
+    // other consumer shares the clock.
+    output wire         gov_ok,
+    input  wire         gov_pay,
     output wire [3:0]   state_o,
     output wire         reset_seq_o,    // the reset sequence is still on the bus
     output logic [31:0] fast_ops,
@@ -383,6 +390,7 @@ module accel_seq #(
     always_ff @(posedge clk) unl_q <= (target == 16'd0);
     wire  unlimited = unl_q;
     wire  can_pay   = unl_q || grant_q;
+    assign gov_ok   = can_pay;
 
     // ---- the decision -------------------------------------------------------
     // What goes to the bus is a matter of class, mode and policy - never of
@@ -651,11 +659,11 @@ module accel_seq #(
             // The token: consumption (and only consumption) takes it away;
             // the pool re-arms it when it covers a credit net of the debit
             // still in flight.  The verdict lands on two one-bit D inputs.
-            spent_q <= (disp_pay || turbo_commit || d_commit) && !unlimited;
+            spent_q <= (disp_pay || turbo_commit || d_commit || gov_pay) && !unlimited;
             if (cpu_rst || !master_active || off || unlimited) begin
                 grant_q <= 1'b0;
                 spent_q <= 1'b0;
-            end else if (disp_pay || turbo_commit || d_commit) begin
+            end else if (disp_pay || turbo_commit || d_commit || gov_pay) begin
                 grant_q <= 1'b0;
             end else if (!grant_q && credit >= (spent_q ? 20'd512 : 20'd256)) begin
                 grant_q <= 1'b1;

@@ -84,7 +84,8 @@ module page_cam #(
     input  wire [7:0]  cl_off,
     input  wire        cl_rw,
     input  wire        cl_wr_image,
-    input  wire [7:0]  cl_wdata,
+    input  wire [31:0] cl_wdata,      // a byte in all four lanes, or the RISC-V engine's word
+    input  wire [3:0]  cl_be,         // its lanes from cl_off: the row's are cl_be << cl_off[3:0]
     input  wire        cl_posted,
     input  wire        pw_pending,
     output wire        pw_ready,
@@ -118,15 +119,22 @@ module page_cam #(
     output wire [7:0]  mw_byte,
     output wire        mwx_stb,
     output wire [7:0]  mw_bank,
-    // The line-row port (no user on this card since rung 3; kept).
+    // The line-row port: the RISC-V engine's probe (rtl/gs/rv_mem.sv,
+    // docs/REQ_RVVM.md "The engine on the L2").  A hit answers the row and
+    // WHERE it is (il_set/il_way); a miss with il_fill set starts the same fill
+    // an op-path read miss starts - as a posted read nobody waits on - and its
+    // retag is reported on op_place_* as every fill's is.
     input  wire        il_req,
     input  wire [15:0] il_ppn,
     input  wire [3:0]  il_line,
     input  wire        il_src,
+    input  wire        il_fill,
     output wire        il_ack,
     output wire        il_done,
     output logic       il_ok,
     output logic [127:0] il_row,
+    output logic [$clog2(SETS)-1:0] il_set,
+    output logic [$clog2(WAYS)-1:0] il_way,
     // The TLB's references, the eviction broadcast, the placement report,
     // the direct read: a set and a way, as the set cache had them.
     input  wire                        ref_v,
@@ -388,7 +396,7 @@ module page_cam #(
     );
 
     // ---- P1: what P0 found, and the set's bits for the victim -------------------
-    logic             e1_v, e1_op, e1_il;
+    logic             e1_v, e1_op, e1_il, e1_fill;
     logic [15:0]      e1_ppn;
     logic [3:0]       e1_line;
     logic [SIDX-1:0]  e1_set;
@@ -400,6 +408,7 @@ module page_cam #(
         e1_v  <= e_any && !rst;
         e1_op <= (e_op || e_pw || e_sh) && !rst;
         e1_il <= e_il && !rst;
+        e1_fill <= e_il && il_fill && !rst;
         if (e_any) begin
             e1_ppn  <= en_ppn;
             e1_line <= en_ln;
@@ -452,19 +461,45 @@ module page_cam #(
     wire            c_vdty    = |(c_vic & tq_de);
 
     // ---- P1 -> P2: the op's stage, and a write's landing -------------------
-    logic            s_v, s_posted, s_rw, s_wr_image, s_machine, s_hit, s_vdty;
+    logic            s_v, s_posted, s_rw, s_wr_image, s_machine, s_hit, s_vdty, s_probe;
     logic [1:0]      s_cls;
     logic [15:0]     s_ppn, s_addr;
-    logic [7:0]      s_off, s_wdata;
+    logic [7:0]      s_off;
+    logic [31:0]     s_wdata;
+    logic [3:0]      s_be;
     logic [SIDX-1:0] s_set;
     logic [SW-1:0]   s_slot, s_vslot;
     logic [WAYS-1:0] s_vic, s_plru;
     wire [LEV-1:0]   s_way = s_slot[LEV-1:0];
     wire p1_wr = cl_valid && !cl_rw && cl_wr_image && c_hit && !iv_run;
+    // A probe that missed and may fill becomes a posted read at P2 (a probe is
+    // acknowledged only with no op present, so it never meets cl_valid here).
+    wire p1_pfill = e1_il && e1_fill && !c_hit && !cl_valid;
     always_ff @(posedge clk) begin
-        s_v  <= cl_valid && !rst;
+        s_v  <= (cl_valid || p1_pfill) && !rst;
         wl_v <= p1_wr && !rst;
+        if (p1_pfill) begin
+            s_posted   <= 1'b1;
+            s_probe    <= 1'b1;
+            s_cls      <= 2'd1;             // not CLS_BUS: cacheable
+            s_ppn      <= e1_ppn;
+            s_off      <= {e1_line, 4'd0};
+            s_rw       <= 1'b1;
+            s_wr_image <= 1'b0;
+            s_wdata    <= 32'd0;
+            s_be       <= 4'b0001;
+            s_addr     <= 16'd0;
+            s_machine  <= 1'b0;
+            s_hit      <= 1'b0;
+            s_slot     <= c_slot;
+            s_set      <= e1_set;
+            s_vic      <= c_vic;
+            s_vslot    <= c_vslot;
+            s_vdty     <= c_vdty;
+            s_plru     <= plru_w;
+        end
         if (cl_valid) begin
+            s_probe    <= 1'b0;
             s_posted   <= cl_posted;
             s_cls      <= cl_cls;
             s_ppn      <= cl_ppn;
@@ -472,6 +507,7 @@ module page_cam #(
             s_rw       <= cl_rw;
             s_wr_image <= cl_wr_image;
             s_wdata    <= cl_wdata;
+            s_be       <= cl_be;
             s_addr     <= op_addr;
             s_machine  <= (cl_ppn[15:8] <= 8'd1);
             s_hit      <= c_hit;
@@ -485,8 +521,8 @@ module page_cam #(
         if (p1_wr) begin
             wl_slot <= c_slot;
             wl_row  <= {c_slot, cl_off[7:4]};
-            wl_be   <= 16'd1 << cl_off[3:0];
-            wl_data <= {16{cl_wdata}};
+            wl_be   <= 16'(cl_be) << cl_off[3:0];
+            wl_data <= {4{cl_wdata}};
             wl_main <= (cl_ppn[15:8] == 8'd0);
             wl_bank <= cl_ppn[15:8];
             wl_addr <= {cl_ppn[7:0], cl_off};
@@ -503,10 +539,13 @@ module page_cam #(
     end
 
     logic il_hit_q;
+    logic [SW-1:0] il_slot_q;
     assign il_done = il_sr[2];
     always_ff @(posedge clk) begin
         il_sr <= rst ? 3'd0 : {il_sr[1:0], il_ack};
         if (e1_il)    il_hit_q <= c_hit;
+        if (e1_il)    il_slot_q <= c_slot;
+        if (il_sr[1]) begin il_set <= il_slot_q[SW-1:LEV]; il_way <= il_slot_q[LEV-1:0]; end
         if (il_sr[1]) il_row   <= mux_row;
         if (il_sr[1]) il_ok    <= il_hit_q;
     end
@@ -519,8 +558,9 @@ module page_cam #(
     // ---- the engine ---------------------------------------------------------
     logic [15:0]     e_ppn, e_old, e_addr;
     logic [3:0]      e_crit, e_boff;
-    logic [7:0]      e_wbyte;
-    logic            e_dirty, e_rw, e_serve, e_cmp, e_main;
+    logic [31:0]     e_wword;       // a write-around's data, as s_wdata
+    logic [15:0]     e_lanes;       // ...and its lanes in the row
+    logic            e_dirty, e_rw, e_serve, e_cmp, e_main, e_probe;
     logic [4:0]      snap_k;
     wire             snap_hold = (snap_k == 5'd0) && wl_v && (wl_slot == e_slot);
     logic [3:0]      req_n, fl_k;
@@ -529,7 +569,7 @@ module page_cam #(
     logic [127:0] pbuf [0:15];
     logic [127:0] ld_wdata_q;
     assign pq_wdata = (state == E_LDWR || state == E_WARD) ? ld_wdata_q : pbuf[fl_k];
-    assign pq_sel   = (state == E_WARD) ? (16'd1 << e_boff) : 16'hFFFF;
+    assign pq_sel   = (state == E_WARD) ? e_lanes : 16'hFFFF;
     wire accept = pq_valid && pq_ready;
     assign ld_take = (state == E_LDWR) && accept;
     always_comb begin
@@ -550,9 +590,9 @@ module page_cam #(
             end
             E_PATCH: begin
                 eb_en    = 1'b1;
-                eb_we    = 16'd1 << e_boff;
+                eb_we    = e_lanes;
                 eb_addr  = {e_slot, e_crit};
-                eb_wdata = {16{e_wbyte}};
+                eb_wdata = {4{e_wword}};
             end
             default: ;
         endcase
@@ -571,7 +611,10 @@ module page_cam #(
     assign mwx_stb = wl_v || e_wr_stb;
     assign mw_bank = wl_v ? wl_bank : e_ppn[15:8];
     assign mw_addr = wl_v ? wl_addr : e_addr;
-    assign mw_byte = wl_v ? wl_data[7:0] : e_wbyte;
+    // ONE BYTE WIDE: its consumers (the video copy of main, the SCBs in $E1)
+    // watch banks only the 65816's byte writes reach; the RISC-V engine's
+    // words stay in $02-$DF (asserted below).
+    assign mw_byte = wl_v ? wl_data[7:0] : e_wword[7:0];
     assign busy = op_present || (cl_valid && !cl_posted) || (s_v && !s_posted) ||
                   !eng_idle;
     assign pw_ready = !op_present && !cl_valid && !s_v && eng_idle && !wl_v && !iv_run;
@@ -693,6 +736,11 @@ module page_cam #(
     logic [15:0] d_tag [N];
     initial for (int i = 0; i < N; i = i + 1) d_tag[i] = 16'd0;
     always_ff @(posedge clk) if (eng_retag) d_tag[e_slot] <= e_ppn;
+    // mw_* carries one byte: a wider write must never land where it is watched.
+    always @(posedge clk)
+        if (mwx_stb && !rst && ((wl_v ? $countones(wl_be) : $countones(e_lanes)) != 1) &&
+            ((mw_bank[7:1] == 7'd0) || (mw_bank[7:1] == 7'h70)))
+            $error("page_cam: a multi-byte write landed in bank $%02x, which mw_* watches a byte at a time", mw_bank);
 `endif
 
     // ---- P2: the decision, the engine's states, the monitor -------------------
@@ -703,7 +751,7 @@ module page_cam #(
         data_q  <= data_sync;
         op_blocked <= s_v && !s_posted && dec_block && !rst;
         decided <= (s_v && !s_posted && !eng_read_start) ||
-                   ((state == E_FILL) && pr_valid && (resp_n == 5'd0) && e_rw);
+                   ((state == E_FILL) && pr_valid && (resp_n == 5'd0) && e_rw && !e_probe);
         if (rst) begin
             sub_en <= 1'b0; sub_data <= 8'd0;
             op_row_v <= 1'b0; op_row <= 128'd0; op_row_ppn <= 16'd0;
@@ -712,8 +760,8 @@ module page_cam #(
             state <= E_IDLE;
             pq_valid <= 1'b0; pq_we <= 1'b0; pq_line <= 20'd0;
             e_ppn <= 16'd0; e_old <= 16'd0; e_slot <= {SW{1'b0}};
-            e_crit <= 4'd0; e_boff <= 4'd0; e_wbyte <= 8'd0; e_addr <= 16'd0;
-            e_dirty <= 1'b0; e_rw <= 1'b1; e_serve <= 1'b0; e_cmp <= 1'b0; e_main <= 1'b0;
+            e_crit <= 4'd0; e_boff <= 4'd0; e_wword <= 32'd0; e_lanes <= 16'd0; e_addr <= 16'd0;
+            e_dirty <= 1'b0; e_rw <= 1'b1; e_serve <= 1'b0; e_cmp <= 1'b0; e_main <= 1'b0; e_probe <= 1'b0;
             snap_k <= 5'd0; req_n <= 4'd0; fl_k <= 4'd0; resp_n <= 5'd0;
             hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
             mismatches <= 32'd0; last_mismatch <= 32'd0; diverted <= 32'd0;
@@ -758,10 +806,11 @@ module page_cam #(
                 pq_valid   <= 1'b1;
                 pq_we      <= 1'b1;
                 pq_line    <= {s_ppn, s_off[7:4]};
-                ld_wdata_q <= {16{s_wdata}};
+                ld_wdata_q <= {4{s_wdata}};
                 e_ppn      <= s_ppn;
                 e_boff     <= s_off[3:0];
-                e_wbyte    <= s_wdata;
+                e_wword    <= s_wdata;
+                e_lanes    <= 16'(s_be) << s_off[3:0];
                 e_addr     <= {s_ppn[7:0], s_off};
                 e_main     <= (s_ppn[15:8] == 8'd0);
             end else if ((dec_read || dec_write) && !s_hit) begin
@@ -773,11 +822,13 @@ module page_cam #(
                     e_slot    <= s_vslot;
                     e_crit    <= s_off[7:4];
                     e_boff    <= s_off[3:0];
-                    e_wbyte   <= s_wdata;
+                    e_wword   <= s_wdata;
+                    e_lanes   <= 16'(s_be) << s_off[3:0];
                     e_addr    <= {s_ppn[7:0], s_off};
                     e_dirty   <= s_vdty;
                     e_rw      <= s_rw;
                     e_serve   <= serve_this && !s_posted;
+                    e_probe   <= s_probe;
                     e_cmp     <= s_rw && s_machine;
                     e_main    <= (s_ppn[15:8] == 8'd0);
                     mem_fills <= mem_fills + 32'd1;

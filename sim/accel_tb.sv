@@ -499,7 +499,7 @@ module accel_tb #(parameter integer SWINT = 1,
         .fast_valid (mg_fast_valid), .fast_addr (fev_valid ? fev_addr : tev_valid ? tev_addr : dev_addr),
         .fast_bank (fev_valid ? fev_bank : 8'd0),
         .fast_rw (mg_fast_rw), .fast_data (8'd0), .fast_sync (1'b0), .fast_mark (1'b0), .fast_mark_free (16'd0),
-        .fast_quiet (1'b0), .vbl_level (1'b0), .res_level (1'b0), .sparse (1'b0), .virt (1'b0),
+        .fast_quiet (1'b0), .eng_valid (1'b0), .eng_rec (64'd0), .eng_take (), .vbl_level (1'b0), .res_level (1'b0), .sparse (1'b0), .virt (1'b0),
         .out_valid (mg_out_valid), .out_data (mg_out_data), .out_mark (), .out_mark_free (), .out_dummy (),
         .out_drop (), .out_carrier (),
         .overflows (mg_overflows), .fast_room (mg_room), .fast_room_w (mg_room_w)

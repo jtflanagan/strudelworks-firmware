@@ -113,8 +113,12 @@ module bus_event_filter #(
 
     localparam [3:0] T_SKIP = 4'hD;
     localparam [3:0] T_FAST = 4'hC;
+    localparam [3:0] T_ENG  = 4'hB;
 
     wire in_fast = (in_data[31:28] == T_FAST);
+    // The RISC-V engine's write record (rtl/event_merge.sv): always kept, never
+    // a cycle, never consulted for an edge (its bits 19:16 are byte enables).
+    wire in_eng  = (in_data[31:28] == T_ENG);
     wire in_word = in_valid && !in_carrier;
     wire in_vbl = in_data[19];
     wire in_res = in_data[17];
@@ -135,12 +139,12 @@ module bus_event_filter #(
     wire on_edge = first || in_mark || (in_vbl != prev_vbl) || (in_res != prev_res);
     // A fast word here was kept at the merge's door (a write, a switch
     // read, a mark, an edge - never a dropped read).
-    wire keep = in_fast  ? 1'b1 :
+    wire keep = (in_fast || in_eng) ? 1'b1 :
                 in_dummy ? (!virt && on_edge) :
                            (!sparse || on_edge || in_io || !in_rw);
     // What is a cycle: the bus's in the real base (a fast op neither counts
     // nor moves the edge rule), the core's in the virtual (a dummy neither).
-    wire cycle = in_word && (virt ? !in_dummy : !in_fast);
+    wire cycle = in_word && !in_eng && (virt ? !in_dummy : !in_fast);
     // The pending count: the cycles not yet sent, with this clock's own
     // contributions folded in - a shed core cycle (the virtual base only)
     // and a cycle whose word is not kept.  One arithmetic for every path.

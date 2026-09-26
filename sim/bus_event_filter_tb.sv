@@ -520,7 +520,7 @@ module bus_event_filter_tb;
         .bus_mark_free (16'h0700), .bus_dummy (m_bus_dummy),
         .fast_valid (m_fast_valid), .fast_addr (m_fast_addr), .fast_bank (8'd0), .fast_rw (m_fast_rw),
         .fast_data (m_fast_data), .fast_sync (1'b0), .fast_mark (m_fmark), .fast_mark_free (16'hA503),
-        .fast_quiet (m_quiet), .fast_force (1'b0), .vbl_level (m_vbl), .res_level (1'b1), .sparse (m_sparse), .virt (m_virt),
+        .fast_quiet (m_quiet), .fast_force (1'b0), .eng_valid (1'b0), .eng_rec (64'd0), .eng_take (), .vbl_level (m_vbl), .res_level (1'b1), .sparse (m_sparse), .virt (m_virt),
         .out_valid (m_valid), .out_data (m_data), .out_mark (m_mark), .out_mark_free (m_free),
         .out_dummy (m_dummy), .out_drop (m_drop), .out_carrier (m_carrier), .overflows (m_overflows)
     );

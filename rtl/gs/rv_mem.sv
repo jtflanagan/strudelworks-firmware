@@ -229,9 +229,10 @@ module rv_mem #(
     end
 
     // THE ONE-CLOCK HIT: a request that finds its row in a row cache is answered
-    // on the clock it is presented, not registered through M_REPLY.
+    // on the clock it is presented, not registered through M_REPLY.  M_REPLY
+    // carries only the replies without a word - a delegation or an abort - so
+    // its valid bits are registered and its data is none.
     logic        f_valid_q, d_valid_q;
-    logic [31:0] f_data_q, d_rdata_q;
 
     // THE INSTRUCTION ROW CACHE: IROWS rows of 16 bytes, direct-mapped, row and tag
     // in BLOCK RAM read a clock early from the core's next fetch address (f_pre).
@@ -294,11 +295,11 @@ module rv_mem #(
     assign f_data  = f_fast ? word_of(ic_out, f_addr[1:0]) :
                      f_pfland ? word_of(pf_row, f_addr[1:0]) :
                      dr_land ? word_of(dr_row, wsel) :
-                     il_land ? word_of(il_row, wsel) : f_data_q;
+                     il_land ? word_of(il_row, wsel) : 32'd0;
     assign d_valid = d_valid_q || d_fast || st_post || (dr_land && !is_f) || (il_land && !is_f);
     assign d_rdata = d_fast ? word_of(dc_row, d_addr[1:0]) :
                      dr_land ? word_of(dr_row, wsel) :
-                     il_land ? word_of(il_row, wsel) : d_rdata_q;
+                     il_land ? word_of(il_row, wsel) : 32'd0;
     assign pk_hit  = 1'b0;                  // (the old core's peek: the cache serves the fetch itself)
     assign pk_word = 32'd0;
     // the prefetch's translation: the last fetched row's page in the table
@@ -330,18 +331,6 @@ module rv_mem #(
             else      dc_v[ra_idx] <= 1'b1;
         end
         st <= M_IDLE;
-    endtask
-
-    // Reply to the core with a row (and keep it unless it went stale).
-    task automatic take_row(input logic [127:0] r);
-        if (is_f) begin
-            f_valid_q <= 1'b1; f_data_q <= word_of(r, wsel);
-            if (keep_ok) ic_v[ra[IDI+1:2]] <= 1'b1;
-        end else begin
-            d_valid_q <= 1'b1; d_rdata_q <= word_of(r, wsel);
-            if (keep_ok) dc_v[ra_idx] <= 1'b1;
-        end
-        st <= M_REPLY;
     endtask
 
     always_ff @(posedge clk) begin

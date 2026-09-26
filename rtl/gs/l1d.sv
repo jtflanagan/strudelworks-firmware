@@ -149,6 +149,12 @@ module l1d #(
     input  wire        cl_rw,
     input  wire        cl_wr_image,
     input  wire        cl_posted,
+    // The RISC-V engine's word write (docs/REQ_RVVM.md rung 3b): posted by
+    // another producer, so nothing here holds its bytes to splice - the last
+    // row, the L2 read in flight and the neighbour slot simply die on it.
+    // The 65816 is in the VM's hot loop whenever the engine writes, so
+    // killing them wholesale costs nothing a row compare would save.
+    input  wire        cl_eng,
     input  wire [15:0] cl_ppn,
     input  wire [15:0] cl_off,
     input  wire [7:0]  wdata,
@@ -256,7 +262,11 @@ module l1d #(
     wire in_sh_estate = (dq_addr[15:9] == 7'd0) && zs_main_q && dq_bz;
     wire sh_hit = dq_v && in_sh_estate && shv[dq_addr[8:4]];
     // $Cxxx is the I/O page in the pair banks alone; elsewhere it is memory.
-    wire is_cx  = (dq_addr[15:12] == 4'hC) && dq_pair;
+    // ...and $EF:FExx is the RISC-V engine's window (rtl/gs/rv_engine.sv,
+    // docs/REQ_RVVM.md): its registers, never the RAM under it - the
+    // dispatcher serves it through the internalized path, so no server here
+    // may answer it.
+    wire is_cx  = ((dq_addr[15:12] == 4'hC) && dq_pair) || (dq_addr[23:8] == 16'hEFFE);
 
     // ---- the I/O page: the keyboard and the chipset's fast reads --------------
     logic io_flat_q, swi_busy_q;
@@ -399,7 +409,8 @@ module l1d #(
     // are the core's own write landing a clock later, and they are killed
     // wholesale - in a block move they do not fire, the last row being the
     // source's while the write goes to the destination's.
-    wire         pb_kill = map_changed || inval || sp_write || lr_snp ||
+    wire         ex_w    = cl_valid && cl_eng;    // the engine's write: see cl_eng
+    wire         pb_kill = map_changed || inval || sp_write || lr_snp || ex_w ||
                            (w_retire && (dq_addr[23:4] == pb_addr[23:4]));
 
     wire d_cycle = !cyc_is_i &&  cpu_rw && !cyc_int;
@@ -477,7 +488,7 @@ module l1d #(
     wire       sp_hit  = iw_v && (iw_ppn[15:1] == 15'd0);
     wire [4:0] sp_line = {iw_ppn[0], iw_off8[7:4]};
     wire       lr_snp  = iw_v && lr_v && (iw_ppn == lr_ppn) && (iw_off8[7:4] == lr_addr[3:0]);
-    assign     l2_snp  = iw_v && (iw_ppn == l2_ppn) && (iw_off8[7:4] == l2_vt[3:0]);
+    assign     l2_snp  = (iw_v && (iw_ppn == l2_ppn) && (iw_off8[7:4] == l2_vt[3:0])) || ex_w;
 
     // The last byte follows the retiring edge; a write clears it; an internal
     // cycle is not an access.
@@ -754,6 +765,9 @@ module l1d #(
                 end else cnt_l2_abort <= cnt_l2_abort + 32'd1;
             end
             if (cyc_en) begin l2_v_q <= 1'b0; l2_live <= 1'b0; end
+            // after every capture above: a row read before the engine's write
+            // landed must not survive it
+            if (ex_w) lr_v <= 1'b0;
             if (map_changed) begin
                 lr_v <= 1'b0; l2_v_q <= 1'b0; l2_live <= 1'b0;
             end

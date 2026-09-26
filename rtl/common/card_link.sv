@@ -110,6 +110,11 @@ module card_link #(
     input  wire [15:0] fast_mark_free,
     input  wire        fast_quiet,
     input  wire        fast_force,      // keep this fast word whatever the rule (rtl/event_merge.sv)
+    // The GS card's RISC-V engine's write records (tag 0xB, rtl/event_merge.sv);
+    // the IIe card ties eng_valid low.
+    input  wire        eng_valid,
+    input  wire [63:0] eng_rec,
+    output wire        eng_take,
     input  wire        fast_valid,
     input  wire [15:0] fast_addr,
     // The 65816's bank byte for that op (docs/GS.md rung 4b).  Zero on the
@@ -1017,6 +1022,9 @@ module card_link #(
     wire        mg_valid, mg_mark, mg_dummy, mg_carrier;
     wire [15:0] mg_mark_free, mg_drop;
 
+    // The synthetic source owes the engine nothing: its records are taken as dropped.
+    wire eng_take_m;
+    assign eng_take = eng_take_m || (eng_valid && !source_real);
     event_merge #(.DEPTH (32)) u_merge (
         .clk           (clk_ctrl),
         .rst           (rst),
@@ -1036,6 +1044,9 @@ module card_link #(
         .fast_mark_free (fast_mark_free),
         .fast_quiet    (fast_quiet),
         .fast_force    (fast_force),
+        .eng_valid     (source_real && eng_valid),
+        .eng_rec       (eng_rec),
+        .eng_take      (eng_take_m),
         .vbl_level     (fast_vbl),
         .res_level     (apple_res_sync),
         .sparse        (sparse_ctrl && source_real),

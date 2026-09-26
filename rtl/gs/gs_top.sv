@@ -453,7 +453,25 @@ module gs_top #(
     wire [15:0]  mem_op_row_ppn;
     wire        d_pending_w, turbo_wr, dq_rw_w, ev_fast_room_w;
     wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w;
-    wire [7:0]  pw_data_w, cl_wdata;
+    wire [7:0]  pw_data_w;
+    wire [31:0] cl_wdata;           // a byte in four lanes, or the RISC-V engine's word
+    wire [3:0]  cl_be;
+    wire        cl_eng;
+    // The RISC-V engine's stores into the seam (docs/REQ_RVVM.md rung 3b): an
+    // aligned word with byte enables, and the MMU's take of it.  pe_pending
+    // holds the L2's direct reads and probes off until it has landed, as
+    // d_pending does for L1-D's posts.
+    wire        pe_valid_w, pe_take_w;
+    wire        eng_rec_v, eng_rec_take;    // ...and its write record, to the event stream
+    wire        eng_gov_ok, eng_gov_pay;    // ...and the governor's token, and the engine's charge on it
+    // The 65816's interrupt line; RUN yields to it when the core would take it (I clear).
+    wire        cpu_irq_n = apple_irq_sync && !gsio_irq && !mb_irq && !mouse_irq;
+    wire [63:0] eng_rec;
+    wire [21:0] pe_waddr_w;         // the word's address: {bank, addr[15:2]}
+    wire [3:0]  pe_be_w;
+    wire [31:0] pe_data_w;
+    logic [2:0] pe_drain_sr;
+    wire        pe_pending = pe_valid_w || (pe_drain_sr != 3'd0);
     // The posted write's seam is the PHYSICAL page and the byte in it now
     // (docs/MEMORY_REFACTOR.md, rung 2); the instruction front's snoop still
     // speaks the old triple until rung 3 converts it.
@@ -521,6 +539,8 @@ module gs_top #(
         .fast_mark (beam_mark_fast), .fast_mark_free (beam_mark_free),
         .fast_quiet (fev_valid && fev_quiet),
         .fast_force (fev_force),
+        // The RISC-V engine's write records (docs/REQ_RVVM.md rung 3b).
+        .eng_valid (eng_rec_v), .eng_rec (eng_rec), .eng_take (eng_rec_take),
         // The fronts' events share the fast port: turbo_ok excludes fev's
         // clock, and an I and a D retire can never share an edge (one core,
         // one cycle), so no two of the three are ever valid together - the
@@ -741,6 +761,10 @@ module gs_top #(
     localparam integer L2_SIDX = $clog2(MEM_SETS);
     localparam integer L2_LEV  = $clog2(MEM_WAYS);
     wire [15:0] la_vpage_w, la_ppn_w, fi_vpage_w, fi_ppn_w, lb_vpage_w, lb_ppn_w, fj_vpage_w, fj_ppn_w;
+    wire [15:0] lc_vpage_w, lc_ppn_w;
+    wire        lc_hit_w;
+    wire [L2_SIDX-1:0] lc_set_w;
+    wire [L2_LEV-1:0]  lc_way_w;
     wire [15:0] kill_ppn_w, op_place_ppn_w;
     wire [L2_SIDX-1:0] la_set_w, fi_set_w, lb_set_w, fj_set_w, op_place_set_w, evict_set_w, ref_set_w;
     wire [L2_SIDX-1:0] dr_set_w, dr_set_i, dr_set_d;
@@ -752,6 +776,15 @@ module gs_top #(
     wire        fi_fold_w, fj_fold_w;
     wire        dr_req_w, dr_ack_w, dr_done_w, dr_req_i, dr_ack_i, dr_done_i, dr_req_d, dr_ack_d, dr_done_d;
     wire [127:0] dr_row_w, dr_erow_w;
+    // The RISC-V engine's memory side on the L2 (rtl/gs/rv_mem.sv): the third
+    // direct-read requester, and the probe (il_*).
+    wire        dr_req_e, dr_ack_e, dr_done_e;
+    wire [L2_SIDX-1:0] dr_set_e, il_set_w;
+    wire [L2_LEV-1:0]  dr_way_e, il_way_w;
+    wire [3:0]  dr_line_e;
+    wire        eng_il_req, eng_il_fill;
+    wire [15:0] eng_il_ppn;
+    wire [3:0]  eng_il_line;
     wire [31:0] tlb_fills_w, tlb_deaths_w;
 
     // ---- the soft CPU -------------------------------------------------------
@@ -841,7 +874,7 @@ module gs_top #(
         // The chipset's line, the backplane's pin, and the on-card cards'.
         // A physical slot card still interrupts through apple_irq_sync,
         // which is what a real GS gives it.
-        .irq_n  (apple_irq_sync && !gsio_irq && !mb_irq && !mouse_irq),
+        .irq_n  (cpu_irq_n),
         .nmi_n  (1'b1),
         .sync   (cpu_sync),
         .vda    (core_vda),
@@ -1069,14 +1102,20 @@ module gs_top #(
     // The Ensoniq's mix, out of gs_io and into the audio sampler; zero on the
     // IIe build, where the DOC is not instantiated (docs/GS.md rung 7).
     wire signed [20:0] doc_l, doc_r;
-    wire        q_swi = q_swi_mmu || gsio_claim;
+    // ...and the RISC-V engine's window, $EF:FE00-$EF:FEFF (rtl/gs/rv_engine.sv,
+    // docs/REQ_RVVM.md section 9): claimed on the live address like gs_io's
+    // registers, served from the registered op; a STEP read holds the
+    // dispatcher's decision (eng_stall) while the engine works.
+    wire        eng_claim, eng_u, eng_stall;
+    wire [7:0]  eng_byte;
+    wire        q_swi = q_swi_mmu || gsio_claim || eng_claim;
     wire [6:0]  kbd_int_low;
     // ...and the card's own slots (docs/CXXX.md, "The on-card slots"): a
     // slot op's byte is the peripheral's registered answer, keyed FIRST -
     // a slot ROM page's low nibble would otherwise read as the keyboard's.
     wire        q_slot, seq_slot_q, q_nsc;
     wire [7:0]  swi_byte = seq_slot_q             ? slot_rd_data
-                         : GS                     ? (gsio_u_claim ? gsio_byte : mmu_swi_stat)
+                         : GS                     ? (eng_u ? eng_byte : gsio_u_claim ? gsio_byte : mmu_swi_stat)
                          : (u_addr[7:4] == 4'h0) ? kbd_int_byte
                          : (u_addr[7:4] == 4'h1) ? mmu_swi_stat
                          : (u_addr[7:4] == 4'h6) ? game_int_byte
@@ -1251,7 +1290,7 @@ module gs_top #(
         .turbo_claim   (turbo_claim | d_claim_w),
         .turbo_wr      (turbo_wr),
         .d_pending     (d_pending_w),
-        .stall         (fd_stall || u2_stall || fd35_stall),
+        .stall         (fd_stall || u2_stall || fd35_stall || eng_stall),
         .op_present    (op_present),
         .op_commit     (op_commit),
         .op_dummy      (op_dummy),
@@ -1293,6 +1332,7 @@ module gs_top #(
         .fev_sync      (fev_sync),
         .accel_on      (accel_on),
         .held_governor (accel_held),
+        .gov_ok (eng_gov_ok), .gov_pay (eng_gov_pay),
         .state_o       (seq_state),
         .reset_seq_o   (accel_reset_seq),
         .fast_ops      (accel_fast),
@@ -1349,6 +1389,7 @@ module gs_top #(
         .p_addr (p_addr_w), .p_ppn (p_ppn_w), .p_reg (p_reg_w), .p_fold (p_fold_w), .p_fs (p_fs_w),
         .map_changed (map_changed), .map_settling (l1_settling), .intc8rom (mem_intc8rom),
         .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
+        .lc_vpage (lc_vpage_w), .lc_hit (lc_hit_w), .lc_ppn (lc_ppn_w), .lc_set (lc_set_w), .lc_way (lc_way_w),
         .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
         .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
         .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
@@ -1371,6 +1412,7 @@ module gs_top #(
         .fi_v (fi_v_w), .fi_vpage (fi_vpage_w), .fi_ppn (fi_ppn_w), .fi_set (fi_set_w), .fi_way (fi_way_w),
         .fi_reg (fi_reg_w), .fi_fold (fi_fold_w), .fi_busy (fi_busy_w),
         .la_vpage (la_vpage_w), .la_hit (la_hit_w), .la_ppn (la_ppn_w), .la_set (la_set_w), .la_way (la_way_w),
+        .lc_vpage (lc_vpage_w), .lc_hit (lc_hit_w), .lc_ppn (lc_ppn_w), .lc_set (lc_set_w), .lc_way (lc_way_w),
         .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
         .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
         .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
@@ -1413,7 +1455,7 @@ module gs_top #(
         .dr_req (dr_req_d), .dr_set (dr_set_d), .dr_way (dr_way_d), .dr_line (dr_line_d),
         .dr_ack (dr_ack_d), .dr_done (dr_done_d), .dr_row (dr_row_w),
         .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
-        .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata),
+        .cl_eng (cl_eng), .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata[7:0]),
         .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
         // ...and it is told a take is ITS take only when it was the source:
         // the ROM loader shares this seam.
@@ -1426,18 +1468,27 @@ module gs_top #(
     );
 
     // THE DIRECT WAY READ, SHARED: L1-D first (its read is the live cycle's),
-    // L1-I's waits; the source rides a two-deep shift register so each side
-    // sees only its own completion two clocks after its ack.
-    assign dr_req_w  = dr_req_d | dr_req_i;
-    assign dr_set_w  = dr_req_d ? dr_set_d  : dr_set_i;
-    assign dr_way_w  = dr_req_d ? dr_way_d  : dr_way_i;
-    assign dr_line_w = dr_req_d ? dr_line_d : dr_line_i;
-    assign dr_ack_d  = dr_ack_w &&  dr_req_d;
-    assign dr_ack_i  = dr_ack_w && !dr_req_d;
-    logic [1:0] dr_src_sr;   // 1 = L1-D's
-    always_ff @(posedge apple_clk) dr_src_sr <= apple_rst ? 2'd0 : {dr_src_sr[0], dr_req_d};
+    // L1-I's waits, the RISC-V engine's last (it never slows the core: while
+    // it works the core is stalled or only its speculation waits; its request
+    // is registered in rv_mem); the source rides a two-deep shift register so
+    // each side sees only its own completion two clocks after its ack.
+    wire   dr_sel_i = !dr_req_d && dr_req_i;
+    wire   dr_sel_e = !dr_req_d && !dr_req_i && dr_req_e;
+    assign dr_req_w  = dr_req_d | dr_req_i | dr_req_e;
+    assign dr_set_w  = dr_req_d ? dr_set_d  : dr_sel_i ? dr_set_i  : dr_set_e;
+    assign dr_way_w  = dr_req_d ? dr_way_d  : dr_sel_i ? dr_way_i  : dr_way_e;
+    assign dr_line_w = dr_req_d ? dr_line_d : dr_sel_i ? dr_line_i : dr_line_e;
+    assign dr_ack_d  = dr_ack_w && dr_req_d;
+    assign dr_ack_i  = dr_ack_w && dr_sel_i;
+    assign dr_ack_e  = dr_ack_w && dr_sel_e;
+    logic [1:0] dr_src_sr, dr_srce_sr;   // 1 = L1-D's; 1 = the engine's
+    always_ff @(posedge apple_clk) begin
+        dr_src_sr  <= apple_rst ? 2'd0 : {dr_src_sr[0], dr_req_d};
+        dr_srce_sr <= apple_rst ? 2'd0 : {dr_srce_sr[0], dr_sel_e};
+    end
     assign dr_done_d = dr_done_w &&  dr_src_sr[1];
-    assign dr_done_i = dr_done_w && !dr_src_sr[1];
+    assign dr_done_i = dr_done_w && !dr_src_sr[1] && !dr_srce_sr[1];
+    assign dr_done_e = dr_done_w && dr_srce_sr[1];
 
     end endgenerate
 
@@ -1772,6 +1823,8 @@ module gs_top #(
         .cl_wr_image (cl_wr_image),
         .cl_posted  (cl_posted),
         .cl_wdata   (cl_wdata),
+        .cl_be      (cl_be),
+        .cl_eng     (cl_eng),
         .shd_drops  (mem_shd_drops),
         .pw_valid   (pw_any_valid),
         .pw_ppn     (pw_any_ppn),
@@ -1779,6 +1832,12 @@ module gs_top #(
         .pw_data    (pw_any_data),
         .pw_ready   (pw_ready_w),
         .pw_take    (pw_take_w),
+        .pe_valid   (pe_valid_w),
+        .pe_ppn     (pe_waddr_w[21:6]),
+        .pe_off     ({pe_waddr_w[5:0], 2'b00}),
+        .pe_be      (pe_be_w),
+        .pe_data    (pe_data_w),
+        .pe_take    (pe_take_w),
         .shd_take_o (shd_take_w), .shd_ppn_o (shd_ppn_w), .shd_off_o (shd_off_w),
         .pf_off     (pf_off),
         .cl_ppn     (cl_ppn_w),
@@ -1975,8 +2034,66 @@ module gs_top #(
         .adb_stat   (gsio_adb_stat)
     );
 
+    // ---- the RISC-V engine (docs/REQ_RVVM.md section 9) -------------------------
+    // Integration rung 2: rv_engine's own memory side still delegates every
+    // access to the 65816 VM (apple/rvvm/rvengine.s).  The two faces of its
+    // window: PRESENTED is the live op the dispatcher is deciding on (a data
+    // cycle - not an instruction fetch, not an internal cycle), SERVED the
+    // registered op and its synthetic commit.  A 65816 write anywhere else
+    // cancels the engine's speculation.
+    wire [23:0] eng_q_addr = {ovr_en ? ovr_bank : cpu_bank, nxt_addr};
+    assign eng_claim = !ovr_en && !cpu_cyc_is_i && !cyc_internal && (eng_q_addr[23:8] == 16'hEFFE);
+    assign eng_u     = (u_bank == 8'hEF) && (u_addr[15:8] == 8'hFE);
+    wire   eng_cancel = cpu_cyc_en && !cpu_rw && !cyc_internal && !cpu_cyc_is_i &&
+                        !((cpu_bank == 8'hEF) && (cpu_addr[15:8] == 8'hFE));
+    // Integration rung 3: the engine's reads are its own (rv_mem on the L2) and
+    // so are its stores (DIRECT_WRITES = 1), words through the posted seam.
+    // Anything but the 65816 writing memory - an invalidate, a DMA's override
+    // write - empties its row buffers.
+    rv_engine #(.MEM (1), .DIRECT_WRITES (1), .SIDX (L2_SIDX), .LEV (L2_LEV)) u_eng (
+        .clk       (apple_clk),
+        .rst       (apple_rst),
+        .inval     (mem_inval || (u_present && !u_rw && u_ovr)),
+        .il_req (eng_il_req), .il_ppn (eng_il_ppn), .il_line (eng_il_line), .il_fill (eng_il_fill),
+        .il_ack (il_ack), .il_done (il_done), .il_ok (il_ok), .il_row (il_row),
+        .il_set (il_set_w), .il_way (il_way_w),
+        .dr_req (dr_req_e), .dr_set (dr_set_e), .dr_way (dr_way_e), .dr_line (dr_line_e),
+        .dr_ack (dr_ack_e), .dr_done (dr_done_e), .dr_row (dr_row_w),
+        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
+        .pw_req (pe_valid_w), .pw_addr (pe_waddr_w), .pw_be (pe_be_w), .pw_data (pe_data_w), .pw_ack (pe_take_w),
+        .ref_v (), .ref_on (), .ref_set (), .ref_way (),
+        .rec_v (eng_rec_v), .rec (eng_rec), .rec_take (eng_rec_take),
+        .irq_yield (!cpu_irq_n && !cpu_p_flags[2]), .gov_ok (eng_gov_ok), .gov_pay (eng_gov_pay),
+        .pre_sel   (eng_claim),
+        .pre_rw    (cpu_rw),
+        .pre_off   (eng_q_addr[7:0]),
+        .srv_sel   (eng_u),
+        .srv_rw    (u_rw),
+        .srv_off   (u_addr[7:0]),
+        .srv_wdata (u_wdata),
+        .srv_act   (swi_commit && eng_u),
+        .win_rdata (eng_byte),
+        .win_stall (eng_stall),
+        .cancel    (eng_cancel),
+        .wsn_a     ({cpu_bank, cpu_addr}),
+        .retired   ()
+    );
+
     end else begin : g_no_gsio
     assign gs_c000_byte = 8'd0;
+    assign eng_il_req   = 1'b0;
+    assign eng_il_fill  = 1'b0;
+    assign eng_il_ppn   = 16'd0;
+    assign eng_il_line  = 4'd0;
+    assign dr_req_e     = 1'b0;
+    assign dr_set_e     = '0;
+    assign dr_way_e     = '0;
+    assign dr_line_e    = 4'd0;
+    assign eng_claim    = 1'b0;
+    assign eng_u        = 1'b0;
+    assign eng_stall    = 1'b0;
+    assign eng_byte     = 8'd0;
 
     assign gsio_claim   = 1'b0;
     assign gsio_u_claim = 1'b0;
@@ -2081,6 +2198,7 @@ module gs_top #(
     wire [15:0] pw_any_ppn   = pw_ppn_w;
     wire [7:0]  pw_any_off   = pw_off_w;
     wire [7:0]  pw_any_data  = pw_data_w;
+    always_ff @(posedge apple_clk) pe_drain_sr <= apple_rst ? 3'd0 : {pe_drain_sr[1:0], pe_take_w};
 
     page_cam #(.SETS (MEM_SETS), .WAYS (MEM_WAYS)) u_cache (
         .clk         (apple_clk),
@@ -2092,18 +2210,19 @@ module gs_top #(
         .cl_rw       (cl_rw),
         .cl_wr_image (cl_wr_image),
         .cl_wdata    (cl_wdata),
+        .cl_be       (cl_be),
         .cl_posted   (cl_posted),
-        .pw_pending  (d_pending_w),
+        .pw_pending  (d_pending_w || pe_pending),
         .pw_ready    (pw_ready_w),
         .pf_ppn      (pf_ppn_w),
         .pf_off      (pf_off[7:0]),
-        .pw_take     (pw_take_w),
+        .pw_take     (pw_take_w || pe_take_w),
         // The map's shadow duplicate needs its own P0 (docs/GS.md rung 3e).
         .shd_take    (shd_take_w),
         .shd_ppn     (shd_ppn_w),
         .shd_off     (shd_off_w),
-        .pw_ppn      (pw_any_ppn),
-        .pw_off      (pw_any_off),
+        .pw_ppn      (pe_take_w ? pe_waddr_w[21:6] : pw_any_ppn),
+        .pw_off      (pe_take_w ? {pe_waddr_w[5:0], 2'b00} : pw_any_off),
         .op_addr     (u_addr),
         .op_present  (u_present),
         .op_commit   (u_commit),
@@ -2126,16 +2245,19 @@ module gs_top #(
         .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w), .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .dr_req (dr_req_w), .dr_set (dr_set_w), .dr_way (dr_way_w), .dr_line (dr_line_w),
         .dr_ack (dr_ack_w), .dr_done (dr_done_w), .dr_row (dr_row_w), .dr_erow (dr_erow_w),
-        // The line-row port has no user on this card since rung 3: both L1
-        // sides read by the direct way read.
-        .il_req      (1'b0),
-        .il_ppn      (16'd0),
-        .il_line     (4'd0),
+        // The line-row port: both L1 sides read by the direct way read (rung 3);
+        // its user now is the RISC-V engine's probe (rtl/gs/rv_mem.sv).
+        .il_req      (eng_il_req),
+        .il_ppn      (eng_il_ppn),
+        .il_line     (eng_il_line),
         .il_src      (1'b1),
+        .il_fill     (eng_il_fill),
         .il_ack      (il_ack),
         .il_done     (il_done),
         .il_ok       (il_ok),
         .il_row      (il_row),
+        .il_set      (il_set_w),
+        .il_way      (il_way_w),
         .serve       (mem_serve),
         .inval       (mem_inval),
         .dbg_sel     (dbg_sel[3:0]),

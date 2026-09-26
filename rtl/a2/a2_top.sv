@@ -516,6 +516,7 @@ module a2_top #(
         .fast_mark (beam_mark_fast), .fast_mark_free (beam_mark_free),
         .fast_quiet (fev_valid && fev_quiet),
         .fast_force (fev_force),
+        .eng_valid (1'b0), .eng_rec (64'd0), .eng_take (),
         // The fronts' events share the fast port: turbo_ok excludes fev's
         // clock, and an I and a D retire can never share an edge (one core,
         // one cycle), so no two of the three are ever valid together - the

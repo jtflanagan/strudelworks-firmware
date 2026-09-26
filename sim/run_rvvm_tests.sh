@@ -10,11 +10,12 @@
 # are static PIEs, each run at two load addresses (the identity map: crt0
 # relocates itself).
 #
-#   sim/run_rvvm_tests.sh [--ref-only | --engine | --engine-mem] [NAME-FILTER]
+#   sim/run_rvvm_tests.sh [--ref-only | --engine | --engine-mem | --engine-sys] [NAME-FILTER]
 #
 # The runner is the engine's core bench (sim/run_rv_core.sh; --engine names it
 # explicitly); --engine-mem the core with its memory side and an L2 model
-# (sim/run_rv_mem.sh).  There is no software VM on riscv_v2: the 65816 cannot
+# (sim/run_rv_mem.sh); --engine-sys the engine behind its window with its
+# 65816 VM (sim/run_rvvm.sh).  There is no software VM on riscv_v2: the 65816 cannot
 # reach the engine's upper 16 MB, so the engine is the only way a guest runs.
 #
 # The tests come from the sibling checkout ../riscv-tests, assembled with the
@@ -40,6 +41,7 @@ for a in "$@"; do
         --ref-only) mode=(--ref-only);;
         --engine) runner="$root/sim/run_rv_core.sh";;
         --engine-mem) runner="$root/sim/run_rv_mem.sh";;
+        --engine-sys) runner="$root/sim/run_rvvm.sh";;
         *) filter="$a";;
     esac
 done

@@ -70,6 +70,11 @@ module tlb #(
     output logic [15:0]      la_ppn,
     output logic [SIDX-1:0]  la_set,
     output logic [LEV-1:0]   la_way,
+    input  wire [15:0]       lc_vpage,      // lookup C: L1-I's prefetch
+    output logic             lc_hit,
+    output logic [15:0]      lc_ppn,
+    output logic [SIDX-1:0]  lc_set,
+    output logic [LEV-1:0]   lc_way,
     input  wire [15:0]       lb_vpage,
     output logic             lb_hit,
     output logic [15:0]      lb_ppn,
@@ -110,12 +115,16 @@ module tlb #(
     always_comb begin
         la_hit = 1'b0; la_ppn = 16'd0; la_set = '0; la_way = '0;
         lb_hit = 1'b0; lb_ppn = 16'd0; lb_set = '0; lb_way = '0;
+        lc_hit = 1'b0; lc_ppn = 16'd0; lc_set = '0; lc_way = '0;
         for (int i = 0; i < N; i = i + 1) begin
             if (e_v[i] && e_vp[i] == la_vpage) begin
                 la_hit = 1'b1; la_ppn = e_ppn[i]; la_set = e_set[i]; la_way = e_way[i];
             end
             if (e_v[i] && e_vp[i] == lb_vpage) begin
                 lb_hit = 1'b1; lb_ppn = e_ppn[i]; lb_set = e_set[i]; lb_way = e_way[i];
+            end
+            if (e_v[i] && e_vp[i] == lc_vpage) begin
+                lc_hit = 1'b1; lc_ppn = e_ppn[i]; lc_set = e_set[i]; lc_way = e_way[i];
             end
         end
     end
@@ -156,7 +165,7 @@ module tlb #(
     logic [LEV-1:0]  ins_way;
     logic [3:0]    ins_reg;
     logic          ins_fold;
-    assign fi_busy = ins_busy;
+    assign fi_busy = ins_busy || ins_old;
 
     logic [IW-1:0] pick;
     logic          pick_same, pick_free;
@@ -165,16 +174,28 @@ module tlb #(
         for (int i = N - 1; i >= 0; i = i - 1) if (!e_r[i]) begin pick = IW'(i); pick_free = 1'b1; end
         for (int i = N - 1; i >= 0; i = i - 1) if (e_r[i] && e_vp[i] == tk_vpage) begin pick = IW'(i); pick_same = 1'b1; end
     end
-    wire take_i = fi_v && !ins_busy && serve && !inval;
-    wire take_j = fj_v && !fi_v && !ins_busy && serve && !inval;
+    wire take_i = fi_v && !ins_busy && !ins_old && serve && !inval;
+    wire take_j = fj_v && !fi_v && !ins_busy && !ins_old && serve && !inval;
     wire take   = take_i || take_j;
     assign fj_ack = take_j;
-    wire [15:0]     tk_vpage = take_i ? fi_vpage : fj_vpage;
-    wire [15:0]     tk_ppn   = take_i ? fi_ppn   : fj_ppn;
-    wire [SIDX-1:0] tk_set   = take_i ? fi_set   : fj_set;
-    wire [LEV-1:0]  tk_way   = take_i ? fi_way   : fj_way;
-    wire [3:0]      tk_reg   = take_i ? fi_reg   : fj_reg;
-    wire            tk_fold  = take_i ? fi_fold  : fj_fold;
+    // (the port is chosen by fi_v alone - the same whenever a take happens - so
+    // inval/serve/busy are not in front of the pick's compares; gs_rvredir1)
+    wire [15:0]     tk_vpage = fi_v ? fi_vpage : fj_vpage;
+    wire [15:0]     tk_ppn   = fi_v ? fi_ppn   : fj_ppn;
+    wire [SIDX-1:0] tk_set   = fi_v ? fi_set   : fj_set;
+    wire [LEV-1:0]  tk_way   = fi_v ? fi_way   : fj_way;
+    wire [3:0]      tk_reg   = fi_v ? fi_reg   : fj_reg;
+    wire            tk_fold  = fi_v ? fi_fold  : fj_fold;
+    // THE INSTALL IN THREE CLOCKS: the take (the pick, the entry dropped), the old
+    // entry's unreference and kill from the registered index (ins_old), then the
+    // new entry and its reference.  The unreference and the kill go out on the
+    // same clock, so L2 cannot reuse the slot while a buffer still names it.
+    logic          ins_old;          // the second clock
+    logic          ins_dead;         // the new entry's slot was evicted before it was installed
+    logic          ins_kill;         // ...with an old entry to let go
+    logic [15:0]   ins_oppn;
+    logic [SIDX-1:0] ins_oset;
+    logic [LEV-1:0]  ins_oway;
 
     always_ff @(posedge clk) begin
         ref_v  <= 1'b0;
@@ -184,12 +205,12 @@ module tlb #(
                 e_v[i] <= 1'b0; e_r[i] <= 1'b0; e_vp[i] <= 16'd0; e_ppn[i] <= 16'd0;
                 e_set[i] <= '0; e_way[i] <= '0; e_reg[i] <= 4'd0; e_fold[i] <= 1'b0; e_pair[i] <= 1'b0;
             end
-            rr <= '0; ins_busy <= 1'b0;
+            rr <= '0; ins_busy <= 1'b0; ins_old <= 1'b0; ins_kill <= 1'b0; ins_dead <= 1'b0;
             cnt_fills <= 32'd0; cnt_deaths <= 32'd0;
         end else begin
             if (inval || !serve) begin
                 for (int i = 0; i < N; i = i + 1) begin e_v[i] <= 1'b0; e_r[i] <= 1'b0; end
-                ins_busy <= 1'b0;
+                ins_busy <= 1'b0; ins_old <= 1'b0;
             end else begin
                 if (reval_q)
                     for (int i = 0; i < N; i = i + 1)
@@ -203,15 +224,28 @@ module tlb #(
                 if (take) begin
                     ins_idx <= pick; ins_vp <= tk_vpage; ins_ppn <= tk_ppn;
                     ins_set <= tk_set; ins_way <= tk_way; ins_reg <= tk_reg; ins_fold <= tk_fold;
-                    ins_busy <= 1'b1;
-                    if (e_r[pick] && (!pick_same || e_set[pick] != tk_set || e_way[pick] != tk_way)) begin
-                        ref_v <= 1'b1; ref_set <= e_set[pick]; ref_way <= e_way[pick]; ref_on <= 1'b0;
-                        kill_v <= 1'b1; kill_ppn <= e_ppn[pick];
-                    end
+                    ins_old <= 1'b1;
+                    ins_dead <= evict_v && tk_set == evict_set && tk_way == evict_way;
+                    ins_kill <= e_r[pick] && (!pick_same || e_set[pick] != tk_set || e_way[pick] != tk_way);
+                    ins_oppn <= e_ppn[pick]; ins_oset <= e_set[pick]; ins_oway <= e_way[pick];
                     e_v[pick] <= 1'b0; e_r[pick] <= 1'b0;
                     if (!pick_same && !pick_free) rr <= rr + IW'(1);
                 end
-                if (ins_busy) begin
+                // (an eviction of the new entry's slot while it waits drops the install:
+                // the fill asks again)
+                if ((ins_old || ins_busy) && evict_v && ins_set == evict_set && ins_way == evict_way)
+                    ins_dead <= 1'b1;
+                if (ins_old) begin
+                    ins_old  <= 1'b0;
+                    ins_busy <= 1'b1;
+                    if (ins_kill) begin
+                        ref_v <= 1'b1; ref_set <= ins_oset; ref_way <= ins_oway; ref_on <= 1'b0;
+                        kill_v <= 1'b1; kill_ppn <= ins_oppn;
+                    end
+                end
+                if (ins_busy && (ins_dead || (evict_v && ins_set == evict_set && ins_way == evict_way))) begin
+                    ins_busy <= 1'b0;
+                end else if (ins_busy) begin
                     ins_busy <= 1'b0;
                     e_v[ins_idx] <= 1'b1; e_r[ins_idx] <= 1'b1;
                     e_vp[ins_idx] <= ins_vp; e_ppn[ins_idx] <= ins_ppn;

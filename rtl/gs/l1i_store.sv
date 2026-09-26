@@ -77,6 +77,12 @@ module l1i_store #(
     input  wire [15:0] la_ppn,
     input  wire [SIDX-1:0] la_set,
     input  wire [LEV-1:0]  la_way,
+    // lookup C (l1i's prefetch lookup; the store has none: it mirrors A)
+    output wire [15:0] lc_vpage,
+    input  wire        lc_hit,
+    input  wire [15:0] lc_ppn,
+    input  wire [SIDX-1:0] lc_set,
+    input  wire [LEV-1:0]  lc_way,
     output logic       fi_v,
     output logic [15:0] fi_vpage,
     output logic [15:0] fi_ppn,
@@ -239,6 +245,8 @@ module l1i_store #(
     wire want_any = want_fetch || (nx_v && nx_ok_q);
     wire [23:0] want = want_fetch ? fa : nx_addr;
     assign la_vpage = want[23:8];
+    assign lc_vpage = want[23:8];
+    wire unused_lc = &{1'b0, lc_hit, lc_ppn, lc_set, lc_way};
     assign p_addr   = {want[23:4], 4'h0};
     // Is the wanted page resident, and in which way?  For the fetch, the
     // lookup registered beside the RAM output says (the fetch IS pcd_q when

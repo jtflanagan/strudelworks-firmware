@@ -247,6 +247,9 @@ if {$snoop || $master} {
                 [file join $root rtl gs gs_intc.sv] \
                 [file join $root rtl gs gs_iwm.sv] \
                 [file join $root rtl gs bank_census.sv] \
+                [file join $root rtl gs rv_pipe.sv] \
+                [file join $root rtl gs rv_engine.sv] \
+                [file join $root rtl gs rv_mem.sv] \
                 [file join $root rtl gs cpu65816_ucode.hex] \
                 [file join $root rtl gs cpu65816_ucode0.hex] \
                 [file join $root rtl gs cpu65816_useq0.hex] \

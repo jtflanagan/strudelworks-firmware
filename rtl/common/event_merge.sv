@@ -78,6 +78,15 @@ module event_merge #(
     // disk's EXECUTE and its completion, served on the card (docs/CXXX.md,
     // "The on-card slots"); master_top decides it from the card's state.
     input  wire        fast_force,
+    // THE RISC-V ENGINE'S WRITE RECORD (tag 0xB, docs/REQ_RVVM.md "The
+    // engine-write record"): a write the core never made, which the host's
+    // mirror applies in order - an op, never a cycle.  It takes the fast
+    // word's place at the staging input on a clock no fast word is kept, and
+    // it waits for room rather than shed: the engine holds its next store
+    // until eng_take.  A top without the engine ties eng_valid low.
+    input  wire        eng_valid,
+    input  wire [63:0] eng_rec,
+    output wire        eng_take,
     input  wire        vbl_level,
     input  wire        res_level,       // RES', as the event carries it
     // The rules the door applies: sparse capture, and the virtual base.
@@ -181,6 +190,8 @@ module event_merge #(
     wire [AW:0] need = push_bus ? (AW+1)'(2) : (AW+1)'(1);
     wire fast_fits = (room >= need) && (stg_room >= (SAW+1)'(need));
     wire push_fast = want_fast && fast_fits;
+    wire push_eng  = enable && eng_valid && !want_fast && fast_fits;
+    assign eng_take = eng_valid && (!enable || push_eng);   // capture off: nothing is owed
     wire drop_fast = enable && fast_valid && !push_fast;
     assign fast_room = room >= (AW+1)'(8);
     always_ff @(posedge clk) fast_room_w <= (rst || !enable) ? 1'b1 : (room >= (AW+1)'(6));
@@ -192,15 +203,15 @@ module event_merge #(
     // goes out as a carrier before it can wrap.
     logic [15:0] pend = 16'd0;
     wire [15:0] pend_after_bus  = push_bus ? 16'd0 : pend;
-    wire [15:0] pend_after_fast = push_fast ? 16'd0 : pend_after_bus;
+    wire [15:0] pend_after_fast = (push_fast || push_eng) ? 16'd0 : pend_after_bus;
     wire        count_drop      = drop_fast && virt;
-    wire        carrier         = enable && !push_bus && !push_fast && (pend >= 16'hFFF0) && (room != '0) && (stg_room != '0);
+    wire        carrier         = enable && !push_bus && !push_fast && !push_eng && (pend >= 16'hFFF0) && (room != '0) && (stg_room != '0);
     wire [15:0] pend_next       = carrier ? (count_drop ? 16'd1 : 16'd0)
                                 : pend_after_fast + (count_drop ? 16'd1 : 16'd0);
 
     wire [SAW-1:0] st_bus  = st[SAW-1:0];
     wire [SAW-1:0] st_fast = st[SAW-1:0] + (push_bus ? (SAW)'(1) : (SAW)'(0));
-    wire [AW:0]    pushed  = (push_bus ? (AW+1)'(1) : (AW+1)'(0)) + (push_fast ? (AW+1)'(1) : (AW+1)'(0)) +
+    wire [AW:0]    pushed  = (push_bus ? (AW+1)'(1) : (AW+1)'(0)) + ((push_fast || push_eng) ? (AW+1)'(1) : (AW+1)'(0)) +
                              (carrier ? (AW+1)'(1) : (AW+1)'(0));
     // The stage drains one entry per clock into the RAM's one write port.
     wire drain = (stg_used != '0);
@@ -220,6 +231,7 @@ module event_merge #(
             // ---- push, into the stage --------------------------------------------
             if (push_bus)  stg[st_bus]  <= {1'b0, pend, bus_dummy, bus_mark_free, bus_mark, bus_word};
             if (push_fast) stg[st_fast] <= {1'b0, pend_after_bus, 1'b0, fast_mark_free, fast_mark, fast_word};
+            if (push_eng)  stg[st_fast] <= {1'b0, pend_after_bus, 1'b0, 16'd0, 1'b0, eng_rec};
             if (carrier)   stg[st_bus]  <= {1'b1, pend, 1'b0, 16'd0, 1'b0, 64'd0};
             st   <= st + (SAW+1)'(pushed);
             wp   <= wp + pushed;

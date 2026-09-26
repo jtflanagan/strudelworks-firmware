@@ -117,7 +117,25 @@ word 1   [31:24] data
          [15:0]  spare    zero until something earns it
 ```
 
-A SKIP's word 1 is zero.  The 24-bit address regime of the IIgs is what
+A SKIP's word 1 is zero.
+
+**The RISC-V engine's write record, tag `0xB`** (the GS card, docs/REQ_RVVM.md "The
+engine-write record"): a store the engine made to the machine's RAM itself, which no
+cycle or fast op carries.  An op and not a cycle, like a fast op; the filter always
+keeps it and never counts it, and the host's mirror applies it in stream order
+(`src/protocol.hpp` `kEngineWriteTag`, `AppleMemory::apply_engine_write`):
+
+```
+word 0   [31:28] tag      0xB
+         [27:20] bank     $02-$DF
+         [19:16] enables  bit k: the byte at addr + k is written
+         [15:0]  addr     word aligned ([1:0] = 00)
+word 1   [31:0]  data     the byte at addr + k in bits 8k+7:8k
+```
+
+It enters `rtl/event_merge.sv` in the fast word's slot on a clock no fast word is
+kept, and waits for room (the engine holds its next store until the take) rather
+than being dropped.  The 24-bit address regime of the IIgs is what
 forced the size (the bank has to ride every record), and the record is
 uniform for the IIe build too, so every consumer - the capture, the host's
 ring, the trace file (version 2, 8-byte records) - has one stride.  A frame is
