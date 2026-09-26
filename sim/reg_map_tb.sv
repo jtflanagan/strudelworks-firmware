@@ -472,7 +472,7 @@ module reg_map_tb;
             errors = errors + 1;
         end else $display("  ok: RING_STATUS reads back tx_ring's word");
 
-        // --- case 5b2 / RING_CTRL: clear out of reset, a level once written ---
+        // --- case 5b2 / RING_CTRL: clear out of reset, set once written, never cleared by a write ---
         base = out_n;
         do_read(32'h8000_0188);
         if (out_mem[base+2] !== 32'h0000_0000 || ring_engage !== 1'b0) begin
@@ -485,7 +485,16 @@ module reg_map_tb;
         if (out_mem[base+2] !== 32'h0000_0001 || ring_engage !== 1'b1) begin
             $display("FAIL: RING_CTRL after write reads %08x, engage %b", out_mem[base+2], ring_engage);
             errors = errors + 1;
-        end else $display("  ok: RING_CTRL[0] is the ring's engage, a level");
+        end else $display("  ok: RING_CTRL[0] is the ring's engage");
+        // ONE WAY (docs/BOOT_LOADER.md, the fence): a write of 0 is refused and
+        // the refusal is in the reply - it reads back 1, and the engage stays.
+        do_write(32'h8000_0188, 32'h0000_0000);
+        base = out_n;
+        do_read(32'h8000_0188);
+        if (out_mem[base+2] !== 32'h0000_0001 || ring_engage !== 1'b1) begin
+            $display("FAIL: RING_CTRL after a write of 0 reads %08x, engage %b", out_mem[base+2], ring_engage);
+            errors = errors + 1;
+        end else $display("  ok: RING_CTRL ignores a write of 0 and says so: one way, until a reset");
 
         // --- case 5c / LINK_STAT reads back card_link's word ---------------
         base = out_n;

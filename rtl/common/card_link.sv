@@ -963,6 +963,7 @@ module card_link #(
     // session instead of queueing that session's capture behind the last
     // one's leftovers.  Measured: a shutdown that stalled mid-drain left
     // 1.28 M lines for the next capture to sit behind.
+    wire [31:0] ring_status;    // tx_ring's (below): the watchdog's disarm and the flash block's BOOT_ID read it first
     wire ring_empty = (ring_status[21:0] == 22'd0);
     reg  stop_pending = 1'b0;
     always @(posedge clk_ctrl) begin
@@ -1364,7 +1365,8 @@ module card_link #(
 
     wire flash_sck;
     flash_ctrl #(.IDCODE (IDCODE)) u_flash (
-        .clk (clk_ctrl), .rst (rst), .stage (8'd1),
+        // Stage 1 bootstrap, 2 full operation: the ring engaged is the OPERATE step.
+        .clk (clk_ctrl), .rst (rst), .stage (ring_status[23] ? 8'd2 : 8'd1),
         .wb_cyc (srw_cyc && flash_sel), .wb_stb (srw_stb && flash_sel), .wb_we (srw_we),
         .wb_adr (srw_adr), .wb_dat_w (rwb_dat_w), .wb_ack (flash_ack), .wb_dat_r (flash_dat_r),
         .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
@@ -1581,7 +1583,6 @@ module card_link #(
     wire [31:0]         sb_adr, sb_dat;
     wire [3:0]          sb_sel;
     wire                out_valid;
-    wire [31:0]         ring_status;
     wire                ring_engage;    // RING_CTRL[0] -> the ring's boot lane
 
     // LINK_STAT (0x8000_00EC): the UART status line's facts, readable over

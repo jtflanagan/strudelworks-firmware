@@ -1078,10 +1078,14 @@ module wb_regfile #(
     // THE RING'S ENGAGE (docs/REQ_65C02.md 1.10): clear out of reset, so a card
     // that has just come up answers over USB3 with no DDR3 behind it; the host
     // sets it once it has read the DDR3 calibrated and before BUS_ENABLE.
+    // ONE WAY (docs/BOOT_LOADER.md, the fence): the ring never lets go except by
+    // reset (tx_ring.sv), so a write of 0 is ignored and reads back 1 - the
+    // refusal shows in the write's own reply instead of a register that says 0
+    // over a ring that is still engaged.
     logic ring_engage_q;
     always_ff @(posedge clk) begin
-        if (rst)               ring_engage_q <= 1'b0;
-        else if (wr_ring_ctrl) ring_engage_q <= wb_dat_w[0];
+        if (rst)                                ring_engage_q <= 1'b0;
+        else if (wr_ring_ctrl && wb_dat_w[0])   ring_engage_q <= 1'b1;
     end
     assign ring_engage = ring_engage_q;
 

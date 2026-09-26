@@ -325,7 +325,25 @@ stops the work.
 - **BL6 - the stage 1 / stage 2 fence.** The host: calibration read before anything that needs the
   DDR3, OPERATE as one step, stay up and report on a failed calibration, the mock's uncalibrated mode.
   The card: a `RING_CTRL` disengage write refused loudly; BOOT_ID's stage 2 after OPERATE.
-- **BL7 - the control clock off the DDR3's MMCM.**
+  **DONE 2026-09-25 on hardware** (GS build `gs_bl6a`, stamp 191926, TIMING MET, packaged by
+  run_build.sh itself and loaded by swhost's `image` key: program 17.0 s).  The fenced start ran
+  through; BOOT_ID read `424c0102` - stage 2 with the ring engaged; a write of 0 to RING_CTRL read
+  back `00000001` and RING_STATUS stayed `02800000` (calibrated, engaged).  The host: the LINK_STAT calibration check moved ahead of the ROM
+  push - the fence - so a card whose DDR3 did not calibrate is sent nothing that needs it (it used
+  to burn every ROM chunk's retries first); the mock card has a `ddr3_uncalibrated` fault (LINK_STAT
+  and RING_STATUS say so, the ring never engages) and `tests/fence_test` proves both sides: a
+  calibrated mock starts and takes the 32 ROM chunks, an uncalibrated one is refused, says why, and
+  is sent NO chunk.  The rest of the host's add_tests pass except the four red on master too
+  (accel, vbl, beam - frame placement - and telemetry's duplicate `il_tgt_serves`), checked by
+  building master.  The card: RING_CTRL's engage is one way (a write of 0 is ignored and reads
+  back 1, reg_map_tb's new case, mutation-tested), and BOOT_ID reports stage 2 once the ring is
+  engaged.  DEFERRED by the user to a host session of its own: staying up and telling the user on
+  the SCREEN when the DDR3 did not calibrate - today the start is refused with the message (log,
+  MCP) and swhost exits.
+- **BL7 - DROPPED (the user, 2026-09-25).** It would have given the link and registers a clock of
+  their own, off the DDR3's MMCM.  The audit found no functional coupling beyond the shared
+  primitive (the controller's phase shifts do not drop LOCKED), and if that MMCM fails the DDR3 is
+  dead and the board is broken anyway: the recovery is the same either way.
 - **BL8 - the deadman release,** when the hardware exists.
 
 ## History
