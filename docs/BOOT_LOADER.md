@@ -311,6 +311,17 @@ stops the work.
   always newer (the log is appended to the end); it compares against the build's start now.
 - **BL5 - swhost's start.** identify -> compare with the conf's image -> load if needed -> reconnect;
   reconnect after LINK_RESET as an expected loss.
+  **DONE 2026-09-25 on hardware (host).** The conf key `image = PATH.pkg`: at start, before any
+  session or reader thread, swhost asks the card for BOOT_ID and its stamp; the same stamp as the
+  package's record is `image : ... is the image in flash`; a different one is loaded over USB3,
+  LINK_RESET, reconnected, the new stamp checked, `image : ... LOADED over USB3: erase / program /
+  query ms`, and the start carries on.  Refused before anything is written: a package for the
+  other machine than the conf's `machine` (`... is a IIe image and the conf says machine = iigs`),
+  another part, no room, an image without the flash block.  The host's flash code is one file,
+  src/flash_boot.{hpp,cpp}, shared with swboot.  On the Pt: GS in flash -> no load; the crossed conf
+  refused; the IIe package loaded by swhost itself (program 15.2 s) and Nox came up; the GS package
+  loaded back and System 6 came up.  Still true after any new image: the first start leaves the
+  native 6502 driving and a second start latches the soft core.
 - **BL6 - the stage 1 / stage 2 fence.** The host: calibration read before anything that needs the
   DDR3, OPERATE as one step, stay up and report on a failed calibration, the mock's uncalibrated mode.
   The card: a `RING_CTRL` disengage write refused loudly; BOOT_ID's stage 2 after OPERATE.
