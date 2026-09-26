@@ -1,0 +1,17 @@
+# meson cross file: picolibc for rvvm guests (docs/REQ_RVVM.md) - clang/lld,
+# exactly the VM's ISA, position-independent (guests are static PIEs).  sim/build_rvvm_picolibc.sh uses it.
+[binaries]
+c = ['clang', '--target=riscv32-unknown-elf', '-march=rv32im_zba_zbb', '-mabi=ilp32', '-fPIE', '-nostdlib']
+c_ld = 'lld'
+ar = 'llvm-ar'
+nm = 'llvm-nm'
+strip = 'llvm-strip'
+
+[host_machine]
+system = 'none'
+cpu_family = 'riscv32'
+cpu = 'riscv'
+endian = 'little'
+
+[properties]
+skip_sanity_check = true
