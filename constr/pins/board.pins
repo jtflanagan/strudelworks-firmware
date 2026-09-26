@@ -37,15 +37,18 @@ set_false_path -to [get_ports usb_tx]
 # Bitstream / configuration
 #
 # The board boots from its QSPI flash.  A standalone Vivado flow (no Alchitry
-# Labs wrapper) has to set these itself.  Values are the ones proven by flashing
-# the Au V2; Alchitry Labs V2 itself writes CONFIGRATE 66 and SPI_BUSWIDTH 4 for
-# both the Au V2 and the Pt V2, which would boot faster - a change to make
-# deliberately, on hardware, not as a side effect of the port.
+# Labs wrapper) has to set these itself.  CONFIGRATE 66 and SPI_BUSWIDTH 4 are
+# what Alchitry Labs V2 writes for both the Au V2 and the Pt V2 (x1 at 33 was
+# the first value proven on the Au V2).  x4 reads with SQOR (6Bh), which the
+# SST26VF032B accepts only with IOC = 1: the "BA" part powers up that way, the
+# plain "B" part powers up with IOC = 0 (volatile) and would never configure
+# from flash.  Both answer JEDEC BF 26 42, so only a power-up boot tells them
+# apart; the fallback is a JTAG load (docs/BOOT_LOADER.md).
 ##############################################################################
 set_property CONFIG_VOLTAGE 3.3 [current_design]
 set_property CFGBVS VCCO [current_design]
 set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]
-set_property BITSTREAM.CONFIG.CONFIGRATE 33 [current_design]
-set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 1 [current_design]
+set_property BITSTREAM.CONFIG.CONFIGRATE 66 [current_design]
+set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4 [current_design]
 set_property BITSTREAM.CONFIG.SPI_FALL_EDGE YES [current_design]
 set_property BITSTREAM.CONFIG.SPI_32BIT_ADDR NO [current_design]

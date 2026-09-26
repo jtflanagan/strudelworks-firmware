@@ -160,6 +160,15 @@ the image reads the ID at reset anyway). Datasheet DS20005218E.
 - `03h` read is limited to 40 MHz; the executor runs clk/4 (25 MHz) and samples MISO late, at the end
   of SCK's high phase, because SCK leaves through STARTUPE2 with some ns of delay.
 - In x1 SPI, D02 is WP# and D03 is HOLD#: driven high.
+- **Configuration reads in x4 at 66 MHz** (`CONFIGRATE 66`, `SPI_BUSWIDTH 4`, as Alchitry Labs
+  writes): the header in x1 `03h`, the rest in `SQOR 6Bh`, which is valid only with the Configuration
+  register's IOC bit = 1. The SST26VF032B**A** powers up with IOC = 1; the plain SST26VF032B powers up
+  with IOC = 0 (volatile, so no one-time write fixes it) and could never configure in x4. Both
+  answer JEDEC `BF 26 42`, so any boot from flash is the test (IOC is only ever its power-up value:
+  nothing here writes it, and a 66h/99h reset restores the default); a failure is a JTAG load back to
+  x1. **Proven on the Pt 2026-09-25** (GS build x4cfg1, stamp 20260925 211711): the part behaves as
+  the BA.
+  The executor's own commands are x1 and unaffected (with IOC = 1, WP#/HOLD# are simply ignored).
 - CCLK is reachable only through STARTUPE2 `USRCCLKO`; the first 3 clocks after configuration are
   swallowed (the executor sends 8). FCS_B and D00-D03 are ordinary user I/O after configuration (Pt:
   FCS_B T19, D00-D03 P22 R22 P21 R21, from Alchitry Labs' PtV2TopPin.kt; `constr/pt_v2/flash_pins.xdc`).

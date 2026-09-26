@@ -139,9 +139,12 @@ and the reset openFPGALoader issues after flashing brought it up clean:
 `R=000000 L=0`, every readback answered, events flowing.  A power cycle was
 not needed.  SRAM loads after that are expected to work, as on the Au.
 
-The bitstream properties (`CONFIGRATE 33`, `SPI_BUSWIDTH 1`) are the ones
-proven by flashing the Au V2.  Alchitry Labs writes `66` and `4` for both
-boards; worth adopting once on hardware, as a deliberate change.
+The bitstream properties were first `CONFIGRATE 33`, `SPI_BUSWIDTH 1`, the
+ones proven by flashing the Au V2.  Since 2026-09-25 they are Alchitry Labs'
+`66` and `4` for both boards (`constr/pins/board.pins`), which depends on the
+flash being the SST26VF032BA (docs/BOOT_LOADER.md, "The flash"); proven on
+the Pt the same day (GS build x4cfg1, stamp 20260925 211711: booted from flash
+in x4, link up, System 6 to the Finder).
 
 ## Left for later
 
