@@ -41,7 +41,7 @@ if [ -z "$bin" ]; then
         command -v "$t" >/dev/null || { echo "need $t on PATH (cc65)" >&2; exit 1; }
     done
     cat > "$work/selftest.cfg" <<'CFG'
-MEMORY { ROM: start = $E20000, size = $10000, file = %O, fill = yes, fillval = $FF; }
+MEMORY { ROM: start = $F00000, size = $10000, file = %O, fill = yes, fillval = $FF; }
 SEGMENTS { CODE: load = ROM, type = ro; }
 CFG
     ca65 -o "$work/selftest.o" "$root/sim/gspanel_selftest.s"

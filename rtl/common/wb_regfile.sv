@@ -258,7 +258,7 @@ module wb_regfile #(
     input  wire            mem_rom_busy,    // the ROM load is draining: the host waits
     input  wire [31:0]     mem_rom_sum,     // the sum of every chunk's first landing (CS2)
     input  wire [7:0]      mem_rom_over,    // ...and chunks it had to drop
-    // ABSOLUTE chunks drained whole: the card's extended ROM ($E2-$EE), which
+    // ABSOLUTE chunks drained whole: our own ROM ($F0-$FB), which
     // the base ROM's `rom_ok` says nothing about (docs/GS_CONTROL_PANEL.md).
     input  wire [7:0]      mem_rom_xland,
     input  wire [31:0]     gs_adb_stat,     // GS_ADB_STAT, the ADB micro's mouse path (rtl/gs_adb.sv)

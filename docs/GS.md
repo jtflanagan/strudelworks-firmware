@@ -288,8 +288,8 @@ IIe through a real bus cycle. "M" = milestone (1 GS/OS Finder, 2 sound,
 
 | feature | where | M | notes (KEGS moremem.c) |
 |---|---|---|---|
-| Physical layout: RAM $00-$7F (8 MB), Mega II slow RAM $E0/$E1, ROM $FC-$FF, one write-protected VOID page for unpopulated banks $80-$DF/$F0-$FB (reads return its bytes, writes drop, so the ROM's sizing finds 8 MB) | CARD + HOST | 1 | The 16 MB space maps 1:1; RamWorks steering (`RW_BANKS`, $C071/$C073) is off at GS=1. |
-| IIe switches applied identically in $00/$01 and $E0/$E1 (ALTZP, RAMRD/RAMWRT, 80STORE/PAGE2/HIRES, LC, INTCXROM/SLOTC3ROM) | CARD + HOST | 1 | Bank classes in front of the region table: PAIR ($00/$01, $E0/$E1), RAM, VOID, ROM. Pair side = `va[16] | aux`. |
+| Physical layout: RAM $00-$7F (8 MB, what the ROM sizes), Mega II slow RAM $E0/$E1, ROM 3 $FC-$FF. **Above $7F the map is ours** (docs/ENHANCED_VIDEO.md R0, 2026-09-26): RAM $80-$DF (the enhanced video banks) and $E2-$EF ($E2 video control, $EF the panel's RAM), our ROM $F0-$FB (the panel at $F0). There is no void bank: the card has the memory | CARD + HOST | 1 | The 16 MB space maps 1:1; RamWorks steering (`RW_BANKS`, $C071/$C073) is off at GS=1. The ROM's sizing stops at $80, so it still finds 8 MB. |
+| IIe switches applied identically in $00/$01 and $E0/$E1 (ALTZP, RAMRD/RAMWRT, 80STORE/PAGE2/HIRES, LC, INTCXROM/SLOTC3ROM) | CARD + HOST | 1 | Bank classes in front of the region table: PAIR ($00/$01, $E0/$E1), RAM, ROM. Pair side = `va[16] | aux`. |
 | STATEREG $C068 r/w (ALTZP, PAGE2, RAMRD, RAMWRT, RDROM, LCBANK2, ROMBANK, INTCXROM) | CARD + HOST | 1 | One write sets seven existing switch registers. |
 | SHADOW $C035: writes to $00/$01 text1/text2/hires1/hires2/SHR/aux-hires also land in $E0/$E1 unless inhibited; bit 6 inhibits I/O + LC in $00/$01 | CARD + HOST | 1 | Second posted write (design below). Bit 6 = the `flat` map MEMORY_REFACTOR.md anticipated; fold off under it. |
 | $C036 bit 4 shadow-in-all-banks | CARD + HOST | 3 | DONE 2026-09-16: odd banks $03+ shadow $2000-$9FFF to $E1 (KEGS fixup_shadow_all_banks).  Not the Megademo alone: Arkanoid launched from the Finder is relocated into bank $07 and draws through it. |
@@ -392,7 +392,7 @@ IIe through a real bus cycle. "M" = milestone (1 GS/OS Finder, 2 sound,
 **Translation.** `apple_mmu`'s query ports grow to 24 bits. Bank classes in
 front of the region table: PAIR ($00/$01, $E0/$E1) uses the table with side
 `{va[23:17], va[16] | (bsel == AUX)}` (an odd bank named directly is itself);
-RAM $02-$7F identity; VOID one write-protected page `{$FB,$00}`; ROM $FC-$FF
+RAM $02-$EF identity (ours from $80, docs/ENHANCED_VIDEO.md R0); ROM $F0-$FF
 identity, cls ROM. The region table splits `R_RAM` into `R_TXT2 $08-$0B`,
 `R_HGR2 $40-$5F`, `R_SHR $20-$9F` (bank 1) so SHADOW inhibits per region
 (NREG 10 -> 13, `rt_rd_flat` 70 -> 117 bits, the fronts' `rv1` mux 13:1). An
