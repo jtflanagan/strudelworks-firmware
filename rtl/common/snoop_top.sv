@@ -84,6 +84,8 @@ module snoop_top #(
     ) u_card (
         .clk_pin (clk_pin), .rst_n (rst_n), .led (led),
         .usb_rx (usb_rx), .usb_tx (usb_tx),
+        // No flash pins in the watching build: the flash block runs against nothing.
+        .flash_cs_n (), .flash_mosi (), .flash_miso (1'b1), .flash_wp_n (), .flash_hold_n (),
         .apple_clk (apple_clk), .apple_rst (apple_rst),
         .capture_on (capture_on), .capture_real (capture_real),
         .real_data (real_data), .real_valid (real_valid),

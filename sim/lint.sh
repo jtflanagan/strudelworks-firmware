@@ -55,6 +55,7 @@ run ft601_fifo    rtl/common/ft601_fifo.sv -Wno-INITIALDLY
 run ft601_msg_tx  rtl/common/ft601_msg_tx.sv
 run ft601_msg_rx  rtl/common/ft601_msg_rx.sv
 run link_watchdog rtl/common/link_watchdog.sv
+run flash_exec    rtl/common/flash_exec.sv
 run sync_fifo     rtl/common/sync_fifo.sv
 run synth_bus_events rtl/common/synth_bus_events.sv
 run bus_event_capture rtl/common/bus_event_capture.sv rtl/common/sync_fifo.sv

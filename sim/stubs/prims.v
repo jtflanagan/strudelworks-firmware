@@ -25,6 +25,40 @@ endmodule
 module BUFG (output wire O, input wire I);
 endmodule
 
+// The golden image's two configuration primitives (rtl/golden/golden_top.sv).
+module ICAPE2 #(
+    parameter DEVICE_ID = 32'h03651093,
+    parameter ICAP_WIDTH = "X32",
+    parameter SIM_CFG_FILE_NAME = "NONE"
+) (
+    output wire [31:0] O,
+    input  wire        CLK,
+    input  wire        CSIB,
+    input  wire [31:0] I,
+    input  wire        RDWRB
+);
+endmodule
+
+module STARTUPE2 #(
+    parameter PROG_USR = "FALSE",
+    parameter real SIM_CCLK_FREQ = 0.0
+) (
+    output wire CFGCLK,
+    output wire CFGMCLK,
+    output wire EOS,
+    output wire PREQ,
+    input  wire CLK,
+    input  wire GSR,
+    input  wire GTS,
+    input  wire KEYCLEARB,
+    input  wire PACK,
+    input  wire USRCCLKO,
+    input  wire USRCCLKTS,
+    input  wire USRDONEO,
+    input  wire USRDONETS
+);
+endmodule
+
 module MMCME2_ADV #(
     parameter BANDWIDTH = "OPTIMIZED",
     parameter COMPENSATION = "ZHOLD",

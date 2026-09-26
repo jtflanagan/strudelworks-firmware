@@ -55,13 +55,23 @@ module card_link #(
     // CK_PHASE_SHIFT (docs/UBERDDR3.md rung 2): the DDR3 controller walks the
     // CK pin's clock phase under the DRAM's own write-level feedback.  The
     // default since 2026-09-18; `build/build.sh --ck-phase 0` builds without it.
-    parameter integer CK_PHASE_SHIFT = 1
+    parameter integer CK_PHASE_SHIFT = 1,
+    // The part this image is built for (the tops pass it on from build.tcl): the
+    // flash block's BOOT_PART (docs/BOOT_LOADER.md).
+    parameter logic [31:0] IDCODE = 32'h13631093
 ) (
     input  wire        clk_pin,
     input  wire        rst_n,
     output wire [7:0]  led,
     input  wire        usb_rx,
     output wire        usb_tx,
+
+    // The configuration flash (rtl/common/flash_ctrl.sv); CCLK is STARTUPE2's, below.
+    output wire        flash_cs_n,
+    output wire        flash_mosi,
+    input  wire        flash_miso,
+    output wire        flash_wp_n,
+    output wire        flash_hold_n,
 
     // ---- the Apple seam ----------------------------------------------------
     // No Apple pins here, and that is the point: this module is the CARD - the
@@ -516,8 +526,13 @@ module card_link #(
     wire       rx_link_reset_req;      // host's LINK_RESET (0x01), from ft601_msg_rx
     wire       ft_clk_dead;            // CLKOUT never came back after a reset (below)
     wire       tx_stalled;             // words waiting, the chip taking none (below)
-    wire       link_reset_trigger = cmd_reset_strobe | watchdog_fired |
-                                    rx_link_reset_req | ft_clk_dead | tx_stalled;
+    // THE HOST'S LINK_RESET AND THE WATCHDOG ARE NOT HERE ANY MORE: they reconfigure
+    // the FPGA from flash (below, "the full reset"; docs/BOOT_LOADER.md), which spares
+    // nothing - not the DDR3 controller, not a flop anyone forgot to reset.  The link's
+    // two self-recoveries stay on this 1 ms pulse: reconfiguring on a CLKOUT that never
+    // came back would loop every half second, recalibrating the DDR3 each time, while
+    // a Pi boots with the FT601 dark.
+    wire       link_reset_trigger = cmd_reset_strobe | ft_clk_dead | tx_stalled;
 
     reg [16:0] cmd_rst_cnt = 17'd0;
 
@@ -948,6 +963,7 @@ module card_link #(
     // session instead of queueing that session's capture behind the last
     // one's leftovers.  Measured: a shutdown that stalled mid-drain left
     // 1.28 M lines for the next capture to sit behind.
+    wire [31:0] ring_status;    // tx_ring's (below): the watchdog's disarm and the flash block's BOOT_ID read it first
     wire ring_empty = (ring_status[21:0] == 22'd0);
     reg  stop_pending = 1'b0;
     always @(posedge clk_ctrl) begin
@@ -1104,6 +1120,9 @@ module card_link #(
     wire [15:0] tm_off;
     wire        srw_cyc, srw_stb, srw_we, srw_ack;
     wire [31:0] srw_adr;
+    wire        regs_ack;                // the register file's, beside the flash block's
+    wire [31:0] regs_dat_r;
+    wire        flash_sel = (srw_adr[31:9] == 23'h400007);   // 0x8000_0E00-0FFF: the flash block's
     wire        telem_on, apple_res_q;
     wire [23:0] telem_stat;
     wire [31:0] tm_word;
@@ -1321,15 +1340,62 @@ module card_link #(
         .telem_on          (telem_on),
         .telem_stat        (telem_stat),
         .apple_res_q       (apple_res_q),
-        .wb_cyc   (srw_cyc),
-        .wb_stb   (srw_stb),
+        .wb_cyc   (srw_cyc && !flash_sel),
+        .wb_stb   (srw_stb && !flash_sel),
         .wb_we    (srw_we),
         .wb_adr   (srw_adr),
         .wb_dat_w (rwb_dat_w),
         .wb_sel   (rwb_sel),
-        .wb_ack   (srw_ack),
+        .wb_ack   (regs_ack),
         .wb_stall (),
-        .wb_dat_r (rwb_dat_r)
+        .wb_dat_r (regs_dat_r)
+    );
+
+    // ---- the flash block (docs/BOOT_LOADER.md) ---------------------------------
+    // A second slave on the register file's side of reg_front: 0x8000_0E00-0FFF are
+    // its, everything else the register file's.  Both hold their read data and ack
+    // in flops, so the select below sits after them, not on the file's read mux; it
+    // is latched with the strobe (one clock, reg_front's) and held until the next.
+    reg         flash_sel_q = 1'b0;
+    wire        flash_ack;
+    wire [31:0] flash_dat_r;
+    always @(posedge clk_ctrl) if (srw_cyc && srw_stb) flash_sel_q <= flash_sel;
+    assign srw_ack   = regs_ack | flash_ack;
+    assign rwb_dat_r = flash_sel_q ? flash_dat_r : regs_dat_r;
+
+    wire flash_sck;
+    flash_ctrl #(.IDCODE (IDCODE)) u_flash (
+        // Stage 1 bootstrap, 2 full operation: the ring engaged is the OPERATE step.
+        .clk (clk_ctrl), .rst (rst), .stage (ring_status[23] ? 8'd2 : 8'd1),
+        .wb_cyc (srw_cyc && flash_sel), .wb_stb (srw_stb && flash_sel), .wb_we (srw_we),
+        .wb_adr (srw_adr), .wb_dat_w (rwb_dat_w), .wb_ack (flash_ack), .wb_dat_r (flash_dat_r),
+        .msg_valid (msg_valid), .msg_type (msg_type), .msg_len (msg_len),
+        .pay_data (pay_data), .pay_valid (pay_valid),
+        .spi_sck (flash_sck), .spi_cs_n (flash_cs_n), .spi_mosi (flash_mosi),
+        .spi_miso (flash_miso), .spi_wp_n (flash_wp_n), .spi_hold_n (flash_hold_n)
+    );
+
+    // CCLK, the flash's clock, is reachable after configuration only through STARTUPE2.
+    STARTUPE2 #(.PROG_USR ("FALSE"), .SIM_CCLK_FREQ (0.0)) u_startup (
+        .CFGCLK (), .CFGMCLK (), .EOS (), .PREQ (),
+        .CLK (1'b0), .GSR (1'b0), .GTS (1'b0), .KEYCLEARB (1'b1), .PACK (1'b0),
+        .USRCCLKO (flash_sck), .USRCCLKTS (1'b0),
+        .USRDONEO (1'b1), .USRDONETS (1'b1)
+    );
+
+    // ---- the full reset: LINK_RESET and the watchdog reconfigure the FPGA ---------
+    // IPROG to flash address 0 (rtl/common/iprog.sv): every pin floats until the
+    // image is up again, the FT601 is reset by that image's power-on pulse, and the
+    // host reconnects (docs/BOOT_LOADER.md, "RECONFIGURATION DROPS THE LINK").
+    wire        icap_csib, icap_rdwrb;
+    wire [31:0] icap_i;
+    iprog u_iprog (
+        .clk (clk_ctrl), .rst (!clk_locked), .req (rx_link_reset_req | watchdog_fired),
+        .addr (24'h000000),
+        .icap_csib (icap_csib), .icap_rdwrb (icap_rdwrb), .icap_i (icap_i), .busy ()
+    );
+    ICAPE2 #(.ICAP_WIDTH ("X32")) u_icap (
+        .CLK (clk_ctrl), .CSIB (icap_csib), .RDWRB (icap_rdwrb), .I (icap_i), .O ()
     );
 
     reg_front u_reg_front (
@@ -1517,7 +1583,6 @@ module card_link #(
     wire [31:0]         sb_adr, sb_dat;
     wire [3:0]          sb_sel;
     wire                out_valid;
-    wire [31:0]         ring_status;
     wire                ring_engage;    // RING_CTRL[0] -> the ring's boot lane
 
     // LINK_STAT (0x8000_00EC): the UART status line's facts, readable over

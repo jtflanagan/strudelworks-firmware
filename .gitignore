@@ -77,5 +77,7 @@ __pycache__/
 /sim/floppy_card_work/
 /sim/gspanel_work/
 /sim/start_hold_work/
+/sim/flash_exec_work/
+/sim/flash_ctrl_work/
 /sim/rom_loader_work/
 /sim/telem_work/

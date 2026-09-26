@@ -199,6 +199,9 @@ if {$snoop || $master} {
         [file join $root rtl common page_client.sv] \
         [file join $root rtl common event_merge.sv] \
         [file join $root rtl common card_link.sv] \
+        [file join $root rtl common flash_ctrl.sv] \
+        [file join $root rtl common flash_exec.sv] \
+        [file join $root rtl common iprog.sv] \
     ]
     if {$master} {
         add_files -norecurse [list \
@@ -397,6 +400,18 @@ if {$gs} {
     set_property generic [concat [get_property generic [current_fileset]] \
         [list HAS_MB=0 HAS_MOUSE=0]] [current_fileset]
 }
+# The part as its JTAG IDCODE, for the flash block's BOOT_PART (docs/BOOT_LOADER.md):
+# a package's record must name the part it is loaded into.  Hex, since the
+# generic is a 32-bit logic vector.
+if {$master} {
+    set idcodes [dict create xc7a100t 13631093 xc7a50t 0362C093 xc7a35t 0362D093]
+    set idcode ""
+    dict for {dev code} $idcodes { if {[string match "${dev}*" $part]} { set idcode $code } }
+    if {$idcode eq ""} { puts "ERROR: no IDCODE known for part $part"; exit 1 }
+    puts " IDCODE: $idcode ($part)"
+    set_property generic [concat [get_property generic [current_fileset]] \
+        [list "IDCODE=32'h$idcode"]] [current_fileset]
+}
 if {$ck_phase >= 0} {
     puts "CK_PHASE_SHIFT = $ck_phase ([expr {$ck_phase ? "the DDR3 write-levels its own CK" : "asked for OFF: CK on the commands' clock"}])"
     set_property generic [concat [get_property generic [current_fileset]] \
@@ -431,6 +446,11 @@ if {$snoop || $master} {
         add_files -fileset constrs_1 -norecurse [list \
             [file join $root constr apple_bus_master.xdc] \
         ]
+    }
+    # The configuration flash's pins (docs/BOOT_LOADER.md): the card rewrites its
+    # own flash over USB3.  The snooper has no flash block.
+    if {$master} {
+        add_files -fileset constrs_1 -norecurse [file join $cdir flash_pins.xdc]
     }
     # The FT601 output-enable flops pinned beside their pads: a hand-written,
     # per-board placement file (site coordinates are the die's), present only
@@ -572,6 +592,11 @@ if {[file exists $bit]} {
     # pick the loader's part, and to refuse to push an Au bitstream at a Pt.
     set fh [open [file join $results $bitname.board] w]
     puts $fh $board
+    close $fh
+    # ...and its build stamp, the BUILD_DATE / BUILD_TIME the image reports, for the
+    # record tools/mkpkg.py puts beside it (docs/BOOT_LOADER.md).
+    set fh [open [file join $results $bitname.stamp] w]
+    puts $fh [format "%08d %06d" $stamp_date $stamp_time]
     close $fh
 }
 foreach r {timing_summary.rpt utilization.rpt logic_depth.rpt design_analysis.rpt ddr3_forensics.txt} {
