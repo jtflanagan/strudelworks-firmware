@@ -1,7 +1,11 @@
 # Enhanced video for the IIgs
 
-Status: 2026-09-26, branch `enhanced_video` (fw off master 79bfd94 / host off
-6f8e9e9).  Design agreed with the user.  **R0 (the memory map) DONE ON
+Status: 2026-09-26, **MERGED to master** from branch `enhanced_video` (fw off
+master 79bfd94 / host off 6f8e9e9).  Design agreed with the user.  **The
+text mode is 160x50 of 8x16 cells** since the user saw the first cut's 8x8 on
+the machine (too small to read) and the 8x16 ("very close to what I
+intended"): the 8-row font, each row drawn twice.  `tools/ev_test.sh --hold`
+leaves EVTEST on the screen for looking at.  **R0 (the memory map) DONE ON
 HARDWARE** (bit `gs_evmap1`, TIMING MET wns +0.018 whs +0.030, 0 of 76940,
 stamp 20260926 124715, FLASH): ROM 3 boots GS/OS 6 to the Finder; the panel
 loads at $F0 (128 absolute chunks, counted by the card) and its row of
@@ -157,12 +161,15 @@ there; what does not goes in the banks.
 **1 - Bitmap 320x200 RGB565, 4x** (2 banks).  Rows 0-99 in the first bank,
 100-199 in the second, 640 bytes a row from offset 0 (no row crosses a bank).
 
-**2 - Text 160x100, 8x8 glyphs** (1 bank, 1:1).  Cell (c, r) at
-`2*(r*160 + c)` in the bank: the glyph byte, then the attribute byte (high
-nibble the foreground index, low nibble the background index), so one 16-bit
-store writes a cell.  Control window: the font at `$0000`, 256 glyphs x 8
-rows, bit 7 the leftmost pixel; the 16 foreground colours at `$0800` and the
-16 background colours at `$0820`, RGB565.
+**2 - Text 160x50, 8x16 cells** (1 bank, 1:1).  Cell (c, r) at
+`2*(r*160 + c)` in the bank (16,000 bytes): the glyph byte, then the
+attribute byte (high nibble the foreground index, low nibble the background
+index), so one 16-bit store writes a cell.  Control window: the font at
+`$0000`, 256 glyphs x 8 rows, bit 7 the leftmost pixel, each row drawn twice
+to fill the cell's 16; the 16 foreground colours at `$0800` and the 16
+background colours at `$0820`, RGB565.  A cell is exactly two claim regions
+tall.  (It was 160x100 of 8x8 until 2026-09-26: seen on the machine, too
+small to read - the user.)
 
 **3 - Tiles 80x50, 16x16** (1-96 banks, 1:1).  The map at the front of the
 first bank: cell (c, r) at `2*(r*80 + c)`, a 16-bit tile index, $0000-$1F3F.
