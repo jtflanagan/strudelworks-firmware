@@ -20,7 +20,14 @@ per-mode snapshots with dirty-page copies, AUTO at the frame point, the
 global commit, RES' clearing - `enhanced_video_test` 47/47 (and mutation-
 checked), host tests 44/48 (master's four red); on the live machine, monitor
 writes to $E2 gave `ev=1 evlive=1 evg=1 evc=1 evr=1` on the status line and
-the refusal in the log, and a RES' took it to `ev=0 evlive=0`.  Next: R2.
+the refusal in the log, and a RES' took it to `ev=0 evlive=0`.  **R2 DONE
+ON HARDWARE** (host src/ev_render.cpp; `ev_render_test` 28/28, every canvas
+pixel of a patterned bitmap against a reference, mutation-checked; host tests
+45/49): from the monitor, bank $80 filled red and $81 blue, mode 0 a bitmap on
+them, the top half of the claim map to mode 0 - the screenshot's top half 100%
+red over the monitor's text below; green written into $80 without a commit
+left it red, `E2/0010:00` turned it 100% green; a RES' took the canvas away
+and the Finder came back.  Next: R3, the text and tile modes.
 
 New video modes for the GS, drawn by the host, living beside the machine's own
 video rather than replacing it.  A program writes pixels, cells or tiles into
@@ -183,7 +190,14 @@ instead of receiving every write.
   (ENABLE latched), `evlive=` (bit n = mode n drawn), `evg=` / `evc=` (global
   and mode commits) and `evr=` (refusals).
 - **R2** - the renderer thread, the compositor's mask, mode 1; golden-image
-  tests.
+  tests.  As built: EvCanvas (its own thread, woken every 2 ms to look at the
+  generations) copies a mode whose generation moved out from under the
+  commits' lock, draws it into a 1280x800 RGB layer, and puts the layers
+  together through the claim map into one RGBA canvas; the GL thread uploads
+  a new canvas when there is one and draws it over the Super Hi-Res box
+  after the legacy pass, discarding alpha 0 - so the legacy frame, scanlines
+  and border included, is untouched wherever nothing is claimed.  A
+  screenshot reads the panel back, canvas included.
 - **R3** - modes 2 and 3.
 - **R4** - a 65816 test program (llvm-mos, as the panel) on hardware: all
   three modes at once over the legacy desktop, and the bitmap throughput
