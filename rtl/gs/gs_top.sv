@@ -2026,7 +2026,7 @@ module gs_top #(
     rom_loader #(.N_CHUNKS (GS ? 512 : 32),
                  .ROM_PPN0 (GS ? 16'hFC00 : 16'hFFC0),
                  .REQUIRE_HOLD (1'b1),
-                 // The card's extended ROM, banks $E2-$EE: a IIgs build only
+                 // Our own ROM, banks $F0-$FB below the machine's: a IIgs build only
                  // (docs/GS_CONTROL_PANEL.md R2).  A IIe refuses an absolute
                  // chunk outright - it has no such banks to put one in.
                  .ABS_EN (GS)) u_rom (

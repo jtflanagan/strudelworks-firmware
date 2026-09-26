@@ -6,7 +6,7 @@
 // the panel will run on hardware, with nothing else of a IIgs around them.
 //
 // THE MACHINE IS A STAGE, NOT A IIgs.  A flat 16 MB of memory; the panel's
-// image in bank $E2; a bank-0 caller that stands where the Desk Manager does
+// image in bank $F0 (our ROM, docs/ENHANCED_VIDEO.md R0); a bank-0 caller that stands where the Desk Manager does
 // (FE/D467: native mode, M = X = 1, DBR = 0, D = 0, a JSL to the panel);
 // $C0xx in banks $00/$01/$E0/$E1 answered by a small soft-switch model with
 // a scripted keyboard; the text pages at $E0/$E1 $0400 read back as the 80
@@ -331,16 +331,16 @@ int main(int argc, char **argv) {
     if (!hex || !bin) { fprintf(stderr, "need --hex= and --bin=\n"); return 2; }
     if (!load_fetch_word(hex)) { fprintf(stderr, "cannot read %s\n", hex); return 2; }
 
-    // THE PANEL'S IMAGE in bank $E2, and its header.
+    // THE PANEL'S IMAGE in bank $F0, our ROM's first, and its header.
     {
         FILE *f = fopen(bin, "rb"); if (!f) { fprintf(stderr, "cannot open %s\n", bin); return 2; }
-        size_t n = fread(&mem[0xE20000], 1, 0x10000 * 13, f);   // $E2-$EE at most
+        size_t n = fread(&mem[0xF00000], 1, 0x10000 * 12, f);   // $F0-$FB at most
         fclose(f);
-        if (n < 16 || memcmp(&mem[0xE20000], "SWCP", 4) != 0) { fprintf(stderr, "%s: no SWCP header\n", bin); return 2; }
+        if (n < 16 || memcmp(&mem[0xF00000], "SWCP", 4) != 0) { fprintf(stderr, "%s: no SWCP header\n", bin); return 2; }
     }
-    const unsigned entry = mem[0xE20008] | (mem[0xE20009] << 8) | (mem[0xE2000A] << 16);
+    const unsigned entry = mem[0xF00008] | (mem[0xF00009] << 8) | (mem[0xF0000A] << 16);
     printf("panel %s: version %u, size word $%04X, entry $%02X/%04X\n", bin,
-           mem[0xE20004] | (mem[0xE20005] << 8), mem[0xE20006] | (mem[0xE20007] << 8),
+           mem[0xF00004] | (mem[0xF00005] << 8), mem[0xF00006] | (mem[0xF00007] << 8),
            entry >> 16, entry & 0xFFFF);
 
     // THE CALLER, where the Desk Manager stands.  Reset comes up in emulation

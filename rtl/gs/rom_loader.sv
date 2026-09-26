@@ -61,14 +61,14 @@ module rom_loader #(
     // THE CARD'S EXTENDED ROM (docs/GS_CONTROL_PANEL.md R2).  A MEM_ROM whose
     // first word has bit 31 set is an ABSOLUTE chunk: its low 16 bits are the
     // physical page the 512 bytes land on, rather than an index counted from
-    // ROM_PPN0.  That is how our 65816 panel gets into banks $E2-$EE without
+    // ROM_PPN0.  That is how our 65816 panel gets into banks $F0-$FB without
     // a second message type, a second seam, or any change to the base ROM's
     // completeness check - an absolute chunk is NOT one of the `seen` and
     // never satisfies `rom_ok`; it is counted on its own in `xlanded`.
     // ABS_EN off (a IIe) refuses them outright.
     parameter bit          ABS_EN = 1'b0,
-    parameter logic [7:0]  ABS_LO = 8'hE2,
-    parameter logic [7:0]  ABS_HI = 8'hEE
+    parameter logic [7:0]  ABS_LO = 8'hF0,
+    parameter logic [7:0]  ABS_HI = 8'hFB
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -125,7 +125,7 @@ module rom_loader #(
                      ST_NOT_HELD  = 4'd2,   // the machine is running: refused
                      ST_BAD_LEN   = 4'd3,   // not {chunk} + 128 words
                      ST_BAD_INDEX = 4'd4,   // chunk number past the ROM
-                     ST_BAD_PPN   = 4'd5;   // an absolute chunk outside $E2-$EE
+                     ST_BAD_PPN   = 4'd5;   // an absolute chunk outside $F0-$FB
 
     localparam integer CHUNK_WORDS = 128;      // 128 words = 512 bytes a chunk
     localparam integer CW = $clog2(N_CHUNKS);  // bits of chunk index

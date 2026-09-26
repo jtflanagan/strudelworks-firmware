@@ -23,7 +23,7 @@
 // verbatim from iline's GS arm - the wanted bank is ROM ? $FF : the virtual
 // bank with its low bit set when the region goes to the auxiliary side).
 // Everywhere else the translation is fixed by the physical layout (RAM $02-
-// $7F, the extended ROM $E2-$EE, the panel's RAM $EF, ROM 3 $FC-$FF) and the
+// $EF, our ROM $F0-$FB, ROM 3 $FC-$FF) and the
 // entry survives every map change untouched.  PBR and DBR are still part of
 // the map on this card (rung 5 takes them out); with the bank in the key a
 // change of either invalidates nothing here.
