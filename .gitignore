@@ -81,3 +81,5 @@ __pycache__/
 /sim/flash_ctrl_work/
 /sim/rom_loader_work/
 /sim/telem_work/
+# The RISC-V engine benches (the riscv branch), one work dir per variant.
+/sim/rv*_work*/
