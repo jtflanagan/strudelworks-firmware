@@ -27,7 +27,15 @@ pixel of a patterned bitmap against a reference, mutation-checked; host tests
 them, the top half of the claim map to mode 0 - the screenshot's top half 100%
 red over the monitor's text below; green written into $80 without a commit
 left it red, `E2/0010:00` turned it 100% green; a RES' took the canvas away
-and the Finder came back.  Next: R3, the text and tile modes.
+and the Finder came back.  **R3 DONE ON HARDWARE**: the text and tile modes
+(`ev_render_test` 33/33, every canvas pixel of random text and random tile
+maps against references, indices past the banks black; mutation-checked;
+host tests 45/49).  From the monitor, all three modes at once over the
+monitor's own screen: the bitmap green in region rows 0-32, text (a box glyph,
+white on blue) in 33-65, tiles (a yellow/magenta stripe) in 66-89, the legacy
+text in 90-99 - a claim typed one row wrong showed up exactly one row and 64
+regions wrong, and the corrected map landed by the global commit alone.
+Next: R4, a 65816 program and the bitmap's throughput.
 
 New video modes for the GS, drawn by the host, living beside the machine's own
 video rather than replacing it.  A program writes pixels, cells or tiles into
