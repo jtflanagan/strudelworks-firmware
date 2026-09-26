@@ -15,7 +15,12 @@ $F0/0000 is refused (still "SWCP").  Sims: lint clean, `suite quick` 36/36,
 red being master's own.  The IIe tree (rtl/a2) is not touched by this work
 (user, 2026-09-26).  Found on the way: swhost's `mouseat` took `panel_mu_`
 twice and deadlocked its control thread since 2026-09-16 (host 3f792ff) -
-fixed.  Next: R1.
+fixed.  **R1 DONE** (host src/enhanced_video.cpp): the committed state -
+per-mode snapshots with dirty-page copies, AUTO at the frame point, the
+global commit, RES' clearing - `enhanced_video_test` 47/47 (and mutation-
+checked), host tests 44/48 (master's four red); on the live machine, monitor
+writes to $E2 gave `ev=1 evlive=1 evg=1 evc=1 evr=1` on the status line and
+the refusal in the log, and a RES' took it to `ev=0 evlive=0`.  Next: R2.
 
 New video modes for the GS, drawn by the host, living beside the machine's own
 video rather than replacing it.  A program writes pixels, cells or tiles into
@@ -172,7 +177,11 @@ instead of receiving every write.
   the panel relinked at $F0, the benches and tests on the new map, a bit, and
   the hardware proof.
 - **R1** - the host mirror of the video banks, dirty pages, COMMIT / AUTO /
-  the global commit, the reset clearing; unit tests.
+  the global commit, the reset clearing; unit tests.  AUTO commits at the
+  host's frame point (emit_frame, the beam entering blanking), which on a
+  IIgs is every frame of real bus time.  The status line carries `ev=`
+  (ENABLE latched), `evlive=` (bit n = mode n drawn), `evg=` / `evc=` (global
+  and mode commits) and `evr=` (refusals).
 - **R2** - the renderer thread, the compositor's mask, mode 1; golden-image
   tests.
 - **R3** - modes 2 and 3.
