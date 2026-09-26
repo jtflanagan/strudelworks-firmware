@@ -35,7 +35,18 @@ monitor's own screen: the bitmap green in region rows 0-32, text (a box glyph,
 white on blue) in 33-65, tiles (a yellow/magenta stripe) in 66-89, the legacy
 text in 90-99 - a claim typed one row wrong showed up exactly one row and 64
 regions wrong, and the corrected map landed by the global commit alone.
-Next: R4, a 65816 program and the bitmap's throughput.
+**R4 DONE ON HARDWARE - THE LADDER IS FINISHED**: `tools/ev_test.sh` PASSES
+(host firmware/evtest/evtest.s, a ProDOS 8 binary BRUN from a copy of
+po_master.po, put there by the host's new prodos_put): the bitmap top left,
+the text mode top right in the IIe's own glyphs, the tiles bottom left, the
+machine's own screen bottom right, each read out of a screenshot; a key turns
+it all off and BASIC's prompt comes back.  THE THROUGHPUT: 600 whole frames
+of the bitmap, 64,000 16-bit stores and a commit each, at **38.5 frames/s**
+(38.4 on the first run) - 4.9 M records/s through the stream, the card's DDR3
+ring backlog never past 16, the mirror missing nothing.  The stream and the
+Pi are not the limit: the machine's own store loop is (about 25 cycles a
+pixel), so the "snapshot, do not stream" fallback is not needed at this
+rate.
 
 New video modes for the GS, drawn by the host, living beside the machine's own
 video rather than replacing it.  A program writes pixels, cells or tiles into
@@ -207,6 +218,7 @@ instead of receiving every write.
   and border included, is untouched wherever nothing is claimed.  A
   screenshot reads the panel back, canvas included.
 - **R3** - modes 2 and 3.
-- **R4** - a 65816 test program (llvm-mos, as the panel) on hardware: all
-  three modes at once over the legacy desktop, and the bitmap throughput
-  measured.
+- **R4** - a 65816 test program on hardware: all three modes at once over
+  the legacy picture, and the bitmap throughput measured.  As built: ca65,
+  not llvm-mos - a ProDOS 8 binary at $2000 is the least machinery, and the
+  throughput loop wants hand-counted cycles.
