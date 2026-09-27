@@ -100,6 +100,12 @@ DOOM needs it (it is compiled for strict alignment first).
   `doom_rv.c` sends Control as `KEY_FIRE` and Space as `KEY_USE`. On hardware Control fires (50 -> 45).
   The keys: Control fire, Space use, arrows move, Shift run, Option/Command strafe, Esc menu, Return
   select, Tab map, digits weapons.
+- **Frame rates on the screen**: DOOM draws "RV dd.d" in the picture's top right corner - the frames it
+  committed over the last whole second of TickCount (a true 60 Hz on the card: 604 ticks in ~10 s of
+  wall clock), also at `$EE:FE10` in tenths; drawn from the first whole second on, so frame 1 stays
+  DOOM's own (the bench's TITLEPIC). DOOM paces itself at 35 tics a second: ~35 in play, above it now
+  and then (a frame without a new tic), ~60 on the title page. The host's HUD shows "FPS 60.0" - the
+  Pi's on-time refreshes (the host's apple_app.hpp).
 - **What the key path shows the host** (bank $EE): `$306` completions (low byte), `$308` the last
   count, `$30A` the log's next place over 256 bytes of answers at `$500` ({count, bytes} end to end),
   and librvgs's `$30C` asks, `$30E` refusals, `$310` the last refusal, `$312` requests given up on.

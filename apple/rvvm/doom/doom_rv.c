@@ -2,7 +2,10 @@
    the frame through the palette to RGB565 in enhanced video's mode 1, time from
    the Event Manager's ticks, the WAD beside the program (9:DOOM1.WAD), keys
    from the ADB itself.  Its report ($EE:FE00): 'DOOM', frames drawn, the ticks at
-   the first frame, the ticks now. */
+   the first frame, the ticks now, and the frames of the last whole second
+   (tenths).  That rate is drawn in the picture's top right corner, "RV 35.0" -
+   the engine's, DOOM's own ceiling being 35; the host's HUD shows beside it the
+   rate the Pi puts on the screen ("PI"). */
 #include <stdint.h>
 #include "doomgeneric.h"
 #include "i_video.h"
@@ -16,6 +19,41 @@ extern boolean palette_changed;
 static volatile uint32_t *const report = (volatile uint32_t *)(uintptr_t)RVGS_REPORT;
 static uint16_t lut[256];
 static uint32_t frames;
+static uint32_t rate_tick, rate_frames, rate10;   /* the last whole second's frames, in tenths */
+static int rate_known;                             /* drawn from the first whole second on (frame 1 stays DOOM's own) */
+
+/* A 3x5 font, two pixels a dot: the rate's characters only. */
+static const uint8_t glyph[][5] = {
+    {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},   /* 0-4 */
+    {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7},   /* 5-9 */
+    {6,5,6,5,5}, {5,5,5,5,2}, {0,0,0,0,2}, {0,0,0,0,0},                /* R V . space */
+};
+enum { G_R = 10, G_V, G_DOT, G_SP };
+
+static void put_px(uint32_t x, uint32_t y, uint16_t c) {
+    volatile uint16_t *row = (volatile uint16_t *)(uintptr_t)(VIDEO_BANK + (y / 100) * 0x10000u + (y % 100) * ROW_BYTES);
+    row[x] = c;
+}
+
+/* "RV dd.d" on black in the top right corner, over DOOM's own picture. */
+static void draw_rate(void) {
+    uint8_t text[7] = {G_R, G_V, G_SP, G_SP, G_SP, G_DOT, 0};
+    const uint32_t r = rate10 > 999 ? 999 : rate10;
+    if (r >= 100) text[3] = (uint8_t)(r / 100);
+    text[4] = (uint8_t)(r / 10 % 10);
+    text[6] = (uint8_t)(r % 10);
+    const uint32_t x0 = 320 - 7 * 8 - 1, y0 = 1;
+    for (uint32_t y = y0 - 1; y < y0 + 11; y++)
+        for (uint32_t x = x0 - 2; x < 320; x++) put_px(x, y, 0);
+    for (uint32_t i = 0; i < 7; i++)
+        for (uint32_t gy = 0; gy < 5; gy++)
+            for (uint32_t gx = 0; gx < 3; gx++)
+                if (glyph[text[i]][gy] & (4 >> gx)) {
+                    const uint32_t x = x0 + i * 8 + gx * 2, y = y0 + gy * 2;
+                    put_px(x, y, 0xFFFF); put_px(x + 1, y, 0xFFFF);
+                    put_px(x, y + 1, 0xFFFF); put_px(x + 1, y + 1, 0xFFFF);
+                }
+}
 
 void DG_Init(void) {
     for (int i = 0; i < 64; i++) report[i] = 0;
@@ -45,6 +83,16 @@ void DG_DrawFrame(void) {
         volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)(VIDEO_BANK + (y / 100) * 0x10000u + (y % 100) * ROW_BYTES);
         for (uint32_t x = 0; x < 320; x += 2) dst[x / 2] = lut[src[x]] | ((uint32_t)lut[src[x + 1]] << 16);
     }
+    /* the rate: the frames committed over the last whole second (60 ticks or more) */
+    const uint32_t now = rvgs_ticks();
+    if (frames == 0) { rate_tick = now; rate_frames = 0; }
+    else if (now - rate_tick >= 60) {
+        rate10 = (frames - rate_frames) * 600 / (now - rate_tick);
+        rate_tick = now; rate_frames = frames;
+        report[4] = rate10;
+        rate_known = 1;
+    }
+    if (rate_known) draw_rate();
     volatile uint8_t *ctl = (volatile uint8_t *)(uintptr_t)rv_env->video;
     ctl[0x10] = 0;                      /* COMMIT mode slot 0: this frame */
     if (frames++ == 0) {
@@ -52,7 +100,7 @@ void DG_DrawFrame(void) {
         report[2] = rvgs_ticks();
     }
     report[1] = frames;
-    report[3] = rvgs_ticks();
+    report[3] = now;
 }
 
 void DG_SleepMs(uint32_t ms) {
