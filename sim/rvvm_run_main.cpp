@@ -48,11 +48,21 @@
 // $EE:FF00, enhanced video left off, the stack balanced, and no write anywhere
 // the lifecycle does not own.  --stale first leaves a dead application in the
 // registration table (a bank of the upper half, enhanced video on) to reclaim.
+// Rung I3: the runner is built with the engine's memory side (-DRVVM_MEM=1,
+// sim/rvvm_sys.sv MEM=1: rv_mem on the card's map, sim/l2_model.h behind it, the
+// whole 32 MB); --image=FILE is the program's file GS/OS serves (Open, GetEOF,
+// Read as a DMA would write it - the engine's rows invalidated - Close, through
+// the stack entry $E1:00B0), which must land in the upper half byte for byte, and
+// reach the host's mirror of it by the engine's own 0xB records.
+// --expect-code=N: the lifecycle's exit code (the runtime's own failures).
+// --launches=N: the application launched N times on the one engine (the Finder
+// would; nothing resets the engine in between), every launch checked.
 
 #include "Vrvvm_sys.h"
 #include "Vrvvm_sys___024root.h"
 #include "verilated.h"
 #include "rv_ref.h"
+#include "l2_model.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -61,6 +71,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -83,6 +94,9 @@ static const unsigned PORT_PUTC = 0xEFFFE0, PORT_GETC = 0xEFFFE1, PORT_AVAIL = 0
 static const unsigned PORT_CYC = 0xEFFFE4;   // 8 bytes, latched when the first is read
 
 // ---- the 65816 stage ---------------------------------------------------------
+#ifndef RVVM_MEM
+#define RVVM_MEM 0      // sim/run_rv_app.sh builds the runner with the engine's memory side (-DRVVM_MEM=1)
+#endif
 static Vrvvm_sys *dut;   // sim/rvvm_sys.sv: the 65816 and the RISC-V engine
 #define CPU(x) dut->rootp->rvvm_sys__DOT__u_cpu__DOT__##x
 #define ENG(x) dut->rootp->rvvm_sys__DOT__u_eng__DOT__u_core__DOT__##x
@@ -135,38 +149,55 @@ static void dump_regs(const char *who, const uint32_t *x, uint32_t pc) {
     for (int i = 0; i < 32; i++) printf("  %-4s=%08x%s", abi[i], x[i], (i % 4 == 3) ? "\n" : "");
 }
 
-// ---- the application mode: a GS/OS stand-in (docs/RVV2_INTEROP.md, rung I2) ----------
+// ---- the application mode: a GS/OS stand-in (docs/RVV2_INTEROP.md, rungs I2-I3) ------
 static const unsigned APP_STUB = 0x031000;              // where the "loader" put the stub
 static const unsigned APP_DP = 0x2000, APP_DP_END = 0x2FFF;   // its ~Direct segment
 static const unsigned APP_UID = 0x1002;
 static const unsigned SC_S = 0xEFFFF0, SC_CALL = 0xEFFFF2, SC_GS = 0xEFFFF4,
-                      SC_SOUT = 0xEFFFF6, SC_ERR = 0xEFFFF8;
+                      SC_SOUT = 0xEFFFF6, SC_ERR = 0xEFFFF8, SC_GSS = 0xEFFFFA;
+static const unsigned TRAMPS = 0xE1F000;                // the trampolines the entry points JML to
 static const unsigned HEAP = 0x060000, MPTRS = 0x05F000, DPAGE_H = 0x05FF00;
 static const unsigned REG = 0xEE0000, TRACE = 0xEEFF00, EV_CTL = 0xE20000;
+static const unsigned HI = 0x1000000, SPACE_APP = 0x2000000;
 
 static void wr16(unsigned a, unsigned v) { mem[a] = uint8_t(v); mem[a + 1] = uint8_t(v >> 8); }
 static void wr32(unsigned a, uint32_t v) { wr16(a, v & 0xFFFF); wr16(a + 2, v >> 16); }
 
-struct AppCall { std::string name; std::vector<uint32_t> args; };
+struct AppCall { std::string name; std::vector<uint32_t> args; unsigned err = 0; };
 
 static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char *stub_path, bool stale,
-                   unsigned long long max_cycles) {
+                   const char *image_path, long expect_code, unsigned launches, unsigned long long max_cycles) {
+#if !RVVM_MEM
+    (void)hex; (void)vm; (void)vm_bank; (void)stub_path; (void)stale; (void)image_path; (void)expect_code; (void)launches; (void)max_cycles;
+    fprintf(stderr, "--app= needs the runner built with the engine's memory side (sim/run_rv_app.sh)\n");
+    return 2;
+#else
+    mem.assign(SPACE_APP + 8, 0);                   // the engine's 32 MB; the 65816 sees the lower 16
     const unsigned vmb = vm_bank << 16;
     load_file(vm, mem, vmb, 0x10000);
     if (memcmp(&mem[vmb], "RVVM", 4) != 0) { fprintf(stderr, "%s: no RVVM header\n", vm); return 2; }
     const size_t stub_len = load_file(stub_path, mem, APP_STUB, 0x10000 - (APP_STUB & 0xFFFF));
     if (!load_fetch_word(hex)) { fprintf(stderr, "cannot read %s\n", hex); return 2; }
+    std::vector<uint8_t> image;                     // the program's file, as GS/OS would read it
+    if (image_path) {
+        FILE *f = fopen(image_path, "rb");
+        if (!f) { fprintf(stderr, "cannot open %s\n", image_path); return 2; }
+        int c; while ((c = fgetc(f)) != EOF) image.push_back(uint8_t(c));
+        fclose(f);
+    }
 
     // The stub's header, read as the runtime reads it: its tool list is what
-    // StartUpTools must be handed.
+    // StartUpTools must be handed, its image name what Open must be asked for.
     unsigned hdr = 0;
     for (size_t i = 0; i + 4 <= stub_len; i++)
         if (!memcmp(&mem[APP_STUB + i], "RVAP", 4)) { hdr = APP_STUB + unsigned(i); break; }
     if (!hdr) { fprintf(stderr, "%s: no RVAP header\n", stub_path); return 2; }
-    const unsigned h_flags = rd16(hdr + 6), h_vmode = rd16(hdr + 8);
+    const unsigned h_flags = rd16(hdr + 6), h_vmode = rd16(hdr + 8), h_bounce = rd16(hdr + 10);
     const unsigned list = hdr + rd16(hdr + 14), ntools = rd16(list);
     std::vector<uint32_t> want_tools;
     for (unsigned i = 0; i < ntools; i++) want_tools.push_back(rd32(list + 2 + 4 * i));
+    const unsigned name_at = hdr + rd16(hdr + 16);
+    const std::string image_name(reinterpret_cast<const char *>(&mem[name_at + 2]), rd16(name_at));
 
     // The machine as the loader leaves it: the stub entered native, 16-bit, with
     // A = the user ID and D/S on its direct page / stack segment.
@@ -179,9 +210,11 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     };
     memcpy(&mem[0x000800], boot, sizeof boot);
     mem[0x00FFFC] = 0x00; mem[0x00FFFD] = 0x08;
-    // The trampolines: REP #$30, S and the call to the harness, the new S and the
-    // error back, C = an error (the toolbox's convention), RTL.
-    auto tramp = [&](unsigned at, unsigned trigger) {
+    // The entry points JML to trampolines: REP #$30, S and the call to the
+    // harness, the new S and the error back, C = an error, RTL.
+    auto tramp = [&](unsigned entry, unsigned at, unsigned trigger) {
+        const unsigned char j[] = {0x5C, uint8_t(at), uint8_t(at >> 8), uint8_t(at >> 16)};
+        memcpy(&mem[entry], j, sizeof j);
         const unsigned char t[] = {
             0xC2, 0x30, 0x3B,                                   // REP #$30 TSC
             0x8F, SC_S & 0xFF, (SC_S >> 8) & 0xFF, SC_S >> 16,  // STA SC_S
@@ -193,8 +226,9 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         };
         memcpy(&mem[at], t, sizeof t);
     };
-    tramp(0xE10000, SC_CALL);
-    tramp(0xE100A8, SC_GS);
+    tramp(0xE10000, TRAMPS + 0x00, SC_CALL);        // the toolbox's dispatcher
+    tramp(0xE100A8, TRAMPS + 0x40, SC_GS);          // GS/OS, inline
+    tramp(0xE100B0, TRAMPS + 0x80, SC_GSS);         // GS/OS, the stack entry
     for (unsigned a = APP_DP; a <= APP_DP_END; a++) mem[a] = 0xA5;   // the stack's high-water mark
     if (stale) {   // a dead application: registered, one upper bank, enhanced video on
         memcpy(&mem[REG], "RVRG", 4); wr16(REG + 4, 1);
@@ -204,13 +238,47 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     }
 
     dut = new Vrvvm_sys;
-    dut->irq_n = 1; dut->nmi_n = 1; dut->cyc_en = 1; dut->i_din = 0; dut->d_din = 0;
+    dut->irq_n = 1; dut->nmi_n = 1; dut->cyc_en = 1; dut->i_din = 0; dut->d_din = 0; dut->inval = 0;
     dut->rst = 1; tick(); tick(); dut->rst = 0; dut->eval();
+
+    unsigned long long cycles = 0;
+    std::mt19937 rng(7);
+    L2Model<Vrvvm_sys> l2(mem, rng, cycles);
+    std::vector<uint8_t> mirror(mem.begin() + HI, mem.begin() + SPACE_APP);   // the host's upper half: records only
+    unsigned long long recs = 0;
+    bool inval_next = false;
+    // The program as the loader left it: memory at its first instruction (on
+    // whatever clock it retires - the engine runs while the 65816 waits on RUN),
+    // before it relocates itself and clears its bss.
+    uint32_t entered_at = 0;
+    bool entered_same = false;
+    auto app_tick = [&]() {
+        l2.pre_edge(dut);
+        dut->inval = inval_next; inval_next = false;
+        dut->rec_take = dut->rec_v;
+        if (dut->rec_v) {
+            const uint64_t r = dut->rec;
+            const uint32_t w0 = uint32_t(r), data = uint32_t(r >> 32);
+            const uint32_t a = (w0 & 0x7FFFFFu) << 2;
+            for (int i = 0; i < 4; i++)
+                if (((w0 >> (24 + i)) & 1) && a + i >= HI) mirror[a + i - HI] = uint8_t(data >> (8 * i));
+            recs++;
+        }
+        dut->clk = 1; dut->eval();
+        l2.post_edge(dut);
+        dut->clk = 0; dut->eval();
+        if (dut->retired && !entered_at && ENG(pc_q) >= HI) {
+            entered_at = ENG(pc_q);
+            entered_same = entered_at + image.size() <= SPACE_APP &&
+                           !memcmp(&mem[entered_at], image.data(), image.size());
+        }
+    };
 
     std::string fail;
     char msg[512];
     std::vector<AppCall> calls;
-    unsigned sc_s = 0, sc_sout = 0, sc_err = 0, quit_s = 0;
+    unsigned sc_s = 0, sc_sout = 0, sc_err = 0;
+    std::vector<unsigned> quit_s;                   // S at each QuitGS
     bool quit = false;
     unsigned hp = HEAP, nmp = 0;
     struct Block { uint32_t ptr, size; unsigned uid; bool live; };
@@ -219,8 +287,10 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     unsigned low_water = APP_DP_END + 1;
     long ev_enable_at = -1, ev_commit_at = -1;
     unsigned ev_enable = 0xFF;
-    unsigned long long cycles = 0;
     unsigned stray = 0;
+    bool open = false;
+    size_t fpos = 0;
+
 
     // A toolbox call: X = the call number, S as the dispatcher saw it (the
     // return address at S+1, the parameters from S+4, the last pushed first).
@@ -298,36 +368,97 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             err = 0x0002;
             c.name = "?";
         }
+        c.err = err;
         calls.push_back(c);
         for (int i = 3; i >= 1; i--) mem[sc_s + npop + i] = mem[sc_s + i];   // the return address, over the parameters
         sc_sout = sc_s + npop;
         sc_err = err;
     };
-    // GS/OS: JSL $E100A8, then the call number and the parameter block inline.
-    auto gsos = [&]() {
+    // A class-1 GS/OS call on its parameter block: the ones the runtime makes.
+    // Read writes the buffer as a DMA would (not through the 65816): the
+    // engine's rows are invalidated after it, as gs_top does for DMA.
+    auto gs_class1 = [&](unsigned num, uint32_t pb, AppCall &c) -> unsigned {
+        c.args = {num, pb};
+        const unsigned pcount = rd16(pb);
+        switch (num) {
+        case 0x2010: {
+            c.name = "Open";
+            const uint32_t path = rd32(pb + 4) & 0xFFFFFF;
+            const std::string asked(reinterpret_cast<const char *>(&mem[path + 2]), rd16(path));
+            c.args.push_back(pcount >= 3 ? rd16(pb + 8) : 0);
+            if (pcount < 2) return 0x0004;
+            if (!image_path || asked != image_name) return 0x0046;   // fileNotFound
+            if (open) { fail += "Open: the program's file is already open\n"; return 0x0050; }
+            if (pcount >= 3 && rd16(pb + 8) != 1) { snprintf(msg, sizeof msg, "Open: requestAccess %u, want 1 (read)\n", rd16(pb + 8)); fail += msg; }
+            open = true; fpos = 0;
+            wr16(pb + 2, 1);
+            return 0;
+        }
+        case 0x2019:
+            c.name = "GetEOF";
+            if (!open || rd16(pb + 2) != 1) return 0x0043;             // invalidRefNum
+            wr32(pb + 4, uint32_t(image.size()));
+            return 0;
+        case 0x2012: {
+            c.name = "Read";
+            if (!open || rd16(pb + 2) != 1) return 0x0043;
+            const uint32_t buf = rd32(pb + 4) & 0xFFFFFF, want = rd32(pb + 8);
+            const size_t n = std::min<size_t>(want, image.size() - fpos);
+            c.args.push_back(uint32_t(n));
+            if (want != h_bounce) { snprintf(msg, sizeof msg, "Read of %u bytes: not the bounce buffer's %u\n", want, h_bounce); fail += msg; }
+            memcpy(&mem[buf], image.data() + fpos, n);
+            fpos += n;
+            wr32(pb + 12, uint32_t(n));
+            inval_next = true;
+            return n == 0 ? 0x004C : 0;                                // eofEncountered
+        }
+        case 0x2014:
+            c.name = "Close";
+            if (!open || rd16(pb + 2) != 1) return 0x0043;
+            open = false;
+            return 0;
+        default:
+            c.name = "?";
+            snprintf(msg, sizeof msg, "the stand-in has no GS/OS call $%04X\n", num);
+            fail += msg;
+            return 0x0001;
+        }
+    };
+    // GS/OS inline: JSL $E100A8, then the call number and the parameter block.
+    auto gsos_inline = [&]() {
         const uint32_t ret = mem[sc_s + 1] | (mem[sc_s + 2] << 8) | (mem[sc_s + 3] << 16);
         const unsigned num = rd16(ret + 1);
         const uint32_t pb = rd32(ret + 3) & 0xFFFFFF;
         AppCall c;
-        c.args = {num, pb};
         sc_sout = sc_s;
-        sc_err = 0;
+        uint32_t back = ret + 6;                    // past the inline block
         if (num == 0x2029) {
             c.name = "QuitGS";
+            c.args = {num, pb};
             if (rd16(pb) != 0) { snprintf(msg, sizeof msg, "QuitGS: pCount %u, want 0\n", rd16(pb)); fail += msg; }
-            quit = true;
-            quit_s = sc_s;
-        } else {
-            c.name = "?";
-            snprintf(msg, sizeof msg, "the stand-in has no GS/OS call $%04X\n", num);
-            fail += msg;
-            sc_err = 0x0001;
-        }
-        for (int i = 0; i < 3; i++) mem[sc_s + 1 + i] = uint8_t((ret + 6) >> (8 * i));   // past the inline block
+            quit_s.push_back(sc_s);
+            sc_err = 0;
+            // launched again, as the Finder would - on the same engine, which
+            // nothing resets between applications - or the run is over
+            if (quit_s.size() < launches) back = 0x0007FF;   // RTL -> the boot stub at $0800
+            else quit = true;
+        } else sc_err = gs_class1(num, pb, c);
+        c.err = sc_err;
+        for (int i = 0; i < 3; i++) mem[sc_s + 1 + i] = uint8_t(back >> (8 * i));
+        calls.push_back(c);
+    };
+    // GS/OS's stack entry: the call number at S+4, the parameter block at S+6;
+    // GS/OS takes both off.
+    auto gsos_stack = [&]() {
+        AppCall c;
+        sc_err = gs_class1(rd16(sc_s + 4), rd32(sc_s + 6) & 0xFFFFFF, c);
+        c.err = sc_err;
+        for (int i = 3; i >= 1; i--) mem[sc_s + 6 + i] = mem[sc_s + i];
+        sc_sout = sc_s + 6;
         calls.push_back(c);
     };
 
-    // What the lifecycle may write: its direct page and stack, the low block, the
+    // What the 65816 may write: its direct page and stack, the low block, the
     // registration table and the trace, enhanced video's two control bytes, the
     // stand-in's ports - and the engine's window.
     auto owned = [&](unsigned a) {
@@ -335,7 +466,7 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         if (a >= REG && a < REG + 0x300) return true;
         if (a >= TRACE && a < TRACE + 0x100) return true;
         if (a == EV_CTL || a == EV_CTL + 1) return true;
-        if (a >= SC_S && a < SC_ERR + 2) return true;
+        if (a >= SC_S && a < SC_GSS + 2) return true;
         for (auto &h : handles) if (h.second.live && a >= h.second.ptr && a < h.second.ptr + h.second.size) return true;
         return false;
     };
@@ -353,7 +484,7 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         dut->eval();
         if (dut->win_sel) {
             while (dut->win_stall) {
-                dut->cyc_en = 0; tick(); cycles++;
+                dut->cyc_en = 0; app_tick(); cycles++;
                 if (cycles >= max_cycles) break;
             }
             dut->cyc_en = 1;
@@ -366,7 +497,8 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             else if (addr == SC_S + 1) sc_s = (sc_s & 0xFF) | (v << 8);
             else if (addr == SC_CALL) sc_err = v;                                   // the call's low byte, for a moment
             else if (addr == SC_CALL + 1) tool(sc_err | (v << 8));
-            else if (addr == SC_GS + 1) gsos();
+            else if (addr == SC_GS + 1) gsos_inline();
+            else if (addr == SC_GSS + 1) gsos_stack();
             if (dut->win_sel) {}
             else if (!owned(addr)) {
                 if (!stray++) { snprintf(msg, sizeof msg, "a write the lifecycle does not own: $%02X to $%06X (pc $%02X/%04X)\n", v, addr, CPU(pbr), CPU(pc)); fail += msg; }
@@ -376,7 +508,7 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             if (addr == EV_CTL + 1) ev_commit_at = long(cycles);
             if (addr >= APP_DP + 0x100 && addr <= APP_DP_END && addr < low_water) low_water = addr;
         }
-        tick();
+        app_tick();
         cycles++;
     }
 
@@ -384,16 +516,34 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     std::string seq;
     for (auto &c : calls) seq += (seq.empty() ? "" : " ") + c.name;
     printf("app: %s\n", seq.c_str());
-    const char *want[] = {"TLStartUp", "MMStartUp", "NewHandle", "StartUpTools", "ShutDownTools",
-                          "DisposeHandle", "MMShutDown", "TLShutDown", "QuitGS"};
+    // THE ORDER when the program loads: every Read of the file - a chunk at a
+    // time, then one more that reads 0 - and Close at its end, before the tools
+    // go down.
+    std::string one = "TLStartUp MMStartUp NewHandle StartUpTools";
+    const long code_want = expect_code;
+    if (code_want == 0) {
+        one += " Open GetEOF";
+        for (size_t k = 0; k <= (image.size() + h_bounce - 1) / h_bounce; k++) one += " Read";
+        one += " Close";
+    }
+    one += " ShutDownTools DisposeHandle MMShutDown TLShutDown QuitGS";
     std::string wseq;
-    for (auto w : want) wseq += (wseq.empty() ? "" : " ") + std::string(w);
-    if (seq != wseq) fail += "the calls are not the lifecycle's: want " + wseq + "\n";
-    if (!quit) fail += "the stub never quit\n";
-    else if (quit_s != APP_DP_END - 3) { snprintf(msg, sizeof msg, "the stack at QuitGS is $%04X, want $%04X: the runtime left it unbalanced\n", quit_s, APP_DP_END - 3); fail += msg; }
+    for (unsigned k = 0; k < launches; k++) wseq += (k ? " " : "") + one;
+    if (code_want == 0 && seq != wseq) fail += "the calls are not the lifecycle's: want " + wseq + "\n";
+    // Whatever happened: every start has its stop.
+    auto count = [&](const char *n) { return std::count_if(calls.begin(), calls.end(), [&](const AppCall &c) { return c.name == n && c.err == 0; }); };
+    const std::pair<const char *, const char *> pairs[] = {{"TLStartUp", "TLShutDown"}, {"MMStartUp", "MMShutDown"},
+        {"NewHandle", "DisposeHandle"}, {"StartUpTools", "ShutDownTools"}, {"Open", "Close"}};
+    for (auto &p : pairs)
+        if (count(p.first) != count(p.second)) { snprintf(msg, sizeof msg, "%ld %s but %ld %s\n", long(count(p.first)), p.first, long(count(p.second)), p.second); fail += msg; }
+    if (open) fail += "the program's file was left open\n";
+    if (!quit) fail += "the stub never quit (" + std::to_string(quit_s.size()) + " of " + std::to_string(launches) + " launches)\n";
+    for (unsigned q : quit_s)
+        if (q != APP_DP_END - 3) { snprintf(msg, sizeof msg, "the stack at QuitGS is $%04X, want $%04X: the runtime left it unbalanced\n", q, APP_DP_END - 3); fail += msg; break; }
+    if (rd16(TRACE + 4) != launches) { snprintf(msg, sizeof msg, "the trace counts %u entries, want %u\n", rd16(TRACE + 4), launches); fail += msg; }
     uint32_t low = 0, handle = 0;
     for (auto &c : calls) {
-        if (c.name == "NewHandle") {
+        if (c.name == "NewHandle") {                // (the last launch's, for the trace)
             handle = c.args[3];
             low = handles[handle].ptr;
             if (c.args[1] != APP_UID) { snprintf(msg, sizeof msg, "NewHandle for user ID $%04X\n", c.args[1]); fail += msg; }
@@ -407,15 +557,30 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     if (tools_ref && (tools_ref < low || tools_ref >= low + 0x10000)) fail += "the start/stop record is not in the low block\n";
     // The trace
     const unsigned t_step = rd16(TRACE + 12), t_err = rd16(TRACE + 14), t_stat = rd16(TRACE + 24), t_done = rd16(TRACE + 40);
-    const uint32_t t_code = rd32(TRACE + 20), t_low = rd32(TRACE + 16);
-    printf("app: trace step $%02X, exit %d (status %u, cause %u, pc $%08X), toolbox error $%04X, done $%02X\n",
-           t_step, int32_t(t_code), t_stat, rd16(TRACE + 26), rd32(TRACE + 32), t_err, t_done);
+    const uint32_t t_code = rd32(TRACE + 20), t_low = rd32(TRACE + 16), t_hi = rd32(TRACE + 42), t_hisz = rd32(TRACE + 46), t_eof = rd32(TRACE + 50);
+    printf("app: trace step $%02X, exit %d (status %u, cause %u, pc $%08X), error $%04X, done $%02X, upper $%08X+$%X, file %u bytes\n",
+           t_step, int32_t(t_code), t_stat, rd16(TRACE + 26), rd32(TRACE + 32), t_err, t_done, t_hi, t_hisz, t_eof);
     if (memcmp(&mem[TRACE], "RVRT", 4)) fail += "no trace at $EE:FF00\n";
     if (t_step != 0xFF) fail += "the trace: the lifecycle did not come back\n";
-    if (t_stat != 1 || t_code != 0) fail += "the program did not exit 0 (rt_null: the failing check's number)\n";
+    if (int32_t(t_code) != code_want) { snprintf(msg, sizeof msg, "the exit code is %d, want %ld\n", int32_t(t_code), code_want); fail += msg; }
+    if (code_want == 0 && t_stat != 1) fail += "the program did not exit (a trap?)\n";
     if (t_low != low) fail += "the trace's low block is not NewHandle's\n";
-    const unsigned want_done = 0x0F | ((h_flags & 1) ? 0x10 : 0);
-    if (t_done != want_done) { snprintf(msg, sizeof msg, "the steps done $%02X, want $%02X\n", t_done, want_done); fail += msg; }
+    const unsigned want_done = 0x0F | ((h_flags & 1) ? 0x10 : 0) | (code_want == 0 ? 0x20 : 0);
+    if (code_want == 0 && t_done != want_done) { snprintf(msg, sizeof msg, "the steps done $%02X, want $%02X\n", t_done, want_done); fail += msg; }
+    // The program: loaded where the environment block said, byte for byte, and
+    // every byte the engine wrote up there reached the host by its records.
+    if (code_want == 0) {
+        if (t_hi < HI || (t_hi & 0xFFFF) || t_hisz == 0 || t_hi + t_hisz > SPACE_APP) fail += "the upper-half memory is not whole banks above 16 MB\n";
+        else if (t_eof != image.size()) fail += "the trace's file size is not the program's\n";
+        else if (entered_at != t_hi) { snprintf(msg, sizeof msg, "the engine entered the upper half at $%08X, not the program's first byte $%08X\n", entered_at, t_hi); fail += msg; }
+        else if (!entered_same) fail += "when the program started, the upper half did not hold its file\n";
+        size_t bad = 0, first = 0;
+        for (size_t i = 0; i < mirror.size(); i++) if (mirror[i] != mem[HI + i]) { if (!bad++) first = HI + i; }
+        if (bad) { snprintf(msg, sizeof msg, "the host's mirror of the upper half: %zu bytes differ, first $%06zX\n", bad, first); fail += msg; }
+        printf("app: %llu engine write records; L2 model %llu probes, %llu reads, %llu fills, %llu evictions, %llu writes\n",
+               recs, l2.probes, l2.reads, l2.fills, l2.evicts, l2.writes);
+    }
+    fail += l2.err;
     // The registration table: made, and empty again
     if (memcmp(&mem[REG], "RVRG", 4) || rd16(REG + 4) != 1) fail += "no registration table at $EE:0000\n";
     if (rd16(REG + 6) || rd16(REG + 8) || rd32(REG + 10)) { snprintf(msg, sizeof msg, "the registration table still holds video $%04X, application $%04X\n", rd16(REG + 6), rd16(REG + 8)); fail += msg; }
@@ -432,6 +597,7 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     else printf("app: PASS\n");
     delete dut;
     return fail.empty() ? 0 : 1;
+#endif
 }
 
 int main(int argc, char **argv) {
@@ -444,8 +610,10 @@ int main(int argc, char **argv) {
     unsigned long long trace = 0;
     long expect_trap = -1;
     std::string input;
-    const char *app = nullptr;
+    const char *app = nullptr, *image = nullptr;
     bool stale = false;
+    long expect_code = 0;
+    unsigned launches = 1;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto val = [&](const char *k) { return a.substr(strlen(k)); };
@@ -461,6 +629,9 @@ int main(int argc, char **argv) {
         else if (a.rfind("--expect-trap=", 0) == 0) expect_trap = strtol(val("--expect-trap=").c_str(), nullptr, 0);
         else if (a.rfind("--app=", 0) == 0) app = argv[i] + 6;
         else if (a == "--stale") stale = true;
+        else if (a.rfind("--image=", 0) == 0) image = argv[i] + 8;
+        else if (a.rfind("--launches=", 0) == 0) launches = unsigned(strtoul(val("--launches=").c_str(), nullptr, 0));
+        else if (a.rfind("--expect-code=", 0) == 0) expect_code = strtol(val("--expect-code=").c_str(), nullptr, 0);
         else if (a == "--ref") use_ref = true;
         else if (a == "--ref-only") ref_only = true;
         else if (a == "--prof") prof = true;
@@ -468,7 +639,7 @@ int main(int argc, char **argv) {
     }
     if (app) {
         if (!hex || !vm || guest || ref_only || use_ref) { fprintf(stderr, "--app= takes --hex= --vm= and no guest, no reference\n"); return 2; }
-        return run_app(hex, vm, vm_bank, app, stale, max_cycles);
+        return run_app(hex, vm, vm_bank, app, stale, image, expect_code, launches, max_cycles);
     }
     if (!guest || (!ref_only && (!hex || !vm))) { fprintf(stderr, "need --guest= and (--hex= --vm= | --ref-only)\n"); return 2; }
 

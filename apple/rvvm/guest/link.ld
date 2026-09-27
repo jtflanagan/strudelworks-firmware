@@ -4,6 +4,10 @@
    applies its own R_RISCV_RELATIVE relocations wherever it was loaded.  The
    image is objcopy'd to a flat binary. */
 ENTRY(_start)
+/* A GS/OS application's memory beyond its image (crt0_app.S's header): override
+   with -Wl,--defsym=__stack_size=N / __heap_size=N. */
+PROVIDE(__stack_size = 0x10000);
+PROVIDE(__heap_size = 0x10000);
 SECTIONS {
   . = DEFINED(__load) ? __load : 0;
   .text : { *(.text.init) *(.text .text.*) }

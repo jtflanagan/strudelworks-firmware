@@ -37,6 +37,7 @@ EVIW    = WIN + $8C
 EVDATA  = WIN + $90
 RVAL    = WIN + $94
 WID     = WIN + $98
+WSTAT   = WIN + $9C     ; bit 1: an event pending
 ; the registers the services use, as window addresses
 WA0     = WX + 10 * 4
 WA1     = WX + 11 * 4
@@ -95,7 +96,7 @@ quit_pb:    .word   0                       ; $F1:0030: QuitGS, pCount 0
 
         .segment "CODE"
 
-; ---- a GS/OS application's lifecycle (docs/RVV2_INTEROP.md, rung I2) -----------------
+; ---- a GS/OS application's lifecycle (docs/RVV2_INTEROP.md, rungs I2-I3) --------------
 ; From a stub's JSL $F1:0020: A = the application's user ID, X/Y = its header's
 ; address (X the low word, Y the bank), D/S the stub's direct page and stack
 ; (its ~Direct segment), which are the runtime's while the application runs.
@@ -104,8 +105,11 @@ quit_pb:    .word   0                       ; $F1:0030: QuitGS, pCount 0
 ;
 ;   register in $EE -> TLStartUp, MMStartUp -> the low block (NewHandle) -> the
 ;   environment block and the start/stop record in it -> StartUpTools -> enhanced
-;   video, if the header asks -> the engine runs, a0 = the environment block ->
-;   and everything undone in reverse (DONE says what was done).
+;   video, if the header asks -> the program's file opened, its first chunk read,
+;   its image header -> the upper-half banks it needs registered -> the engine
+;   runs the loader (rt_loader, a0 = the environment block), which pulls the
+;   rest of the file through the bounce buffer and enters the program -> and
+;   everything undone in reverse (DONE says what was done).
 ;
 ; The direct page (the step loop's own at $00-$19 and $C0-$CB):
 APPM    = $1A           ; nonzero: an application's run - no console, an exit returns
@@ -124,12 +128,29 @@ DONE    = $3E           ; the steps done, to undo
 ERR     = $40           ; the last toolbox error
 NTOOLS  = $42           ; the header's tool count
 LIST    = $44           ; the header's tool pairs (4)
+RTP     = $48           ; the runtime's own GS/OS parameter blocks, in the low block (4)
+PATH    = $4C           ; the program's pathname, the header's class-1 string (4)
+EOFV    = $50           ; the program file's size (4)
+MEMSZ   = $54           ; the image header's memory: the image and its bss, 16-aligned (4)
+TOTAL   = $58           ; all of the upper-half memory it needs (4)
+FIRSTN  = $5C           ; the first chunk's bytes, read before the engine starts
+NCHUNK  = $5E           ; chunks handed to the loader
+NB      = $60           ; upper-half banks: how many...
+HIB     = $62           ; ...and the first (0-255: bank $100 + HIB)
+DMAX    = $64           ; every step ever done (DONE loses them as they are undone)
+GSN     = $66           ; a GS/OS call's number
 
 D_REG   = $0001         ; DONE: registered in $EE
 D_MM    = $0002         ;       TLStartUp + MMStartUp
 D_LOW   = $0004         ;       the low block
 D_TOOLS = $0008         ;       StartUpTools
 D_VIDEO = $0010         ;       enhanced video owned
+D_FILE  = $0020         ;       the program's file open
+.macro  did     bit
+        lda     #bit
+        tsb     DONE
+        tsb     DMAX
+.endmacro
 
 ; The stub's header (apple/rvvm/stub/stub.s)
 H_VER    = 4
@@ -138,6 +159,7 @@ H_VMODE  = 8
 H_BOUNCE = 10
 H_CALL   = 12
 H_TOOLS  = 14
+H_IMAGE  = 16
 HF_VIDEO = $0001
 MAX_TOOLS = 32
 
@@ -162,6 +184,18 @@ EV_PATH   = 56
 EV_VIDEO  = 60          ; the enhanced video control bank, 0 = not the owner
 ENV_LEN   = 64
 REC_LEN   = 12          ; the start/stop record before its tool pairs
+; The runtime's GS/OS parameter blocks, after the record (class 1, pCount first)
+RT_OPEN   = 0           ; Open: pCount 3, refNum, pathname (4), requestAccess 1 (read)
+RT_EOF    = 10          ; GetEOF: pCount 2, refNum, eof (4)
+RT_READ   = 18          ; Read: pCount 4, refNum, dataBuffer (4), requestCount (4), transferCount (4)
+RT_CLOSE  = 34          ; Close: pCount 1, refNum
+RT_LEN    = 40
+; The program's image header (apple/rvvm/guest/crt0_app.S), after its first jump
+IM_MAGIC  = 4           ; 'RVIM'
+IM_VER    = 8           ; 1
+IM_MEM    = 12          ; the image and its bss (4)
+IM_STACK  = 16          ; (4)
+IM_HEAP   = 20          ; (4)
 
 ; The registration table, bank $EE (ours): read by nothing else.  One owner word
 ; per 64 KB bank of the upper half; one application slot (a RISC-V desk
@@ -189,14 +223,24 @@ TR_CAUSE = 26
 TR_TVAL  = 28           ; (4)
 TR_PC    = 32           ; the engine's pc at the stop (4)
 TR_REF   = 36           ; StartUpTools' startStopRef (4)
-TR_DONE  = 40           ; DONE at its highest
-TR_LEN   = 42
+TR_DONE  = 40           ; every step done (DMAX)
+TR_HI    = 42           ; the upper-half memory: its base (4)...
+TR_HISZ  = 46           ; ...and size (4)
+TR_EOF   = 50           ; the program file's size (4)
+TR_LEN   = 54
 .macro  step    n
         lda     #n
         sta     f:RT_TRACE + TR_STEP
 .endmacro
 
 TOOLS   = $E10000
+GSOS_STACK = $E100B0    ; GS/OS's stack entry: the parameter block (long), the call number
+GS_OPEN  = $2010
+GS_READ  = $2012
+GS_CLOSE = $2014
+GS_GETEOF = $2019
+GS_EOF_ERR = $004C      ; Read at the end of the file
+RT_CHUNK = $5020        ; the loader's ECALL: the next chunk of the program's file
 TL_STARTUP   = $0201
 TL_SHUTDOWN  = $0301
 MM_STARTUP   = $0202
@@ -245,8 +289,11 @@ app_entry:
         step    5
         jsr     video_up
         step    6
-        jsr     app_run
+        jsr     file_up                 ; C: the program's file, its header or its memory (CODE says)
+        bcs     @down
         step    7
+        jsr     app_run
+        step    8
         bra     @down
 @bad:   lda     #$FFFE                  ; -2: the header
         bra     @code
@@ -289,11 +336,12 @@ hdr_check:
         inc
         inc
         sta     LIST
-        lda     NTOOLS                  ; env, record, pairs; then the bounce buffer...
+        lda     NTOOLS                  ; env, record, pairs, the runtime's blocks; then the bounce buffer...
         asl
         asl
         adc     #ENV_LEN + REC_LEN + 3
         and     #$FFFC
+        adc     #RT_LEN
         sta     BOFF
         ldy     #H_BOUNCE
         lda     [HDR],y
@@ -347,8 +395,7 @@ reg_up: lda     f:REG
         jsr     reclaim
 :       lda     UID
         sta     f:REG_APP
-        lda     #D_REG
-        tsb     DONE
+        did     D_REG
         rts
 
 ; Everything registered to the user ID in A goes back: its upper-half banks, and
@@ -387,8 +434,7 @@ mm_up:  ldx     #TL_STARTUP
         ldx     #MM_STARTUP
         jsl     TOOLS
         pla
-        lda     #D_MM
-        tsb     DONE
+        did     D_MM
         rts
 
 ; NewHandle(size, user ID, attributes, location): the low block.
@@ -427,11 +473,17 @@ low_up: pha
         adc     COFF
         sta     CALLP
         lda     LOWP
+        adc     BOFF
+        sec
+        sbc     #RT_LEN
+        sta     RTP
+        lda     LOWP+2
+        sta     RTP+2
+        lda     LOWP
         sta     f:REG_LOW
         lda     LOWP+2
         sta     f:REG_LOW+2
-        lda     #D_LOW
-        tsb     DONE
+        did     D_LOW
         clc
         rts
 @no:    lda     ERR
@@ -559,14 +611,322 @@ tools_up:
         pla
         sta     f:RT_TRACE + TR_REF + 2
         bcs     @no
-        lda     #D_TOOLS
-        tsb     DONE
+        did     D_TOOLS
         clc
         rts
 @no:    lda     ERR
         sta     f:RT_TRACE + TR_ERR
         sec
         rts
+
+; ---- the program's file (rung I3) ------------------------------------------------------
+; A class-1 GS/OS call through the stack entry: A = the call number, X = its
+; parameter block's offset from RTP.  C and A = GS/OS's error (A = 0 when none).
+; B is kept (the panel's gs_call learned it): the engine's run needs $EF.
+gs_call:
+        sta     GSN
+        phb
+        lda     RTP+2
+        pha                             ; the parameter block, high word...
+        txa
+        clc
+        adc     RTP
+        pha                             ; ...then low
+        pei     (GSN)
+        jsl     GSOS_STACK
+        bcs     :+
+        lda     #0
+:       plb
+        rts
+
+; The program: its file opened (the header's pathname, prefix 9: = the
+; application's folder), its size, its first chunk read into the bounce buffer,
+; the image header in that chunk checked, and the upper-half memory it asks for
+; registered to the application.  C set with CODE: -5 the file (TR_ERR = GS/OS's
+; error), -6 its image header, -7 no room in the upper half.
+file_up:
+        ldy     #H_IMAGE
+        lda     [HDR],y
+        bne     :+
+        jmp     @nofile                 ; a header without an image
+:       clc
+        adc     HDR
+        sta     PATH
+        lda     HDR+2
+        sta     PATH+2
+        lda     #3                      ; Open(refNum, pathname, read)
+        ldy     #RT_OPEN
+        sta     [RTP],y
+        ldy     #RT_OPEN+4
+        lda     PATH
+        sta     [RTP],y
+        iny
+        iny
+        lda     PATH+2
+        sta     [RTP],y
+        ldy     #RT_OPEN+8
+        lda     #1
+        sta     [RTP],y
+        lda     #GS_OPEN
+        ldx     #RT_OPEN
+        jsr     gs_call
+        bcc     :+
+        jmp     @gserr
+:       did     D_FILE
+        ldy     #RT_OPEN+2
+        lda     [RTP],y                 ; the refNum, into every other block
+        ldy     #RT_EOF+2
+        sta     [RTP],y
+        ldy     #RT_READ+2
+        sta     [RTP],y
+        ldy     #RT_CLOSE+2
+        sta     [RTP],y
+        lda     #2
+        ldy     #RT_EOF
+        sta     [RTP],y
+        lda     #1
+        ldy     #RT_CLOSE
+        sta     [RTP],y
+        lda     #4                      ; Read(refNum, the bounce buffer, its size)
+        ldy     #RT_READ
+        sta     [RTP],y
+        ldy     #RT_READ+4
+        lda     BNC
+        sta     [RTP],y
+        iny
+        iny
+        lda     BNC+2
+        sta     [RTP],y
+        ldy     #RT_READ+8
+        lda     COFF
+        sec
+        sbc     BOFF
+        sta     [RTP],y
+        iny
+        iny
+        lda     #0
+        sta     [RTP],y
+        lda     #GS_GETEOF
+        ldx     #RT_EOF
+        jsr     gs_call
+        bcc     :+
+        jmp     @gserr
+:       ldy     #RT_EOF+4
+        lda     [RTP],y
+        sta     EOFV
+        iny
+        iny
+        lda     [RTP],y
+        sta     EOFV+2
+        jsr     read_chunk              ; the first chunk: the image header is in it
+        bcc     :+
+        jmp     @gserr
+:       sta     FIRSTN
+        cmp     #IM_HEAP + 4
+        bcs     :+
+        jmp     @badimg
+:       ldy     #IM_MAGIC               ; 'RVIM', version 1
+        lda     [BNC],y
+        cmp     #('V' << 8) | 'R'
+        beq     :+
+        jmp     @badimg
+:       iny
+        iny
+        lda     [BNC],y
+        cmp     #('M' << 8) | 'I'
+        beq     :+
+        jmp     @badimg
+:       ldy     #IM_VER
+        lda     [BNC],y
+        cmp     #1
+        beq     :+
+        jmp     @badimg
+:       ldy     #IM_MEM                 ; MEMSZ = the image and its bss, 16-aligned
+        lda     [BNC],y
+        clc
+        adc     #15
+        and     #$FFF0
+        sta     MEMSZ
+        iny
+        iny
+        lda     [BNC],y
+        adc     #0
+        sta     MEMSZ+2
+        lda     MEMSZ+2                 ; the file must fit in it (EOFV <= MEMSZ)
+        cmp     EOFV+2
+        bne     :+
+        lda     MEMSZ
+        cmp     EOFV
+:       bcs     :+
+        jmp     @badimg
+:       lda     MEMSZ                   ; TOTAL = MEMSZ + the heap + the stack
+        ldy     #IM_HEAP
+        clc
+        adc     [BNC],y
+        sta     TOTAL
+        iny
+        iny
+        lda     MEMSZ+2
+        adc     [BNC],y
+        sta     TOTAL+2
+        bcc     :+
+        jmp     @badimg
+:       ldy     #IM_STACK
+        lda     TOTAL
+        clc
+        adc     [BNC],y
+        sta     TOTAL
+        iny
+        iny
+        lda     TOTAL+2
+        adc     [BNC],y
+        sta     TOTAL+2
+        bcc     :+
+        jmp     @badimg
+:       lda     TOTAL                   ; NB = whole banks, 1-256
+        cmp     #1                      ; C = a partial bank
+        lda     TOTAL+2
+        adc     #0
+        beq     @badimg
+        cmp     #257
+        bcs     @room
+        sta     NB
+        jsr     bank_alloc              ; C: no run of NB free banks
+        bcs     @room
+        jsr     env_hi
+        clc
+        rts
+@nofile:
+        lda     #0
+        sta     f:RT_TRACE + TR_ERR
+@gserr: sta     f:RT_TRACE + TR_ERR
+        lda     #$FFFB                  ; -5: the program's file
+        bra     @code
+@badimg:
+        lda     #$FFFA                  ; -6: its image header
+        bra     @code
+@room:  stz     NB
+        lda     #$FFF9                  ; -7: no room in the upper half
+@code:  sta     CODE
+        lda     #$FFFF
+        sta     CODE+2
+        sec
+        rts
+
+; Read the next chunk into the bounce buffer: A = the bytes read (0 at the end
+; of the file), C and A = GS/OS's error otherwise.
+read_chunk:
+        lda     #GS_READ
+        ldx     #RT_READ
+        jsr     gs_call
+        bcc     @ok
+        cmp     #GS_EOF_ERR
+        bne     @no
+@ok:    ldy     #RT_READ+12             ; transferCount (a chunk is under 64 KB)
+        lda     [RTP],y
+        clc
+        rts
+@no:    sec
+        rts
+
+; The file closed, if it is open.
+file_close:
+        lda     #D_FILE
+        trb     DONE
+        beq     :+
+        lda     #GS_CLOSE
+        ldx     #RT_CLOSE
+        jsr     gs_call
+:       rts
+
+; NB banks of the upper half, contiguous, first fit, registered to the
+; application: HIB the first.  C set when there is no such run.
+bank_alloc:
+        ldx     #0                      ; the bank (x2)
+@start: stx     HIB                     ; a run starts here...
+        ldy     NB                      ; ...needing this many more
+@next:  cpx     #$0200
+        bcs     @no
+        lda     f:REG_BANKS,x
+        inx
+        inx
+        cmp     #0
+        bne     @start                  ; taken: a new run from the next bank
+        dey
+        bne     @next
+        lda     HIB                     ; found: HIB (x2) .. X
+        tax
+        ldy     NB
+        lda     UID
+:       sta     f:REG_BANKS,x
+        inx
+        inx
+        dey
+        bne     :-
+        lda     HIB
+        lsr
+        sta     HIB
+        clc
+        rts
+@no:    sec
+        rts
+
+; The environment block's upper-half fields and the program's pathname.
+env_hi: lda     #0
+        ldy     #EV_HI
+        sta     [LOWP],y
+        ldy     #EV_IMG
+        sta     [LOWP],y
+        ldy     #EV_HISZ
+        sta     [LOWP],y
+        lda     HIB
+        clc
+        adc     #$0100
+        ldy     #EV_HI+2
+        sta     [LOWP],y
+        ldy     #EV_IMG+2
+        sta     [LOWP],y
+        ldy     #EV_HEAP+2              ; the heap: after the image and its bss
+        clc
+        adc     MEMSZ+2
+        sta     [LOWP],y
+        lda     MEMSZ
+        ldy     #EV_HEAP
+        sta     [LOWP],y
+        lda     NB
+        ldy     #EV_HISZ+2
+        sta     [LOWP],y
+        ldy     #EV_IMGSZ
+        ldx     #EOFV
+        jsr     env_ptr
+        ldy     #EV_PATH
+        ldx     #PATH
+        jmp     env_ptr
+
+; ECALL RT_CHUNK (the loader's): a0 = the bytes of the program's file now in the
+; bounce buffer - the first chunk, read before the engine started, then one
+; Read each - 0 at the end (the file is closed then), -error from GS/OS.
+sys_chunk:
+        lda     APPM
+        bne     :+
+        jmp     enosys
+:       lda     NCHUNK
+        inc     NCHUNK
+        cmp     #0
+        bne     :+
+        lda     FIRSTN
+        bra     @n
+:       jsr     read_chunk
+        bcc     @n
+        eor     #$FFFF                  ; -error
+        inc
+        jmp     ret_neg
+@n:     cmp     #0
+        bne     :+
+        pha
+        jsr     file_close
+        pla
+:       jmp     ret_a
 
 ; Enhanced video: the one owner is the running application (the user,
 ; 2026-09-26).  It starts off (ENABLE 0, latched), whatever was left.
@@ -587,8 +947,7 @@ video_up:
         ldy     #EV_VIDEO+2
         lda     #^EV_CTL
         sta     [LOWP],y
-        lda     #D_VIDEO
-        tsb     DONE
+        did     D_VIDEO
 @no:    rts
 video_off:
         sep     #$20
@@ -602,7 +961,7 @@ video_off:
 
 ; The engine runs the program: DBR $EF (the window), x1-x31 zero, a0 = the
 ; environment block.  sys_exit and the traps come back through app_done to
-; app_run's caller.  Rung I2's program is rt_null, in this bank.
+; app_run's caller.  The engine starts in the loader, rt_loader, in this bank.
 app_run:
         sep     #$20
         .a8
@@ -620,14 +979,15 @@ app_run:
         sta     CODE+2
         rts
 :       jsr     eng_mode
+        jsr     eng_idle
         jsr     eng_clear
         lda     LOWP
         sta     a:WA0
         lda     LOWP+2
         sta     a:WA0+2
-        lda     #.loword(rt_null)
+        lda     #.loword(rt_loader)
         sta     a:WPC
-        lda     #^rt_null
+        lda     #^rt_loader
         sta     a:WPC+2
         tsc
         sta     RUN_S
@@ -648,6 +1008,29 @@ eng_mode:
         bcc     :+
         inc     RUNM
 :       rts
+; The engine idle for a new program: an event the last program left pending -
+; its exit's ECALL, above all: nothing resets the engine between applications or
+; machine resets - is finished, or the first RUN would only report it again (and
+; the RESUME that answered it would step the new pc past its first instruction:
+; the loader's a0 was lost that way on hardware, 2026-09-26).  The resume value
+; is a NOP for the one event RESUME re-executes, a delegated fetch; that one is
+; still not clean (the NOP would stand for the new pc's first instruction) and
+; needs an abort in the engine - it is only left by a reset in the middle of a
+; delegated fetch, which no program here makes.
+eng_idle:
+        sep     #$20
+        .a8
+        lda     a:WSTAT
+        rep     #$20
+        .a16
+        and     #$0002
+        beq     :+
+        lda     #$0013                  ; addi x0, x0, 0
+        sta     a:RVAL
+        lda     #0
+        sta     a:RVAL+2
+        sta     a:RESUME
+:       rts
 ; x1..x31 = 0: the register file has no reset.
 eng_clear:
         ldx     #4
@@ -663,7 +1046,7 @@ eng_clear:
 
 ; Undo what DONE says, in reverse.
 app_down:
-        lda     DONE
+        lda     DMAX
         sta     f:RT_TRACE + TR_DONE
         lda     #D_VIDEO
         trb     DONE
@@ -671,8 +1054,9 @@ app_down:
         jsr     video_off
         lda     #0
         sta     f:REG_VIDEO
-        step    8
-:       lda     #D_TOOLS
+        step    9
+:       jsr     file_close
+        lda     #D_TOOLS
         trb     DONE
         beq     :+
         pea     0                       ; ShutDownTools(0 = a pointer, the record)
@@ -680,7 +1064,7 @@ app_down:
         pei     (RECP)
         ldx     #SHUTDOWN_TOOLS
         jsl     TOOLS
-        step    9
+        step    10
 :       lda     #D_LOW
         trb     DONE
         beq     :+
@@ -688,7 +1072,7 @@ app_down:
         pei     (LOWH)
         ldx     #DISPOSE_HANDLE
         jsl     TOOLS
-        step    10
+        step    11
 :       lda     #D_MM
         trb     DONE
         beq     :+
@@ -697,12 +1081,12 @@ app_down:
         jsl     TOOLS
         ldx     #TL_SHUTDOWN
         jsl     TOOLS
-        step    11
+        step    12
 :       lda     #D_REG
         trb     DONE
         beq     :+
         jsr     reg_down
-        step    12
+        step    13
 :       rts
 
 ; The trace: counted, the fields of the last run cleared.
@@ -758,6 +1142,21 @@ tr_leave:
         sta     f:RT_TRACE + TR_PC
         lda     f:$EF0000 + WPC + 2
         sta     f:RT_TRACE + TR_PC + 2
+        lda     EOFV
+        sta     f:RT_TRACE + TR_EOF
+        lda     EOFV+2
+        sta     f:RT_TRACE + TR_EOF + 2
+        lda     #0
+        sta     f:RT_TRACE + TR_HI
+        sta     f:RT_TRACE + TR_HISZ
+        lda     NB
+        beq     :+
+        sta     f:RT_TRACE + TR_HISZ + 2
+        lda     HIB
+        clc
+        adc     #$0100
+        sta     f:RT_TRACE + TR_HI + 2
+:
         step    $FF
         rts
 
@@ -793,6 +1192,7 @@ entry:  rep     #$30
         sta     STATUS
         stp
 @eng:   jsr     eng_mode
+        jsr     eng_idle
         jsr     eng_clear
         lda     f:hdr_sp                ; sp: the header's, or $E00000
         ora     f:hdr_sp+2
@@ -903,8 +1303,11 @@ ev_ecall:
         bne     :+
         jmp     sys_peek
 :       cmp     #$5002
-        bne     enosys
+        bne     :+
         jmp     sys_poke
+:       cmp     #RT_CHUNK
+        bne     enosys
+        jmp     sys_chunk
 enosys: lda     #$FFDA                  ; -38, ENOSYS
 ret_neg:
         sta     a:WA0
@@ -1305,11 +1708,11 @@ c_fe:   .byte   "fetch fault", 0
 causes: .word   .loword(c_ill), .loword(c_ebr), .loword(c_ld), .loword(c_st), .loword(c_fe)
 
 ; ---- RISC-V code the runtime runs, in this bank (apple/rvvm/rt; the engine reads
-; the ROM itself).  rt_null: rung I2's program - it checks the environment block
-; it is given and exits 0, or the number of the check that failed.
+; the ROM itself).  rt_loader: the loader - the program's file through the bounce
+; buffer into the upper half, then into the program.
         .segment "RVCODE"
-rt_null:
-        .incbin "rt_null.bin"
+rt_loader:
+        .incbin "rt_loader.bin"
 
 ; The engine's result code (even, under 32) to its handler.
 evtab:  .word   .loword(loop)           ;  0 NEXT (never here)

@@ -51,6 +51,9 @@ typedef Vrv_pipe Top;
 #include "Vrv_mem_tb___024root.h"
 #endif
 #include "rv_ref.h"
+#ifdef RV_MEM
+#include "l2_model.h"
+#endif
 
 #include <deque>
 #include <algorithm>
@@ -70,8 +73,6 @@ enum : unsigned {
 static Top *dut;
 static std::vector<uint8_t> mirror;       // the host's view (RV_MEM)
 static bool vm_wrote = false;             // the VM wrote memory: pulse cancel
-static std::string l2_err;
-static unsigned evict_one_in = 150;       // --evict=N: other L2 users evict one clock in N
 static unsigned rec_stall_pct = 30;       // --rec-stall=P: the stream refuses a held record on P% of clocks
 static FILE *acc_dump = nullptr;          // --accdump=FILE: every direct data access, "L|S addr" (sizing studies)
 static unsigned hold_pct = 0;
@@ -117,129 +118,16 @@ static void vm_write(uint32_t a, uint8_t v) {
 }
 
 #ifdef RV_MEM
-// ---- the L2 model ----------------------------------------------------------
-static int32_t slot_ppn[16][8];
-static bool    slot_pin[16][8];
-static unsigned long long l2_fills = 0, l2_evicts = 0, l2_probes = 0, l2_reads = 0, l2_writes = 0, recs = 0;
-// page_cam's set: every 4-bit slice of the page number XORed (17 bits at 32 MB)
-static unsigned fold(uint32_t ppn) { unsigned f = 0; for (; ppn; ppn >>= 4) f ^= ppn & 15; return f; }
-static bool find(uint32_t ppn, unsigned &set, unsigned &way) {
-    set = fold(ppn);
-    for (way = 0; way < 8; way++) if (slot_ppn[set][way] == int32_t(ppn)) return true;
-    return false;
-}
-static void row_of(uint32_t ppn, unsigned line, uint32_t *w) {
-    const uint32_t a = (ppn << 8) | (line << 4);
-    for (int i = 0; i < 4; i++) w[i] = rd32(a + 4 * i);
-}
-// Evict a way of `set` (unpinned first), broadcasting it this clock.
-static int evict_in(unsigned set, bool &bcast, unsigned &bset, unsigned &bway) {
-    int cand[8], n = 0, any[8], m = 0;
-    for (int w = 0; w < 8; w++) {
-        if (slot_ppn[set][w] < 0) return w;          // a free way: nothing to evict
-        any[m++] = w;
-        if (!slot_pin[set][w]) cand[n++] = w;
-    }
-    const int w = n ? cand[rng() % n] : any[rng() % m];
-    slot_ppn[set][w] = -1; bcast = true; bset = set; bway = unsigned(w); l2_evicts++;
-    return w;
-}
-static std::vector<std::string> ev_ring;   // the last memory-side events, for a mismatch
-static void note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void note(const char *fmt, ...) {
-    char b[200]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
-    ev_ring.push_back(std::to_string(clocks) + ": " + b);
-    if (ev_ring.size() > 24) ev_ring.erase(ev_ring.begin());
-}
-static int il_wait = -1, il_done_in = -1, dr_wait = -1, dr_done_in = -1, pw_wait = -1;
-// A request's answer is taken on its ack's clock, as page_cam reads the row
-// RAM just after the ack: an eviction between the ack and the done must not
-// change what comes back.
-static bool il_ok_q; static unsigned il_set_q, il_way_q; static uint32_t il_row_q[4], dr_row_q[4];
-static bool pfill_pend = false; static int pfill_wait = -1; static uint32_t pfill_ppn;   // a probe's fill
-static bool dr_empty_q; static unsigned dr_set_q, dr_way_q;
+// ---- the L2 model (sim/l2_model.h) ------------------------------------------
+static L2Model<Top> l2(mem, rng, clocks);
+static unsigned long long recs = 0;
+#define note(...) l2.note(__VA_ARGS__)
 static void tick() {
     // the governor's token: withheld on --hold percent of clocks (a write-back waits)
     dut->run = run_mode && run_left != 0;
     if (run_left != 0 && run_left != ~0ull) run_left--;
     dut->hold = hold_pct && (rng() % 100 < hold_pct);
-    dut->il_ack = 0; dut->il_done = 0; dut->dr_ack = 0; dut->dr_done = 0;
-    dut->pw_ack = 0; dut->evict_v = 0;
-    bool bcast = false; unsigned bset = 0, bway = 0;
-    // the probe: ack after 0-2 clocks, the answer three clocks later
-    if (il_done_in >= 0 && il_done_in-- == 0) {
-        dut->il_done = 1;
-        dut->il_ok = il_ok_q;
-        for (int i = 0; i < 4; i++) dut->il_row[i] = il_row_q[i];
-        dut->il_set = il_set_q; dut->il_way = il_way_q;
-    }
-    if (dut->il_req && il_done_in < 0) {
-        if (il_wait < 0) il_wait = int(rng() % 3);
-        if (il_wait-- == 0) {
-            unsigned set, way;
-            dut->il_ack = 1;
-            il_ok_q = find(dut->il_ppn, set, way);
-            il_set_q = set; il_way_q = way;
-            if (il_ok_q) row_of(dut->il_ppn, dut->il_line, il_row_q);
-            else if (dut->il_fill && !pfill_pend) {             // the miss starts a fill (page_cam's)
-                pfill_pend = true; pfill_wait = 5 + int(rng() % 26); pfill_ppn = dut->il_ppn;
-            }
-            note("il ack ppn=%04x line=%x -> ok=%d %u/%u", unsigned(dut->il_ppn), unsigned(dut->il_line), il_ok_q, set, way);
-            il_done_in = 2; il_wait = -1; l2_probes++;
-        }
-    }
-    // the direct read: ack after 0-2 clocks, the row two clocks later
-    if (dr_done_in >= 0 && dr_done_in-- == 0) {
-        dut->dr_done = 1;
-        if (dr_empty_q) { char m[128]; snprintf(m, sizeof m, "L2: a direct read of an empty slot %u/%u\n", dr_set_q, dr_way_q); l2_err += m; }
-        for (int i = 0; i < 4; i++) dut->dr_row[i] = dr_row_q[i];
-    }
-    if (dut->dr_req && dr_done_in < 0) {
-        if (dr_wait < 0) dr_wait = int(rng() % 3);
-        if (dr_wait-- == 0) {
-            dut->dr_ack = 1;
-            dr_set_q = dut->dr_set; dr_way_q = dut->dr_way;
-            const int32_t ppn = slot_ppn[dr_set_q][dr_way_q];
-            dr_empty_q = ppn < 0;
-            if (!dr_empty_q) row_of(uint32_t(ppn), dut->dr_line, dr_row_q);
-            note("dr ack %u/%u line=%x (slot holds %04x)", dr_set_q, dr_way_q, unsigned(dut->dr_line), unsigned(ppn));
-            dr_done_in = 1; dr_wait = -1; l2_reads++;
-        }
-    }
-    // a probe's fill: 5-30 clocks, evicting (and broadcasting) if the set is
-    // full, then the placement report
-    dut->op_place_v = 0;
-    if (pfill_pend && pfill_wait-- == 0) {
-        unsigned set, way;
-        if (!find(pfill_ppn, set, way)) {
-            const int w = evict_in(fold(pfill_ppn), bcast, bset, bway);
-            slot_ppn[fold(pfill_ppn)][w] = int32_t(pfill_ppn); slot_pin[fold(pfill_ppn)][w] = false;
-        }
-        dut->op_place_v = 1; dut->op_place_ppn = pfill_ppn;
-        pfill_pend = false; l2_fills++;
-    }
-    // other L2 users now and then take a way (not on a fill's clock)
-    if (!bcast && evict_one_in && rng() % evict_one_in == 0) {
-        const unsigned set = rng() % 16;
-        bool anyres = false; for (int w = 0; w < 8; w++) anyres |= slot_ppn[set][w] >= 0;
-        if (anyres) {
-            // only a way that holds a page; unpinned first
-            int cand[8], n = 0, pinned[8], m = 0;
-            for (int w = 0; w < 8; w++) if (slot_ppn[set][w] >= 0) { if (slot_pin[set][w]) pinned[m++] = w; else cand[n++] = w; }
-            const int w = n ? cand[rng() % n] : pinned[rng() % m];
-            slot_ppn[set][w] = -1; bcast = true; bset = set; bway = unsigned(w); l2_evicts++;
-        }
-    }
-    if (bcast) { dut->evict_v = 1; dut->evict_set = bset; dut->evict_way = bway; note("evict %u/%u", bset, bway); }
-    // a word write: ack after 0-2 clocks
-    if (dut->pw_req) {
-        if (pw_wait < 0) pw_wait = int(rng() % 3);
-        if (pw_wait-- == 0) {
-            const uint32_t a = uint32_t(dut->pw_addr) << 2;
-            for (int i = 0; i < 4; i++) if (dut->pw_be & (1u << i)) mem[a + i] = uint8_t(dut->pw_data >> (8 * i));
-            dut->pw_ack = 1; pw_wait = -1; l2_writes++;
-        }
-    }
+    l2.pre_edge(dut);
     vm_wrote = false;
     if (!snoopq.empty()) { dut->cancel = 1; dut->wsn_a = snoopq.front(); snoopq.pop_front(); }
     // the event stream takes a held record, or not this clock; the mirror
@@ -248,10 +136,10 @@ static void tick() {
     if (dut->rec_v && dut->rec_take) {
         const uint64_t r = dut->rec;
         const uint32_t w0 = uint32_t(r), data = uint32_t(r >> 32);
-        if ((w0 >> 28) != 0xB) l2_err += "a record without tag 0xB\n";
+        if ((w0 >> 28) != 0xB) l2.err += "a record without tag 0xB\n";
         // {tag[31:28], enables[27:24], 0, word address[22:0]} (docs/PROTOCOL.md)
         const uint32_t a = (w0 & 0x7FFFFFu) << 2;
-        if (w0 & 0x00800000u) l2_err += "a record with bit 23 set\n";
+        if (w0 & 0x00800000u) l2.err += "a record with bit 23 set\n";
         for (int i = 0; i < 4; i++) if ((w0 >> (24 + i)) & 1) mirror[a + i] = uint8_t(data >> (8 * i));
         recs++;
     }
@@ -293,18 +181,18 @@ static void tick() {
         auto *R = dut->rootp;
         if (R->rv_mem_tb__DOT__f_valid && !R->rv_mem_tb__DOT__f_delegate && !R->rv_mem_tb__DOT__f_abort && R->rv_mem_tb__DOT__f_req) {
             const uint32_t fa = uint32_t(R->rv_mem_tb__DOT__f_addr) << 2;
-            if (R->rv_mem_tb__DOT__f_data != rd32(fa) && l2_err.size() < 2000) {
+            if (R->rv_mem_tb__DOT__f_data != rd32(fa) && l2.err.size() < 2000) {
                 char m[256];
                 snprintf(m, sizeof m, "FETCH @%llu: asked %06x, answered %08x, memory %08x (rv_mem ra=%06x is_f=%u)\n",
                          clocks, fa, R->rv_mem_tb__DOT__f_data, rd32(fa),
                          uint32_t(R->rv_mem_tb__DOT__u_mem__DOT__ra) << 2, R->rv_mem_tb__DOT__u_mem__DOT__is_f);
-                l2_err += m; fputs(m, stdout);
-                for (auto &e : ev_ring) printf("    %s\n", e.c_str());
+                l2.err += m; fputs(m, stdout);
+                for (auto &e : l2.ring) printf("    %s\n", e.c_str());
             }
         }
     }
     // what the memory side said on that clock
-    if (dut->ref_v) slot_pin[dut->ref_set][dut->ref_way] = dut->ref_on;
+    l2.post_edge(dut);
     dut->step = 0; dut->resume = 0; dut->w_en = 0; dut->pc_we = 0; dut->cancel = 0;
     clocks++;
 }
@@ -455,7 +343,11 @@ int main(int argc, char **argv) {
         else if (a.rfind("--expect-trap=", 0) == 0) expect_trap = strtol(val("--expect-trap=").c_str(), nullptr, 0);
         else if (a.rfind("--seed=", 0) == 0) rng.seed(unsigned(strtoul(val("--seed=").c_str(), nullptr, 0)));
         else if (a.rfind("--watch=", 0) == 0) watch = atoi(val("--watch=").c_str());
-        else if (a.rfind("--evict=", 0) == 0) evict_one_in = unsigned(strtoul(val("--evict=").c_str(), nullptr, 0));
+#ifdef RV_MEM
+        else if (a.rfind("--evict=", 0) == 0) l2.evict_one_in = unsigned(strtoul(val("--evict=").c_str(), nullptr, 0));
+#else
+        else if (a.rfind("--evict=", 0) == 0) {}   // no L2 without the memory side
+#endif
         else if (a.rfind("--accdump=", 0) == 0) acc_dump = fopen(val("--accdump=").c_str(), "w");
         else if (a == "--run") run_mode = true;
         else if (a == "--pipeprof") pipeprof = true;
@@ -516,7 +408,6 @@ int main(int argc, char **argv) {
 
     dut = new Top;
 #ifdef RV_MEM
-    for (auto &s : slot_ppn) for (auto &w : s) w = -1;
     mirror = mem;
     dut->all_deleg = delegate_all;               // --delegate-all: nothing direct
 #endif
@@ -699,12 +590,12 @@ int main(int argc, char **argv) {
         for (uint32_t i = 0; i < SPACE; i++) if (mem[i] != ref.m[i]) { if (!bad++) first = i; }
         if (bad) { snprintf(msg, sizeof msg, "LOCKSTEP: %zu bytes differ, first at %06zx (core %02x ref %02x)\n", bad, first, mem[first], ref.m[first]); fail += msg; }
 #ifdef RV_MEM
-        fail += l2_err;
+        fail += l2.err;
         size_t mb = 0, mf = 0;
         for (uint32_t i = 0; i < SPACE; i++) if (mirror[i] != mem[i]) { if (!mb++) mf = i; }
         if (mb) { snprintf(msg, sizeof msg, "MIRROR: %zu bytes differ from memory, first at %06zx\n", mb, mf); fail += msg; }
         printf("rvvm: L2: %llu probes, %llu direct reads, %llu fills, %llu evictions, %llu word writes, %llu records\n",
-               l2_probes, l2_reads, l2_fills, l2_evicts, l2_writes, recs);
+               l2.probes, l2.reads, l2.fills, l2.evicts, l2.writes, recs);
 #endif
         if (fail.empty()) printf("rvvm: lockstep with the reference: %llu instructions agree\n", instret);
     }

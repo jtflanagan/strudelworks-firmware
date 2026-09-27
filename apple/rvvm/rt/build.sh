@@ -15,7 +15,7 @@ objcopy="${xgcc%gcc}objcopy"
 mkdir -p "$out"
 for src in "$root"/apple/rvvm/rt/*.S; do
     n="$(basename "$src" .S)"
-    "$xgcc" -march=rv32im_zba_zbb -mabi=ilp32 -nostdlib -nostartfiles -Wl,-Ttext=0xF1E000 \
+    "$xgcc" -march=rv32im_zba_zbb_zifencei -mabi=ilp32 -nostdlib -nostartfiles -Wl,-Ttext=0xF1E000 \
         -o "$out/$n.elf" "$src"
     "$objcopy" -O binary "$out/$n.elf" "$out/$n.bin"
 done
