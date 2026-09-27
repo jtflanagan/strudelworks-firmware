@@ -1,0 +1,4 @@
+# sim/run_rv_app.sh's cases for SPLASH: NAME, then the runner's arguments ($work,
+# $up: the build directory and the application's name).  The picture in the
+# video banks must be TITLEPIC.565 (tools/wad_titlepic.py) when the key comes.
+show    --image=$work/$up.RV --launches=2 --key=Z --expect-code=0 --expect-video=$work/TITLEPIC.565

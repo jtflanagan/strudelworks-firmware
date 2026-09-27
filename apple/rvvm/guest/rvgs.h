@@ -25,6 +25,48 @@ struct rv_env {
 
 extern struct rv_env *rv_env;
 
+/* call65816 (ECALL $5010): a JSL on the 65816, described in the call area. */
+struct rvgs_call {
+    uint32_t target;                    /* 24-bit: $E10000 the toolbox, $E100B0 GS/OS */
+    uint16_t a, x, y;                   /* registers in */
+    uint16_t push_len;
+    uint32_t push;                      /* the stack's bytes from its top up: last pushed first */
+    uint16_t pull_len, reserved;        /* bytes the call leaves (its results)... */
+    uint32_t pull;                      /* ...and where they go */
+    uint16_t a_out, x_out, y_out, p_out;   /* registers out; p_out bit 0: carry */
+};
+long rvgs_call(struct rvgs_call *d);
+
+/* A toolbox call: `params` as they lie on the stack (the last pushed first,
+   longs low word first), `result` the result space the caller pushes first.
+   Returns the tool's error, 0 for none. */
+unsigned rvgs_tool(unsigned num, const void *params, unsigned plen, void *result, unsigned rlen);
+/* A class-1 GS/OS call on a parameter block in the call area (rvgs_scratch).
+   Returns GS/OS's error, 0 for none. */
+unsigned rvgs_gsos(unsigned num, void *pblock);
+/* The part of the call area librvgs leaves free, and its size. */
+void *rvgs_scratch(unsigned *size);
+
+/* Files, through the bounce buffer.  A path is a C string (prefix 9: = the
+   application's folder).  Negative returns are -(GS/OS error). */
+int  rvgs_open(const char *path);
+long rvgs_eof(int ref);
+long rvgs_read(int ref, void *buf, unsigned long n);   /* bytes read; fewer at the end */
+int  rvgs_close(int ref);
+
+/* The next key-down (or auto-key) from the Event Manager: its character. */
+int rvgs_key(void);
+/* The Event Manager's tick count (TickCount $1006): 60 a second. */
+uint32_t rvgs_ticks(void);
+
+/* A program's report for the host: 256 bytes in our RAM bank $EE (the runtime's
+   trace is at $EE:FF00), read with a peek - a program's own measurements, say.
+   Nothing reads it but a person; nothing clears it. */
+#define RVGS_REPORT 0x00EEFE00u
+
+void *memcpy(void *d, const void *s, unsigned long n);
+void *memset(void *d, int c, unsigned long n);
+
 static inline __attribute__((noreturn)) void rvgs_exit(int code) {
     register long a0 __asm__("a0") = code;
     register long a7 __asm__("a7") = 93;

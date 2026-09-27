@@ -57,6 +57,12 @@
 // --expect-code=N: the lifecycle's exit code (the runtime's own failures).
 // --launches=N: the application launched N times on the one engine (the Finder
 // would; nothing resets the engine in between), every launch checked.
+// Rung I4: --file=NAME=PATH, more files GS/OS has (the application's resources,
+// NAME as a program asks for it: 9:SPLASH.DAT); --key=C the key GetNextEvent
+// gives, after five calls that give nothing (default Z).
+// Rung I5: --expect-video=FILE, the RGB565 picture (320x200) the program must
+// have left in mode 1's banks, the mode described and claimed, and ENABLE set
+// then the global commit by its own stores.  TickCount counts 1000 cycles.
 
 #include "Vrvvm_sys.h"
 #include "Vrvvm_sys___024root.h"
@@ -166,9 +172,12 @@ static void wr32(unsigned a, uint32_t v) { wr16(a, v & 0xFFFF); wr16(a + 2, v >>
 struct AppCall { std::string name; std::vector<uint32_t> args; unsigned err = 0; };
 
 static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char *stub_path, bool stale,
-                   const char *image_path, long expect_code, unsigned launches, unsigned long long max_cycles) {
+                   const char *image_path, long expect_code, unsigned launches,
+                   const std::vector<std::string> &extra_files, int key, const char *expect_video,
+                   unsigned long long max_cycles) {
 #if !RVVM_MEM
-    (void)hex; (void)vm; (void)vm_bank; (void)stub_path; (void)stale; (void)image_path; (void)expect_code; (void)launches; (void)max_cycles;
+    (void)hex; (void)vm; (void)vm_bank; (void)stub_path; (void)stale; (void)image_path; (void)expect_code; (void)launches;
+    (void)extra_files; (void)key; (void)expect_video; (void)max_cycles;
     fprintf(stderr, "--app= needs the runner built with the engine's memory side (sim/run_rv_app.sh)\n");
     return 2;
 #else
@@ -198,6 +207,19 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     for (unsigned i = 0; i < ntools; i++) want_tools.push_back(rd32(list + 2 + 4 * i));
     const unsigned name_at = hdr + rd16(hdr + 16);
     const std::string image_name(reinterpret_cast<const char *>(&mem[name_at + 2]), rd16(name_at));
+    // The files GS/OS has: the program's, under the header's name, and the
+    // resources beside it (--file=NAME=PATH).
+    std::map<std::string, std::vector<uint8_t>> files;
+    if (image_path) files[image_name] = image;
+    for (auto &f : extra_files) {
+        const size_t eq = f.find('=');
+        if (eq == std::string::npos) { fprintf(stderr, "--file=%s: want NAME=PATH\n", f.c_str()); return 2; }
+        FILE *fp = fopen(f.substr(eq + 1).c_str(), "rb");
+        if (!fp) { fprintf(stderr, "cannot open %s\n", f.substr(eq + 1).c_str()); return 2; }
+        std::vector<uint8_t> d; int ch; while ((ch = fgetc(fp)) != EOF) d.push_back(uint8_t(ch));
+        fclose(fp);
+        files[f.substr(0, eq)] = d;
+    }
 
     // The machine as the loader leaves it: the stub entered native, 16-bit, with
     // A = the user ID and D/S on its direct page / stack segment.
@@ -252,6 +274,9 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     // before it relocates itself and clears its bss.
     uint32_t entered_at = 0;
     bool entered_same = false;
+    // Enhanced video as the program drove it: its own stores, seen in its 0xB
+    // records - ENABLE set, and the global commit after it.
+    long eng_enable_at = -1, eng_commit_at = -1;
     auto app_tick = [&]() {
         l2.pre_edge(dut);
         dut->inval = inval_next; inval_next = false;
@@ -260,8 +285,13 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             const uint64_t r = dut->rec;
             const uint32_t w0 = uint32_t(r), data = uint32_t(r >> 32);
             const uint32_t a = (w0 & 0x7FFFFFu) << 2;
-            for (int i = 0; i < 4; i++)
-                if (((w0 >> (24 + i)) & 1) && a + i >= HI) mirror[a + i - HI] = uint8_t(data >> (8 * i));
+            for (int i = 0; i < 4; i++) {
+                if (!((w0 >> (24 + i)) & 1)) continue;
+                const uint8_t v = uint8_t(data >> (8 * i));
+                if (a + i >= HI) mirror[a + i - HI] = v;
+                if (a + i == EV_CTL && v == 1) eng_enable_at = long(cycles);
+                if (a + i == EV_CTL + 1 && eng_enable_at >= 0) eng_commit_at = long(cycles);
+            }
             recs++;
         }
         dut->clk = 1; dut->eval();
@@ -288,8 +318,10 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     long ev_enable_at = -1, ev_commit_at = -1;
     unsigned ev_enable = 0xFF;
     unsigned stray = 0;
-    bool open = false;
-    size_t fpos = 0;
+    struct OpenFile { const std::vector<uint8_t> *data; size_t pos; };
+    std::map<unsigned, OpenFile> open;              // by refNum
+    unsigned next_ref = 1, events_asked = 0;
+    const unsigned KEY_AFTER = 5;                   // GetNextEvent: nothing this many times, then the key
 
 
     // A toolbox call: X = the call number, S as the dispatcher saw it (the
@@ -352,6 +384,24 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             tools_ref = ref;
             break;
         }
+        case 0x1006:                                // TickCount: a long, no parameters (cycles here)
+            c.name = "TickCount";
+            wr32(P, uint32_t(cycles / 1000));
+            break;
+        case 0x0A06: {
+            // GetNextEvent (the event record's long address at S+4, the mask,
+            // a word result): nothing KEY_AFTER times, then the key as a keyDown
+            c.name = "GetNextEvent";
+            const uint32_t ev = rd32(P) & 0xFFFFFF;
+            const unsigned mask = rd16(P + 4);
+            npop = 6;
+            if (!(mask & (1u << 3))) { snprintf(msg, sizeof msg, "GetNextEvent: the mask $%04X has no keyDown\n", mask); fail += msg; }
+            if (++events_asked <= KEY_AFTER) { wr16(P + 6, 0); wr16(ev, 0); break; }
+            wr16(ev, 3); wr32(ev + 2, uint32_t(key)); wr32(ev + 6, events_asked); wr32(ev + 10, 0); wr16(ev + 14, 0);
+            wr16(P + 6, 1);
+            events_asked = 0;
+            break;
+        }
         case 0x1901: {
             c.name = "ShutDownTools";
             const uint32_t ref = rd32(P);
@@ -371,12 +421,14 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         c.err = err;
         calls.push_back(c);
         for (int i = 3; i >= 1; i--) mem[sc_s + npop + i] = mem[sc_s + i];   // the return address, over the parameters
+        inval_next = true;     // what a tool writes the engine would have snooped: written here, its rows go
         sc_sout = sc_s + npop;
         sc_err = err;
     };
-    // A class-1 GS/OS call on its parameter block: the ones the runtime makes.
-    // Read writes the buffer as a DMA would (not through the 65816): the
-    // engine's rows are invalidated after it, as gs_top does for DMA.
+    // A class-1 GS/OS call on its parameter block.  The stand-in writes memory
+    // directly, where GS/OS would write it through the 65816 (snooped, row by
+    // row) or by DMA (every row: gs_top's inval): after every call the engine's
+    // rows are invalidated.
     auto gs_class1 = [&](unsigned num, uint32_t pb, AppCall &c) -> unsigned {
         c.args = {num, pb};
         const unsigned pcount = rd16(pb);
@@ -387,36 +439,42 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             const std::string asked(reinterpret_cast<const char *>(&mem[path + 2]), rd16(path));
             c.args.push_back(pcount >= 3 ? rd16(pb + 8) : 0);
             if (pcount < 2) return 0x0004;
-            if (!image_path || asked != image_name) return 0x0046;   // fileNotFound
-            if (open) { fail += "Open: the program's file is already open\n"; return 0x0050; }
+            auto f = files.find(asked);
+            if (f == files.end()) return 0x0046;                      // fileNotFound
             if (pcount >= 3 && rd16(pb + 8) != 1) { snprintf(msg, sizeof msg, "Open: requestAccess %u, want 1 (read)\n", rd16(pb + 8)); fail += msg; }
-            open = true; fpos = 0;
-            wr16(pb + 2, 1);
+            const unsigned ref = next_ref++;
+            open[ref] = {&f->second, 0};
+            wr16(pb + 2, ref);
             return 0;
         }
-        case 0x2019:
+        case 0x2019: {
             c.name = "GetEOF";
-            if (!open || rd16(pb + 2) != 1) return 0x0043;             // invalidRefNum
-            wr32(pb + 4, uint32_t(image.size()));
+            auto f = open.find(rd16(pb + 2));
+            if (f == open.end()) return 0x0043;                       // invalidRefNum
+            wr32(pb + 4, uint32_t(f->second.data->size()));
             return 0;
+        }
         case 0x2012: {
             c.name = "Read";
-            if (!open || rd16(pb + 2) != 1) return 0x0043;
+            auto f = open.find(rd16(pb + 2));
+            if (f == open.end()) return 0x0043;
             const uint32_t buf = rd32(pb + 4) & 0xFFFFFF, want = rd32(pb + 8);
-            const size_t n = std::min<size_t>(want, image.size() - fpos);
+            if (want > h_bounce) { snprintf(msg, sizeof msg, "Read of %u bytes: more than the bounce buffer's %u\n", want, h_bounce); fail += msg; }
+            const size_t n = std::min<size_t>(want, f->second.data->size() - f->second.pos);
             c.args.push_back(uint32_t(n));
-            if (want != h_bounce) { snprintf(msg, sizeof msg, "Read of %u bytes: not the bounce buffer's %u\n", want, h_bounce); fail += msg; }
-            memcpy(&mem[buf], image.data() + fpos, n);
-            fpos += n;
+            memcpy(&mem[buf], f->second.data->data() + f->second.pos, n);
+            f->second.pos += n;
             wr32(pb + 12, uint32_t(n));
             inval_next = true;
             return n == 0 ? 0x004C : 0;                                // eofEncountered
         }
-        case 0x2014:
+        case 0x2014: {
             c.name = "Close";
-            if (!open || rd16(pb + 2) != 1) return 0x0043;
-            open = false;
+            auto f = open.find(rd16(pb + 2));
+            if (f == open.end()) return 0x0043;
+            open.erase(f);
             return 0;
+        }
         default:
             c.name = "?";
             snprintf(msg, sizeof msg, "the stand-in has no GS/OS call $%04X\n", num);
@@ -446,6 +504,7 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         c.err = sc_err;
         for (int i = 0; i < 3; i++) mem[sc_s + 1 + i] = uint8_t(back >> (8 * i));
         calls.push_back(c);
+        inval_next = true;
     };
     // GS/OS's stack entry: the call number at S+4, the parameter block at S+6;
     // GS/OS takes both off.
@@ -456,6 +515,7 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         for (int i = 3; i >= 1; i--) mem[sc_s + 6 + i] = mem[sc_s + i];
         sc_sout = sc_s + 6;
         calls.push_back(c);
+        inval_next = true;     // GS/OS's results, written through the 65816 on the card: snooped
     };
 
     // What the 65816 may write: its direct page and stack, the low block, the
@@ -519,24 +579,46 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     // THE ORDER when the program loads: every Read of the file - a chunk at a
     // time, then one more that reads 0 - and Close at its end, before the tools
     // go down.
-    std::string one = "TLStartUp MMStartUp NewHandle StartUpTools";
+    // Each launch: the lifecycle's own calls before the program runs - the
+    // program's file read a chunk at a time, then one more Read that reads 0,
+    // and closed - and after it, exactly; the program's calls in between are
+    // its own business (its exit code says whether they did what it expected).
     const long code_want = expect_code;
-    if (code_want == 0) {
-        one += " Open GetEOF";
-        for (size_t k = 0; k <= (image.size() + h_bounce - 1) / h_bounce; k++) one += " Read";
-        one += " Close";
+    const bool loaded = code_want >= 0;             // the program ran (the runtime's own failures are negative)
+    std::vector<std::string> pre = {"TLStartUp", "MMStartUp", "NewHandle", "StartUpTools"};
+    if (loaded) {
+        pre.push_back("Open"); pre.push_back("GetEOF");
+        for (size_t k = 0; k <= (image.size() + h_bounce - 1) / h_bounce; k++) pre.push_back("Read");
+        pre.push_back("Close");
     }
-    one += " ShutDownTools DisposeHandle MMShutDown TLShutDown QuitGS";
-    std::string wseq;
-    for (unsigned k = 0; k < launches; k++) wseq += (k ? " " : "") + one;
-    if (code_want == 0 && seq != wseq) fail += "the calls are not the lifecycle's: want " + wseq + "\n";
+    const std::vector<std::string> post = {"ShutDownTools", "DisposeHandle", "MMShutDown", "TLShutDown", "QuitGS"};
+    {
+        std::vector<std::string> launch;
+        unsigned k = 0;
+        for (auto &c : calls) {
+            launch.push_back(c.name);
+            if (c.name != "QuitGS") continue;
+            k++;
+            const bool pre_ok = launch.size() >= pre.size() + post.size() && std::equal(pre.begin(), pre.end(), launch.begin());
+            const bool post_ok = launch.size() >= post.size() && std::equal(post.begin(), post.end(), launch.end() - post.size());
+            if (!pre_ok || !post_ok || (!loaded && launch.size() > pre.size() + post.size() + 1)) {
+                std::string want, got;
+                for (auto &n : pre) want += n + " ";
+                want += "... ";
+                for (auto &n : post) want += n + " ";
+                for (auto &n : launch) got += n + " ";
+                fail += "launch " + std::to_string(k) + ": the calls are not the lifecycle's: want " + want + "- got " + got + "\n";
+            }
+            launch.clear();
+        }
+    }
     // Whatever happened: every start has its stop.
     auto count = [&](const char *n) { return std::count_if(calls.begin(), calls.end(), [&](const AppCall &c) { return c.name == n && c.err == 0; }); };
     const std::pair<const char *, const char *> pairs[] = {{"TLStartUp", "TLShutDown"}, {"MMStartUp", "MMShutDown"},
         {"NewHandle", "DisposeHandle"}, {"StartUpTools", "ShutDownTools"}, {"Open", "Close"}};
     for (auto &p : pairs)
         if (count(p.first) != count(p.second)) { snprintf(msg, sizeof msg, "%ld %s but %ld %s\n", long(count(p.first)), p.first, long(count(p.second)), p.second); fail += msg; }
-    if (open) fail += "the program's file was left open\n";
+    if (!open.empty()) fail += std::to_string(open.size()) + " file(s) left open\n";
     if (!quit) fail += "the stub never quit (" + std::to_string(quit_s.size()) + " of " + std::to_string(launches) + " launches)\n";
     for (unsigned q : quit_s)
         if (q != APP_DP_END - 3) { snprintf(msg, sizeof msg, "the stack at QuitGS is $%04X, want $%04X: the runtime left it unbalanced\n", q, APP_DP_END - 3); fail += msg; break; }
@@ -563,13 +645,13 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     if (memcmp(&mem[TRACE], "RVRT", 4)) fail += "no trace at $EE:FF00\n";
     if (t_step != 0xFF) fail += "the trace: the lifecycle did not come back\n";
     if (int32_t(t_code) != code_want) { snprintf(msg, sizeof msg, "the exit code is %d, want %ld\n", int32_t(t_code), code_want); fail += msg; }
-    if (code_want == 0 && t_stat != 1) fail += "the program did not exit (a trap?)\n";
+    if (loaded && t_stat != 1) fail += "the program did not exit (a trap?)\n";
     if (t_low != low) fail += "the trace's low block is not NewHandle's\n";
-    const unsigned want_done = 0x0F | ((h_flags & 1) ? 0x10 : 0) | (code_want == 0 ? 0x20 : 0);
-    if (code_want == 0 && t_done != want_done) { snprintf(msg, sizeof msg, "the steps done $%02X, want $%02X\n", t_done, want_done); fail += msg; }
+    const unsigned want_done = 0x0F | ((h_flags & 1) ? 0x10 : 0) | (loaded ? 0x20 : 0);
+    if (loaded && t_done != want_done) { snprintf(msg, sizeof msg, "the steps done $%02X, want $%02X\n", t_done, want_done); fail += msg; }
     // The program: loaded where the environment block said, byte for byte, and
     // every byte the engine wrote up there reached the host by its records.
-    if (code_want == 0) {
+    if (loaded) {
         if (t_hi < HI || (t_hi & 0xFFFF) || t_hisz == 0 || t_hi + t_hisz > SPACE_APP) fail += "the upper-half memory is not whole banks above 16 MB\n";
         else if (t_eof != image.size()) fail += "the trace's file size is not the program's\n";
         else if (entered_at != t_hi) { snprintf(msg, sizeof msg, "the engine entered the upper half at $%08X, not the program's first byte $%08X\n", entered_at, t_hi); fail += msg; }
@@ -589,6 +671,34 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     // Enhanced video: off, and the global commit after it
     if ((h_flags & 1) || stale) {
         if (ev_enable != 0 || ev_commit_at < ev_enable_at) fail += "enhanced video: not left off (ENABLE 0, then the global commit)\n";
+    }
+    // The picture the program drew (--expect-video): mode 1's banks, rows 0-99
+    // in $80 and 100-199 in $81, 640 bytes a row, as the reference says.
+    if (expect_video) {
+        FILE *fv = fopen(expect_video, "rb");
+        std::vector<uint8_t> want;
+        int ch;
+        if (fv) { while ((ch = fgetc(fv)) != EOF) want.push_back(uint8_t(ch)); fclose(fv); }
+        if (want.size() != 320 * 200 * 2) { snprintf(msg, sizeof msg, "--expect-video=%s: not a 320x200 RGB565 picture\n", expect_video); fail += msg; }
+        else {
+            unsigned bad = 0, first = 0;
+            for (unsigned y = 0; y < 200; y++)
+                for (unsigned b = 0; b < 640; b++)
+                    if (mem[0x800000 + (y / 100) * 0x10000 + (y % 100) * 640 + b] != want[y * 640 + b]) { if (!bad++) first = y * 640 + b; }
+            if (bad) { snprintf(msg, sizeof msg, "the picture: %u bytes differ, first at row %u byte %u\n", bad, first / 640, first % 640); fail += msg; }
+            else printf("app: the picture in banks $80-$81 is the reference, 64000 pixels\n");
+        }
+        if (mem[EV_CTL + 0x11] != 1 || mem[EV_CTL + 0x13] != 0x80 || mem[EV_CTL + 0x14] != 2)
+            fail += "enhanced video: mode slot 0 is not a bitmap on banks $80-$81\n";
+        bool claimed = true;
+        for (unsigned i = 0; i < 4000; i++) claimed &= mem[EV_CTL + 0x1000 + i] == 0x55;
+        if (!claimed) fail += "enhanced video: the claim map is not slot 0 everywhere\n";
+        if (eng_enable_at < 0 || eng_commit_at < eng_enable_at) fail += "enhanced video: the program never set ENABLE and then the global commit\n";
+    }
+    if (memcmp(&mem[0xEEFE00], "SPLR", 4) == 0 || memcmp(&mem[0xEEFE00], "RVRP", 4) == 0) {
+        printf("app: the program's report:");
+        for (unsigned i = 1; i < 12; i++) printf(" %u", rd32(0xEEFE00 + 4 * i));
+        printf("\n");
     }
     if (low_water <= APP_DP_END) printf("app: the stack's deepest write $%04X: %u bytes of the %u-byte segment\n", low_water, APP_DP_END + 1 - low_water, APP_DP_END + 1 - APP_DP);
     if (stray > 1) { snprintf(msg, sizeof msg, "%u stray writes in all\n", stray); fail += msg; }
@@ -614,6 +724,9 @@ int main(int argc, char **argv) {
     bool stale = false;
     long expect_code = 0;
     unsigned launches = 1;
+    std::vector<std::string> app_files;
+    int key = 'Z';
+    const char *expect_video = nullptr;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto val = [&](const char *k) { return a.substr(strlen(k)); };
@@ -630,6 +743,9 @@ int main(int argc, char **argv) {
         else if (a.rfind("--app=", 0) == 0) app = argv[i] + 6;
         else if (a == "--stale") stale = true;
         else if (a.rfind("--image=", 0) == 0) image = argv[i] + 8;
+        else if (a.rfind("--file=", 0) == 0) app_files.push_back(val("--file="));
+        else if (a.rfind("--expect-video=", 0) == 0) expect_video = argv[i] + 15;
+        else if (a.rfind("--key=", 0) == 0) key = (unsigned char)val("--key=")[0];
         else if (a.rfind("--launches=", 0) == 0) launches = unsigned(strtoul(val("--launches=").c_str(), nullptr, 0));
         else if (a.rfind("--expect-code=", 0) == 0) expect_code = strtol(val("--expect-code=").c_str(), nullptr, 0);
         else if (a == "--ref") use_ref = true;
@@ -639,7 +755,7 @@ int main(int argc, char **argv) {
     }
     if (app) {
         if (!hex || !vm || guest || ref_only || use_ref) { fprintf(stderr, "--app= takes --hex= --vm= and no guest, no reference\n"); return 2; }
-        return run_app(hex, vm, vm_bank, app, stale, image, expect_code, launches, max_cycles);
+        return run_app(hex, vm, vm_bank, app, stale, image, expect_code, launches, app_files, key, expect_video, max_cycles);
     }
     if (!guest || (!ref_only && (!hex || !vm))) { fprintf(stderr, "need --guest= and (--hex= --vm= | --ref-only)\n"); return 2; }
 

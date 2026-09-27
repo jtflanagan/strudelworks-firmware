@@ -4,9 +4,11 @@
 # An application backed by RISC-V (docs/RVV2_INTEROP.md), built into OUTDIR:
 #   APP.stub  the stub's raw bytes (apple/rvvm/stub/stub.s with apple/rvvm/APP/app.inc)
 #   APP       the stub as a GS/OS application (tools/omf_s16.py: S16 + ~Direct)
-#   APP.RV    the program: apple/rvvm/APP/*.c with apple/rvvm/guest/crt0_app.S,
-#             a static PIE flattened; its image header sizes its memory
-#             (apple/rvvm/APP/app.mk may set HEAP / STACK, bytes)
+#   APP.RV    the program: apple/rvvm/APP/*.c with apple/rvvm/guest/crt0_app.S and
+#             librvgs (apple/rvvm/guest/rvgs.c, png.c), a static PIE flattened; its image
+#             header sizes its memory (apple/rvvm/APP/app.mk may set HEAP / STACK, bytes)
+#   APP.res   the resources beside it: apple/rvvm/APP/resources.sh OUTDIR, if there is
+#             one, makes them and names them (one a line)
 #
 #   apple/rvvm/build_app.sh APP OUTDIR
 set -euo pipefail
@@ -25,7 +27,11 @@ python3 "$root/tools/omf_s16.py" "$out/$up.stub" "$out/$up" > /dev/null
 HEAP=0x10000; STACK=0x10000
 [ -f "$src/app.mk" ] && . "$src/app.mk"
 clang --target=riscv32-unknown-elf -march=rv32im_zba_zbb_zifencei -mabi=ilp32 -O2 -fPIE -ffreestanding \
+    -ffunction-sections -fdata-sections -Wl,--gc-sections \
     -nostdlib -fuse-ld=lld -Wl,-pie -Wl,--no-dynamic-linker -T "$env/link.ld" -I"$env" \
     -Wl,--defsym=__heap_size=$HEAP -Wl,--defsym=__stack_size=$STACK \
-    "$env/crt0_app.S" "$src"/*.c -o "$out/$up.RV.elf"
+    "$env/crt0_app.S" "$env/rvgs.c" "$env/png.c" "$src"/*.c -o "$out/$up.RV.elf"
 llvm-objcopy -O binary "$out/$up.RV.elf" "$out/$up.RV"
+: > "$out/$up.res"
+[ -x "$src/resources.sh" ] && "$src/resources.sh" "$out" > "$out/$up.res"
+true

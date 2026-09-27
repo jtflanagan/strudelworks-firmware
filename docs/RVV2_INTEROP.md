@@ -2,19 +2,19 @@
 
 Status: **2026-09-26, branch `riscv_v2`. DESIGN reviewed by the user 2026-09-26. The engine's map
 rule is built (gs_map3, TIMING MET 0/91,875, on the card). RUNG I1 DONE ON HARDWARE (fw d422b82).
-RUNGS I2 AND I3 DONE ON HARDWARE (under System 6.0.1, launched from the Finder by the MCP): the
-lifecycle (registration in `$EE`, the Tool Locator and Memory Manager, the low block, the environment
-block, StartUpTools, enhanced video's ownership, all undone in reverse) and now THE PROGRAM - its file
-opened through GS/OS (`9:SPLASH.RV`, 25,724 bytes from the 800K floppy), its image header read, six
-banks of the upper half registered to it, the RISC-V loader in `$F1` pulling the file through the
-bounce buffer into `$0100_0000`, and the program running there: its eleven checks pass (the
-environment block, 160 KB of heap across banks, the stack, the call area, its pathname, its
-relocations, a 24 KB table word for word) and it exits 0 at its own ECALL (`$0100_00BC`), twice in a
-row. `sim/run_rv_app.sh` (the engine's memory side and 32 MB in the bench, sim/l2_model.h) passes a
-clean machine, a stale registration and a missing file, each launched twice; five mutations caught.
-Hardware found two bugs the bench then learned to see: StartUpTools is `$1801` / ShutDownTools `$1901`
-(read off the machine's own Tool Locator, not recalled), and an engine event left pending by the last
-program (its exit's ECALL) must be finished before the next program starts.** The card's main memory is
+THE SPLASH MILESTONE IS DONE ON HARDWARE (rungs I1-I5, System 6.0.1, launched from the Finder by
+the MCP): SPLASH, a GS/OS application whose program runs on the RISC-V engine in the upper 16 MB,
+reads `TITLEPIC.PNG` (DOOM's title screen, 36,940 bytes, made from the shareware WAD at build time)
+off the 800K floppy through the bounce buffer in 6 ticks, decodes it with the RISC-V PNG decoder
+(`apple/rvvm/guest/png.c`) in **5 ticks (about 83 ms)**, draws it into enhanced video's mode 1 (a
+320x200 RGB565 bitmap in banks `$80`-`$81`) in 1 tick, turns the compositing on, waits for a key
+through the Event Manager and goes back to the Finder with enhanced video off. RVTEST, beside it on
+the disk, is the interop's own test application (the lifecycle, the loader, call65816, files, keys).
+`sim/run_rv_app.sh` runs both (RVTEST: clean, stale registration, missing program, each launched
+twice; SPLASH: the picture in the banks against a reference, byte for byte); the decoder's own test
+(`ctests/png_test.c`) covers stored/fixed/dynamic blocks, all filters and four colour types in
+lockstep with the reference model. Not yet: generated tool wrappers (the signature table's source
+is the user's decision), callbacks.** The card's main memory is
 the whole 32 MB DDR3 bank: the lower 16 MB the 65816's, the upper 16 MB the RISC-V engine's alone,
 all of it through the L2 (fw 06b4b3f, on hardware). This
 document is how a RISC-V program becomes a GS/OS application. The decisions marked *(user)* were
@@ -272,6 +272,77 @@ descriptor and everything it points at live in the call area**, never in the upp
   block; the runtime resumes the engine at `fn` with the tool's parameters copied into the call
   area; `callback_return` goes back. Not at interrupt time in v1 (as the old design).
 
+### Rung I4, as built and on hardware (2026-09-26)
+
+**The primitive: ECALL `$5010` `call65816(desc)`**, a0 = the descriptor's address, which must be
+below 16 MB (the call area; the runtime refuses anything else with `-14`, EFAULT). It returns 0:
+what the call itself said is in the descriptor.
+
+```c
+struct rvgs_call {               /* in the call area; 32 bytes, little-endian */
+    uint32_t target;             /* 24-bit JSL target: $E10000 the toolbox, $E100B0 GS/OS */
+    uint16_t a, x, y;            /* registers in (native, M = X = 16-bit) */
+    uint16_t push_len;           /* bytes of the push image */
+    uint32_t push;               /* the image: the stack's bytes from its top (S+1) upward -
+                                    the last pushed parameter first, the result space last */
+    uint16_t pull_len;           /* bytes left on the stack by the call (its results) ... */
+    uint16_t reserved;
+    uint32_t pull;               /* ... and where they go */
+    uint16_t a_out, x_out, y_out, p_out;   /* registers out; p_out bit 0 = carry (an error) */
+};
+```
+
+The runtime copies the image onto its own 65816 stack (the stub's `~Direct` segment), pushes a
+return address and enters the target by RTL - a JSL to an address held in data, no code written
+anywhere - with the registers from the descriptor. On the return it records A/X/Y/P, restores its
+data bank (GS/OS may change it), copies `pull_len` bytes from the stack to `pull` and takes them off,
+and checks the stack is where it was: a call whose image does not match what the callee takes off is
+an error in the descriptor, reported (`-22`, EINVAL, after the stack is set right). A 16-byte pad
+lies between the runtime's own frames and the image, so a callee that takes off up to 16 bytes more
+than the image holds damages only the pad (a mutation: a GS/OS descriptor two bytes short - the
+program sees the error, the lifecycle finishes unharmed). The callee must keep D - every tool and
+GS/OS does. Interrupts stay on throughout; the call runs at the 65816's
+speed like any tool call.
+
+**GS/OS is called through its stack entry `$E1:00B0` only** (the parameter block's long address and
+the call number on the stack - the way the panel's accessory has always called it): no inline data,
+so no code built at run time. A parameter block and everything it points at must be below 16 MB.
+
+**librvgs** (`apple/rvvm/guest/rvgs.[ch]`), built into every program:
+- `rvgs_call(desc)`; `rvgs_tool(num, params, plen, result, rlen)` - the parameters as they lie on
+  the stack, copied into the call area with the result space after them; returns the tool's error;
+  `rvgs_gsos(num, pblock)` - a parameter block already in the call area.
+- File I/O through the bounce buffer: `rvgs_open(path)` (a C string, copied into the call area as a
+  class-1 string; `9:` = the application's folder), `rvgs_eof`, `rvgs_read(ref, buf, n)` - GS/OS
+  reads into the bounce buffer a chunk at a time and the program copies each chunk out to wherever
+  it wants it, the upper half included - and `rvgs_close`.
+- Events: `rvgs_key()` - GetNextEvent (`$0A06`, read off the machine: 6 bytes of parameters, a word
+  result) for a key-down, until one comes.
+
+**Not in I4:** the generated wrappers (their signature table's source and licensing are still open -
+a decision for the user; I4's few calls are written by hand on `rvgs_tool`), and callbacks (nothing
+the splash calls needs one).
+
+### Rung I5, the splash, as built (2026-09-26)
+
+- **The picture**: `tools/wad_titlepic.py` makes `TITLEPIC.PNG` (TITLEPIC's column posts through
+  PLAYPAL's first palette; an 8-bit palette PNG) from `../doom-shareware/doom1.wad` at build time
+  (`apple/rvvm/splash/resources.sh`) - nothing WAD-derived is in git - and, for the bench, the RGB565
+  picture a right decode and blit leave in the banks.
+- **The decoder** (`apple/rvvm/guest/png.[ch]`, part of every program): zlib inflate - Mark Adler's
+  puff, bit-serial canonical Huffman, chosen to be right before fast - with the Adler-32 and every
+  chunk's CRC-32 checked, the five row filters, colour types 0/2/3/6 at 8 bits. Its test is
+  `ctests/png_test.c` on synthetic PNGs from `tools/png_testdata.py` (a small encoder of our own, so
+  each case is there on purpose; its output cross-checked with PIL). Measured on the card: 5 ticks
+  for DOOM's title (36,103 bytes of image data) - the baseline for a faster inflate later.
+- **Enhanced video**: the program owns it (the header's flag; `rv_env.video` = `$E20000`), writes
+  the picture two pixels a store straight into banks `$80`-`$81`, then mode slot 0 (bitmap, banks
+  `$80`, 2), its COMMIT, the claim map (slot 0 everywhere) and ENABLE with the global commit - all
+  its own stores, reaching the host as 0xB records. The runtime turns it off at exit.
+- **Time**: `rvgs_ticks()` (the Event Manager's TickCount, 60 Hz). **The report**: a program may
+  leave numbers for the host at `$EE:FE00` (`RVGS_REPORT`); SPLASH leaves the stage it reached, each
+  step's ticks, the file's size and the picture's shape and kind.
+
 ## I/O
 
 `read`/`write` and every file service take buffers in the low block. The guest library bounces a
@@ -292,7 +363,9 @@ registers more banks), enhanced video helpers (the control bank, descriptors, co
   engine bench's L2 model, shared - behind it, 32 MB): the card's 65816 and the engine, the stub
   entered as the loader would, GS/OS's entry points (`$E10000`, `$E100A8`, `$E100B0`) 65816
   trampolines into a C++ stand-in that answers the calls the runtime makes, the program's file served
-  from `--image=` (Read written as a DMA would, the engine's rows invalidated after). The verdict: the
+  from `--image=` and its resources from `--file=` (the stand-in writes memory directly where GS/OS
+and the tools would write it through the 65816 - snooped - or by DMA, so every call invalidates the
+engine's rows; GetNextEvent gives `--key=` after five empty calls). The verdict: the
   calls in order with their arguments (the start/stop record against the stub's header, every Read of
   the file, Close before the tools go down), every start with its stop, the trace, the upper half
   holding the file byte for byte when the program starts and the host's mirror of it (the engine's own
@@ -309,8 +382,8 @@ registers more banks), enhanced video helpers (the control bank, descriptors, co
 | I1 **done** | `$F1` on the card (a host conf key loads the runtime image there as the panel is at `$F0`), `tools/omf_s16.py`, the host's 800K disk builder, a stub whose runtime entry only returns | the Finder launches the stub, it enters `$F1` and quits back, on hardware |
 | I2 **done** | registration, the low block, the environment block, tool startup/shutdown, enhanced video ownership | the lifecycle, in sim (stand-in) and on hardware |
 | I3 **done** | the loader, the image read through GS/OS, upper-half banks | a guest loaded into the upper 16 MB runs and exits back to the Finder |
-| I4 | `call65816`, generated wrappers, bounce I/O, callbacks, the Event Manager key | a guest reads a file and waits for a key |
-| I5 | the splash: enhanced video mode 1, the PNG decoder (measured) | DOOM's title screen, a key, back to the Finder |
+| I4 **done** | `call65816`, bounce I/O, the Event Manager key (generated wrappers and callbacks: later) | a guest reads a file and waits for a key |
+| I5 **done** | the splash: enhanced video mode 1, the PNG decoder (measured: 5 ticks) | DOOM's title screen, a key, back to the Finder |
 
 ## Open
 

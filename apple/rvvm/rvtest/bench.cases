@@ -1,0 +1,6 @@
+# sim/run_rv_app.sh's cases for RVTEST: NAME, then the runner's arguments ($work,
+# $up: the build directory and the application's name).  Each launched twice on
+# the one engine; RVTEST exits $100 | the key.
+clean   --image=$work/$up.RV --launches=2 --key=Z --expect-code=0x15A
+stale   --image=$work/$up.RV --stale --launches=2 --key=q --expect-code=0x171
+noimage --expect-code=-5 --launches=2

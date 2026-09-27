@@ -139,6 +139,16 @@ NB      = $60           ; upper-half banks: how many...
 HIB     = $62           ; ...and the first (0-255: bank $100 + HIB)
 DMAX    = $64           ; every step ever done (DONE loses them as they are undone)
 GSN     = $66           ; a GS/OS call's number
+DSC     = $68           ; call65816: the descriptor (4)
+CA      = $6C           ;   the registers, in and out
+CX      = $6E
+CY      = $70
+CP      = $72
+PUSHN   = $74           ;   the push image's bytes
+PULLN   = $76           ;   the results' bytes
+CPTR    = $78           ;   the image, then the results' home (4)
+DSTP    = $7C           ;   the stack, as a long pointer (4)
+CSP     = $80           ;   S before the call
 
 D_REG   = $0001         ; DONE: registered in $EE
 D_MM    = $0002         ;       TLStartUp + MMStartUp
@@ -241,6 +251,19 @@ GS_CLOSE = $2014
 GS_GETEOF = $2019
 GS_EOF_ERR = $004C      ; Read at the end of the file
 RT_CHUNK = $5020        ; the loader's ECALL: the next chunk of the program's file
+RT_CALL  = $5010        ; call65816 (struct rvgs_call, apple/rvvm/guest/rvgs.h)
+C_TARGET = 0            ; the descriptor
+C_A      = 4
+C_X      = 6
+C_Y      = 8
+C_PUSHN  = 10
+C_PUSH   = 12
+C_PULLN  = 16
+C_PULL   = 20
+C_AOUT   = 24
+C_XOUT   = 26
+C_YOUT   = 28
+C_POUT   = 30
 TL_STARTUP   = $0201
 TL_SHUTDOWN  = $0301
 MM_STARTUP   = $0202
@@ -903,6 +926,157 @@ env_hi: lda     #0
         ldx     #PATH
         jmp     env_ptr
 
+; ECALL call65816 (docs/RVV2_INTEROP.md, rung I4): a0 = a descriptor below 16 MB
+; (struct rvgs_call, in the call area).  Its push image goes onto this stack,
+; the target is entered by RTL - a return address pushed first, then the
+; target - 1, so a JSL to an address held in data needs no code written
+; anywhere - with the descriptor's A/X/Y, native and 16-bit; on the way back
+; A/X/Y/P are recorded, the data bank is $EF again (GS/OS may change it), the
+; results are taken off the stack into `pull`, and the stack must be where it
+; was.  a0 = 0; -14 a descriptor or buffer at or above 16 MB; -22 the callee
+; took off more or less than the image said (the stack is set right first).
+; The loop reaches here by JMP with S = RUN_S: nothing of ours is on the stack
+; but the lifecycle's frames above it - so CALL_PAD bytes are left between them
+; and the image, and a callee that takes off up to that many more than the image
+; holds damages only the pad (and is reported), not the runtime's return path.
+CALL_PAD = 16
+sys_call:
+        lda     APPM
+        bne     :+
+        jmp     enosys
+@fault: lda     #$FFF2                  ; -14
+        jmp     ret_neg
+:       lda     a:WA0+2
+        cmp     #$0100
+        bcs     @fault
+        sta     DSC+2
+        lda     a:WA0
+        sta     DSC
+        ldy     #C_A
+        lda     [DSC],y
+        sta     CA
+        ldy     #C_X
+        lda     [DSC],y
+        sta     CX
+        ldy     #C_Y
+        lda     [DSC],y
+        sta     CY
+        ldy     #C_PUSHN
+        lda     [DSC],y
+        sta     PUSHN
+        ldy     #C_PULLN
+        lda     [DSC],y
+        sta     PULLN
+        ldy     #C_PULL+2               ; the buffers below 16 MB too
+        lda     [DSC],y
+        cmp     #$0100
+        bcs     @fault
+        ldy     #C_PUSH+2
+        lda     [DSC],y
+        cmp     #$0100
+        bcs     @fault
+        sta     CPTR+2
+        ldy     #C_PUSH
+        lda     [DSC],y
+        sta     CPTR
+        tsc
+        sec
+        sbc     #CALL_PAD
+        sta     CSP                     ; where the callee must leave S
+        sec
+        sbc     PUSHN
+        tcs                             ; the image's room: S+1 .. S+PUSHN
+        inc
+        sta     DSTP
+        stz     DSTP+2                  ; the stack is in bank 0
+        ldy     #0
+        sep     #$20
+        .a8
+@cp:    cpy     PUSHN
+        beq     @go
+        lda     [CPTR],y
+        sta     [DSTP],y
+        iny
+        bra     @cp
+@go:    phk                             ; the return: as a JSL would leave it
+        per     @back - 1
+        ldy     #C_TARGET+2
+        lda     [DSC],y
+        pha                             ; the target's bank...
+        rep     #$20
+        .a16
+        ldy     #C_TARGET
+        lda     [DSC],y
+        dec
+        pha                             ; ...and its address - 1 (RTL adds 1, within the bank)
+        ldy     CY
+        ldx     CX
+        lda     CA
+        rtl
+@back:  php                             ; the callee's P, before anything changes it
+        rep     #$30
+        sta     CA
+        stx     CX
+        sty     CY
+        sep     #$20
+        .a8
+        pla
+        sta     CP
+        stz     CP+1
+        lda     #$EF
+        pha
+        plb                             ; the window's bank again
+        rep     #$20
+        .a16
+        ldy     #C_PULL                 ; the results: S+1 .. S+PULLN -> pull
+        lda     [DSC],y
+        sta     CPTR
+        iny
+        iny
+        lda     [DSC],y
+        sta     CPTR+2
+        tsc
+        inc
+        sta     DSTP
+        ldy     #0
+        sep     #$20
+        .a8
+@pl:    cpy     PULLN
+        beq     @pd
+        lda     [DSTP],y
+        sta     [CPTR],y
+        iny
+        bra     @pl
+@pd:    rep     #$20
+        .a16
+        tsc
+        clc
+        adc     PULLN
+        tcs
+        ldy     #C_AOUT
+        lda     CA
+        sta     [DSC],y
+        ldy     #C_XOUT
+        lda     CX
+        sta     [DSC],y
+        ldy     #C_YOUT
+        lda     CY
+        sta     [DSC],y
+        ldy     #C_POUT
+        lda     CP
+        sta     [DSC],y
+        tsc
+        cmp     CSP
+        beq     :+
+        lda     RUN_S                   ; not where it should be: the loop's stack, and say so
+        tcs
+        lda     #$FFEA                  ; -22
+        jmp     ret_neg
+:       lda     RUN_S                   ; the loop's stack (the pad off)
+        tcs
+        lda     #0
+        jmp     ret_a
+
 ; ECALL RT_CHUNK (the loader's): a0 = the bytes of the program's file now in the
 ; bounce buffer - the first chunk, read before the engine started, then one
 ; Read each - 0 at the end (the file is closed then), -error from GS/OS.
@@ -1306,8 +1480,11 @@ ev_ecall:
         bne     :+
         jmp     sys_poke
 :       cmp     #RT_CHUNK
-        bne     enosys
+        bne     :+
         jmp     sys_chunk
+:       cmp     #RT_CALL
+        bne     enosys
+        jmp     sys_call
 enosys: lda     #$FFDA                  ; -38, ENOSYS
 ret_neg:
         sta     a:WA0
