@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2026 jtflanagan
-# The riscv-tests smoke suites (rv32ui, rv32um, rv32uzba, rv32uzbb) and rvvm's
+# The riscv-tests smoke suites (rv32ui, rv32um, rv32uzba, rv32uzbb, rv32uf, rv32ud) and rvvm's
 # own edge tests (apple/rvvm/guest/tests: bank crossings, every trap cause) on
 # the RISC-V engine, each in lockstep with the reference model (docs/REQ_RVVM.md).
 # An edge test names its verdict on a "# rvvm-expect: exit" or "trap N" line,
@@ -30,6 +30,8 @@ work="$root/sim/rvvm_work/tests"
 tests="${RISCV_TESTS:-$root/../riscv-tests}"
 xgcc="${RVGCC:-$root/../xpack-riscv-none-elf-gcc-15.2.0-1/bin/riscv-none-elf-gcc}"
 objcopy="${xgcc%gcc}objcopy"
+# (the C tests' 64-bit division: libgcc, integer-only, the same ilp32 ABI as the apps')
+libgcc="${xgcc%/bin/*}/lib/gcc/riscv-none-elf/15.2.0/rv32im/ilp32/libgcc.a"
 env="$root/apple/rvvm/guest"
 mkdir -p "$work"
 
@@ -54,11 +56,14 @@ done
 "$runner" --build-only >/dev/null
 
 pass=0; fail=0; skip=0; failed=()
-for d in rv32ui rv32um rv32uzba rv32uzbb; do
+for d in rv32ui rv32um rv32uzba rv32uzbb rv32uf rv32ud; do
+    # (the FP suites hold sources RV32 does not build - rv32ud's move: its Makefrag names the rest)
+    sc="$(sed -n '/_sc_tests *=/,/^$/p' "$tests/isa/$d/Makefrag" 2>/dev/null | tr -d '\\' | sed 's/.*=//')"
     for src in "$tests/isa/$d"/*.S; do
         n="$d-$(basename "$src" .S)"
         [ -n "$filter" ] && [[ "$n" != *"$filter"* ]] && continue
-        if ! "$xgcc" -march=rv32im_zba_zbb_zifencei -mabi=ilp32 -nostdlib -nostartfiles -T "$env/link.ld" \
+        case $d in rv32uf|rv32ud) [[ " $(echo $sc) " == *" $(basename "$src" .S) "* ]] || continue;; esac
+        if ! "$xgcc" -march=rv32imfd_zba_zbb_zifencei -mabi=ilp32 -nostdlib -nostartfiles -T "$env/link.ld" \
                 -Wl,--defsym=__load=0x800000 \
                 -I"$env" -I"$tests/isa/macros/scalar" "$src" -o "$work/$n.elf" > "$work/$n.log" 2>&1 ||
            ! "$objcopy" -O binary "$work/$n.elf" "$work/$n.bin" >> "$work/$n.log" 2>&1; then
@@ -88,7 +93,7 @@ for src in "$root/apple/rvvm/guest/tests"/*.S; do
         "trap "*) extra+=(--expect-trap="${expect#trap }");;
         *) echo "FAIL $n: no rvvm-expect line"; fail=$((fail + 1)); failed+=("$n"); continue;;
     esac
-    if ! "$xgcc" -march=rv32im_zba_zbb_zifencei -mabi=ilp32 -nostdlib -nostartfiles -T "$env/link.ld" \
+    if ! "$xgcc" -march=rv32imfd_zba_zbb_zifencei -mabi=ilp32 -nostdlib -nostartfiles -T "$env/link.ld" \
             -Wl,--defsym=__load="$at" \
             -I"$root/apple/rvvm/guest/tests" "$src" -o "$work/$n.elf" > "$work/$n.log" 2>&1 ||
        ! "$objcopy" -O binary "$work/$n.elf" "$work/$n.bin" >> "$work/$n.log" 2>&1; then
@@ -107,9 +112,9 @@ done
 for src in "$root/apple/rvvm/guest/ctests"/*.c; do
     n="rvvm-c-$(basename "$src" .c)"
     [ -n "$filter" ] && [[ "$n" != *"$filter"* ]] && continue
-    if ! clang --target=riscv32-unknown-elf -march=rv32im_zba_zbb -mabi=ilp32 -O2 -fPIE -ffreestanding \
+    if ! clang --target=riscv32-unknown-elf -march=rv32imfd_zba_zbb -mabi=ilp32 -O2 -fPIE -ffreestanding -fno-math-errno \
             -nostdlib -fuse-ld=lld -Wl,-pie -Wl,--no-dynamic-linker -T "$env/link.ld" -I"$env" \
-            "$env/crt0.S" "$src" -o "$work/$n.elf" > "$work/$n.log" 2>&1 ||
+            "$env/crt0.S" "$src" "$libgcc" -o "$work/$n.elf" > "$work/$n.log" 2>&1 ||
        ! llvm-objcopy -O binary "$work/$n.elf" "$work/$n.bin" >> "$work/$n.log" 2>&1; then
         fail=$((fail + 1)); failed+=("$n")
         printf "FAIL %-24s build: %s\n" "$n" "$(grep -m1 -i error "$work/$n.log")"

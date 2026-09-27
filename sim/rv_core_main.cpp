@@ -67,7 +67,7 @@ typedef Vrv_pipe Top;
 enum : unsigned {
     R_NEXT = 0, R_ECALL = 2, R_EBREAK = 4, R_ILLEGAL = 6, R_LFAULT = 8, R_SFAULT = 10, R_FFAULT = 12,
     R_DLB = 14, R_DLBU = 16, R_DLH = 18, R_DLHU = 20, R_DLW = 22, R_DSB = 24, R_DSH = 26, R_DSW = 28,
-    R_DFETCH = 30,
+    R_DFETCH = 30, R_DFL = 32, R_DFS = 34,
 };
 
 static Top *dut;
@@ -237,6 +237,18 @@ static void tick() {
 #endif
 
 static uint32_t reg(unsigned i) { const uint8_t k = dut->rsel; dut->rsel = i; dut->eval(); const uint32_t v = dut->rval; dut->rsel = k; return v; }
+static uint64_t freg(unsigned i) { const uint8_t k = dut->frsel; dut->frsel = i; dut->eval(); const uint64_t v = dut->frval; dut->frsel = k; return v; }
+// The FP state against the model's (the registers, frm and fflags): "" when equal,
+// else what differs.
+static std::string fp_diff(const Ref &r) {
+    std::string d;
+    char b[160];
+    for (unsigned i = 0; i < 32; i++)
+        if (r.f[i] != freg(i)) { snprintf(b, sizeof b, "  differs: f%u core=%016" PRIx64 " ref=%016" PRIx64 "\n", i, freg(i), r.f[i]); d += b; }
+    const unsigned fc = dut->fcsr, rc = (r.frm << 5) | r.fflags;
+    if (fc != rc) { snprintf(b, sizeof b, "  differs: fcsr core=%02x ref=%02x\n", fc, rc); d += b; }
+    return d;
+}
 // ---- the row-cache sizing study (--cachestudy, with --ref-only) ----------------------
 // Row caches of 16-byte rows fed by the reference model's accesses: set-associative
 // (ways = 1 direct-mapped ... ways = rows fully associative), LRU within a set.
@@ -300,13 +312,15 @@ static void on_retire() {
     if (g_ref.nondet) { g_ref.x[10] = reg(10); if (g_ref.x[17] == 0x5000) g_ref.x[11] = reg(11); g_ref.nondet = false; }
     bool same = g_ref.status == 0 && g_ref.pc == dut->pc;
     for (int i = 0; i < 32 && same; i++) same = g_ref.x[i] == reg(unsigned(i));
-    if (!same) {
+    const std::string fd = same ? fp_diff(g_ref) : std::string();
+    if (!same || !fd.empty()) {
         char m[256];
         snprintf(m, sizeof m, "LOCKSTEP (run): diverged after instruction %llu at %08x (core pc %08x, ref pc %08x)\n",
                  g_instret, pc0, dut->pc, g_ref.pc);
         g_fail += m;
         for (int i = 0; i < 32; i++)
             if (g_ref.x[i] != reg(unsigned(i))) printf("  differs: x%d core=%08x ref=%08x\n", i, reg(unsigned(i)), g_ref.x[i]);
+        printf("%s", fd.c_str());
     }
 }
 // (and one clock more: the memory side takes the snoop through a register)
@@ -457,11 +471,13 @@ int main(int argc, char **argv) {
     again:
         if (r != R_NEXT) {
             if (r != R_DFETCH) events++;
+            if (getenv("EVDBG")) printf("EV r=%u addr=%08x iw=%08x data=%08x\n", r, dut->ev_addr, dut->ev_iw, dut->ev_data);
             const uint32_t ea = dut->ev_addr, data = dut->ev_data;
             // THE 65816 REACHES ONLY THE LOWER 16 MB: a load, store or fetch handed to
             // it above that is one the real VM could never perform - a design error in
             // the engine or its memory side, not a guest's trap.
-            const bool deleg = (r >= R_DLB && r <= R_DLW) || (r >= R_DSB && r <= R_DSW) || r == R_DFETCH;
+            const bool deleg = (r >= R_DLB && r <= R_DLW) || (r >= R_DSB && r <= R_DSW) || r == R_DFETCH ||
+                               r == R_DFL || r == R_DFS;
             if (deleg && ea >= LOW) {
                 snprintf(msg, sizeof msg, "a delegated access at $%08x: the 65816 cannot reach above $00FFFFFF\n", ea);
                 fail += msg;
@@ -517,6 +533,17 @@ int main(int argc, char **argv) {
                 const unsigned w = r == R_DSB ? 1 : r == R_DSH ? 2 : 4;
                 for (unsigned i = 0; i < w; i++) vm_write(ea + i, uint8_t(data >> (8 * i)));
                 drain(); dut->resume = 1; tick();
+            } else if (r == R_DFL || r == R_DFS) {
+                // an FP access, whole: flw/fsw 4 bytes, fld/fsd 8 (f3 of the instruction)
+                const bool dbl = ((dut->ev_iw >> 12) & 7) == 3;
+                if (r == R_DFL) {
+                    const uint32_t lo = rd32(ea), hi = dbl ? rd32(ea + 4) : 0;
+                    drain(); dut->resume = 1; dut->resume_val = lo; dut->resume_hi = hi; tick();
+                } else {
+                    const uint64_t v = (uint64_t(dut->ev_datah) << 32) | data;
+                    for (unsigned i = 0; i < (dbl ? 8u : 4u); i++) vm_write(ea + i, uint8_t(v >> (8 * i)));
+                    drain(); dut->resume = 1; tick();
+                }
             } else {
                 status = 2; cause = trap_of(r); tval = ea; stop_pc = run_mode ? dut->pc : pc; stopped = true;
                 if (!cause) { snprintf(msg, sizeof msg, "unknown result %u\n", r); fail += msg; }
@@ -544,12 +571,14 @@ int main(int argc, char **argv) {
 #endif
             bool same = ref.status == 0 && ref.pc == dut->pc;
             for (int i = 0; i < 32 && same; i++) same = ref.x[i] == reg(i);
-            if (!same) {
+            const std::string fd = same ? fp_diff(ref) : std::string();
+            if (!same || !fd.empty()) {
                 snprintf(msg, sizeof msg, "LOCKSTEP: diverged after instruction %llu at %08x (%08x %s)\n", instret, pc, iw_pre,
                          mnemonic(iw_pre) ? mnemonic(iw_pre) : "?");
                 fail += msg;
                 printf("core pc=%08x ref pc=%08x (ref status %u)\n", dut->pc, ref.pc, ref.status);
                 for (int i = 0; i < 32; i++) if (ref.x[i] != reg(i)) printf("  differs: %s core=%08x ref=%08x\n", abi[i], reg(i), ref.x[i]);
+                printf("%s", fd.c_str());
                 break;
             }
         } else {
@@ -585,6 +614,7 @@ int main(int argc, char **argv) {
         }
         for (int i = 0; i < 32; i++)
             if (ref.x[i] != reg(i)) { snprintf(msg, sizeof msg, "LOCKSTEP: at the stop %s core=%08x ref=%08x\n", abi[i], reg(i), ref.x[i]); fail += msg; }
+        { const std::string fd = fp_diff(ref); if (!fd.empty()) fail += "LOCKSTEP: at the stop the FP state differs\n" + fd; }
         if (out != ref.out) fail += "LOCKSTEP: console output differs\n";
         size_t bad = 0, first = 0;
         for (uint32_t i = 0; i < SPACE; i++) if (mem[i] != ref.m[i]) { if (!bad++) first = i; }

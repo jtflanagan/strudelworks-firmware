@@ -6,6 +6,11 @@
 
 #define RVTEST_RV32U  .option norvc;
 #define RVTEST_RV64U  RVTEST_RV32U
+/* F and D: always on (no mstatus.FS); fcsr is 0 from reset */
+#define RVTEST_RV32UF RVTEST_RV32U
+#define RVTEST_RV64UF RVTEST_RV32U
+#define RVTEST_RV32UD RVTEST_RV32U
+#define RVTEST_RV64UD RVTEST_RV32U
 
 #define TESTNUM gp
 

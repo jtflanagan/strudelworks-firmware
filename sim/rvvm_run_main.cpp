@@ -1173,6 +1173,20 @@ int main(int argc, char **argv) {
         if (engine) return i == 0 ? 0 : uint32_t(ENG(rf)[i]);
         return rd32(DP_REGS + 4 * i);
     };
+    // the engine's FP state against the model's: "" when equal, else what differs
+    auto eng_fp_diff = [&](const Ref &r) -> std::string {
+        std::string d;
+        char b[160];
+        for (int i = 0; i < 32; i++)
+            if (r.f[i] != uint64_t(ENG(frf)[i])) {
+                snprintf(b, sizeof b, "  differs: f%d eng=%016llx ref=%016llx\n", i,
+                         (unsigned long long)ENG(frf)[i], (unsigned long long)r.f[i]);
+                d += b;
+            }
+        const unsigned fc = (unsigned(ENG(frm_q)) << 5) | ENG(fflags_q), rc = (r.frm << 5) | r.fflags;
+        if (fc != rc) { snprintf(b, sizeof b, "  differs: fcsr eng=%02x ref=%02x\n", fc, rc); d += b; }
+        return d;
+    };
     unsigned long long win_stalls = 0;
     // After every clock: if the engine retired an instruction: the model runs the same one, then
         // the engine's pc and registers must equal the model's.
@@ -1190,7 +1204,9 @@ int main(int argc, char **argv) {
                 if (ref.nondet) { ref.x[10] = vm_reg(10); if (ref.x[17] == 0x5000) ref.x[11] = vm_reg(11); ref.nondet = false; }
                 bool same = ref.status == 0 && ref.pc == vm_pc();
                 for (int i = 0; i < 32 && same; i++) same = ref.x[i] == vm_reg(i);
-                if (!same) {
+                const std::string fd = same ? eng_fp_diff(ref) : std::string();
+                if (!fd.empty()) printf("%s", fd.c_str());
+                if (!same || !fd.empty()) {
                     diverged = true;
                     snprintf(msg, sizeof msg, "LOCKSTEP: the engine diverged at instruction %llu, %08x %08x %s\n", instret, rpc, iw, last_name.c_str());
                     fail += msg;
@@ -1311,6 +1327,7 @@ int main(int argc, char **argv) {
                 snprintf(msg, sizeof msg, "LOCKSTEP: at the stop %s vm=%08x ref=%08x\n", abi[i], vm_reg(i), ref.x[i]);
                 fail += msg;
             }
+        if (engine) { const std::string fd = eng_fp_diff(ref); if (!fd.empty()) fail += "LOCKSTEP: at the stop the FP state differs\n" + fd; }
         // The VM's console also carries the monitor's report; compare the part before it.
         if (vm_out.compare(0, ref.out.size(), ref.out) != 0) fail += "LOCKSTEP: console output differs\n";
         // All of memory but the VM's own direct page and stack.

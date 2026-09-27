@@ -204,7 +204,7 @@ srcs=(
     "$root/rtl/gs/apple_mmu.sv" "$root/rtl/gs/rom_loader.sv" "$root/rtl/gs/page_cam.sv"
     "$root/rtl/gs/way_ram.sv" "$root/rtl/common/page_client.sv" "$root/rtl/common/wb_arb.sv"
     "$root/rtl/common/hd_card.sv" "$root/rtl/common/ft601_msg_rx.sv" "$root/rtl/common/fd_bank.sv"
-    "$root/rtl/gs/rv_engine.sv" "$root/rtl/gs/rv_pipe.sv" "$root/rtl/gs/rv_mem.sv"
+    "$root/rtl/gs/rv_engine.sv" "$root/rtl/gs/rv_pipe.sv" "$root/rtl/gs/rv_fpu.sv" "$root/rtl/gs/rv_mem.sv"
 )
 # THE RISC-V ENGINE (docs/REQ_RVVM.md): --engine=VM.bin (apple/rvvm/rvengine.s,
 # assembled for bank $F1) --guest=PROG.bin [--guest-at=ADDR, default $020000]

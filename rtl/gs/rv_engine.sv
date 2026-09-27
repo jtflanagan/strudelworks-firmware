@@ -28,6 +28,9 @@
 //   +98-+9B  the ID: "RVE" and the version, 2 (RUN)              R
 //   +9C      status: bit 0 busy, bit 1 an event pending          R
 //   +A4,+A5  the RUN slice: clocks per read before a yield (4096) R/W
+//   +A8-+AB  the resume value's high word (a delegated fld's)    R/W
+//   +AC-+AF  ev_data's high word (a delegated fsd's)             R
+//   +B0      fcsr: {frm, fflags}                                 R
 // A register, the pc and the resume value are written in 16-bit halves: the
 // even byte is latched and the odd byte commits the half (so a 16-bit STA -
 // low byte first - lands whole).  A register or pc write cancels a
@@ -116,13 +119,16 @@ module rv_engine #(
     localparam logic [7:0] O_PC = 8'h80, O_STEP = 8'h84, O_RESUME = 8'h86, O_EVADDR = 8'h88,
                            O_EVIW = 8'h8C, O_EVDATA = 8'h90, O_RVAL = 8'h94, O_ID = 8'h98,
                            O_STAT = 8'h9C,
-                           O_RUN = 8'h85, O_SLICE = 8'hA4;
+                           O_RUN = 8'h85, O_SLICE = 8'hA4, O_RVALH = 8'hA8, O_EVDATAH = 8'hAC,
+                           O_FCSR = 8'hB0;
 
     // ---- the core -------------------------------------------------------------
     logic        step, resume, w_en, pc_we, run;
-    logic [31:0] resume_val, w_val, pc_wval;
+    logic [31:0] resume_val, resume_hi, w_val, pc_wval;
     logic [4:0]  rsel, w_sel;
-    wire  [31:0] rval, pc, ev_addr, ev_data, ev_iw;
+    wire  [31:0] rval, pc, ev_addr, ev_data, ev_datah, ev_iw;
+    wire  [63:0] frval;
+    wire  [7:0]  fcsr;
     wire         busy;
     wire  [7:0]  result;
     wire         f_req, d_req, d_we, req_spec;
@@ -138,10 +144,12 @@ module rv_engine #(
 
     rv_pipe #(.AW (AW)) u_core (
         .clk (clk), .rst (rst),
-        .step (step), .cancel (cancel), .resume (resume), .resume_val (resume_val),
+        .step (step), .cancel (cancel), .resume (resume), .resume_val (resume_val), .resume_hi (resume_hi),
         .run (run), .hold (!gov_ok), .paid (gov_pay),
-        .busy (busy), .retired (retired), .result (result), .ev_addr (ev_addr), .ev_data (ev_data), .ev_iw (ev_iw),
-        .rsel (rsel), .rval (rval), .w_en (w_en), .w_sel (w_sel), .w_val (w_val),
+        .busy (busy), .retired (retired), .result (result), .ev_addr (ev_addr), .ev_data (ev_data),
+        .ev_datah (ev_datah), .ev_iw (ev_iw),
+        .rsel (rsel), .rval (rval), .frsel (5'd0), .frval (frval), .fcsr (fcsr),
+        .w_en (w_en), .w_sel (w_sel), .w_val (w_val),
         .pc_we (pc_we), .pc_wval (pc_wval), .pc (pc),
         .f_req (f_req), .f_addr (f_addr), .f_pre (f_pre), .req_spec (req_spec),
         .f_valid (f_valid), .f_delegate (f_delegate), .f_abort (f_abort), .f_data (f_data),
@@ -202,6 +210,7 @@ module rv_engine #(
     // ---- the window's own registers -----------------------------------------
     logic [7:0]  lo_latch;          // the even byte of a half being written
     logic [31:0] rval_q;            // the resume value
+    logic [31:0] rvalh_q;           // ...its high word
     logic        armed;             // the STEP read in progress has stepped the core
     logic [15:0] slice;             // RUN: clocks per read before a yield
     logic [15:0] run_clk;           // ...spent by the read in progress
@@ -210,6 +219,7 @@ module rv_engine #(
     wire is_reg  = win_off[7] == 1'b0;                 // +00-+7F
     wire is_pc   = win_off[7:2] == O_PC[7:2];
     wire is_rval = win_off[7:2] == O_RVAL[7:2];
+    wire is_rvalh = win_off[7:2] == O_RVALH[7:2];
     wire step_rd = pre_sel && pre_rw && (pre_off == O_STEP || pre_off == O_RUN);
     wire run_rd  = pre_sel && pre_rw && pre_off == O_RUN;
 
@@ -250,6 +260,9 @@ module rv_engine #(
         else if (win_off[7:2] == O_EVIW[7:2])    win_rdata = byte_of(ev_iw, win_off[1:0]);
         else if (win_off[7:2] == O_EVDATA[7:2])  win_rdata = byte_of(ev_data, win_off[1:0]);
         else if (is_rval)                        win_rdata = byte_of(rval_q, win_off[1:0]);
+        else if (is_rvalh)                       win_rdata = byte_of(rvalh_q, win_off[1:0]);
+        else if (win_off[7:2] == O_EVDATAH[7:2]) win_rdata = byte_of(ev_datah, win_off[1:0]);
+        else if (win_off == O_FCSR)              win_rdata = fcsr;
         else if (win_off[7:2] == O_ID[7:2])      win_rdata = byte_of({8'd2, "E", "V", "R"}, win_off[1:0]);
         else if (win_off == O_STAT)              win_rdata = {6'd0, result != 8'd0, busy};
         else if (win_off == O_SLICE)             win_rdata = slice[7:0];
@@ -271,21 +284,23 @@ module rv_engine #(
         pc_wval = merge(pc, win_off[1], half);
         resume  = wr && win_off == O_RESUME;
         resume_val = rval_q;
+        resume_hi  = rvalh_q;
     end
     always_ff @(posedge clk) begin
         if (rst) begin
             // $80-$DF is VOID to the 65816 until it becomes RAM (REQ_RVVM), and the
             // engine reads the physical image: keep the two views equal - $02-$7F.
-            lo_latch <= 8'd0; rval_q <= 32'd0;
+            lo_latch <= 8'd0; rval_q <= 32'd0; rvalh_q <= 32'd0;
             slice <= 16'(SLICE0);
         end else if (wr) begin
             if (!win_off[0]) lo_latch <= srv_wdata;
             if (commit_half && is_rval) rval_q <= merge(rval_q, win_off[1], half);
+            if (commit_half && is_rvalh) rvalh_q <= merge(rvalh_q, win_off[1], half);
             if (win_off == O_SLICE)         slice[7:0]  <= srv_wdata;
             if (win_off == O_SLICE + 8'd1)  slice[15:8] <= srv_wdata;
         end
     end
 
     wire unused = &{1'b0, il_ack, il_done, il_ok, il_row, il_set, il_way, dr_ack, dr_done, dr_row,
-                    op_place_v, op_place_ppn, evict_v, evict_set, evict_way, pw_ack, inval};
+                    op_place_v, op_place_ppn, evict_v, evict_set, evict_way, pw_ack, inval, frval};
 endmodule

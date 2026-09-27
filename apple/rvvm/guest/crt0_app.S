@@ -8,7 +8,8 @@
      +12 memory: the image and its bss (_end - _start)
      +16 the stack, +20 the heap to reserve (link.ld's __stack_size, __heap_size)
    Then as crt0.S: relocate, gp, .bss; rv_env = the environment block;
-   main(0, 0); exit with its result. */
+   main(0, 0); exit with its result.  Built for F and D, it first clears fcsr
+   (round to nearest, no flags): nothing resets the engine between programs. */
         .section .text.init
         .option norvc
         .globl  _start
@@ -19,6 +20,9 @@ _start: j       1f
         .word   __stack_size
         .word   __heap_size
 1:      mv      s0, a0                  /* the environment block, kept past the start-up */
+#ifdef __riscv_flen
+        fscsr   zero
+#endif
         lla     t0, _start
         lla     t1, link_start
         lw      t2, 0(t1)               /* where it was linked (read before it is relocated) */

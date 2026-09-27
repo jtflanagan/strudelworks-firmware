@@ -1,0 +1,18 @@
+# meson cross file: picolibc for the RISC-V applications (docs/RVV2_FP.md) - clang/lld,
+# F and D with the ilp32d ABI, position-independent (guests are static PIEs).
+# `sim/build_rvvm_picolibc.sh fd` uses it; picolibc-cross.txt is the soft-float baseline's.
+[binaries]
+c = ['clang', '--target=riscv32-unknown-elf', '-march=rv32imfd_zba_zbb', '-mabi=ilp32d', '-fPIE', '-nostdlib']
+c_ld = 'lld'
+ar = 'llvm-ar'
+nm = 'llvm-nm'
+strip = 'llvm-strip'
+
+[host_machine]
+system = 'none'
+cpu_family = 'riscv32'
+cpu = 'riscv'
+endian = 'little'
+
+[properties]
+skip_sanity_check = true

@@ -19,7 +19,7 @@ mkdir -p "$work"
 
 run="$work/obj/rvvm_run"
 srcs=("$root/sim/rvvm_run_main.cpp" "$root/sim/rv_ref.h" "$root/sim/rvvm_sys.sv" "$root/rtl/gs/cpu65816.sv"
-      "$root/rtl/gs/rv_engine.sv" "$root/rtl/gs/rv_pipe.sv" "$root/rtl/gs/cpu65816_ucode.hex")
+      "$root/rtl/gs/rv_engine.sv" "$root/rtl/gs/rv_pipe.sv" "$root/rtl/gs/rv_fpu.sv" "$root/rtl/gs/cpu65816_ucode.hex")
 stale=0
 [ -x "$run" ] || stale=1
 for s in "${srcs[@]}"; do [ "$s" -nt "$run" ] && stale=1; done
@@ -30,9 +30,9 @@ if [ $stale = 1 ]; then
         -GUCODE_FILE="\"$root/rtl/gs/cpu65816_ucode.hex\"" \
         -GUCODE0_FILE="\"$root/rtl/gs/cpu65816_ucode0.hex\"" \
         -GUSEQ0_FILE="\"$root/rtl/gs/cpu65816_useq0.hex\"" \
-        -CFLAGS -O2 \
+        -CFLAGS "-O2 -I$root/../berkeley-softfloat-3/source/include" -LDFLAGS "$root/../berkeley-softfloat-3/build/Linux-x86_64-GCC/softfloat.a" \
         -Mdir "$work/obj" "$root/sim/rvvm_sys.sv" "$root/rtl/gs/cpu65816.sv" \
-        "$root/rtl/gs/rv_engine.sv" "$root/rtl/gs/rv_pipe.sv" "$root/sim/rvvm_run_main.cpp" \
+        "$root/rtl/gs/rv_engine.sv" "$root/rtl/gs/rv_pipe.sv" "$root/rtl/gs/rv_fpu.sv" "$root/sim/rvvm_run_main.cpp" \
         -o rvvm_run > "$work/verilator.log" 2>&1 || {
             echo "build failed:" >&2; tail -30 "$work/verilator.log" >&2; exit 1; }
 fi

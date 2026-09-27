@@ -28,18 +28,20 @@ ld65 -C "$out/stub.cfg" -o "$out/$up.stub" "$out/$up.o"
 python3 "$root/tools/omf_s16.py" "$out/$up.stub" "$out/$up" > /dev/null
 HEAP=0x10000; STACK=0x10000; PICOLIBC=0; EXTRA_SRCS=""; EXTRA_CFLAGS=""
 [ -f "$src/app.mk" ] && . "$src/app.mk"
-cc=(clang --target=riscv32-unknown-elf -march=rv32im_zba_zbb_zifencei -mabi=ilp32 -O2 -fPIE
+# F and D, doubles passed in FP registers (ilp32d; docs/RVV2_FP.md)
+cc=(clang --target=riscv32-unknown-elf -march=rv32imfd_zba_zbb_zifencei -mabi=ilp32d -O2 -fPIE
     -ffunction-sections -fdata-sections -I"$env")
 link=(-nostdlib -fuse-ld=lld -Wl,-pie -Wl,--no-dynamic-linker -Wl,--gc-sections -T "$env/link.ld"
       -Wl,--defsym=__heap_size=$HEAP -Wl,--defsym=__stack_size=$STACK)
 libs=()
 posix=()
 if [ "$PICOLIBC" = 1 ]; then
-    # picolibc (sim/build_rvvm_picolibc.sh) and libgcc for soft float and 64-bit
-    # division, as CoreMark's build; picolibc's system calls are librvgs's
-    pico="$root/sim/rvvm_work/picolibc"
-    [ -f "$pico/lib/libc.a" ] || "$root/sim/build_rvvm_picolibc.sh" > /dev/null
-    libgcc="${LIBGCC_DIR:-$root/../xpack-riscv-none-elf-gcc-15.2.0-1/lib/gcc/riscv-none-elf/15.2.0/rv32im/ilp32}"
+    # picolibc's F/D variant (sim/build_rvvm_picolibc.sh fd) and libgcc's (64-bit
+    # division, the conversions RV32 has no instruction for); picolibc's system
+    # calls are librvgs's
+    pico="$root/sim/rvvm_work/picolibc-fd"
+    [ -f "$pico/lib/libc.a" ] || "$root/sim/build_rvvm_picolibc.sh" fd > /dev/null
+    libgcc="${LIBGCC_DIR:-$root/../xpack-riscv-none-elf-gcc-15.2.0-1/lib/gcc/riscv-none-elf/15.2.0/rv32imfd_zicsr/ilp32d}"
     cc+=(-isystem "$pico/include")
     posix=("$env/rvgs_posix.c")
     libs=(-L"$pico/lib" -L"$libgcc" -Wl,--start-group -lc -lm -lgcc -Wl,--end-group)

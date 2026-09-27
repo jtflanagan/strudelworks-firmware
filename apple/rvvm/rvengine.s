@@ -36,6 +36,8 @@ EVADDR  = WIN + $88
 EVIW    = WIN + $8C
 EVDATA  = WIN + $90
 RVAL    = WIN + $94
+RVALH   = WIN + $A8             ; the resume value's high word (a delegated fld's)
+EVDATAH = WIN + $AC             ; ev_data's high word (a delegated fsd's)
 WID     = WIN + $98
 WSTAT   = WIN + $9C     ; bit 1: an event pending
 ; the registers the services use, as window addresses
@@ -1520,6 +1522,44 @@ ev_sw:  jsr     evptr
         ldy     #2
         sta     [PTR],y
         bra     resume
+; An FP load or store, misaligned or in memory the engine delegates: done whole
+; here - flw/fsw 4 bytes, fld/fsd 8 (f3 = 3, the instruction's bits 12-14).
+ev_fl:  jsr     evptr
+        lda     [PTR]
+        sta     a:RVAL
+        ldy     #2
+        lda     [PTR],y
+        sta     a:RVAL+2
+        jsr     ev_fdbl
+        bne     @r
+        ldy     #4
+        lda     [PTR],y
+        sta     a:RVALH
+        ldy     #6
+        lda     [PTR],y
+        sta     a:RVALH+2
+@r:     jmp     resume
+ev_fs:  jsr     evptr
+        lda     a:EVDATA
+        sta     [PTR]
+        lda     a:EVDATA+2
+        ldy     #2
+        sta     [PTR],y
+        jsr     ev_fdbl
+        bne     @r
+        lda     a:EVDATAH
+        ldy     #4
+        sta     [PTR],y
+        lda     a:EVDATAH+2
+        ldy     #6
+        sta     [PTR],y
+@r:     jmp     resume
+; Z set when the event's instruction is a double's (fld, fsd).
+ev_fdbl:
+        lda     a:EVIW
+        and     #$7000
+        cmp     #$3000
+        rts
 
 ; ---- ECALL: a7 = the service (Linux/newlib numbers; rvvm's own from $5000) --------
 ev_ecall:
@@ -2455,7 +2495,7 @@ causes: .word   .loword(c_ill), .loword(c_ebr), .loword(c_ld), .loword(c_st), .l
 rt_loader:
         .incbin "rt_loader.bin"
 
-; The engine's result code (even, under 32) to its handler.
+; The engine's result code (even, under 36) to its handler.
 evtab:  .word   .loword(loop)           ;  0 NEXT (never here)
         .word   .loword(ev_ecall)       ;  2
         .word   .loword(ev_ebreak)      ;  4
@@ -2472,3 +2512,5 @@ evtab:  .word   .loword(loop)           ;  0 NEXT (never here)
         .word   .loword(ev_sh)          ; 26 sh
         .word   .loword(ev_sw)          ; 28 sw
         .word   .loword(ev_fetch)       ; 30 fetch
+        .word   .loword(ev_fl)          ; 32 flw, fld
+        .word   .loword(ev_fs)          ; 34 fsw, fsd

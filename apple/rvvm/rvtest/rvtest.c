@@ -14,6 +14,12 @@
      9 the program's pathname: a class-1 string naming RVTEST.RV
     10 the relocations: a pointer in data points into this image
     11 a 24 KB table - three of the loader's chunks - every word as built
+   Floating point (F and D, docs/RVV2_FP.md):
+    30 fcsr at entry: round to nearest, no flags (crt0_app clears it)
+    31 results bit for bit: 1/3, sqrt 2, fma(0.1, 10, -1) rounded once, a single's
+       1/3, fcvt.w.d of -3.5 to nearest even and toward zero
+    32 the flags: 1/3 inexact, 1/0 divide by zero, 0/0 invalid
+    33 misaligned in the low block: fsd/fld and fsw/flw the runtime does (R_DFS, R_DFL)
    Rung I4 (librvgs: call65816, GS/OS through the bounce buffer, the Event Manager):
     20 a missing file: Open says fileNotFound ($46)
     21 9:RVTEST.DAT opens               22 its size is 40000
@@ -77,6 +83,49 @@ static int check(void) {
     return 0;
 }
 
+static inline uint32_t fcsr_get(void) { uint32_t v; __asm__ volatile("frcsr %0" : "=r"(v) :: "memory"); return v; }
+static inline void fcsr_set(uint32_t v) { __asm__ volatile("fscsr %0" :: "r"(v) : "memory"); }
+static inline uint64_t bits(double d) { union { double d; uint64_t u; } x = {d}; return x.u; }
+static inline uint32_t bitsf(float f) { union { float f; uint32_t u; } x = {f}; return x.u; }
+
+static int fp(void) {
+    if (fcsr_get() != 0) return 30;
+    volatile double one = 1.0, two = 2.0, three = 3.0, tenth = 0.1, ten = 10.0, m35 = -3.5, zero = 0.0;
+    volatile float onef = 1.0f, threef = 3.0f;
+    double r;
+    int n;
+    if (bits(one / three) != 0x3FD5555555555555ull) return 31;
+    __asm__ volatile("fsqrt.d %0, %1" : "=f"(r) : "f"(two));
+    if (bits(r) != 0x3FF6A09E667F3BCDull) return 31;
+    __asm__ volatile("fmadd.d %0, %1, %2, %3" : "=f"(r) : "f"(tenth), "f"(ten), "f"(-one));
+    if (bits(r) != 0x3C90000000000000ull) return 31;
+    if (bitsf(onef / threef) != 0x3EAAAAABu) return 31;
+    __asm__ volatile("fcvt.w.d %0, %1, rne" : "=r"(n) : "f"(m35));
+    if (n != -4) return 31;
+    __asm__ volatile("fcvt.w.d %0, %1, rtz" : "=r"(n) : "f"(m35));
+    if (n != -3) return 31;
+    volatile double sink;
+    fcsr_set(0); sink = one / three; if (fcsr_get() != 0x01) return 32;
+    fcsr_set(0); sink = one / zero;  if (fcsr_get() != 0x08) return 32;
+    fcsr_set(0); sink = zero / zero; if (fcsr_get() != 0x10) return 32;
+    fcsr_set(0);
+    (void)sink;
+    /* misaligned: the engine hands them to the runtime, which does them whole */
+    volatile uint8_t *lb = (volatile uint8_t *)(uintptr_t)rv_env->bounce;
+    const double v = one / three;
+    const uint64_t vb = bits(v);
+    __asm__ volatile("fsd %1, 1(%0)" :: "r"(lb), "f"(v) : "memory");
+    for (unsigned i = 0; i < 8; i++) if (lb[1 + i] != (uint8_t)(vb >> (8 * i))) return 33;
+    __asm__ volatile("fld %0, 1(%1)" : "=f"(r) : "r"(lb) : "memory");
+    if (bits(r) != vb) return 33;
+    const float fv = onef / threef;
+    float fr;
+    __asm__ volatile("fsw %1, 11(%0)" :: "r"(lb), "f"(fv) : "memory");
+    __asm__ volatile("flw %0, 11(%1)" : "=f"(fr) : "r"(lb) : "memory");
+    if (bitsf(fr) != 0x3EAAAAABu || lb[11] != 0xAB || lb[14] != 0x3E) return 33;
+    return 0;
+}
+
 #define DAT_SIZE 40000
 
 static int files(void) {
@@ -128,6 +177,7 @@ static int sound(void) {
 int main(void) {
     int r = check();
     if (r) return r;
+    if ((r = fp()) != 0) return r;
     if ((r = files()) != 0) return r;
     const int key = rvgs_key();
     if (key < 0) return 26;

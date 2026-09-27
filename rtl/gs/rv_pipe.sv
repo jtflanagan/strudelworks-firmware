@@ -3,7 +3,7 @@
 // SPDX-FileCopyrightText: 2026 jtflanagan
 //////////////////////////////////////////////////////////////////////////////////
 // rv_pipe - the RISC-V engine's core, pipelined (docs/REQ_RVVM.md section 9,
-// "The pipeline"): RV32IM_Zba_Zbb in order, five stages, rtl/gs/rv_core.sv's
+// "The pipeline"): RV32IMFD_Zba_Zbb in order, five stages, rtl/gs/rv_core.sv's
 // ports and protocol less the speculation.
 //
 //   F  fetch      f_req/f_addr from registers; rv_mem answers a row hit on the
@@ -28,6 +28,20 @@
 // after waits one clock.  Stores commit at M, when nothing older can still
 // raise an event (an event anywhere older has flushed them by then).
 //
+// FLOATING POINT (F and D, docs/RVV2_FP.md): 32 FP registers
+// of 64 bits, a single NaN-boxed in them (an operand not boxed reads as the
+// canonical NaN).  They are read in E and written in W like the integer file,
+// without forwarding: an FP source that an instruction in M or W still writes
+// waits for it to retire.  The arithmetic, compares, min/max, class and the
+// conversions go to rtl/gs/rv_fpu.sv (one at a time, E held; a flush kills
+// it); sign injection and the two moves are single-clock here.  fld/fsd make
+// two word accesses in M (the second's row read a clock early, as d_pre does
+// for E).  An FP access that is misaligned, or that rv_mem delegates, is the
+// event R_DFL/R_DFS - the VM does the whole access (ev_data and ev_datah a
+// store's value; the resume value and resume_hi a load's).  fflags gather at
+// retirement; the Zicsr ops on fflags/frm/fcsr wait for M and W to empty and
+// take effect leaving E; a dynamic rounding mode with frm > 4 is illegal.
+//
 // THE PROTOCOL (the window's, as rv_core's): `step` starts a run from pc; with
 // `run` low the run fetches one instruction, with `run` high it fetches until
 // `run` falls (a yield) - either way what is in the pipe drains and retires,
@@ -50,6 +64,7 @@ module rv_pipe #(
     input  wire         cancel,
     input  wire         resume,
     input  wire [31:0]  resume_val,
+    input  wire [31:0]  resume_hi,      // ...a delegated fld's high word
     input  wire         run,
     input  wire         hold,
     output logic        paid,
@@ -58,10 +73,14 @@ module rv_pipe #(
     output logic [7:0]  result,
     output logic [31:0] ev_addr,
     output logic [31:0] ev_data,
+    output logic [31:0] ev_datah,       // ...a delegated fsd's high word
     output logic [31:0] ev_iw,
     // the state, while idle
     input  wire  [4:0]  rsel,
     output wire  [31:0] rval,
+    input  wire  [4:0]  frsel,          // an FP register (a bench's port)
+    output wire  [63:0] frval,
+    output wire  [7:0]  fcsr,           // {frm, fflags}
     input  wire         w_en,
     input  wire  [4:0]  w_sel,
     input  wire  [31:0] w_val,
@@ -97,7 +116,8 @@ module rv_pipe #(
     localparam logic [7:0] R_NEXT = 8'd0, R_ECALL = 8'd2, R_EBREAK = 8'd4, R_ILLEGAL = 8'd6,
                            R_LFAULT = 8'd8, R_SFAULT = 8'd10, R_FFAULT = 8'd12,
                            R_DLB = 8'd14, R_DLBU = 8'd16, R_DLH = 8'd18, R_DLHU = 8'd20, R_DLW = 8'd22,
-                           R_DSB = 8'd24, R_DSH = 8'd26, R_DSW = 8'd28, R_DFETCH = 8'd30;
+                           R_DSB = 8'd24, R_DSH = 8'd26, R_DSW = 8'd28, R_DFETCH = 8'd30,
+                           R_DFL = 8'd32, R_DFS = 8'd34;
 
     typedef enum logic [5:0] {
         OP_ADD, OP_SUB, OP_SLL, OP_SLT, OP_SLTU, OP_XOR, OP_SRL, OP_SRA, OP_OR, OP_AND,
@@ -106,8 +126,15 @@ module rv_pipe #(
         OP_ZEXTH, OP_SEXTB, OP_SEXTH, OP_REV8, OP_ORCB, OP_CLZ, OP_CTZ, OP_CPOP,
         OP_MUL, OP_MULH, OP_MULHSU, OP_MULHU, OP_DIV, OP_DIVU, OP_REM, OP_REMU,
         OP_LUI, OP_AUIPC, OP_JAL, OP_JALR, OP_BR, OP_LOAD, OP_STORE,
-        OP_FENCE, OP_FENCEI, OP_ECALL, OP_EBREAK, OP_ILL
+        OP_FENCE, OP_FENCEI, OP_ECALL, OP_EBREAK, OP_ILL,
+        OP_FP, OP_FSGNJ, OP_FMVXW, OP_FMVWX, OP_FLOAD, OP_FSTORE, OP_CSR
     } op_t;
+    // rv_fpu's operations
+    localparam logic [4:0] F_ADD = 5'd0, F_SUB = 5'd1, F_MUL = 5'd2, F_DIV = 5'd3, F_SQRT = 5'd4,
+                           F_MADD = 5'd5, F_MSUB = 5'd6, F_NMSUB = 5'd7, F_NMADD = 5'd8,
+                           F_MIN = 5'd12, F_MAX = 5'd13,
+                           F_EQ = 5'd14, F_LT = 5'd15, F_LE = 5'd16, F_CLASS = 5'd17,
+                           F_CVTW = 5'd18, F_CVTWU = 5'd19, F_CVTFW = 5'd20, F_CVTFWU = 5'd21, F_CVTFF = 5'd22;
 
     assign req_spec = 1'b0;
     assign pk_addr  = '0;
@@ -141,11 +168,20 @@ module rv_pipe #(
     logic [31:0] rf_wval;
     always_ff @(posedge clk) if (rf_we) rf[rf_wsel] <= rf_wval;
     assign rval = rsel == 5'd0 ? 32'd0 : rf[rsel];
+    // the FP registers: read in E (three ports)
+    logic [63:0] frf [0:31];
+    logic        frf_we;
+    logic [4:0]  frf_wsel;
+    logic [63:0] frf_wval;
+    always_ff @(posedge clk) if (frf_we) frf[frf_wsel] <= frf_wval;
+    logic [4:0]  fflags_q;
+    logic [2:0]  frm_q;
+    assign fcsr = {frm_q, fflags_q};
 
     logic [31:0] pc_q;
     assign pc = pc_q;
     logic [7:0]  pend;          // the event awaiting resume (ECALL, a delegated access), or R_NEXT
-    logic [4:0]  pend_rd;
+    logic [4:0]  pend_rd;       // (an FP register for R_DFL)
     logic [1:0]  pend_w;
     logic        pend_u;
     logic        inj_v;         // a delegated fetch's word, to run first
@@ -180,8 +216,16 @@ module rv_pipe #(
     logic [2:0]  e_fn3;
     logic [7:0]  e_ev;
     logic [31:0] e_evaddr;
+    // E, floating point: the FP sources (raw fields: e_rs1/e_rs2 are the integer
+    // file's, zero when unused), which of them the op reads, whether it writes an
+    // FP register, rv_fpu's op, the source format (e_fdbl) and the result's (e_fodbl)
+    logic [4:0]  e_fr1, e_fr2, e_fr3, e_fop;
+    logic        e_fu1, e_fu2, e_fu3, e_fwr, e_fdbl, e_fodbl, e_frmchk;
     // M
     logic        m_v, m_wr, m_mem, m_we, m_done, m_ldu;
+    logic        m_fwr, m_fp, m_half;   // writes an FP register; an FP access; a double's second word
+    logic [31:0] m_resh, m_ch;          // the FP result's high word; an fsd's
+    logic [4:0]  m_ffl;                 // the FP op's flags
     logic [31:0] m_pc, m_iw, m_res, m_npc, m_ea, m_c, m_evaddr;
     logic [4:0]  m_rd;
     logic [AW-3:0] m_addr;
@@ -190,7 +234,9 @@ module rv_pipe #(
     logic [1:0]  m_ldw;
     logic [7:0]  m_ev;
     // W
-    logic        w_v, w_wr, w_ldu;
+    logic        w_v, w_wr, w_ldu, w_fwr;
+    logic [31:0] w_resh, w_evdatah;
+    logic [4:0]  w_ffl;
     logic [31:0] w_pc, w_iw, w_res, w_npc, w_evaddr, w_evdata;
     logic [4:0]  w_rd;
     logic [1:0]  w_ldw;
@@ -209,11 +255,18 @@ module rv_pipe #(
     wire   m_dgt   = d_req && d_valid && d_delegate;               // rv_mem will not do it: an event
     // (a delegate reply becomes M's event register and M moves on the clock
     // after: the flush and the forwarding look only at registered state)
-    wire   m_ready = m_v && (m_ev != R_NEXT || !m_mem || m_done || (d_valid && !d_delegate));
+    // (a double's first word is not the end of its access: M goes on to the second)
+    wire   m_dbl   = m_fp && m_ldw[0];
+    wire   m_first = m_mem && m_dbl && !m_half;
+    wire   m_ready = m_v && (m_ev != R_NEXT || !m_mem || m_done || (d_valid && !d_delegate && !m_first));
     wire   m_adv   = m_ready && w_free;
     wire   m_evnt  = m_ev != R_NEXT;
-    // the value M hands W (a load's, straight from the answer when it came this clock)
-    wire [31:0] m_out = (m_mem && !m_we && !m_done) ? ld_ext(d_rdata, m_ea[1:0], m_ldw, m_ldu) : m_res;
+    // the value M hands W (a load's, straight from the answer when it came this clock;
+    // an FP load's raw: a single's high word is the box, a double's low word came first)
+    wire        m_ldnow = m_mem && !m_we && !m_done;
+    wire [31:0] m_out  = (m_ldnow && !m_dbl) ? (m_fp ? d_rdata : ld_ext(d_rdata, m_ea[1:0], m_ldw, m_ldu)) : m_res;
+    wire [31:0] m_outh = (m_ldnow && m_dbl) ? d_rdata : m_resh;
+    wire [AW-3:0] m_addr1 = m_addr + 1'b1;
     // an event in M flushes everything younger at once (not on the clock it
     // moves on: that would hang the whole stall chain on the flush)
     wire   flush_ev = m_v && m_evnt;
@@ -239,7 +292,8 @@ module rv_pipe #(
     wire [31:0] c = fwd(e_rs2, e_c);
     wire [31:0] b = e_bimm ? e_imm : c;
     wire [31:0] ea_now = a + e_imm;
-    assign d_pre = ea_now[AW-1:2];
+    // (while M holds a double's first word, the row read a clock early is its second's)
+    assign d_pre = (m_v && m_first) ? m_addr1 : ea_now[AW-1:2];
 
     // the single-cycle units
     function automatic logic [31:0] shf(input op_t o, input logic [31:0] v, input logic [4:0] n);
@@ -330,10 +384,65 @@ module rv_pipe #(
     wire e_div = e_op == OP_DIV || e_op == OP_DIVU || e_op == OP_REM || e_op == OP_REMU;
     wire e_mc  = (e_mul || e_div) && e_ev == R_NEXT;
 
+    // ---- E: floating point ---------------------------------------------------------------
+    // The FP sources, read as E asks.  An FP register that M or W still writes is
+    // not read yet: E waits (no forwarding).  (frval: a bench's own port, read at
+    // any time - the engine leaves it unconnected and synthesis drops it.)
+    wire [63:0] fa = frf[e_fr1];
+    wire [63:0] fb = frf[e_fr2];
+    wire [63:0] fc = frf[e_fr3];
+    assign frval = frf[frsel];
+    function automatic logic fwr_pend(input logic [4:0] r);
+        return (m_v && m_fwr && m_rd == r) || (w_v && w_fwr && w_rd == r);
+    endfunction
+    wire fhz = (e_fu1 && fwr_pend(e_fr1)) || (e_fu2 && fwr_pend(e_fr2)) || (e_fu3 && fwr_pend(e_fr3));
+    // a single's source: its box checked (not boxed = the canonical NaN)
+    function automatic logic [63:0] unbox(input logic [63:0] v, input logic d);
+        return d ? v : {32'd0, v[63:32] == 32'hFFFF_FFFF ? v[31:0] : 32'h7FC0_0000};
+    endfunction
+    wire [63:0] ua64 = unbox(fa, e_fdbl), ub64 = unbox(fb, e_fdbl), uc64 = unbox(fc, e_fdbl);
+    // sign injection (fmv, fneg, fabs), one clock
+    wire        sj_bs  = e_fdbl ? ub64[63] : ub64[31];
+    wire        sj_as  = e_fdbl ? ua64[63] : ua64[31];
+    wire        sj_s   = e_fn3[1] ? sj_as ^ sj_bs : e_fn3[0] ? !sj_bs : sj_bs;
+    wire [63:0] sj_res = e_fdbl ? {sj_s, ua64[62:0]} : {32'hFFFF_FFFF, sj_s, ua64[30:0]};
+
+    // rv_fpu: started once the sources are there, held in E until it is done
+    wire        e_fpop   = e_op == OP_FP && e_ev == R_NEXT;
+    wire        fp_rmbad = e_fpop && e_frmchk && e_fn3 == 3'd7 && frm_q > 3'd4;
+    wire        e_fpx    = e_fpop && !fp_rmbad;
+    typedef enum logic [1:0] { FP_IDLE, FP_RUN, FP_DONE } fp_st_t;
+    fp_st_t      fp_st;
+    logic [63:0] fp_res;
+    logic [4:0]  fp_fl;
+    wire         fp_kill  = (flush_ev || mr_now) && fp_st == FP_RUN;
+    wire         fp_start = fp_st == FP_IDLE && e_v && e_fpx && !hz1 && !hz2 && !fhz && !flush_ev && !mr_now;
+    wire         fu_done, fu_busy;
+    wire [63:0]  fu_res;
+    wire [4:0]   fu_flags;
+    rv_fpu u_fpu (
+        .clk (clk), .rst (rst), .start (fp_start), .kill (fp_kill), .op (e_fop), .dbl (e_fdbl),
+        .rm (e_fn3 == 3'd7 ? frm_q : e_fn3),
+        .a (e_fu1 ? ua64 : {32'd0, a}), .b (ub64), .c (uc64),
+        .busy (fu_busy), .done (fu_done), .res (fu_res), .flags (fu_flags)
+    );
+    // an FP result: a single's boxed
+    wire [63:0] fu_box = e_fodbl ? fu_res : {32'hFFFF_FFFF, fu_res[31:0]};
+
+    // the Zicsr ops on fflags (1), frm (2), fcsr (3): E waits for M and W to empty
+    wire        drained = !m_v && !w_v;
+    wire        e_csrx  = e_op == OP_CSR && e_ev == R_NEXT;
+    wire [11:0] csr_a   = e_iw[31:20];
+    wire [31:0] csr_old = csr_a == 12'd1 ? {27'd0, fflags_q} : csr_a == 12'd2 ? {29'd0, frm_q} : {24'd0, frm_q, fflags_q};
+    wire [31:0] csr_src = e_fn3[2] ? {27'd0, e_iw[19:15]} : a;
+    wire [31:0] csr_new = e_fn3[1:0] == 2'd1 ? csr_src : e_fn3[1:0] == 2'd2 ? (csr_old | csr_src) : (csr_old & ~csr_src);
+    wire        csr_we  = e_fn3[1:0] == 2'd1 || e_iw[19:15] != 5'd0;
+
     // E's outcome
     wire        e_hz    = hz1 || hz2;
     logic       d_rdone;                // D's prediction has gone out
-    wire        e_ready = e_v && !e_hz && (!e_mc || mc_done);
+    wire        e_ready = e_v && !e_hz && (!e_mc || mc_done) && !(fhz && e_ev == R_NEXT) &&
+                          (!e_fpx || fp_st == FP_DONE) && (!e_csrx || drained);
     wire        m_free  = !m_v || m_adv;
     wire        e_adv   = e_ready && m_free && !flush_ev && !mr_now;
     wire [31:0] e_tgt   = e_op == OP_JALR ? (ea_now & ~32'd1) : e_pc + e_imm;
@@ -341,18 +450,25 @@ module rv_pipe #(
     wire        e_tbad  = e_taken && (e_tgt[1:0] != 2'd0 || !addr_ok(e_tgt));
     wire [31:0] e_npc   = (e_taken && !e_tbad) ? e_tgt : e_pc + 32'd4;
     wire [1:0]  e_sz    = e_fn3[1:0];
-    wire        e_mis   = (e_sz == 2'd1 && ea_now[0]) || (e_sz == 2'd2 && ea_now[1:0] != 2'd0);
-    wire        e_ls    = e_op == OP_LOAD || e_op == OP_STORE;
-    // E's event: D's, else a bad target, a memory fault, a misaligned (delegated) access
+    wire        e_mis   = (e_sz == 2'd1 && ea_now[0]) || (e_sz[1] && ea_now[1:0] != 2'd0);
+    wire        e_fls   = e_op == OP_FLOAD || e_op == OP_FSTORE;
+    wire        e_ls    = e_op == OP_LOAD || e_op == OP_STORE || e_fls;
+    wire        e_ld    = e_op == OP_LOAD || e_op == OP_FLOAD;
+    // (a double's second word must be in the space too: its first is not the last word)
+    wire        e_aok   = addr_ok(ea_now) && !(e_fls && e_sz[0] && &ea_now[AW-1:2]);
+    // E's event: D's, else a bad rounding mode, a bad target, a memory fault, a
+    // misaligned (delegated) access
     logic [7:0]  e_evo;
     logic [31:0] e_evao;
     always_comb begin
         e_evo = e_ev; e_evao = e_evaddr;
         if (e_ev == R_NEXT) begin
-            if (e_tbad) begin e_evo = R_FFAULT; e_evao = e_tgt; end
-            else if (e_ls && !addr_ok(ea_now)) begin e_evo = e_op == OP_LOAD ? R_LFAULT : R_SFAULT; e_evao = ea_now; end
+            if (fp_rmbad) begin e_evo = R_ILLEGAL; e_evao = e_iw; end
+            else if (e_tbad) begin e_evo = R_FFAULT; e_evao = e_tgt; end
+            else if (e_ls && !e_aok) begin e_evo = e_ld ? R_LFAULT : R_SFAULT; e_evao = ea_now; end
             else if (e_ls && e_mis) begin
-                e_evo  = e_op == OP_LOAD ? dl_code(e_sz, e_fn3[2]) : R_DSB + {5'd0, e_sz, 1'b0};
+                e_evo  = e_fls ? (e_ld ? R_DFL : R_DFS) :
+                         e_ld  ? dl_code(e_sz, e_fn3[2]) : R_DSB + {5'd0, e_sz, 1'b0};
                 e_evao = ea_now;
             end
         end
@@ -375,6 +491,55 @@ module rv_pipe #(
     wire [31:0] imm_b = {{19{d_iw[31]}}, d_iw[31], d_iw[7], d_iw[30:25], d_iw[11:8], 1'b0};
     wire [31:0] imm_u = {d_iw[31:12], 12'd0};
     wire [31:0] imm_j = {{11{d_iw[31]}}, d_iw[31], d_iw[19:12], d_iw[20], d_iw[30:21], 1'b0};
+    // floating point: OP-FP (0x53) and the fused four (0x43/47/4B/4F) - rv_fpu's op,
+    // which sources are FP registers, whether the result is one, the source format
+    // (fd_dbl) and the result's (fd_odbl: fmt), whether f3 is a rounding mode
+    wire [4:0]  f5    = d_iw[31:27];
+    wire [1:0]  ffmt  = d_iw[26:25];
+    wire [4:0]  rs3_f = d_iw[31:27];
+    op_t        fd_k;                   // OP_FP, OP_FSGNJ, OP_FMVXW, OP_FMVWX, or OP_ILL
+    logic       fd_dbl, fd_u1, fd_u2, fd_u3, fd_fwr, fd_rmchk;
+    logic [4:0] fd_op;
+    always_comb begin
+        fd_k = OP_ILL; fd_op = F_ADD; fd_dbl = ffmt[0];
+        fd_u1 = 1'b1; fd_u2 = 1'b0; fd_u3 = 1'b0; fd_fwr = 1'b1; fd_rmchk = 1'b1;
+        if (opc == 7'h43 || opc == 7'h47 || opc == 7'h4B || opc == 7'h4F) begin
+            fd_k = OP_FP; fd_u2 = 1'b1; fd_u3 = 1'b1;
+            fd_op = opc == 7'h43 ? F_MADD : opc == 7'h47 ? F_MSUB : opc == 7'h4B ? F_NMSUB : F_NMADD;
+        end else if (opc == 7'h53) begin
+            case (f5)
+                5'b00000: begin fd_k = OP_FP; fd_op = F_ADD; fd_u2 = 1'b1; end
+                5'b00001: begin fd_k = OP_FP; fd_op = F_SUB; fd_u2 = 1'b1; end
+                5'b00010: begin fd_k = OP_FP; fd_op = F_MUL; fd_u2 = 1'b1; end
+                5'b00011: begin fd_k = OP_FP; fd_op = F_DIV; fd_u2 = 1'b1; end
+                5'b01011: begin fd_k = rs2_f == 5'd0 ? OP_FP : OP_ILL; fd_op = F_SQRT; end
+                5'b00100: begin fd_k = f3 <= 3'd2 ? OP_FSGNJ : OP_ILL; fd_u2 = 1'b1; fd_rmchk = 1'b0; end
+                5'b00101: begin fd_k = f3 <= 3'd1 ? OP_FP : OP_ILL; fd_u2 = 1'b1; fd_rmchk = 1'b0;
+                                fd_op = f3 == 3'd0 ? F_MIN : F_MAX; end
+                5'b10100: begin fd_k = f3 <= 3'd2 ? OP_FP : OP_ILL; fd_u2 = 1'b1; fd_rmchk = 1'b0; fd_fwr = 1'b0;
+                                fd_op = f3 == 3'd2 ? F_EQ : f3 == 3'd1 ? F_LT : F_LE; end
+                5'b11100: begin                                     // fmv.x.w (f3 0, S only), fclass (f3 1)
+                    fd_rmchk = 1'b0; fd_fwr = 1'b0; fd_op = F_CLASS;
+                    fd_k = rs2_f != 5'd0 ? OP_ILL : f3 == 3'd1 ? OP_FP : (f3 == 3'd0 && !ffmt[0]) ? OP_FMVXW : OP_ILL;
+                end
+                5'b11110: begin                                     // fmv.w.x (S only)
+                    fd_rmchk = 1'b0; fd_u1 = 1'b0;
+                    fd_k = (rs2_f == 5'd0 && f3 == 3'd0 && !ffmt[0]) ? OP_FMVWX : OP_ILL;
+                end
+                5'b11000: begin fd_k = rs2_f <= 5'd1 ? OP_FP : OP_ILL; fd_fwr = 1'b0;
+                                fd_op = rs2_f[0] ? F_CVTWU : F_CVTW; end
+                5'b11010: begin fd_k = rs2_f <= 5'd1 ? OP_FP : OP_ILL; fd_u1 = 1'b0;
+                                fd_op = rs2_f[0] ? F_CVTFWU : F_CVTFW; end
+                5'b01000: begin                                     // fcvt.s.d (fmt S, rs2 1), fcvt.d.s (fmt D, rs2 0)
+                    fd_k = rs2_f == {4'd0, !ffmt[0]} ? OP_FP : OP_ILL; fd_op = F_CVTFF; fd_dbl = !ffmt[0];
+                end
+                default: ;
+            endcase
+        end
+        // S and D only; a reserved rounding mode
+        if (ffmt[1] || (fd_rmchk && (f3 == 3'd5 || f3 == 3'd6))) fd_k = OP_ILL;
+    end
+    wire d_csr_ok = f3 != 3'd0 && f3 != 3'd4 && imm12 >= 12'd1 && imm12 <= 12'd3;
     op_t dop;
     always_comb begin
         dop = OP_ILL;
@@ -387,7 +552,11 @@ module rv_pipe #(
             7'h03: dop = (f3 == 3'd3 || f3 == 3'd6 || f3 == 3'd7) ? OP_ILL : OP_LOAD;
             7'h23: dop = f3 <= 3'd2 ? OP_STORE : OP_ILL;
             7'h0F: dop = f3 == 3'd0 ? OP_FENCE : f3 == 3'd1 ? OP_FENCEI : OP_ILL;
-            7'h73: dop = d_iw == 32'h0000_0073 ? OP_ECALL : d_iw == 32'h0010_0073 ? OP_EBREAK : OP_ILL;
+            7'h73: dop = d_iw == 32'h0000_0073 ? OP_ECALL : d_iw == 32'h0010_0073 ? OP_EBREAK :
+                         d_csr_ok ? OP_CSR : OP_ILL;
+            7'h07: dop = (f3 == 3'd2 || f3 == 3'd3) ? OP_FLOAD : OP_ILL;
+            7'h27: dop = (f3 == 3'd2 || f3 == 3'd3) ? OP_FSTORE : OP_ILL;
+            7'h53, 7'h43, 7'h47, 7'h4B, 7'h4F: dop = fd_k;
             7'h13: unique case (f3)
                 3'd0: dop = OP_ADD;
                 3'd2: dop = OP_SLT;
@@ -430,10 +599,15 @@ module rv_pipe #(
         endcase
     end
     // which registers the op reads (a false read only costs a spurious stall)
-    wire d_use1 = !(dop == OP_LUI || dop == OP_AUIPC || dop == OP_JAL);
+    // (an FP op's rs1 is an integer register only for fcvt.s.w/fmv.w.x and the like)
+    wire d_fpk  = dop == OP_FP || dop == OP_FSGNJ || dop == OP_FMVXW || dop == OP_FMVWX;
+    wire d_use1 = !(dop == OP_LUI || dop == OP_AUIPC || dop == OP_JAL || (dop == OP_CSR && f3[2]) ||
+                    (d_fpk && fd_u1));
     wire d_use2 = opc == 7'h33 || opc == 7'h23 || opc == 7'h63;
+    wire d_fwr  = (d_fpk && fd_fwr) || dop == OP_FLOAD;         // writes an FP register
     wire d_wr   = !(dop == OP_BR || dop == OP_STORE || dop == OP_FENCE || dop == OP_FENCEI ||
-                    dop == OP_ECALL || dop == OP_EBREAK || dop == OP_ILL) && rd_f != 5'd0;
+                    dop == OP_ECALL || dop == OP_EBREAK || dop == OP_ILL || dop == OP_FSTORE || d_fwr) &&
+                  rd_f != 5'd0;
     // the register file read, bypassed from W's write this clock
     wire [31:0] rs1v = (rf_we && rf_wsel == rs1_f && rs1_f != 5'd0) ? rf_wval : (rs1_f == 5'd0 ? 32'd0 : rf[rs1_f]);
     wire [31:0] rs2v = (rf_we && rf_wsel == rs2_f && rs2_f != 5'd0) ? rf_wval : (rs2_f == 5'd0 ? 32'd0 : rf[rs2_f]);
@@ -443,7 +617,7 @@ module rv_pipe #(
             7'h37, 7'h17: d_imm = imm_u;
             7'h6F:        d_imm = imm_j;
             7'h63:        d_imm = imm_b;
-            7'h23:        d_imm = imm_s;
+            7'h23, 7'h27: d_imm = imm_s;
             default:      d_imm = imm_i;
         endcase
     end
@@ -506,6 +680,18 @@ module rv_pipe #(
             rf_we = 1'b1;
         end
     end
+    // ...and the FP file's: W, a delegated FP load's resume (a single boxed)
+    always_comb begin
+        frf_we   = 1'b0;
+        frf_wsel = w_rd;
+        frf_wval = {w_resh, w_res};
+        if (w_leave && w_ev == R_NEXT && w_fwr) begin
+            frf_we = 1'b1;
+        end else if (!busy && resume && pend == R_DFL) begin
+            frf_we = 1'b1; frf_wsel = pend_rd;
+            frf_wval = {pend_w[0] ? resume_hi : 32'hFFFF_FFFF, resume_val};
+        end
+    end
 
     wire pipe_empty = !d_v && !e_v && !m_v && !w_v && !fb_v && !fo_v;
 
@@ -516,7 +702,8 @@ module rv_pipe #(
             fb_v <= 1'b0; fo_v <= 1'b0; fo_drop <= 1'b0;
             d_v <= 1'b0; e_v <= 1'b0; m_v <= 1'b0; w_v <= 1'b0; m_rdone <= 1'b0; d_rdone <= 1'b0; m_mis <= 1'b0;
             mc_on <= 1'b0; mc_done <= 1'b0;
-            ev_addr <= 32'd0; ev_data <= 32'd0; ev_iw <= 32'd0;
+            fp_st <= FP_IDLE; fflags_q <= 5'd0; frm_q <= 3'd0;
+            ev_addr <= 32'd0; ev_data <= 32'd0; ev_datah <= 32'd0; ev_iw <= 32'd0;
         end else begin
             retired <= 1'b0;
             paid    <= 1'b0;
@@ -543,12 +730,13 @@ module rv_pipe #(
                 if (w_ev == R_NEXT) begin
                     retired <= 1'b1; paid <= 1'b1;
                     pc_q <= w_npc;
+                    fflags_q <= fflags_q | w_ffl;
                 end else begin
                     // the event: pc at it, the run over (everything younger flushed as it left M)
                     result  <= w_ev;
-                    pend    <= (w_ev == R_ECALL || (w_ev >= R_DLB && w_ev <= R_DFETCH)) ? w_ev : R_NEXT;
+                    pend    <= (w_ev == R_ECALL || (w_ev >= R_DLB && w_ev <= R_DFS)) ? w_ev : R_NEXT;
                     pend_rd <= w_rd; pend_w <= w_ldw; pend_u <= w_ldu;
-                    ev_addr <= w_evaddr; ev_iw <= w_iw; ev_data <= w_evdata;
+                    ev_addr <= w_evaddr; ev_iw <= w_iw; ev_data <= w_evdata; ev_datah <= w_evdatah;
                     pc_q    <= w_pc;
                     busy    <= 1'b0;
                     run_on  <= 1'b0;
@@ -566,19 +754,34 @@ module rv_pipe #(
                 w_v      <= 1'b1;
                 w_pc     <= m_pc; w_iw <= m_iw; w_rd <= m_rd; w_npc <= m_npc;
                 w_wr     <= m_wr && !m_evnt;
+                w_fwr    <= m_fwr && !m_evnt;
                 w_res    <= m_out;
+                w_resh   <= m_outh;
+                w_ffl    <= m_evnt ? 5'd0 : m_ffl;
                 w_ldw    <= m_ldw; w_ldu <= m_ldu;
                 w_ev     <= m_ev;
                 w_evaddr <= m_evaddr;
-                w_evdata <= m_c;
+                w_evdata <= m_c; w_evdatah <= m_ch;
+            end
+            // M: a double's first word answered - on to its second
+            if (m_v && m_first && d_req && d_valid && !d_delegate) begin
+                m_half <= 1'b1;
+                m_addr <= m_addr1;
+                m_wdata <= m_ch;
+                if (!m_we) m_res <= d_rdata;
             end
             // M: a load's answer while W cannot take it yet
-            if (m_v && !m_adv && d_req && d_valid && !d_delegate) begin
+            else if (m_v && !m_adv && d_req && d_valid && !d_delegate) begin
                 m_done <= 1'b1;
-                if (!m_we) m_res <= ld_ext(d_rdata, m_ea[1:0], m_ldw, m_ldu);
+                if (!m_we) begin
+                    if (m_dbl)     m_resh <= d_rdata;
+                    else if (m_fp) m_res  <= d_rdata;
+                    else           m_res  <= ld_ext(d_rdata, m_ea[1:0], m_ldw, m_ldu);
+                end
             end
+            // (the VM does an FP access whole, from its first address)
             if (m_dgt) begin
-                m_ev <= m_we ? R_DSB + {5'd0, m_ldw, 1'b0} : dl_code(m_ldw, m_ldu);
+                m_ev <= m_fp ? (m_we ? R_DFS : R_DFL) : m_we ? R_DSB + {5'd0, m_ldw, 1'b0} : dl_code(m_ldw, m_ldu);
                 m_evaddr <= m_ea;
             end
 
@@ -588,18 +791,27 @@ module rv_pipe #(
                 m_v      <= 1'b1;
                 m_pc     <= e_pc; m_iw <= e_iw; m_rd <= e_rd;
                 m_wr     <= e_wr && e_evo == R_NEXT;
-                m_res    <= e_mc ? mc_res : alu;
+                m_fwr    <= e_fwr && e_evo == R_NEXT;
+                m_fp     <= e_fls;
+                m_half   <= 1'b0;
+                // (an FP op's value: rv_fpu's, boxed when an FP register takes it; an FP
+                // load's high word is its box until a double's second word replaces it)
+                m_res    <= e_mc ? mc_res : e_fpx ? fp_res[31:0] : e_op == OP_FSGNJ ? sj_res[31:0] :
+                            e_op == OP_FMVXW ? fa[31:0] : e_op == OP_FMVWX ? a : e_csrx ? csr_old : alu;
+                m_resh   <= (e_fpx && e_fwr) ? fp_res[63:32] : e_op == OP_FSGNJ ? sj_res[63:32] : 32'hFFFF_FFFF;
+                m_ffl    <= e_fpx ? fp_fl : 5'd0;
                 m_npc    <= e_npc;
                 m_ev     <= e_evo; m_evaddr <= e_evao;
                 m_mem    <= e_ls && e_evo == R_NEXT;
-                m_we     <= e_op == OP_STORE;
+                m_we     <= e_op == OP_STORE || e_op == OP_FSTORE;
                 m_done   <= 1'b0;
                 m_addr   <= ea_now[AW-1:2];
                 m_ea     <= ea_now;
                 m_ldw    <= e_sz; m_ldu <= e_fn3[2];
                 m_be     <= (e_sz == 2'd0 ? 4'b0001 : e_sz == 2'd1 ? 4'b0011 : 4'b1111) << ea_now[1:0];
-                m_wdata  <= c << {ea_now[1:0], 3'b000};
-                m_c      <= c;
+                m_wdata  <= e_fls ? fb[31:0] : c << {ea_now[1:0], 3'b000};
+                m_c      <= e_fls ? fb[31:0] : c;
+                m_ch     <= fb[63:32];
                 m_mis    <= e_misp && e_evo == R_NEXT;
                 m_rtgt   <= e_rtgt;
             end
@@ -651,6 +863,23 @@ module rv_pipe #(
             end
             if (e_adv) mc_done <= 1'b0;
             if (flush_ev || mr_now) begin mc_on <= 1'b0; mc_done <= 1'b0; end   // (its instruction is gone)
+
+            // E: floating point - rv_fpu runs, its answer waits for E to move on
+            if (fp_start) fp_st <= FP_RUN;
+            if (fp_st == FP_RUN && fu_done) begin
+                fp_res <= e_fwr ? fu_box : fu_res;
+                fp_fl  <= fu_flags;
+                fp_st  <= FP_DONE;
+            end
+            if (e_adv || flush_ev || mr_now) fp_st <= FP_IDLE;
+            // the CSR op takes effect as it leaves E (nothing older is left)
+            if (e_adv && e_csrx && e_evo == R_NEXT && csr_we) begin
+                case (csr_a)
+                    12'd1:   fflags_q <= csr_new[4:0];
+                    12'd2:   frm_q    <= csr_new[2:0];
+                    default: begin frm_q <= csr_new[7:5]; fflags_q <= csr_new[4:0]; end
+                endcase
+            end
             // E's captured operands follow a register W writes while E waits
             if (!d_adv && rf_we) begin
                 if (e_rs1 == rf_wsel) e_a <= rf_wval;
@@ -673,6 +902,12 @@ module rv_pipe #(
                 e_fn3  <= f3;
                 e_ev   <= d_evo; e_evaddr <= d_evao;
                 e_pred <= d_pred;
+                e_fr1  <= rs1_f; e_fr2 <= rs2_f; e_fr3 <= rs3_f; e_fop <= fd_op;
+                e_fu1  <= d_fpk && fd_u1;
+                e_fu2  <= (d_fpk && fd_u2) || dop == OP_FSTORE;
+                e_fu3  <= d_fpk && fd_u3;
+                e_fwr  <= d_fwr;
+                e_fdbl <= fd_dbl; e_fodbl <= ffmt[0]; e_frmchk <= fd_rmchk;
             end
 
             // F -> D
@@ -716,5 +951,5 @@ module rv_pipe #(
         end
     end
 
-    wire unused = &{1'b0, cancel, f_abort, d_abort, pk_hit, pk_word};
+    wire unused = &{1'b0, cancel, f_abort, d_abort, pk_hit, pk_word, fu_busy, csr_new[31:8]};
 endmodule
