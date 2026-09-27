@@ -1,8 +1,8 @@
 # rvvm-expect: exit
 # An FPU operation killed in flight: behind a mispredicted branch (the redirect
 # from M), behind a delegated load (the event from M flushes E), and behind a
-# misaligned FP access (the VM's own event) - each then runs the next FP op
-# clean.  The flags a killed op would have raised must not reach fflags.
+# delegated FP load (R_DFL) - each then runs the next FP op clean.  The flags
+# a killed op would have raised must not reach fflags.
         .section .text.init
         .globl  _start
 _start:
@@ -33,7 +33,7 @@ _start:
         li      t3, 3
         bne     t2, t3, fail
         li      gp, 3
-        fld     fa7, 3(s0)              # misaligned: the VM's
+        fld     fa7, 0(s1)              # bank $01: the VM's (R_DFL)
         fdiv.d  fa0, fa1, fa2
         fmadd.d fa0, fa0, fa2, fa3
         fcvt.w.d t2, fa0, rne

@@ -96,7 +96,8 @@ static int f_wait = -1, d_wait = -1;
 
 static uint32_t rd32(uint32_t a) { return mem[a] | (mem[a + 1] << 8) | (mem[a + 2] << 16) | (uint32_t(mem[a + 3]) << 24); }
 // rv_mem's DIRECT: the machine's map (docs/RVV2_INTEROP.md) - reads of the upper
-// 16 MB, $02-$DF and $E2-$FF; writes of the upper 16 MB, $02-$DF and $E2-$EF.
+// 16 MB, $02-$DF and $E2-$FF; writes of the upper 16 MB, $02-$DF and $E2-$EF (and
+// a write to the ROM, $F0-$FF, answered and dropped).
 static bool direct(uint32_t a, bool we) {
     const unsigned bank = a >> 16;
     if (delegate_all) return false;
@@ -220,7 +221,9 @@ static void tick() {
             const uint32_t a = uint32_t(dut->d_addr) << 2;
             dut->d_valid = 1;
             if (acc_dump && direct(a, dut->d_we)) fprintf(acc_dump, "%c %06x\n", dut->d_we ? 'S' : 'L', a);
-            if (!direct(a, dut->d_we)) dut->d_delegate = 1;
+            // (rv_mem drops a write to the ROM, $F0-$FF, itself - the machine drops it)
+            if (!delegate_all && dut->d_we && a >= ROM_LO && a < LOW) { }
+            else if (!direct(a, dut->d_we)) dut->d_delegate = 1;
             else if (dut->d_we) {
                 for (int i = 0; i < 4; i++) if (dut->d_be & (1u << i)) mem[a + i] = uint8_t(dut->d_wdata >> (8 * i));
             } else dut->d_rdata = rd32(a);
@@ -471,6 +474,7 @@ int main(int argc, char **argv) {
     again:
         if (r != R_NEXT) {
             if (r != R_DFETCH) events++;
+            // EVDBG=1 in the environment: every event the core presents, as it comes
             if (getenv("EVDBG")) printf("EV r=%u addr=%08x iw=%08x data=%08x\n", r, dut->ev_addr, dut->ev_iw, dut->ev_data);
             const uint32_t ea = dut->ev_addr, data = dut->ev_data;
             // THE 65816 REACHES ONLY THE LOWER 16 MB: a load, store or fetch handed to

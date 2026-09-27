@@ -504,7 +504,8 @@ module gs_top #(
     wire        daux_w;
     wire        turbo_tick, tev_valid, tev_sync, ev_fast_room;
     wire [15:0] tev_addr;
-    wire [7:0]  tev_data, i_din_w;
+    wire [7:0]  tev_data, i_din_w, i_base_w, i_tgt_w;
+    wire        i_tgt_sel_w;
     wire [31:0] accel_turbo, accel_dline, accel_maps;
     wire [31:0] accel_ddrop, accel_drevive, accel_idrop, accel_irevive;
     wire        accel_cen_v;
@@ -874,7 +875,8 @@ module gs_top #(
         .addr   (core_a24),
         .rw     (core_rw),
         .dout   (cpu_dout),
-        .i_din  (front_bypass ? cpu_din : i_din_w),   // the instruction front's byte
+        .i_din  (front_bypass ? cpu_din : i_base_w),  // the instruction front's byte, in two
+        .i_tgt  (i_tgt_w), .i_tgt_sel (!front_bypass && i_tgt_sel_w),
         .d_din  (front_bypass ? cpu_din : d_din_w),   // the data front's, or the sequencer's through it
         .cyc_is_i (cpu_cyc_is_i),   // = VPA
         .pc_addr ({cpu_pc_bank, cpu_pc_addr}),
@@ -1052,6 +1054,7 @@ module gs_top #(
     // or the floating-bus simulator ($C05x, $C08x); a write wants no byte,
     // its whole effect is the shadow's at the synthetic commit.
     wire        swi_commit, kbd_int_ok, fb_int_ok, fb_vbl_bar;
+    wire        slow_hold;      // a sliced device's op and its effects in the slice (accel_seq)
     wire        q_swi_mmu, q_swi_quiet;
     // The four registers apple_mmu owns at GS = 1 and gs_io shows, the VGC's
     // border colour, the battery RAM's landed flag, and the host's seconds.
@@ -1101,6 +1104,8 @@ module gs_top #(
     // claim.  Both are zero at GS = 0 and the OR folds away.
     wire        gsio_claim, gsio_u_claim;
     wire [7:0]  gsio_byte;
+    // gs_is_io and gs_io_mine: the chipset's claims, decoded here (g_gsio)
+    `include "gs_iopage.vh"
     // The keyboard read at one clock on the data front (rtl/dline.sv
     // kb_hit): the ADB micro's $C000 byte, registered once here on its way
     // across the die, and the front's retire pulse back to the micro.
@@ -1251,16 +1256,19 @@ module gs_top #(
     // its own at $C033/$C034 (rtl/gs_clock.sv) and no reason to look for one
     // hiding behind a slot ROM.
     assign cpu_din = (nsc_sub && !GS) ? {seq_din[7:1], nsc_bit} : seq_din;
-    accel_seq #(.GS (GS)) u_seq (
+    // (the chipset's slice: two clocks at GS = 1, none on the IIe)
+    accel_seq #(.GS (GS), .SLOW_LAT (GS ? 2 : 0)) u_seq (
         .clk           (apple_clk),
         .rst           (apple_rst),
         .cpu_rst       (cpu_rst),
         .master_active (cpu_source_active),
         .mode          (accel_mode),
         .q_swi         (q_swi),
+        .q_slow        (gsio_claim),
         .q_swi_quiet   (q_swi_quiet),
         .swi_byte      (swi_byte),
         .swi_commit    (swi_commit),
+        .slow_hold     (slow_hold),
         .q_slot        (q_slot),
         .slot_q_o      (seq_slot_q),
         .sl_win        (sl_win),
@@ -1397,7 +1405,7 @@ module gs_top #(
 `endif
         .pc_addr (cpu_pc_addr), .pc_bank (cpu_pc_bank), .cpu_rw (cpu_rw), .cpu_sync (cpu_sync),
         .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
-        .cyc_en (iline_cyc_en), .i_din (i_din_w),
+        .cyc_en (iline_cyc_en), .i_din (i_din_w), .i_base (i_base_w), .i_tgt (i_tgt_w), .i_tgt_sel (i_tgt_sel_w),
         .accel_cyc_en (seq_cyc_en), .accel_din (cpu_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok), .claim (turbo_claim),
         .turbo_commit (turbo_commit), .turbo_sync (turbo_sync), .tick_q (turbo_tick),
@@ -1462,7 +1470,7 @@ module gs_top #(
         .d_ppn (d_ppn_w), .d_reg (d_reg_w), .d_fold (d_fold_w), .d_sh (d_sh_w),
         .rw_bank (mem_rw_bank), .map_changed (map_changed), .map_settling (l1_settling),
         .kbd_en (gs_kbd_en), .kbd_byte (kbd_byte_q), .io_flat (gs_shadow_w[6]), .io_vec (io_vec_q),
-        .swi_busy (swi_commit), .kbd_rd (dl_kbd_rd),
+        .swi_busy (swi_commit || slow_hold), .kbd_rd (dl_kbd_rd),
         .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
         .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
         .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
@@ -1962,15 +1970,24 @@ module gs_top #(
         .cnt_timeouts ()
     );
 
-    gs_io u_gsio (
+    // THE CHIPSET BEHIND A REGISTER SLICE (rtl/gs/gs_io_slice.sv, the user
+    // 2026-09-27): every wire to it flop to flop, so the placer may take the
+    // ADB micro, the IWM, the DOC and the clock out of the region the core,
+    // its L1s, the L2 and the engine need.  Its claims are decoded here, beside
+    // the dispatcher, with the function gs_io itself uses; the sequencer makes
+    // up for the slice's two clocks (accel_seq SLOW_LAT, slow_hold).
+    // The live claim: the same address the map is asked, and for the same
+    // reason - an override brings its own bank.
+    wire [23:0] gsio_q = {ovr_en ? ovr_bank : cpu_bank, nxt_addr};
+    assign gsio_claim   = gs_is_io(gsio_q[23:16], gs_shadow_w[6]) && (gsio_q[15:8] == 8'hC0) &&
+                          gs_io_mine(gsio_q[7:0]);
+    // ...and the registered op's, the select for the internalized byte
+    assign gsio_u_claim = gs_is_io(u_bank, gs_shadow_w[6]) && (u_addr[15:8] == 8'hC0) &&
+                          gs_io_mine(u_addr[7:0]);
+    gs_io_slice u_gsio (
         .clk        (apple_clk),
         .rst        (apple_rst),
         .res_sync   (apple_res_sync),
-        // The same address the map is asked, and for the same reason: an
-        // override brings its own bank.
-        .q_addr     ({ovr_en ? ovr_bank : cpu_bank, nxt_addr}),
-        .q_rw       (cpu_rw),
-        .claim      (gsio_claim),
         .u_bank     (u_bank),
         .u_addr     (u_addr),
         .u_rw       (u_rw),
@@ -2044,7 +2061,6 @@ module gs_top #(
         .fd525_flush (fd_flush),
         .fd525_stale (gsio_fd525_stale), .fd525_dirty (gsio_fd525_dirty),
         .fd525_phase (gsio_fd525_phase),
-        .u_claim    (gsio_u_claim),
         .rd_byte    (gsio_byte),
         .fr_vec     (gsio_fr_vec),
         .irq        (gsio_irq),

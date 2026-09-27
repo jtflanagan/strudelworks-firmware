@@ -28,6 +28,16 @@
 // after waits one clock.  Stores commit at M, when nothing older can still
 // raise an event (an event anywhere older has flushed them by then).
 //
+// MISALIGNED ACCESS IS THE ENGINE'S (the user, 2026-09-26): an access is the
+// words its bytes touch - one, two, or three for a double not on a 4-byte
+// boundary - made one after the other in M (the next word's row read a clock
+// early through d_pre).  A store's words go out with their byte enables; a
+// load's are gathered and, when it was not word-aligned, put together on one
+// clock more.  An access must lie wholly in the space (its first and last
+// bytes); only memory rv_mem delegates - the 65816's own banks - is the VM's,
+// as the event of the access's own kind, the VM doing it whole from its first
+// byte.
+//
 // FLOATING POINT (F and D, docs/RVV2_FP.md): 32 FP registers
 // of 64 bits, a single NaN-boxed in them (an operand not boxed reads as the
 // canonical NaN).  They are read in E and written in W like the integer file,
@@ -36,9 +46,9 @@
 // conversions go to rtl/gs/rv_fpu.sv (one at a time, E held; a flush kills
 // it); sign injection and the two moves are single-clock here.  fld/fsd make
 // two word accesses in M (the second's row read a clock early, as d_pre does
-// for E).  An FP access that is misaligned, or that rv_mem delegates, is the
-// event R_DFL/R_DFS - the VM does the whole access (ev_data and ev_datah a
-// store's value; the resume value and resume_hi a load's).  fflags gather at
+// for E).  An FP access rv_mem delegates is the event R_DFL/R_DFS - the VM
+// does the whole access (ev_data and ev_datah a store's value; the resume
+// value and resume_hi a load's).  fflags gather at
 // retirement; the Zicsr ops on fflags/frm/fcsr wait for M and W to empty and
 // take effect leaving E; a dynamic rounding mode with frm > 4 is illegal.
 //
@@ -223,14 +233,20 @@ module rv_pipe #(
     logic        e_fu1, e_fu2, e_fu3, e_fwr, e_fdbl, e_fodbl, e_frmchk;
     // M
     logic        m_v, m_wr, m_mem, m_we, m_done, m_ldu;
-    logic        m_fwr, m_fp, m_half;   // writes an FP register; an FP access; a double's second word
+    logic        m_fwr, m_fp;           // writes an FP register; an FP access
     logic [31:0] m_resh, m_ch;          // the FP result's high word; an fsd's
+    // the access's words: how many more after the first (m_n), which one is out
+    // (m_k), a store's data and byte enables for this one and the rest (shifted
+    // down a word as each goes), a load's words gathered, and a misaligned
+    // load's last word in (m_fin: put together on the next clock)
+    logic [1:0]  m_n, m_k;
+    logic [95:0] m_wd, m_acc;
+    logic [11:0] m_bew;
+    logic        m_fin;
     logic [4:0]  m_ffl;                 // the FP op's flags
     logic [31:0] m_pc, m_iw, m_res, m_npc, m_ea, m_c, m_evaddr;
     logic [4:0]  m_rd;
     logic [AW-3:0] m_addr;
-    logic [3:0]  m_be;
-    logic [31:0] m_wdata;
     logic [1:0]  m_ldw;
     logic [7:0]  m_ev;
     // W
@@ -247,26 +263,31 @@ module rv_pipe #(
     wire w_free  = !w_v || w_leave;
 
     // ---- M ---------------------------------------------------------------------------------
-    assign d_req   = m_v && m_mem && !m_done && m_ev == R_NEXT;
+    assign d_req   = m_v && m_mem && !m_done && !m_fin && m_ev == R_NEXT;
     assign d_we    = m_we;
     assign d_addr  = m_addr;
-    assign d_be    = m_be;
-    assign d_wdata = m_wdata;
+    assign d_be    = m_bew[3:0];
+    assign d_wdata = m_wd[31:0];
     wire   m_dgt   = d_req && d_valid && d_delegate;               // rv_mem will not do it: an event
     // (a delegate reply becomes M's event register and M moves on the clock
     // after: the flush and the forwarding look only at registered state)
-    // (a double's first word is not the end of its access: M goes on to the second)
     wire   m_dbl   = m_fp && m_ldw[0];
-    wire   m_first = m_mem && m_dbl && !m_half;
-    wire   m_ready = m_v && (m_ev != R_NEXT || !m_mem || m_done || (d_valid && !d_delegate && !m_first));
+    wire   m_more  = m_mem && m_k != m_n;                          // words still to go after this one
+    wire   m_asm   = m_mem && !m_we && m_n != 2'd0 && m_ea[1:0] != 2'd0;   // a load put together after
+    wire   m_ready = m_v && (m_ev != R_NEXT || !m_mem || m_done ||
+                             (d_valid && !d_delegate && !m_more && !m_asm));
     wire   m_adv   = m_ready && w_free;
     wire   m_evnt  = m_ev != R_NEXT;
-    // the value M hands W (a load's, straight from the answer when it came this clock;
-    // an FP load's raw: a single's high word is the box, a double's low word came first)
+    // the value M hands W: a one-word load's straight from the answer the clock it
+    // came, a word-aligned double's high word likewise (its low word came first);
+    // anything put together is in m_res/m_resh by then.  An FP load's raw: a
+    // single's high word is the box.
     wire        m_ldnow = m_mem && !m_we && !m_done;
-    wire [31:0] m_out  = (m_ldnow && !m_dbl) ? (m_fp ? d_rdata : ld_ext(d_rdata, m_ea[1:0], m_ldw, m_ldu)) : m_res;
+    wire [31:0] m_out  = (m_ldnow && m_n == 2'd0) ? (m_fp ? d_rdata : ld_ext(d_rdata, m_ea[1:0], m_ldw, m_ldu)) : m_res;
     wire [31:0] m_outh = (m_ldnow && m_dbl) ? d_rdata : m_resh;
     wire [AW-3:0] m_addr1 = m_addr + 1'b1;
+    // a misaligned load's bytes, from its first
+    wire [63:0] m_asmd = 64'(m_acc >> {m_ea[1:0], 3'b000});
     // an event in M flushes everything younger at once (not on the clock it
     // moves on: that would hang the whole stall chain on the flush)
     wire   flush_ev = m_v && m_evnt;
@@ -292,8 +313,8 @@ module rv_pipe #(
     wire [31:0] c = fwd(e_rs2, e_c);
     wire [31:0] b = e_bimm ? e_imm : c;
     wire [31:0] ea_now = a + e_imm;
-    // (while M holds a double's first word, the row read a clock early is its second's)
-    assign d_pre = (m_v && m_first) ? m_addr1 : ea_now[AW-1:2];
+    // (while M has words to go, the row read a clock early is the next word's)
+    assign d_pre = (m_v && m_more) ? m_addr1 : ea_now[AW-1:2];
 
     // the single-cycle units
     function automatic logic [31:0] shf(input op_t o, input logic [31:0] v, input logic [4:0] n);
@@ -450,14 +471,20 @@ module rv_pipe #(
     wire        e_tbad  = e_taken && (e_tgt[1:0] != 2'd0 || !addr_ok(e_tgt));
     wire [31:0] e_npc   = (e_taken && !e_tbad) ? e_tgt : e_pc + 32'd4;
     wire [1:0]  e_sz    = e_fn3[1:0];
-    wire        e_mis   = (e_sz == 2'd1 && ea_now[0]) || (e_sz[1] && ea_now[1:0] != 2'd0);
     wire        e_fls   = e_op == OP_FLOAD || e_op == OP_FSTORE;
     wire        e_ls    = e_op == OP_LOAD || e_op == OP_STORE || e_fls;
     wire        e_ld    = e_op == OP_LOAD || e_op == OP_FLOAD;
-    // (a double's second word must be in the space too: its first is not the last word)
-    wire        e_aok   = addr_ok(ea_now) && !(e_fls && e_sz[0] && &ea_now[AW-1:2]);
-    // E's event: D's, else a bad rounding mode, a bad target, a memory fault, a
-    // misaligned (delegated) access
+    // the access's bytes: the first at ea, the last `e_lst` on (0, 1, 3 or 7); the
+    // words they touch after the first; its last byte must be in the space too
+    wire [2:0]  e_lst   = e_sz == 2'd0 ? 3'd0 : e_sz == 2'd1 ? 3'd1 : e_sz == 2'd2 ? 3'd3 : 3'd7;
+    wire [3:0]  e_end   = {2'b00, ea_now[1:0]} + {1'b0, e_lst};    // the last byte's offset from the first word
+    wire [1:0]  e_n     = e_end[3:2];
+    wire [3:0]  e_end8  = {1'b0, ea_now[2:0]} + {1'b0, e_lst};
+    wire        e_aok   = addr_ok(ea_now) && !(e_end8[3] && &ea_now[AW-1:3]);
+    // a store's data and byte enables across its words
+    wire [63:0] e_sd    = e_fls ? fb : {32'd0, c};
+    wire [7:0]  e_sm    = e_sz == 2'd0 ? 8'h01 : e_sz == 2'd1 ? 8'h03 : e_sz == 2'd2 ? 8'h0F : 8'hFF;
+    // E's event: D's, else a bad rounding mode, a bad target, a memory fault
     logic [7:0]  e_evo;
     logic [31:0] e_evao;
     always_comb begin
@@ -466,11 +493,6 @@ module rv_pipe #(
             if (fp_rmbad) begin e_evo = R_ILLEGAL; e_evao = e_iw; end
             else if (e_tbad) begin e_evo = R_FFAULT; e_evao = e_tgt; end
             else if (e_ls && !e_aok) begin e_evo = e_ld ? R_LFAULT : R_SFAULT; e_evao = ea_now; end
-            else if (e_ls && e_mis) begin
-                e_evo  = e_fls ? (e_ld ? R_DFL : R_DFS) :
-                         e_ld  ? dl_code(e_sz, e_fn3[2]) : R_DSB + {5'd0, e_sz, 1'b0};
-                e_evao = ea_now;
-            end
         end
     end
     // what E hands M for the redirect: a mispredicted branch, a JALR, a fence.i
@@ -702,7 +724,7 @@ module rv_pipe #(
             fb_v <= 1'b0; fo_v <= 1'b0; fo_drop <= 1'b0;
             d_v <= 1'b0; e_v <= 1'b0; m_v <= 1'b0; w_v <= 1'b0; m_rdone <= 1'b0; d_rdone <= 1'b0; m_mis <= 1'b0;
             mc_on <= 1'b0; mc_done <= 1'b0;
-            fp_st <= FP_IDLE; fflags_q <= 5'd0; frm_q <= 3'd0;
+            fp_st <= FP_IDLE; fflags_q <= 5'd0; frm_q <= 3'd0; m_fin <= 1'b0;
             ev_addr <= 32'd0; ev_data <= 32'd0; ev_datah <= 32'd0; ev_iw <= 32'd0;
         end else begin
             retired <= 1'b0;
@@ -763,12 +785,22 @@ module rv_pipe #(
                 w_evaddr <= m_evaddr;
                 w_evdata <= m_c; w_evdatah <= m_ch;
             end
-            // M: a double's first word answered - on to its second
-            if (m_v && m_first && d_req && d_valid && !d_delegate) begin
-                m_half <= 1'b1;
+            // M: a word answered with words to go - on to the next (a load's gathered;
+            // a word-aligned double's low word is its value's)
+            if (m_v && m_more && d_req && d_valid && !d_delegate) begin
+                m_k    <= m_k + 2'd1;
                 m_addr <= m_addr1;
-                m_wdata <= m_ch;
-                if (!m_we) m_res <= d_rdata;
+                m_wd   <= {32'd0, m_wd[95:32]};
+                m_bew  <= {4'd0, m_bew[11:4]};
+                if (!m_we) begin
+                    m_acc[32 * m_k +: 32] <= d_rdata;
+                    if (m_k == 2'd0) m_res <= d_rdata;
+                end
+            end
+            // M: a misaligned load's last word - put together on the next clock
+            else if (m_v && m_asm && d_req && d_valid && !d_delegate) begin
+                m_acc[32 * m_k +: 32] <= d_rdata;
+                m_fin <= 1'b1;
             end
             // M: a load's answer while W cannot take it yet
             else if (m_v && !m_adv && d_req && d_valid && !d_delegate) begin
@@ -778,6 +810,14 @@ module rv_pipe #(
                     else if (m_fp) m_res  <= d_rdata;
                     else           m_res  <= ld_ext(d_rdata, m_ea[1:0], m_ldw, m_ldu);
                 end
+            end
+            if (m_fin) begin
+                m_fin  <= 1'b0;
+                m_done <= 1'b1;
+                if (m_fp) begin
+                    m_res <= m_asmd[31:0];
+                    if (m_dbl) m_resh <= m_asmd[63:32];
+                end else m_res <= ld_ext(m_asmd[31:0], 2'd0, m_ldw, m_ldu);
             end
             // (the VM does an FP access whole, from its first address)
             if (m_dgt) begin
@@ -793,7 +833,7 @@ module rv_pipe #(
                 m_wr     <= e_wr && e_evo == R_NEXT;
                 m_fwr    <= e_fwr && e_evo == R_NEXT;
                 m_fp     <= e_fls;
-                m_half   <= 1'b0;
+                m_n      <= e_n; m_k <= 2'd0; m_fin <= 1'b0;
                 // (an FP op's value: rv_fpu's, boxed when an FP register takes it; an FP
                 // load's high word is its box until a double's second word replaces it)
                 m_res    <= e_mc ? mc_res : e_fpx ? fp_res[31:0] : e_op == OP_FSGNJ ? sj_res[31:0] :
@@ -808,8 +848,8 @@ module rv_pipe #(
                 m_addr   <= ea_now[AW-1:2];
                 m_ea     <= ea_now;
                 m_ldw    <= e_sz; m_ldu <= e_fn3[2];
-                m_be     <= (e_sz == 2'd0 ? 4'b0001 : e_sz == 2'd1 ? 4'b0011 : 4'b1111) << ea_now[1:0];
-                m_wdata  <= e_fls ? fb[31:0] : c << {ea_now[1:0], 3'b000};
+                m_wd     <= {32'd0, e_sd} << {ea_now[1:0], 3'b000};
+                m_bew    <= {4'd0, e_sm} << ea_now[1:0];
                 m_c      <= e_fls ? fb[31:0] : c;
                 m_ch     <= fb[63:32];
                 m_mis    <= e_misp && e_evo == R_NEXT;
@@ -951,5 +991,5 @@ module rv_pipe #(
         end
     end
 
-    wire unused = &{1'b0, cancel, f_abort, d_abort, pk_hit, pk_word, fu_busy, csr_new[31:8]};
+    wire unused = &{1'b0, cancel, f_abort, d_abort, pk_hit, pk_word, fu_busy, csr_new[31:8], e_end[1:0], e_end8[2:0]};
 endmodule

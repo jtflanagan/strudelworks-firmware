@@ -149,11 +149,12 @@ struct Ref {
     // a sizing study's tap: every fetch ('F'), load ('L') and store ('S') address
     void (*on_acc)(char, uint32_t) = nullptr;
 
-    // The engine's range rule: an access is legal when its FIRST byte is below
-    // `space` ($0200_0000) and outside the null guard (a straddle off the end is not
-    // caught).  A SERVICE the 65816 performs - a write or read buffer, peek, poke -
+    // The engine's range rule: an access is legal when its first AND last bytes are
+    // below `space` ($0200_0000) and outside the null guard (acc_ok); alignment is
+    // free - the engine does a misaligned access itself.  A SERVICE the 65816 performs - a write or read buffer, peek, poke -
     // must lie in the 65816's own space, below $0100_0000 (low_ok).
     bool ok(uint32_t a) const { return a < space && a >= GUARD; }
+    bool acc_ok(uint32_t a, uint32_t n) const { return ok(a) && ok(a + n - 1); }
     static bool low_ok(uint32_t a) { return a < LOW && a >= GUARD; }
     uint32_t ld(uint32_t a, int n) const { uint32_t v = 0; for (int i = 0; i < n; i++) v |= uint32_t(m[a + i]) << (8 * i); return v; }
     static uint64_t box(uint32_t v) { return 0xFFFFFFFF00000000ull | v; }
@@ -196,7 +197,7 @@ struct Ref {
             }
             case 0x03: {
                 const uint32_t ea = a + iI;
-                if (!ok(ea)) { trap(T_LOAD, ea); return; }
+                if (!acc_ok(ea, 1u << (f3 & 3))) { trap(T_LOAD, ea); return; }
                 if (on_acc) on_acc('L', ea);
                 switch (f3) {
                     case 0: r = uint32_t(int8_t(ld(ea, 1))); break; case 1: r = uint32_t(int16_t(ld(ea, 2))); break;
@@ -206,7 +207,7 @@ struct Ref {
             }
             case 0x23: {
                 const uint32_t ea = a + iS;
-                if (!ok(ea)) { trap(T_STORE, ea); return; }
+                if (!acc_ok(ea, 1u << (f3 & 3))) { trap(T_STORE, ea); return; }
                 if (on_acc) on_acc('S', ea);
                 st(ea, b, f3 == 0 ? 1 : f3 == 1 ? 2 : 4);
                 wr = false;
@@ -278,7 +279,7 @@ struct Ref {
             case 0x07: {                                            // flw, fld
                 const uint32_t ea = a + iI;
                 const bool d = f3 == 3;
-                if (!ok(ea) || (d && !ok(ea + 4))) { trap(T_LOAD, ea); return; }
+                if (!acc_ok(ea, d ? 8 : 4)) { trap(T_LOAD, ea); return; }
                 if (on_acc) on_acc('L', ea);
                 f[rd] = d ? (uint64_t(ld(ea + 4, 4)) << 32) | ld(ea, 4) : box(ld(ea, 4));
                 wr = false;
@@ -287,7 +288,7 @@ struct Ref {
             case 0x27: {                                            // fsw, fsd
                 const uint32_t ea = a + iS;
                 const bool d = f3 == 3;
-                if (!ok(ea) || (d && !ok(ea + 4))) { trap(T_STORE, ea); return; }
+                if (!acc_ok(ea, d ? 8 : 4)) { trap(T_STORE, ea); return; }
                 if (on_acc) on_acc('S', ea);
                 st(ea, uint32_t(f[rs2]), 4);
                 if (d) st(ea + 4, uint32_t(f[rs2] >> 32), 4);

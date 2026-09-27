@@ -159,11 +159,13 @@ module rv_mem #(
     // fixed (docs/RVV2_INTEROP.md, the user 2026-09-26):
     //   read:  the upper 16 MB, $02-$DF, $E2-$FF (our RAM and the ROM)
     //   write: the upper 16 MB, $02-$DF, $E2-$EF
-    // Everything else goes to the VM as a real 65816 access: all of banks $00,
-    // $01, $E0 and $E1 (the switched bank-0/1 views, the I/O page, the Mega II's
-    // watched banks - protection for them is later), and a write to the ROM
-    // ($F0-$FF), which the 65816 drops as the machine does.  The null guard in
-    // $00 faults in the core, before any of this.
+    // A write to the ROM ($F0-$FF) is DROPPED here, as the machine drops it:
+    // answered, nothing written, no record.  Everything else goes to the VM as a
+    // real 65816 access: all of banks $00, $01, $E0 and $E1 (the switched
+    // bank-0/1 views, the I/O page, the Mega II's watched banks - protection for
+    // them is later) - none of them next to the upper 16 MB, so an access the
+    // core splits across words never hands the VM a byte it cannot reach.  The
+    // null guard in $00 faults in the core, before any of this.
     // As EQUALITIES, not ranges (gs_map2 missed timing on the range compares'
     // carry chains): "$02-$DF or $E2-$FF" is every bank but $00, $01, $E0, $E1 -
     // bank[7:1] neither $00 nor $70 - and the ROM is bank[7:4] = $F.
@@ -179,6 +181,8 @@ module rv_mem #(
     endfunction
     wire         direct_f = !all_deleg && rd_direct(f_addr);
     wire         direct_d = !all_deleg && (d_we ? wr_direct(d_addr) : rd_direct(d_addr));
+    // a write to the ROM: dropped (not in the upper 16 MB, whose top bits look like a bank)
+    wire         rom_wr   = !all_deleg && d_we && !(AW > 24 && d_addr[AW-3]) && d_addr[21:18] == 4'hF;
     wire         sel_d;             // the miss engine takes the data request
     wire  [AW-3:0] a_now = sel_d ? d_addr : f_addr;
     wire         direct_now = sel_d ? direct_d : direct_f;
@@ -302,7 +306,9 @@ module rv_mem #(
     // the event stream's arbitration in front of the pipe's stall chain)
     wire st_post = (st == M_IDLE) && d_req && d_we && direct_d && DIRECT_WRITES != 0 &&
                    !rec_v && !wsn_v;
-    wire d_need = d_req && !d_fast;         // the data request needs the miss engine (or the seam)
+    // A ROM write, dropped: answered on the clock it is presented, like a posted store
+    wire st_drop = (st == M_IDLE) && d_req && rom_wr && !wsn_v;
+    wire d_need = d_req && !d_fast && !st_drop;   // the data request needs the miss engine (or the seam)
     // a fetch needs the miss engine when it is not direct, or its row is not held
     // (the row read is its own index's and the tag is another's)
     wire f_need = f_req && (!direct_f || (ic_match && !ic_tagok));
@@ -323,7 +329,7 @@ module rv_mem #(
                      f_pfland ? word_of(pf_row, f_addr[1:0]) :
                      dr_land ? word_of(dr_row, wsel) :
                      il_land ? word_of(il_row, wsel) : 32'd0;
-    assign d_valid = d_valid_q || d_fast || st_post || (dr_land && !is_f) || (il_land && !is_f);
+    assign d_valid = d_valid_q || d_fast || st_post || st_drop || (dr_land && !is_f) || (il_land && !is_f);
     assign d_rdata = d_fast ? word_of(dc_row, d_addr[1:0]) :
                      dr_land ? word_of(dr_row, wsel) :
                      il_land ? word_of(il_row, wsel) : 32'd0;

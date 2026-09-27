@@ -67,6 +67,11 @@ module l1i #(
     input  wire [7:0]  p_flags,
     output wire        cyc_en,
     output wire [7:0]  i_din,
+    // ...and i_din in its two parts, for the core's early carry (rtl/gs/cpu65816.sv):
+    // the byte without the target serve, the target byte and the serve itself
+    output wire [7:0]  i_base,
+    output wire [7:0]  i_tgt,
+    output wire        i_tgt_sel,
     // The sequencer's path through (rtl/gs/accel_seq.sv).
     input  wire        accel_cyc_en,
     input  wire [7:0]  accel_din,
@@ -262,8 +267,10 @@ module l1i #(
     assign turbo_commit = retire;
     assign turbo_sync   = retire && cpu_sync;
     assign cyc_en       = accel_cyc_en || retire;
-    assign i_din        = tgt_serve ? tgt_byte_q :
-                          lhit_q    ? i_byte_q  : accel_din;
+    assign i_base       = lhit_q ? i_byte_q : accel_din;
+    assign i_tgt        = tgt_byte_q;
+    assign i_tgt_sel    = tgt_serve;
+    assign i_din        = tgt_serve ? tgt_byte_q : i_base;
 
     // ---- the branch scanner and the target table (rtl/gs/iscan.sv) --------------
     wire        sc_rd_slot;

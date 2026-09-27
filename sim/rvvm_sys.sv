@@ -77,7 +77,7 @@ module rvvm_sys #(
 );
     cpu65816 #(.UCODE_FILE (UCODE_FILE), .UCODE0_FILE (UCODE0_FILE), .USEQ0_FILE (USEQ0_FILE)) u_cpu (
         .clk (clk), .rst (rst), .cyc_en (cyc_en),
-        .addr (addr), .rw (rw), .dout (dout), .i_din (i_din), .d_din (d_din),
+        .addr (addr), .rw (rw), .dout (dout), .i_din (i_din), .d_din (d_din), .i_tgt (8'd0), .i_tgt_sel (1'b0),
         .irq_n (irq_n), .nmi_n (nmi_n), .sync (sync), .vda (vda), .vpa (vpa),
         .vpb (), .emu (), .halted (halted), .cyc_is_i (), .pc_addr (), .pc_d (),
         .d_pred (), .d_pred_v (), .d_pred_rw (), .d_pred_bcls (), .d_pred_vpb (),

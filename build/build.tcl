@@ -240,6 +240,7 @@ if {$snoop || $master} {
             add_files -norecurse [list \
                 [file join $root rtl gs cpu65816.sv] \
                 [file join $root rtl gs gs_io.sv] \
+                [file join $root rtl gs gs_io_slice.sv] \
                 [file join $root rtl gs gs_adb.sv] \
                 [file join $root rtl gs gs_doc.sv] \
                 [file join $root rtl gs gs_kbd_a2.sv] \

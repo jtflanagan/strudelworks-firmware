@@ -19,7 +19,7 @@
     31 results bit for bit: 1/3, sqrt 2, fma(0.1, 10, -1) rounded once, a single's
        1/3, fcvt.w.d of -3.5 to nearest even and toward zero
     32 the flags: 1/3 inexact, 1/0 divide by zero, 0/0 invalid
-    33 misaligned in the low block: fsd/fld and fsw/flw the runtime does (R_DFS, R_DFL)
+    33 misaligned in the low block: fsd/fld and fsw/flw, which the engine does itself
    Rung I4 (librvgs: call65816, GS/OS through the bounce buffer, the Event Manager):
     20 a missing file: Open says fileNotFound ($46)
     21 9:RVTEST.DAT opens               22 its size is 40000
@@ -110,7 +110,7 @@ static int fp(void) {
     fcsr_set(0); sink = zero / zero; if (fcsr_get() != 0x10) return 32;
     fcsr_set(0);
     (void)sink;
-    /* misaligned: the engine hands them to the runtime, which does them whole */
+    /* misaligned: the engine does them itself, word by word (docs/RVV2_MISALIGNED.md) */
     volatile uint8_t *lb = (volatile uint8_t *)(uintptr_t)rv_env->bounce;
     const double v = one / three;
     const uint64_t vb = bits(v);

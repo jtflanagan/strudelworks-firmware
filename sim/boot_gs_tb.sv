@@ -297,12 +297,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [1:0]  cpu_d_pred_bcls;
     wire        cpu_d_pred_vpb;
     wire [33:0] cpu_d_pred_arms;
-    wire [7:0]  cpu_p_flags, cpu_dbr, i_din_w, d_din_w, seq_din;
+    wire [7:0]  cpu_p_flags, cpu_dbr, i_din_w, d_din_w, seq_din, i_base_w, i_tgt_w;
+    wire        i_tgt_sel_w;
     wire [7:0]  cpu_din = cpu_cyc_is_i ? i_din_w : d_din_w;
 
     cpu65816 #(.UCODE_FILE (UCODE), .UCODE0_FILE (UCODE0), .USEQ0_FILE (USEQ0)) u_cpu (
         .clk (clk), .rst (cpu_rst), .cyc_en (cpu_cyc_en),
-        .addr (cpu_a24), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_din_w), .d_din (d_din_w),
+        .addr (cpu_a24), .rw (cpu_rw), .dout (cpu_dout), .i_din (i_base_w), .d_din (d_din_w),
+        .i_tgt (i_tgt_w), .i_tgt_sel (i_tgt_sel_w),
         .cyc_is_i (cpu_cyc_is_i), .pc_addr (cpu_pc24), .pc_d (cpu_pc_d), .d_pred (cpu_d_pred),
         .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_bcls (cpu_d_pred_bcls), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
         .p_flags (cpu_p_flags), .dbr_o (cpu_dbr), .bank_wr (cpu_bank_wr),
@@ -374,6 +376,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [7:0]  retries;
     wire        mem_image_ready, mem_invalidating;
     wire        q_swi_mmu, q_swi_quiet, q_slot, swi_commit, sl_win, seq_slot_q;
+    wire        slow_hold;      // the chipset's slice (rtl/gs/gs_io_slice.sv, accel_seq SLOW_LAT)
     wire [7:0]  mmu_swi_stat;
     // The chipset's face (rtl/gs_io.sv, docs/GS.md rung 3b): what it claims
     // joins the dispatcher's internalized-op question, and its byte joins the
@@ -381,6 +384,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // (swi_on tied low), so the two never both claim.
     wire        gsio_claim, gsio_u_claim;
     wire [7:0]  gsio_byte;
+    `include "gs_iopage.vh"
     wire        gsio_irq;
     // ...and the RISC-V engine's window, as rtl/gs/gs_top.sv wires it: claimed
     // on the live address, served from the registered op, the STEP read
@@ -571,11 +575,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         room_w_q <= room_q;
     end
 
-    accel_seq #(.GS (1'b1)) u_seq (
+    accel_seq #(.GS (1'b1), .SLOW_LAT (2)) u_seq (
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst), .master_active (master_active),
         .mode (mode), .target (target), .cnt_clr (1'b0),
-        .q_swi (q_swi), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte),
-        .swi_commit (swi_commit), .fast_tick (seq_fast_tick), .mem_served (seq_mem_served_w), .fev_quiet (),
+        .q_swi (q_swi), .q_slow (gsio_claim), .q_swi_quiet (q_swi_quiet), .swi_byte (swi_byte),
+        .swi_commit (swi_commit), .slow_hold (slow_hold), .fast_tick (seq_fast_tick), .mem_served (seq_mem_served_w), .fev_quiet (),
         .q_slot (q_slot), .slot_q_o (seq_slot_q), .sl_win (sl_win),
         // The 3.5" drive holds the core while its track is on the way, as
         // the card does (rtl/master_top.sv: fd_stall || u2_stall || fd35_stall).
@@ -623,7 +627,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .pc_addr (cpu_pc24[15:0]), .pc_bank (cpu_pc24[23:16]),
         .cpu_rw (cpu_rw_eff), .cpu_sync (cpu_sync),
         .cyc_is_i (cpu_cyc_is_i), .p_flags (cpu_p_flags),
-        .cyc_en (iline_cyc_en), .i_din (i_din_w),
+        .cyc_en (iline_cyc_en), .i_din (i_din_w), .i_base (i_base_w), .i_tgt (i_tgt_w), .i_tgt_sel (i_tgt_sel_w),
         .accel_cyc_en (seq_cyc_en), .accel_din (seq_din),
         .turbo_en (turbo_en), .turbo_ok (turbo_ok), .claim (turbo_claim),
         .turbo_commit (turbo_commit), .turbo_sync (turbo_sync),
@@ -678,7 +682,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     always @(posedge clk) io_vec_q <= gsio_fr_vec;
     l1d #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1d (
         .kbd_en (1'b1), .kbd_byte (gs_c000_byte), .kbd_rd (dl_kbd_rd),
-        .io_flat (gs_shadow_w[6]), .io_vec (io_vec_q), .swi_busy (swi_commit),
+        .io_flat (gs_shadow_w[6]), .io_vec (io_vec_q), .swi_busy (swi_commit || slow_hold),
         .op_take (seq_mem_served_w), .op_row_v (op_row_low_v), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w[15:0]),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
@@ -1044,9 +1048,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         end
     end
 
-    gs_io #(.adb_keymap (ADB_KEYMAP)) u_gsio (
+    // The chipset behind its register slice, as the card has it (rtl/gs/gs_top.sv):
+    // its claims decoded here with gs_io's own function.
+    assign gsio_claim   = gs_is_io(drv_bank, gs_shadow_w[6]) && (nxt_addr[15:8] == 8'hC0) &&
+                          gs_io_mine(nxt_addr[7:0]);
+    assign gsio_u_claim = gs_is_io(u_bank, gs_shadow_w[6]) && (u_addr[15:8] == 8'hC0) &&
+                          gs_io_mine(u_addr[7:0]);
+    gs_io_slice #(.adb_keymap (ADB_KEYMAP)) u_gsio (
         .clk (clk), .rst (rst), .res_sync (res_sync),
-        .q_addr ({drv_bank, nxt_addr}), .q_rw (cpu_rw_eff), .claim (gsio_claim),
         .u_bank (u_bank), .u_addr (u_addr), .u_rw (u_rw), .u_wdata (u_wdata),
         .u_commit (swi_commit),
         .gs_shadow (gs_shadow_w), .gs_cyareg (gs_cyareg_w),
@@ -1092,7 +1101,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .fd525_cell ({13'd32, 13'd32}), .fd525_tracks ({6'd35, 6'd35}),
         .fd525_flush (2'b00),
         .fd525_stale (), .fd525_dirty (), .fd525_phase (),
-        .u_claim (gsio_u_claim), .rd_byte (gsio_byte), .irq (gsio_irq)
+        .rd_byte (gsio_byte), .irq (gsio_irq)
     );
 
     // ---- the 3.5" drive's host (docs/IWM35.md) ------------------------------
@@ -1265,30 +1274,30 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // The IWM trace: each access to $C0Ex as it retires, with the byte a
     // read took, and the chip and drive as the access leaves them.
     integer fd35_traced = 0;
-    always @(posedge clk) if (FD35_TRACE != 0 && u_gsio.u_iwm.iwm_act && fd35_traced < FD35_TRACE) begin
+    always @(posedge clk) if (FD35_TRACE != 0 && u_gsio.u_chip.u_iwm.iwm_act && fd35_traced < FD35_TRACE) begin
         fd35_traced = fd35_traced + 1;
         $display("    IWM %8d %s $C0%02X %s%02X  ph=%b mot=%0d q7q6=%0d%0d sel35=%0d ctl=%0d stat35=$%X trk=%0d side=%0d m35=%0d stale=%0d pos=%0d latch=%02X v=%0d mode=$%02X per=%0d acc=%0d hp=%0d/%0d",
-                 trace_instrs, u_gsio.u_iwm.op_rw ? "rd" : "WR", u_gsio.u_iwm.op_lo,
-                 u_gsio.u_iwm.op_rw ? "-> " : "<- ",
-                 u_gsio.u_iwm.op_rw ? u_gsio.u_iwm.rd_byte : u_gsio.u_iwm.op_wdata,
-                 u_gsio.u_iwm.phases, u_gsio.u_iwm.motor_on, u_gsio.u_iwm.q7, u_gsio.u_iwm.q6,
-                 u_gsio.u_iwm.apple35_sel, u_gsio.u_iwm.c031_ctrl, u_gsio.u_iwm.stat35,
-                 u_gsio.u_iwm.track35, u_gsio.u_iwm.side35, u_gsio.u_iwm.motor35, u_gsio.u_iwm.stale,
-                 u_gsio.u_iwm.pos, u_gsio.u_iwm.latch, u_gsio.u_iwm.latch_valid, u_gsio.u_iwm.mode,
-                 8'd224, u_gsio.u_iwm.nib_acc,
-                 u_gsio.u_iwm.ph5[0], u_gsio.u_iwm.ph5[1]);
+                 trace_instrs, u_gsio.u_chip.u_iwm.op_rw ? "rd" : "WR", u_gsio.u_chip.u_iwm.op_lo,
+                 u_gsio.u_chip.u_iwm.op_rw ? "-> " : "<- ",
+                 u_gsio.u_chip.u_iwm.op_rw ? u_gsio.u_chip.u_iwm.rd_byte : u_gsio.u_chip.u_iwm.op_wdata,
+                 u_gsio.u_chip.u_iwm.phases, u_gsio.u_chip.u_iwm.motor_on, u_gsio.u_chip.u_iwm.q7, u_gsio.u_chip.u_iwm.q6,
+                 u_gsio.u_chip.u_iwm.apple35_sel, u_gsio.u_chip.u_iwm.c031_ctrl, u_gsio.u_chip.u_iwm.stat35,
+                 u_gsio.u_chip.u_iwm.track35, u_gsio.u_chip.u_iwm.side35, u_gsio.u_chip.u_iwm.motor35, u_gsio.u_chip.u_iwm.stale,
+                 u_gsio.u_chip.u_iwm.pos, u_gsio.u_chip.u_iwm.latch, u_gsio.u_chip.u_iwm.latch_valid, u_gsio.u_chip.u_iwm.mode,
+                 8'd224, u_gsio.u_chip.u_iwm.nib_acc,
+                 u_gsio.u_chip.u_iwm.ph5[0], u_gsio.u_chip.u_iwm.ph5[1]);
     end
 
     // Every 5.25" store - a byte the machine wrote into the buffered track -
     // with the chip's state as it landed, the first 40 of them.
     integer d5_stores_shown = 0;
-    always @(posedge clk) if (HAS_FD525 && u_gsio.u_iwm.store && d5_stores_shown < 40) begin
+    always @(posedge clk) if (HAS_FD525 && u_gsio.u_chip.u_iwm.store && d5_stores_shown < 40) begin
         d5_stores_shown = d5_stores_shown + 1;
         $display("    STORE %8d $C0%02X <- %02X  ph=%b en2=%0d mot=%0d q7q6=%0d%0d sel35=%0d drv=%0d pos=%0d buf_id=%03x mode=$%02X",
-                 trace_instrs, u_gsio.u_iwm.op_lo, u_gsio.u_iwm.op_wdata, u_gsio.u_iwm.phases,
-                 u_gsio.u_iwm.enable2, u_gsio.u_iwm.motor_on, u_gsio.u_iwm.q7, u_gsio.u_iwm.q6,
-                 u_gsio.u_iwm.apple35_sel, u_gsio.u_iwm.drive_sel, u_gsio.u_iwm.pos,
-                 u_gsio.u_iwm.buf_id, u_gsio.u_iwm.mode);
+                 trace_instrs, u_gsio.u_chip.u_iwm.op_lo, u_gsio.u_chip.u_iwm.op_wdata, u_gsio.u_chip.u_iwm.phases,
+                 u_gsio.u_chip.u_iwm.enable2, u_gsio.u_chip.u_iwm.motor_on, u_gsio.u_chip.u_iwm.q7, u_gsio.u_chip.u_iwm.q6,
+                 u_gsio.u_chip.u_iwm.apple35_sel, u_gsio.u_chip.u_iwm.drive_sel, u_gsio.u_chip.u_iwm.pos,
+                 u_gsio.u_chip.u_iwm.buf_id, u_gsio.u_chip.u_iwm.mode);
     end
 
     // THE SCAN-LINE INTERRUPT'S INGREDIENTS, named as they happen: every SCB
@@ -1299,17 +1308,17 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     integer scb_writes = 0, scan_irqs = 0;
     reg scan_q_prev = 1'b0;
     always @(posedge clk) begin
-        scan_q_prev <= u_gsio.irq_scan_q;
-        if (u_gsio.scb_hit) begin
+        scan_q_prev <= u_gsio.u_chip.irq_scan_q;
+        if (u_gsio.u_chip.scb_hit) begin
             scb_writes = scb_writes + 1;
-            if (scb_writes <= 8 || u_gsio.mw_byte[6])
-                $display("    SCB write #%0d at instruction %0d: $E1/%04X <- $%02X", scb_writes, trace_instrs, u_gsio.mw_addr, u_gsio.mw_byte);
+            if (scb_writes <= 8 || u_gsio.u_chip.mw_byte[6])
+                $display("    SCB write #%0d at instruction %0d: $E1/%04X <- $%02X", scb_writes, trace_instrs, u_gsio.u_chip.mw_addr, u_gsio.u_chip.mw_byte);
         end
-        if (u_gsio.act && !u_gsio.u_rw && (u_gsio.u_addr[7:0] == 8'h29 || u_gsio.u_addr[7:0] == 8'h23))
-            $display("    VGC write at instruction %0d: $%02X/C0%02X <- $%02X", trace_instrs, u_gsio.u_bank, u_gsio.u_addr[7:0], u_gsio.u_wdata);
-        if (u_gsio.irq_scan_q && !scan_q_prev) begin
+        if (u_gsio.u_chip.act && !u_gsio.u_chip.u_rw && (u_gsio.u_chip.u_addr[7:0] == 8'h29 || u_gsio.u_chip.u_addr[7:0] == 8'h23))
+            $display("    VGC write at instruction %0d: $%02X/C0%02X <- $%02X", trace_instrs, u_gsio.u_chip.u_bank, u_gsio.u_chip.u_addr[7:0], u_gsio.u_chip.u_wdata);
+        if (u_gsio.u_chip.irq_scan_q && !scan_q_prev) begin
             scan_irqs = scan_irqs + 1;
-            if (scan_irqs <= 5) $display("    scan-line interrupt #%0d at instruction %0d, line %0d", scan_irqs, trace_instrs, u_gsio.scan_v);
+            if (scan_irqs <= 5) $display("    scan-line interrupt #%0d at instruction %0d, line %0d", scan_irqs, trace_instrs, u_gsio.u_chip.scan_v);
         end
     end
 
@@ -2057,18 +2066,18 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     task dump_iwm;
         begin
             $display("    the IWM at the end: motor %0d enable2 %0d q6 %0d q7 %0d phases %04b mode %02b%03b apple35 %0d",
-                     u_gsio.u_iwm.motor_on, u_gsio.u_iwm.enable2,
-                     u_gsio.u_iwm.q6, u_gsio.u_iwm.q7, u_gsio.u_iwm.phases,
-                     u_gsio.u_iwm.mode[4:3], u_gsio.u_iwm.mode[2:0],
-                     u_gsio.u_iwm.apple35_sel);
+                     u_gsio.u_chip.u_iwm.motor_on, u_gsio.u_chip.u_iwm.enable2,
+                     u_gsio.u_chip.u_iwm.q6, u_gsio.u_chip.u_iwm.q7, u_gsio.u_chip.u_iwm.phases,
+                     u_gsio.u_chip.u_iwm.mode[4:3], u_gsio.u_chip.u_iwm.mode[2:0],
+                     u_gsio.u_chip.u_iwm.apple35_sel);
             $display("    data reads served from a disk: %0d from the 3.5\" drive, %0d from a 5.25\" drive",
-                     u_gsio.u_iwm.rd35, u_gsio.u_iwm.rd525);
+                     u_gsio.u_chip.u_iwm.rd35, u_gsio.u_chip.u_iwm.rd525);
             if (HAS_FD525)
                 $display("    the 5.25\" drives: %0d seeks, %0d fills, heads at half-track %0d / %0d",
-                         fd525_seeks, fd525_fills, u_gsio.u_iwm.ph5[0], u_gsio.u_iwm.ph5[1]);
+                         fd525_seeks, fd525_fills, u_gsio.u_chip.u_iwm.ph5[0], u_gsio.u_chip.u_iwm.ph5[1]);
             if (HAS_FD525)
                 $display("    the 5.25\" writes: %0d bytes loaded, %0d bits written, %0d tracks sent home, %0d FD_DIRTY chunks taken",
-                         u_gsio.u_iwm.ld525, u_gsio.u_iwm.wr525, u_gsio.u_iwm.up525, fd525_dirty_chunks);
+                         u_gsio.u_chip.u_iwm.ld525, u_gsio.u_chip.u_iwm.wr525, u_gsio.u_chip.u_iwm.up525, fd525_dirty_chunks);
         end
     endtask
     // The Ensoniq's state (rtl/gs_doc.sv, docs/GS.md rung 7): which
@@ -2109,11 +2118,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     integer doc_pk_l = 0, doc_pk_r = 0, doc_mn_l = 0, doc_mn_r = 0;
     integer doc_nz = 0;
     always @(posedge clk) begin
-        if (u_gsio.u_doc.snd_l > doc_pk_l) doc_pk_l = u_gsio.u_doc.snd_l;
-        if (u_gsio.u_doc.snd_r > doc_pk_r) doc_pk_r = u_gsio.u_doc.snd_r;
-        if (u_gsio.u_doc.snd_l < doc_mn_l) doc_mn_l = u_gsio.u_doc.snd_l;
-        if (u_gsio.u_doc.snd_r < doc_mn_r) doc_mn_r = u_gsio.u_doc.snd_r;
-        if ((u_gsio.u_doc.snd_l != 0) || (u_gsio.u_doc.snd_r != 0))
+        if (u_gsio.u_chip.u_doc.snd_l > doc_pk_l) doc_pk_l = u_gsio.u_chip.u_doc.snd_l;
+        if (u_gsio.u_chip.u_doc.snd_r > doc_pk_r) doc_pk_r = u_gsio.u_chip.u_doc.snd_r;
+        if (u_gsio.u_chip.u_doc.snd_l < doc_mn_l) doc_mn_l = u_gsio.u_chip.u_doc.snd_l;
+        if (u_gsio.u_chip.u_doc.snd_r < doc_mn_r) doc_mn_r = u_gsio.u_chip.u_doc.snd_r;
+        if ((u_gsio.u_chip.u_doc.snd_l != 0) || (u_gsio.u_chip.u_doc.snd_r != 0))
             doc_nz = doc_nz + 1;
     end
 
@@ -2131,7 +2140,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         if (u_commit   && doc_pair_b && doc_addr_b) doc_ops_u   = doc_ops_u + 1;
         if (swi_commit && doc_pair_b && doc_addr_b) doc_ops_act = doc_ops_act + 1;
         if (swi_commit && doc_pair_b && (u_addr[7:0] == 8'h3D) && !u_rw &&
-            !u_gsio.u_doc.sound_ctl[6] && (u_gsio.u_doc.ptr[7:5] == 3'd5)) begin
+            !u_gsio.u_chip.u_doc.sound_ctl[6] && (u_gsio.u_chip.u_doc.ptr[7:5] == 3'd5)) begin
             doc_ctlw = doc_ctlw + 1;
             // Only the writes that CLEAR the halt bit are starts, and those are
             // the ones in question - the ROM's init halts all 32 at boot and
@@ -2140,8 +2149,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 doc_starts = doc_starts + 1;
                 if (doc_starts <= 24)
                     $display("      DOC START #%0d at instr %0d: osc %0d <= $%02x (was $%02x), osc_en %0d",
-                             doc_starts, trace_instrs, u_gsio.u_doc.ptr[4:0], u_wdata,
-                             u_gsio.u_doc.ctl[u_gsio.u_doc.ptr[4:0]], u_gsio.u_doc.osc_en);
+                             doc_starts, trace_instrs, u_gsio.u_chip.u_doc.ptr[4:0], u_wdata,
+                             u_gsio.u_chip.u_doc.ctl[u_gsio.u_chip.u_doc.ptr[4:0]], u_gsio.u_chip.u_doc.osc_en);
             end
         end
     end
@@ -2153,17 +2162,17 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             $display("    the Ensoniq OUT: L %0d..%0d  R %0d..%0d, nonzero on %0d clocks",
                      doc_mn_l, doc_pk_l, doc_mn_r, doc_pk_r, doc_nz);
             $display("    the Ensoniq: osc_en %0d, ends %0d, irqs %0d, queue %0d, irq %0d, ctl $C03C=%02x",
-                     u_gsio.u_doc.osc_en, u_gsio.u_doc.cnt_ends,
-                     u_gsio.u_doc.cnt_irqs, u_gsio.u_doc.q_n,
-                     u_gsio.u_doc.irq, u_gsio.u_doc.sound_ctl);
+                     u_gsio.u_chip.u_doc.osc_en, u_gsio.u_chip.u_doc.cnt_ends,
+                     u_gsio.u_chip.u_doc.cnt_irqs, u_gsio.u_chip.u_doc.q_n,
+                     u_gsio.u_chip.u_doc.irq, u_gsio.u_chip.u_doc.sound_ctl);
             for (dj = 0; dj < 32; dj = dj + 1)
-                if (u_gsio.u_doc.running[dj] || !u_gsio.u_doc.ctl[dj][0])
+                if (u_gsio.u_chip.u_doc.running[dj] || !u_gsio.u_chip.u_doc.ctl[dj][0])
                     $display("      osc %2d RUNNING=%0d ctl=%02x (halt %0d mode %0d int %0d chan %0d) freq=%04x vol=%02x wptr=%02x wsize=%02x",
-                             dj, u_gsio.u_doc.running[dj], u_gsio.u_doc.ctl[dj],
-                             u_gsio.u_doc.ctl[dj][0], u_gsio.u_doc.ctl[dj][2:1],
-                             u_gsio.u_doc.ctl[dj][3], u_gsio.u_doc.ctl[dj][7:4],
-                             {u_gsio.u_doc.r_freq_hi[dj], u_gsio.u_doc.r_freq_lo[dj]}, u_gsio.u_doc.r_vol[dj],
-                             u_gsio.u_doc.r_wptr[dj], u_gsio.u_doc.r_wsize[dj]);
+                             dj, u_gsio.u_chip.u_doc.running[dj], u_gsio.u_chip.u_doc.ctl[dj],
+                             u_gsio.u_chip.u_doc.ctl[dj][0], u_gsio.u_chip.u_doc.ctl[dj][2:1],
+                             u_gsio.u_chip.u_doc.ctl[dj][3], u_gsio.u_chip.u_doc.ctl[dj][7:4],
+                             {u_gsio.u_chip.u_doc.r_freq_hi[dj], u_gsio.u_chip.u_doc.r_freq_lo[dj]}, u_gsio.u_chip.u_doc.r_vol[dj],
+                             u_gsio.u_chip.u_doc.r_wptr[dj], u_gsio.u_chip.u_doc.r_wsize[dj]);
         end
     endtask
     // The interrupt controller's state (rtl/gs_intc.sv).  A machine spinning
@@ -2175,9 +2184,9 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     always @(posedge clk) begin
         if (swi_commit && u_rw && (u_addr[15:0] == 16'hC0EE) && (n_iwmstat < 12)) begin
             $display("    IWM status read #%0d at instruction %0d: stat35 =$%01X -> sense %0d, motor %0d, apple35 %0d, phases %04b",
-                     n_iwmstat, trace_instrs, u_gsio.u_iwm.stat35,
-                     u_gsio.u_iwm.status35, u_gsio.u_iwm.motor_on,
-                     u_gsio.u_iwm.apple35_sel, u_gsio.u_iwm.phases);
+                     n_iwmstat, trace_instrs, u_gsio.u_chip.u_iwm.stat35,
+                     u_gsio.u_chip.u_iwm.status35, u_gsio.u_chip.u_iwm.motor_on,
+                     u_gsio.u_chip.u_iwm.apple35_sel, u_gsio.u_chip.u_iwm.phases);
             n_iwmstat = n_iwmstat + 1;
         end
     end
@@ -2186,11 +2195,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     task dump_intc;
         begin
             $display("    the interrupt controller: irq %0d, taken %0d; $C041=%02x $C023=%02x $C046=%02x; pending vbl %0d .25s %0d 1s %0d scan %0d; adb %0d doc %0d",
-                     u_gsio.u_intc.irq, irqs_taken,
-                     u_gsio.u_intc.c041, u_gsio.u_intc.c023, u_gsio.u_intc.c046,
-                     u_gsio.u_intc.p_vbl, u_gsio.u_intc.p_25sec,
-                     u_gsio.u_intc.p_1sec, u_gsio.u_intc.p_scan,
-                     u_gsio.u_intc.irq_adb, u_gsio.u_intc.irq_doc);
+                     u_gsio.u_chip.u_intc.irq, irqs_taken,
+                     u_gsio.u_chip.u_intc.c041, u_gsio.u_chip.u_intc.c023, u_gsio.u_chip.u_intc.c046,
+                     u_gsio.u_chip.u_intc.p_vbl, u_gsio.u_chip.u_intc.p_25sec,
+                     u_gsio.u_chip.u_intc.p_1sec, u_gsio.u_chip.u_intc.p_scan,
+                     u_gsio.u_chip.u_intc.irq_adb, u_gsio.u_chip.u_intc.irq_doc);
             $display("    ...the line last went UP at instruction %0d and last came DOWN at %0d; $C047 acknowledged %0d times, last at %0d",
                      last_rise, last_fall, c047_n, last_c047);
         end
@@ -3013,7 +3022,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // has to happen WHILE the machine runs, not before or after it.
     integer keys_sent = 0;
     integer adb_repeats = 0;
-    always @(posedge clk) if (u_gsio.u_adb.rpt_fire) adb_repeats = adb_repeats + 1;
+    always @(posedge clk) if (u_gsio.u_chip.u_adb.rpt_fire) adb_repeats = adb_repeats + 1;
     // PB0 held down for a while at BTN_AT: 2'b10 is "down", 2'b00 "the
     // hardware's" (rtl/pb_inject.sv holds the same word).
     initial if (BTN_AT != 0) begin : clicker
@@ -3031,11 +3040,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         send_key(7'(KEY_CODE), 1'b0, 8'(KEY_MODS));
         msg_lock = 1'b0;
         keys_sent = keys_sent + 1;
-        if (u_gsio.u_adb.kbd_buf[0][7] !== 1'b1)
+        if (u_gsio.u_chip.u_adb.kbd_buf[0][7] !== 1'b1)
             fail("the key went down and $C000's strobe did not set");
         else
             ok($sformatf("keycode $%02X reached the keyboard: $C000 reads $%02X, $C025 $%02X",
-                         KEY_CODE, u_gsio.u_adb.kbd_buf[0], u_gsio.u_adb.c025_val));
+                         KEY_CODE, u_gsio.u_chip.u_adb.kbd_buf[0], u_gsio.u_chip.u_adb.c025_val));
         repeat (KEY_HOLD) @(negedge clk);
         wait (!msg_lock); msg_lock = 1'b1;
         send_key(7'(KEY_CODE), 1'b1, 8'(KEY_MODS));
@@ -3074,10 +3083,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     function automatic [7:0] card_bram(input [7:0] i);
         begin
             case (i[1:0])
-                2'd0: card_bram = u_gsio.u_clock.bram0[i[7:2]];
-                2'd1: card_bram = u_gsio.u_clock.bram1[i[7:2]];
-                2'd2: card_bram = u_gsio.u_clock.bram2[i[7:2]];
-                default: card_bram = u_gsio.u_clock.bram3[i[7:2]];
+                2'd0: card_bram = u_gsio.u_chip.u_clock.bram0[i[7:2]];
+                2'd1: card_bram = u_gsio.u_chip.u_clock.bram1[i[7:2]];
+                2'd2: card_bram = u_gsio.u_chip.u_clock.bram2[i[7:2]];
+                default: card_bram = u_gsio.u_chip.u_clock.bram3[i[7:2]];
             endcase
         end
     endfunction
@@ -3441,8 +3450,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         // the rest of the way into bank $0E.
         if (HAS_FD35 != 0) begin
             $display("    the 3.5\" drive: %0d seeks, %0d fills, head at track %0d side %0d, %0d late, fill max %0d us, IWM mode $%02X",
-                     fd35_seeks, fd35_fills, u_gsio.u_iwm.track35, u_gsio.u_iwm.side35,
-                     u_gsio.u_iwm.late, u_gsio.u_iwm.fill_max, u_gsio.u_iwm.mode);
+                     fd35_seeks, fd35_fills, u_gsio.u_chip.u_iwm.track35, u_gsio.u_chip.u_iwm.side35,
+                     u_gsio.u_chip.u_iwm.late, u_gsio.u_chip.u_iwm.fill_max, u_gsio.u_chip.u_iwm.mode);
             if (fd35_seeks == 0)
                 fail("no track was ever asked for: the machine never moved the 3.5\" head");
             else

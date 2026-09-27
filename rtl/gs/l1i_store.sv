@@ -47,6 +47,10 @@ module l1i_store #(
     input  wire [7:0]  p_flags,       // unused here (the lines' branch resolution)
     output wire        cyc_en,
     output wire [7:0]  i_din,
+    // l1i's split of i_din for the core's early carry: here no target serve
+    output wire [7:0]  i_base,
+    output wire [7:0]  i_tgt,
+    output wire        i_tgt_sel,
     // The sequencer.
     input  wire        accel_cyc_en,
     input  wire [7:0]  accel_din,
@@ -215,6 +219,9 @@ module l1i_store #(
     // vector's, an excluded page's, a miss the dispatcher took).
     assign i_din        = byp_hit ? byp_byte :
                           res     ? (way_q ? q[1] : q[0]) : accel_din;
+    assign i_base       = i_din;
+    assign i_tgt        = 8'd0;
+    assign i_tgt_sel    = 1'b0;
 
     // ---- the fill engine ------------------------------------------------------------
     localparam [2:0] F_IDLE = 3'd0, F_DR = 3'd1, F_W1 = 3'd2, F_W2 = 3'd3, F_TLB = 3'd4;

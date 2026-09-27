@@ -5,8 +5,8 @@
 # both directions, and aligned loads and stores of every width on both sides.
 # Below the line is bank $FF - the ROM (docs/RVV2_INTEROP.md, the engine's map):
 # read directly, and a store there is dropped as the machine drops it; above it
-# the engine's own RAM.  Aligned only: a misaligned access still goes to the
-# 65816, which cannot reach the upper half.
+# the engine's own RAM.  Misaligned accesses straddle the line too (the engine
+# does them: a store's ROM bytes dropped, its upper bytes written).
 #include "rvvm_exit.h"
         .section .text.init
         .globl  _start
@@ -73,6 +73,43 @@ fwd:    li      gp, 5
 1:      li      gp, 11
         lb      a1, 1(t1)
         li      a2, -69                 # 0xBB
+        beq     a1, a2, 1f
+        j       fail
+1:      li      gp, 12
+        lw      a1, 14(t0)              # $00FFFFFE: two ROM bytes, two above the line
+        srli    a2, s4, 16              # the ROM's two
+        lw      a3, 0(t1)               # $01000000's word (0x1122BB44)
+        slli    a3, a3, 16              # its two low bytes, high
+        or      a2, a2, a3
+        beq     a1, a2, 1f
+        j       fail
+1:      li      gp, 13
+        li      t2, 0xA1B2C3D4
+        sw      t2, 13(t0)              # $00FFFFFD: three bytes dropped, $01000000 = 0xA1
+        lbu     a1, 0(t1)
+        li      a2, 0xA1
+        beq     a1, a2, 1f
+        j       fail
+1:      lw      a1, 12(t0)
+        beq     a1, s4, 1f              # the ROM is unchanged
+        j       fail
+1:      li      gp, 14
+        li      t4, 0x40
+        fcvt.d.w fa0, t4                # 64.0 = 0x4050_0000_0000_0000
+        fsd     fa0, 12(t0)             # $00FFFFFC: the low word dropped, the high word above
+        lw      a1, 0(t1)
+        li      a2, 0x40500000
+        beq     a1, a2, 1f
+        j       fail
+1:      li      gp, 15
+        fld     fa1, 15(t0)             # $00FFFFFF: one ROM byte and seven above (three words)
+        fsd     fa1, 16(t1)
+        lbu     a1, 16(t1)
+        srli    a2, s4, 24
+        beq     a1, a2, 1f
+        j       fail
+1:      lw      a1, 17(t1)
+        lw      a2, 0(t1)
         beq     a1, a2, 1f
         j       fail
 1:      j       pass

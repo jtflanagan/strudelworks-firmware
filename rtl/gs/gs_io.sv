@@ -229,35 +229,10 @@ module gs_io #(
     // ---- what this module answers -------------------------------------------
     // One function, asked of the live address for the claim and of the
     // registered one for the effect, so the two can never drift apart.
+    // (the decode itself is rtl/common/gs_iopage.vh's gs_io_mine: the top decodes
+    // the claim from it too, beside the dispatcher - rtl/gs/gs_io_slice.sv)
     function automatic mine(input [7:0] lo);
-        mine = (lo == 8'h00) || (lo == 8'h10)                     // the keyboard
-            || (lo == 8'h21) || (lo == 8'h22) || (lo == 8'h23)    // the VGC
-            || (lo == 8'h24) || (lo == 8'h25) || (lo == 8'h26) || (lo == 8'h27)  // ADB
-            || (lo == 8'h29) || (lo == 8'h2A) || (lo == 8'h2B) || (lo == 8'h2C)  // the VGC
-            || (lo[7:4] == 4'h1 && lo != 8'h10)                    // $C011-$C01F, the status page
-            || (lo == 8'h2D)                                       // SLOTROMSEL
-            || (lo == 8'h2E) || (lo == 8'h2F)                      // VERTCNT, HORIZCNT
-            // $C030 IS THE SPEAKER, AND IT MUST NOT REACH THE BACKPLANE.
-            // A IIgs's speaker is the card's and the host's, but the machine
-            // this card lives in decodes $C030-$C03F for ITS OWN speaker -
-            // partially, as real Apple II hardware does - so any one of those
-            // addresses riding a real cycle clicks the motherboard's speaker
-            // audibly.  Every other address in the range is already claimed
-            // below (the clock, SHADOW, CYAREG, the SCC, the sound GLU), so
-            // claiming this one closes the range: nothing in $C03x is ever
-            // presented to the bus again.  The card's own speaker model still
-            // sees it - it watches the fast event, not the backplane
-            // (rtl/speaker.sv) - so the sound still reaches the host.
-            || (lo == 8'h30)                                       // the speaker
-            || (lo == 8'h31) || (lo == 8'h32)                      // DISKREG, SCANINT
-            || (lo == 8'h33) || (lo == 8'h34)                      // the clock and battery RAM
-            || (lo == 8'h35) || (lo == 8'h36) || (lo == 8'h37)     // SHADOW, CYAREG, $C037
-            || (lo[7:2] == 6'b001110)                              // $C038-$C03B, the SCC
-            || (lo[7:2] == 6'b001111)                              // $C03C-$C03F, the sound GLU
-            || (lo == 8'h41) || (lo == 8'h46) || (lo == 8'h47)     // the interrupt controller
-            || (lo == 8'h61) || (lo == 8'h62)                      // the Apple keys (see the header)
-            || (lo == 8'h68) || (lo == 8'h69)                      // STATEREG, and a reserved zero
-            || (lo[7:4] == 4'hE);                                   // $C0E0-$C0EF, the IWM
+        mine = gs_io_mine(lo);
     endfunction
 
     wire q_io = gs_is_io(q_addr[23:16], gs_shadow[6]) && (q_addr[15:8] == 8'hC0);

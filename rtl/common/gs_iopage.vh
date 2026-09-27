@@ -41,3 +41,38 @@ function automatic [5:0] gs_fr_sel(input [7:0] lo);
         default: gs_fr_sel = 6'h00;
     endcase
 endfunction
+
+// WHAT gs_io ANSWERS on $C0xx (rtl/gs/gs_io.sv): one function for the claim on
+// the live address, the effect on the registered op - in gs_io - and the same
+// claim decoded in the top beside the dispatcher, where gs_io sits behind its
+// register slice (rtl/gs/gs_io_slice.sv) and may be placed far away.
+function automatic gs_io_mine(input [7:0] lo);
+gs_io_mine = (lo == 8'h00) || (lo == 8'h10)                     // the keyboard
+        || (lo == 8'h21) || (lo == 8'h22) || (lo == 8'h23)    // the VGC
+        || (lo == 8'h24) || (lo == 8'h25) || (lo == 8'h26) || (lo == 8'h27)  // ADB
+        || (lo == 8'h29) || (lo == 8'h2A) || (lo == 8'h2B) || (lo == 8'h2C)  // the VGC
+        || (lo[7:4] == 4'h1 && lo != 8'h10)                    // $C011-$C01F, the status page
+        || (lo == 8'h2D)                                       // SLOTROMSEL
+        || (lo == 8'h2E) || (lo == 8'h2F)                      // VERTCNT, HORIZCNT
+        // $C030 IS THE SPEAKER, AND IT MUST NOT REACH THE BACKPLANE.
+        // A IIgs's speaker is the card's and the host's, but the machine
+        // this card lives in decodes $C030-$C03F for ITS OWN speaker -
+        // partially, as real Apple II hardware does - so any one of those
+        // addresses riding a real cycle clicks the motherboard's speaker
+        // audibly.  Every other address in the range is already claimed
+        // below (the clock, SHADOW, CYAREG, the SCC, the sound GLU), so
+        // claiming this one closes the range: nothing in $C03x is ever
+        // presented to the bus again.  The card's own speaker model still
+        // sees it - it watches the fast event, not the backplane
+        // (rtl/speaker.sv) - so the sound still reaches the host.
+        || (lo == 8'h30)                                       // the speaker
+        || (lo == 8'h31) || (lo == 8'h32)                      // DISKREG, SCANINT
+        || (lo == 8'h33) || (lo == 8'h34)                      // the clock and battery RAM
+        || (lo == 8'h35) || (lo == 8'h36) || (lo == 8'h37)     // SHADOW, CYAREG, $C037
+        || (lo[7:2] == 6'b001110)                              // $C038-$C03B, the SCC
+        || (lo[7:2] == 6'b001111)                              // $C03C-$C03F, the sound GLU
+        || (lo == 8'h41) || (lo == 8'h46) || (lo == 8'h47)     // the interrupt controller
+        || (lo == 8'h61) || (lo == 8'h62)                      // the Apple keys (see the header)
+        || (lo == 8'h68) || (lo == 8'h69)                      // STATEREG, and a reserved zero
+        || (lo[7:4] == 4'hE);                                   // $C0E0-$C0EF, the IWM
+endfunction

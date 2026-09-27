@@ -6,7 +6,7 @@ riscv-tests rv32uf/rv32ud 21/21 and the whole guest suite 134/134 in lockstep on
 with the memory side (the stress set), RVTEST's FP rung and SPLASH through the real runtime (app
 bench), Embench-IoT 1.0's FP four 2.5-21.9x over soft float. Pt build `gs_fpu1` TIMING MET, 43,649
 LUTs (+5,861). ON HARDWARE (flash, 20260927 142915): RVTEST from the Finder exits $15A with its FP
-rung passed (misaligned FP through the runtime included); DOOM, built for F/D, plays its demo at
+rung passed; DOOM, built for F/D, plays its demo at
 36 fps.**
 
 ## The decision (the user, 2026-09-27)
@@ -35,19 +35,17 @@ through the stack. The trial's arithmetic is kept: `rtl/gs/rv_fpu.sv` and its or
   clean. Add/sub 13 clocks, mul 17-18, fma 17-19, div 37 (s) / 67 (d), sqrt 38 / 66, conversions
   8-13, compares/min/max/class 6-7. Sign injection (`fmv`, `fneg`, `fabs`) and the two moves are
   single-clock in the pipe instead: compilers use `fsgnj` as the register move.
-- **Loads and stores.** `flw`/`fsw` are one word; `fld`/`fsd` two words in M, one after the other -
-  while M holds a double's first word, `d_pre` (rv_mem's early row read) is the second word's, so an
-  aligned double from the row cache costs one clock more than a word. A double needs 4-byte
-  alignment only (a double at a 4-byte boundary is two word accesses). A double whose second word
-  would be past the space (`fld` at the space's last word) is a load/store fault.
-- **The VM's part: R_DFL (32) and R_DFS (34).** An FP access that is misaligned, or that rv_mem
-  delegates (banks $00/$01/$E0/$E1, a store to the ROM), is presented to the 65816 whole: `ev_addr`
-  its first byte, `ev_iw` the instruction (f3 = 3 a double), `ev_data`/`ev_datah` a store's value;
-  a load resumes with the resume value and its high word. The window (`rtl/gs/rv_engine.sv`) gains
-  +A8-+AB (the resume value's high word, R/W), +AC-+AF (ev_data's high word, R) and +B0 (fcsr, R);
-  the runtime (`apple/rvvm/rvengine.s`) `ev_fl`/`ev_fs`. As for an integer access, the 65816 reaches
-  only the lower 16 MB: a misaligned FP access in the upper half is the same open item as a
-  misaligned integer one (clang does not make them).
+- **Loads and stores.** An access is the words its bytes touch, one after the other in M
+  (`docs/RVV2_MISALIGNED.md`): `flw`/`fsw` one word, `fld`/`fsd` two - while M has words to go,
+  `d_pre` (rv_mem's early row read) is the next word's, so an aligned double from the row cache costs
+  one clock more than a word - and a misaligned one up to three, put together on one clock more.
+  An access whose last byte would be past the space is a load/store fault.
+- **The VM's part: R_DFL (32) and R_DFS (34).** An FP access that rv_mem delegates (banks
+  $00/$01/$E0/$E1: the 65816's own) is presented to the 65816 whole: `ev_addr` its first byte,
+  `ev_iw` the instruction (f3 = 3 a double), `ev_data`/`ev_datah` a store's value; a load resumes
+  with the resume value and its high word. The window (`rtl/gs/rv_engine.sv`) gains +A8-+AB (the
+  resume value's high word, R/W), +AC-+AF (ev_data's high word, R) and +B0 (fcsr, R); the runtime
+  (`apple/rvvm/rvengine.s`) `ev_fl`/`ev_fs`.
 - **fcsr** (CSRs 1-3, the Zicsr ops): fflags gather at retirement (a flushed op's flags never
   count); a CSR op waits in E for M and W to empty and takes effect as it leaves E; a dynamic
   rounding mode with frm > 4 is an illegal instruction, found in E. There is no mstatus.FS: F and D
@@ -80,7 +78,7 @@ through the stack. The trial's arithmetic is kept: `rtl/gs/rv_fpu.sv` and its or
 - **The suite** (`sim/run_rvvm_tests.sh`): riscv-tests rv32uf (11) and rv32ud (10, `move` is RV64's)
   beside rv32ui/um/uzba/uzbb; rvvm's edge tests `f_fp_ldst` (aligned, a double at a 4-byte boundary,
   misaligned, bank $01, the load-use waits), `f_fp_nanbox`, `f_fp_flush` (an FPU op killed behind a
-  mispredicted branch, a delegated load, a misaligned FP access - its flags must not count),
+  mispredicted branch, a delegated load, a delegated FP load - its flags must not count),
   `f_fp_top` (a double's second word off the space: a load fault), `f_fp_badfrm`, `f_fp_fused`
   (the fused four with rs3 = every register number OP-FP uses as a funct5: the model read them as
   funct5 once - found by cubic, fixed, mutation-checked); C tests `fp_ops` (every F and D
@@ -92,7 +90,7 @@ through the stack. The trial's arithmetic is kept: `rtl/gs/rv_fpu.sv` and its or
   whole `gs_top` (`sim/run_rv_gs_batch.sh --coremark`) 24/24; `sim/suite.sh gs` 18/18.
 - **Through the runtime** (`sim/run_rv_app.sh`): RVTEST's FP rung (checks 30-33: fcsr clear at
   entry, 1/3, sqrt 2, fma(0.1, 10, -1) rounded once, a single's 1/3, fcvt.w.d of -3.5 in two modes,
-  the NX/DZ/NV flags, a misaligned fsd/fld/fsw/flw round trip through the low block the runtime does)
+  the NX/DZ/NV flags, a misaligned fsd/fld/fsw/flw round trip through the low block)
   - all three cases pass; SPLASH's picture is the reference's, pixel for pixel.
 
 ## What it buys
@@ -126,6 +124,5 @@ FP register file, the sign injection, the unboxing, the second word in M and the
 
 ## Open
 
-- A misaligned access (integer or FP) in the upper 16 MB: the 65816 cannot do it; the engine should.
 - The LUTs, if they matter: the FPU's special-case and result multiplexers, its three wide shifters
   (align 110, normalize 110, round 54) and the full-width magnitude compare are the obvious cuts.

@@ -100,7 +100,11 @@ module accel_seq #(
     // THE MACHINE, as apple_mmu takes it (docs/GS.md).  0 = the Apple IIe;
     // 1 = the IIgs the soft 65816 runs.  The one thing it changes here is
     // the reset sequence: see reset_seq below.
-    parameter bit GS = 1'b0
+    parameter bit GS = 1'b0,
+    // THE SLICED DEVICES' LATENCY (rtl/gs/gs_io_slice.sv): the clocks a device
+    // behind a register slice answers later than one wired straight in - one
+    // register on the way in, one on the way out.  0 = no slice.
+    parameter integer SLOW_LAT = 0
 ) (
     input  wire        clk,
     input  wire        rst,             // the card's
@@ -217,9 +221,14 @@ module accel_seq #(
     // poll at the core's pace cannot flood the link (the host applies
     // switch ops from fast words, and a quiet one would be a no-op there).
     input  wire        q_swi,
+    // ...and the live address is a SLICED device's (gs_io behind gs_io_slice):
+    // its byte comes back SLOW_LAT clocks late, and its effects too - see
+    // slow_ready and slow_hold below.  Always a q_swi op as well.
+    input  wire        q_slow,
     input  wire        q_swi_quiet,
     input  wire [7:0]  swi_byte,
     output logic       swi_commit,      // one clock: an internalized op retired
+    output wire        slow_hold,       // ...a sliced device's, and its effects still in the slice
     // The on-card slots (docs/CXXX.md, "The on-card slots"): q_slot marks a
     // q_swi op one of the card's own peripherals answers.  slot_q_o is the
     // dispatched op's copy, held until the next dispatch; sl_win is high
@@ -404,6 +413,8 @@ module accel_seq #(
     // says they describe the op the core has up now (see the header).
     logic [1:0] dq_cls, fast_cls_q;
     logic       dq_rw, dq_ovr, dq_swi, dq_quiet, swi_q, quiet_q, fast_i_q, settled;
+    logic       dq_slow, slow_q, dec_seen;
+    logic [2:0] slow_cnt;
     logic       ovr_retry;          // a fast override's byte the cache blocked, owed again
     logic [7:0] dq_bank;               // the override's bank, held while it is live
     logic       dq_slot, slot_q;
@@ -418,6 +429,7 @@ module accel_seq #(
         // has dropped, and must still be stamped with the bank it had.
         if (ovr_en) dq_bank <= ovr_bank;
         dq_swi   <= q_swi;
+        dq_slow  <= q_slow;
         dq_slot  <= q_slot;
         dq_quiet <= q_swi_quiet;
     end
@@ -508,13 +520,26 @@ module accel_seq #(
                        (u_addr[7:4] == 4'h8) || gs_map_wr);
     always_ff @(posedge clk) swi_sq <= rst ? 4'd0 : {swi_sq[2:0], swi_change};
     wire swi_settling = swi_change || (|swi_sq);
+    // AFTER A SLICED DEVICE'S OP, the same kind of hold: its effects - a stall
+    // it raises (the IWM's 3.5" buffer after a step), the fast-read vector the
+    // data front serves from, the keyboard byte - reach this side SLOW_LAT
+    // clocks later than a device wired straight in, so for 1 + SLOW_LAT clocks
+    // from its commit nothing new is dispatched or turbo-retired, and the data
+    // front's I/O reads stand off (slow_hold, out to rtl/gs/gs_top.sv).  The next
+    // op then meets every effect exactly where it did before the slice.
+    logic slow_cq;                                  // the op that committed was a sliced one
+    logic [3:0] slow_sq;
+    wire  slow_commit = swi_commit && slow_cq;
+    always_ff @(posedge clk) slow_sq <= rst ? 4'd0 : {slow_sq[2:0], slow_commit};
+    wire  slow_holding = SLOW_LAT != 0 && (slow_commit || (|(slow_sq & 4'((1 << SLOW_LAT) - 1))));
+    assign slow_hold = slow_holding;
 
     // ...and map_settling covers every OTHER way the map can move - a bus
     // op's commit, the bank register, INTC8ROM, a reset - which swi_change
     // above does not see.  One more registered term in an AND.
     assign turbo_ok = turbo_en_q && !stall_q && (st == S_DECIDE) && !ovr_en && !op_inflight &&
                       !busy && mem_image_ready && can_pay && !fev_valid && !swi_settling &&
-                      !map_settling;
+                      !map_settling && !slow_holding;
 
     // What the dispatcher will charge for on this edge, for the governor's
     // one writer: exactly the two dispatching branches below.
@@ -539,8 +564,16 @@ module accel_seq #(
     // stable across a clock.
     logic [7:0] swi_byte_q;
     always_ff @(posedge clk) swi_byte_q <= swi_byte;
+    // A SLICED DEVICE'S OP waits for its byte: an unsliced internalized read's
+    // is in swi_byte_q from the op's second clock here, a sliced one's SLOW_LAT
+    // clocks after that (slow_cnt counts the op's clocks in S_FAST, from 0).
+    // `decided` is a one-clock pulse, so an op that waits past it keeps it
+    // (dec_seen).  A write waits alike: the dispatcher's order of effects is the
+    // device's order of ops, both sides of the slice.
+    wire slow_ready = !slow_q || (slow_cnt >= 3'(1 + SLOW_LAT));
+    wire dec_ok     = (decided && !blocked) || dec_seen;
     // A blocked op is a miss whatever its direction: it is dispatched again.
-    wire fast_hit  = (st == S_FAST) && decided && !blocked && (!fast_rw || mem_sub_en || swi_q);
+    wire fast_hit  = (st == S_FAST) && dec_ok && slow_ready && (!fast_rw || mem_sub_en || swi_q);
     wire fast_miss = (st == S_FAST) && decided && (blocked || (fast_rw && !mem_sub_en && !swi_q));
     assign mem_served = (st == S_FAST) && decided && fast_rw && mem_sub_en && !swi_q;
 
@@ -593,7 +626,8 @@ module accel_seq #(
         // core has sat still for a clock: never on the clock of arrival -
         // and a turbo retire moves the core without this module's cyc_en,
         // so it resets the settling the same way.
-        settled <= (st == S_DECIDE) && !cyc_en && !turbo_commit && !d_commit && !swi_settling;
+        settled <= (st == S_DECIDE) && !cyc_en && !turbo_commit && !d_commit && !swi_settling &&
+                   !slow_holding;
 
         // From reset until $FFFD has ridden the bus (see the header).  Cleared
         // in mode 0 too, where it could not be observed but must not stick.
@@ -612,7 +646,7 @@ module accel_seq #(
             st <= S_RST;
             reset_seq <= !GS;
             settled <= 1'b0;
-            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0; quiet_q <= 1'b0; slot_q <= 1'b0; ovr_retry <= 1'b0;
+            bus_owns_q <= 1'b0; core_valid_q <= 1'b0; fast_rw <= 1'b1; swi_q <= 1'b0; quiet_q <= 1'b0; slow_q <= 1'b0; slow_cq <= 1'b0; dec_seen <= 1'b0; slow_cnt <= 3'd0; slot_q <= 1'b0; ovr_retry <= 1'b0;
             credit <= 20'd0; grant_q <= 1'b0; spent_q <= 1'b0;
             u_addr <= 16'd0; u_bank <= 8'd0; u_rw <= 1'b1; u_wdata <= 8'd0;
             u_sync <= 1'b0; u_ovr <= 1'b0; u_divert <= 1'b0;
@@ -752,6 +786,9 @@ module accel_seq #(
                             core_valid_q <= 1'b0;
                             fast_rw      <= cpu_rw;
                             swi_q        <= dq_swi;
+                            slow_q       <= dq_slow && SLOW_LAT != 0;
+                            slow_cnt     <= 3'd0;
+                            dec_seen     <= 1'b0;
                             slot_q       <= dq_slot;
                             quiet_q      <= dq_quiet;
                             fast_cls_q   <= dq_cls;
@@ -773,7 +810,10 @@ module accel_seq #(
                     end
 
                     S_FAST: begin
+                        if (slow_cnt != 3'd7) slow_cnt <= slow_cnt + 3'd1;
+                        if (decided && !blocked) dec_seen <= 1'b1;
                         if (fast_hit) begin
+                            slow_cq <= slow_q;
                             st <= S_DECIDE;
                             fast_ops  <= fast_ops + 32'd1;
                             fev_valid <= 1'b1;

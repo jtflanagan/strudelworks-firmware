@@ -110,7 +110,16 @@ module cpu65816 #(
     // clock and the data front its own on d_din, neither caring what the
     // other speculates.  A consumer with one data source ties them together
     // (sim/boot_gs_tb.sv, sim/cpu816_irq_tb.sv) and nothing changes.
+    // THE I BYTE COMES IN TWO: i_din, and the L1-I's target byte i_tgt with its
+    // serve i_tgt_sel - the program-stream byte is i_tgt_sel ? i_tgt : i_din.
+    // The select waits on a 24-bit address compare (rtl/gs/l1i.sv, the target
+    // serve), so the early-carry adders below take both bytes at once and the
+    // select picks the carry after them, not the byte before (gs_mis1: the
+    // compare in front of the adder missed timing).  A consumer without the
+    // split ties i_tgt_sel low.
     input  wire  [7:0]  i_din,
+    input  wire  [7:0]  i_tgt,
+    input  wire         i_tgt_sel,
     input  wire  [7:0]  d_din,
 
     input  wire         irq_n,      // level sensitive, active low
@@ -192,7 +201,8 @@ module cpu65816 #(
     // and sourcing it from the I byte keeps the data front's served byte
     // out of the decode ROM's address cone - the false path the 65C02 cut
     // the same way (docs/DLINE.md, the serve-byte cone).
-    wire [7:0] din = cyc_is_i ? i_din : d_din;
+    wire [7:0] i_byte = i_tgt_sel ? i_tgt : i_din;         // the program-stream byte
+    wire [7:0] din = cyc_is_i ? i_byte : d_din;
 
     // ---- microcode ROM ------------------------------------------------------
     // {opcode, ucycle}: 4096 x 66 bits.  Sixteen slots per opcode because a
@@ -268,7 +278,7 @@ module cpu65816 #(
     (* rom_style = "distributed" *) logic [7:0] useq0 [0:255];
     initial $readmemh(USEQ0_FILE, useq0);
 
-    wire [7:0] fetch_op = take_int ? 8'h00 : i_din;
+    wire [7:0] fetch_op = take_int ? 8'h00 : i_byte;
     wire [7:0] seq0     = useq0[fetch_op];
     // The wide slot-0 word, read from the same arriving opcode.  A separate
     // combinational wire, so the distributed-ROM inference is the one the
@@ -784,16 +794,34 @@ module cpu65816 #(
     // din + 256, which carries ALWAYS.  The two disagree on precisely the page
     // boundary this condition exists to find, so the wrap is masked back out -
     // and `&pc[7:0]` comes off a register, early, and rides into the same LUT.
-    wire [8:0] esum_pc = {1'b0, din} + {1'b0, pc[7:0]} + 9'd1;   // EPAGE: PCL+1 + din
-    wire [8:0] esum_x  = {1'b0, din} + {1'b0, x_eff[7:0]};       // IDX, XL
-    wire [8:0] esum_y  = {1'b0, din} + {1'b0, y_eff[7:0]};       // IDX, YL
-    wire       pcl_ff  = &pc[7:0];
-    wire       early_co = (n_cond == UC_COND_EPAGE) ? (esum_pc[8] & ~pcl_ff) :
-                          (n_lo_b == UC_LO_B_XL)    ?  esum_x[8]             : esum_y[8];
+    //
+    // AND EACH SUM RUNS TWICE (gs_mis1): once on the byte din is without the
+    // L1-I's target serve (din_b), once on the target byte, and the carry - and
+    // the page test's sign - is chosen by the serve afterwards.  The same values
+    // on every clock as one sum on din; only the compare is no longer in front.
+    wire [7:0] din_b  = cyc_is_i ? i_din : d_din;
+    wire       din_ts = cyc_is_i & i_tgt_sel;
+    wire       pcl_ff = &pc[7:0];
+    // (everything it reads is an argument: a continuous assignment re-evaluates
+    // on its operands only)
+    function automatic logic eco(input logic [7:0] v, input logic [7:0] pl, input logic [7:0] xl,
+                                 input logic [7:0] yl, input logic epage, input logic use_x,
+                                 input logic ff);
+        logic [8:0] sp, sx, sy;
+        sp = {1'b0, v} + {1'b0, pl} + 9'd1;                         // EPAGE: PCL+1 + din
+        sx = {1'b0, v} + {1'b0, xl};                                // IDX, XL
+        sy = {1'b0, v} + {1'b0, yl};                                // IDX, YL
+        return epage ? (sp[8] & ~ff) : use_x ? sx[8] : sy[8];
+    endfunction
+    wire       co_epage   = n_cond == UC_COND_EPAGE;
+    wire       co_use_x   = n_lo_b == UC_LO_B_XL;
+    wire       early_co_b = eco(din_b, pc[7:0], x_eff[7:0], y_eff[7:0], co_epage, co_use_x, pcl_ff);
+    wire       early_co_t = eco(i_tgt, pc[7:0], x_eff[7:0], y_eff[7:0], co_epage, co_use_x, pcl_ff);
+    wire       early_co   = din_ts ? early_co_t : early_co_b;
 
     // The branch page-cross test compares the carry against the offset's sign,
     // and the offset is the din being read right now.
-    wire early_page = early_co ^ din[7];
+    wire early_page = din_ts ? (early_co_t ^ i_tgt[7]) : (early_co_b ^ din_b[7]);
 
     logic cond_next;
     always_comb begin
@@ -1107,8 +1135,8 @@ module cpu65816 #(
                     int_nmi  <= nmi_pend;
                     nmi_pend <= 1'b0;
                 end else begin
-                    ir      <= i_din;
-                    int_brk <= (i_din == 8'h00);
+                    ir      <= i_byte;
+                    int_brk <= (i_byte == 8'h00);
                     int_nmi <= 1'b0;
                 end
             end

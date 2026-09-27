@@ -693,6 +693,61 @@ are formed from the serve registers; (3) the Uthernet's lane RAMs from the seque
 (12 endpoints, one module, the LUT diet's shape) - the last resort the 50T notes already name.
 pc_reg sources nothing now; no placement constraint (the user's rule).
 
+## The target serve out of the early carry (2026-09-27, branch riscv_v2; the user: "cut the chain")
+
+The build `gs_mis1` (the RISC-V engine's misaligned access; nothing on the 65816's side touched)
+MISSED TIMING on 2 endpoints, one family: the core's `pc_reg` -> L1-I's target serve (`tgt_here`,
+the 24-bit compare of `{pc_bank, pc_addr}` against `tgt_q`, four CARRY4) -> the `i_din` select ->
+`esum_pc` -> `early_co` -> `cond_next` -> `slot_n2` -> `uaddr` -> the microcode ROM's address, 13
+levels, 74% route.  The binding loop again, entered this time through the I side's byte select.
+
+THE CUT IS NOT A RETIME.  The retime of 2026-09-20 (60f485c) moved a decision a clock earlier and
+broke Nox; it was reverted.  This one computes the same value on every clock, restructured: L1-I
+hands the core `i_din` in its two parts - the byte without the target serve (`i_base`), the target
+byte (`i_tgt`) and the serve (`i_tgt_sel`) - and the core's early-carry sums run on BOTH bytes at
+once (`eco()`), the serve choosing the carry and the page test's sign after them.  The compare now
+runs beside the adders, not in front.  Everywhere else the core uses `i_byte = i_tgt_sel ? i_tgt :
+i_din`, the same mux as before, only inside the core; L1-I's full `i_din` still feeds its other
+consumers.  `l1i_store` ties the serve low; the benches with one byte source tie it low too.
+Cost: three 9-bit adders more (the early carry was already three sums chosen after).
+
+(The D side has the same shape - L1-D's served byte into the same sums, named on the 50T on
+2026-09-20 - and the same restructure would take it; not needed on the Pt today.)
+
+## Timing is distance, and the chipset behind a register slice (2026-09-27)
+
+`gs_mis2` (the chain cut above, 44,382 LUTs, 70.0%) MISSED on 17 endpoints in FIVE families (the
+engine's fetch loop, its D row read, its M address into rv_mem, the 65816's D-side binding loop, the
+HD card's DMA override into L1-I).  Vivado's `report_design_analysis -congestion` on it found NO
+congestion window above level 5 - placer or router: the 68-74% route on those paths is DISTANCE,
+not a crowded fabric.  A map of every placed cell by module (RPM_X/RPM_Y from the routed checkpoint)
+showed the core region (10-90% of the 65816/L1/L2/sequencer/MMU cells) shared by the L2 29.7%, L1-D
+21.5%, L1-I 16.9%, TLB 7.5%, the 65816 6.8%, the link 5.7%; the IWM, DOC, Uthernet, flash and
+telemetry 0% - but the ADB micro in a band BETWEEN the RISC-V engine and the core.
+
+THE USER'S DIRECTION: no placement constraints (they have backfired every time); instead let the
+modules where latency costs nothing be placed anywhere - a REGISTER SLICE on their interfaces
+(interface pipelining; latency-insensitive design).  `rtl/gs/gs_io_slice.sv` puts one register on
+every signal crossing gs_io's boundary (72 of 81 ports; not clk/rst, not the 3.5" drive's
+valid-until-taken seek notices to the link, which would be taken twice), so gs_io - the ADB micro,
+the IWM, the DOC, the clock - sees its exact input sequence one clock later and the card sees its
+outputs two clocks later.  The top makes up for it: the claims decoded beside the dispatcher from
+`gs_iopage.vh`'s `gs_io_mine` (the function gs_io uses); accel_seq SLOW_LAT = 2 - a sliced read
+retires once its byte is through the slice (the `decided` pulse latched), and for 1 + SLOW_LAT
+clocks after a sliced op's commit nothing is dispatched or turbo-retired (`slow_hold`), so the next
+op meets every effect - an IWM stall, the fast-read vector, the keyboard byte - where it met it
+before; L1-D's `io_quiet` stands off the same window.  Cost: a few clocks an I/O op, 0.3% on the
+GS/OS row at 256 M clocks (19.80 M instructions against 19.86 M).
+
+Result: `gs_mis3` (+ the engine's misaligned access) TIMING MET, 0 of 99,440, 44,272 LUTs.  The map
+flipped: the whole chipset at the die's bottom edge, the core in the middle, the engine directly
+above it (rv_mem next to the L2, nothing between), the 65816 93% inside the core region (49%
+before).  Sims: suite gs 18/18 (boot_gs on the KEGS floor), the GS/OS row 16/0, the XMAS row (the
+IWM's 3.5" boot) 15/0, the GS batch 24/24.  On hardware: Nox's title and menu; GS/OS, the mouse and
+keyboard through the ADB; RVDEMO off the 3.5" drive; RVTEST's rungs (its keys, files, the DOC's
+sound interrupts); DOOM at 34.4 fps.  The HD card's override into L1-I (the fifth family) is a live
+handshake, not a signal to slice - left as it is; it met timing in `mis3`.
+
 ## The L2 geometry on GS/OS (2026-09-19, `--l2=SETSxWAYS` before the CAM, the 50T question)
 
 The user has an immediate chance to build 50T boards (32,600 LUTs / 75 RAMB36) and keeps the

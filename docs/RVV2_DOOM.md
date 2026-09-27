@@ -48,7 +48,8 @@ with `CMAP256` its screen is 8-bit indices into a 256-colour palette, 320x200.
 | D5 | playable on hardware from the Finder | the goal |
 
 Later: sound (the Ensoniq, or the host), speed (the engine's own), misaligned access in the engine if
-DOOM needs it (it is compiled for strict alignment first).
+DOOM needs it (it is compiled for strict alignment first) - built 2026-09-27 for everything
+(`docs/RVV2_MISALIGNED.md`).
 
 ## As built (2026-09-27)
 

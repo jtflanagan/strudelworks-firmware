@@ -1522,7 +1522,7 @@ ev_sw:  jsr     evptr
         ldy     #2
         sta     [PTR],y
         bra     resume
-; An FP load or store, misaligned or in memory the engine delegates: done whole
+; An FP load or store in memory the engine delegates (the 65816's banks): done whole
 ; here - flw/fsw 4 bytes, fld/fsd 8 (f3 = 3, the instruction's bits 12-14).
 ev_fl:  jsr     evptr
         lda     [PTR]

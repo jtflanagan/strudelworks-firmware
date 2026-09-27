@@ -1,8 +1,9 @@
 # rvvm-expect: exit
 # F and D loads and stores: aligned, a double at a 4-byte boundary (its two
-# words in different 8-byte blocks), misaligned (the VM does the whole access:
-# R_DFL/R_DFS), in bank $01 (delegated: the 65816's), a single's box, and the
-# integer <-> FP moves after a load (the load-use wait on an integer source).
+# words in different 8-byte blocks), misaligned (the engine's, across three
+# words), in bank $01 (delegated: the VM does the whole access, R_DFL/R_DFS),
+# a single's box, and the integer <-> FP moves after a load (the load-use wait
+# on an integer source).
 # The bench judges every retire; the checks here are for the runs it cannot.
         .section .text.init
         .globl  _start
