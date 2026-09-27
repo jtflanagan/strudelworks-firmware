@@ -4,9 +4,9 @@
 // rv_core_run - the RISC-V engine's core (rtl/gs/rv_core.sv, docs/REQ_RVVM.md
 // section 9) against the reference model (sim/rv_ref.h), in lockstep.
 //
-// THE BENCH PLAYS EVERYTHING AROUND THE CORE.  The memory side: a flat 16 MB
+// THE BENCH PLAYS EVERYTHING AROUND THE CORE.  The memory side: a flat 32 MB
 // answering both ports after a random 0-3 clocks, and the permission map -
-// banks $02-$DF are engine-direct, every other access is DELEGATED (as are
+// banks $02-$DF and the whole upper 16 MB are engine-direct, every other access is DELEGATED (as are
 // all of them with --delegate-all).  The 65816 VM: it steps the core, and on
 // an event services it the way the VM will - the ECALLs (exit, write, read,
 // cycles, peek, poke), a delegated load or store performed byte-wise - and
@@ -94,7 +94,7 @@ static unsigned long long clocks = 0;
 static int f_wait = -1, d_wait = -1;
 
 static uint32_t rd32(uint32_t a) { return mem[a] | (mem[a + 1] << 8) | (mem[a + 2] << 16) | (uint32_t(mem[a + 3]) << 24); }
-static bool direct(uint32_t a) { unsigned bank = a >> 16; return !delegate_all && bank >= 0x02 && bank <= 0xDF; }
+static bool direct(uint32_t a) { unsigned bank = a >> 16; return !delegate_all && (a >= LOW || (bank >= 0x02 && bank <= 0xDF)); }
 
 // The VM's own write to guest memory (a 65816 write: the stream carries it).
 // Every VM write is a 65816 write: with the memory side it is snooped, a byte a
@@ -113,7 +113,8 @@ static void vm_write(uint32_t a, uint8_t v) {
 static int32_t slot_ppn[16][8];
 static bool    slot_pin[16][8];
 static unsigned long long l2_fills = 0, l2_evicts = 0, l2_probes = 0, l2_reads = 0, l2_writes = 0, recs = 0;
-static unsigned fold(uint32_t ppn) { return (ppn ^ (ppn >> 4) ^ (ppn >> 8) ^ (ppn >> 12)) & 15; }
+// page_cam's set: every 4-bit slice of the page number XORed (17 bits at 32 MB)
+static unsigned fold(uint32_t ppn) { unsigned f = 0; for (; ppn; ppn >>= 4) f ^= ppn & 15; return f; }
 static bool find(uint32_t ppn, unsigned &set, unsigned &way) {
     set = fold(ppn);
     for (way = 0; way < 8; way++) if (slot_ppn[set][way] == int32_t(ppn)) return true;
@@ -240,8 +241,10 @@ static void tick() {
         const uint64_t r = dut->rec;
         const uint32_t w0 = uint32_t(r), data = uint32_t(r >> 32);
         if ((w0 >> 28) != 0xB) l2_err += "a record without tag 0xB\n";
-        const uint32_t a = (((w0 >> 20) & 0xFF) << 16) | (w0 & 0xFFFF);
-        for (int i = 0; i < 4; i++) if ((w0 >> (16 + i)) & 1) mirror[a + i] = uint8_t(data >> (8 * i));
+        // {tag[31:28], enables[27:24], 0, word address[22:0]} (docs/PROTOCOL.md)
+        const uint32_t a = (w0 & 0x7FFFFFu) << 2;
+        if (w0 & 0x00800000u) l2_err += "a record with bit 23 set\n";
+        for (int i = 0; i < 4; i++) if ((w0 >> (24 + i)) & 1) mirror[a + i] = uint8_t(data >> (8 * i));
         recs++;
     }
     {
@@ -464,7 +467,7 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "unknown argument %s\n", argv[i]); return 2; }
     }
     if (!guest) { fprintf(stderr, "need --guest=\n"); return 2; }
-    if (load < 0 || load >= SPACE) { fprintf(stderr, "--load outside the 24-bit space\n"); return 2; }
+    if (load < 0 || load >= SPACE) { fprintf(stderr, "--load outside the engine's 32 MB\n"); return 2; }
     if (pc0 < 0) pc0 = load;
     const uint32_t sp0 = sp_arg > 0 ? uint32_t(sp_arg) : DEFAULT_SP;
     {
@@ -557,6 +560,15 @@ int main(int argc, char **argv) {
         if (r != R_NEXT) {
             if (r != R_DFETCH) events++;
             const uint32_t ea = dut->ev_addr, data = dut->ev_data;
+            // THE 65816 REACHES ONLY THE LOWER 16 MB: a load, store or fetch handed to
+            // it above that is one the real VM could never perform - a design error in
+            // the engine or its memory side, not a guest's trap.
+            const bool deleg = (r >= R_DLB && r <= R_DLW) || (r >= R_DSB && r <= R_DSW) || r == R_DFETCH;
+            if (deleg && ea >= LOW) {
+                snprintf(msg, sizeof msg, "a delegated access at $%08x: the 65816 cannot reach above $00FFFFFF\n", ea);
+                fail += msg;
+                break;
+            }
             if (r == R_ECALL) {
                 const uint32_t n = reg(17), a0 = reg(10), a1 = reg(11), a2 = reg(12);
                 if (n == 93) { status = 1; code = a0; stopped = true; }
@@ -565,7 +577,7 @@ int main(int argc, char **argv) {
                     else {
                         bool bad = false;
                         for (uint32_t i = 0; i < a2; i++) {
-                            if (!Ref::ok(a1 + i)) { status = 2; cause = T_LOAD; tval = a1 + i; stop_pc = run_mode ? dut->pc : pc; stopped = bad = true; break; }
+                            if (!Ref::low_ok(a1 + i)) { status = 2; cause = T_LOAD; tval = a1 + i; stop_pc = run_mode ? dut->pc : pc; stopped = bad = true; break; }
                             out += char(mem[a1 + i]); fputc(mem[a1 + i], stdout);
                         }
                         if (!bad) set_reg(10, a2);
@@ -575,7 +587,7 @@ int main(int argc, char **argv) {
                     else {
                         uint32_t k = 0; bool bad = false;
                         while (k < a2 && in_pos < input.size()) {
-                            if (!Ref::ok(a1 + k)) { status = 2; cause = T_STORE; tval = a1 + k; stop_pc = run_mode ? dut->pc : pc; stopped = bad = true; break; }
+                            if (!Ref::low_ok(a1 + k)) { status = 2; cause = T_STORE; tval = a1 + k; stop_pc = run_mode ? dut->pc : pc; stopped = bad = true; break; }
                             vm_write(a1 + k, uint8_t(input[in_pos++])); k++;
                         }
                         if (!bad) set_reg(10, k);
@@ -584,7 +596,7 @@ int main(int argc, char **argv) {
                 else if (n == 0x5001 || n == 0x5002) {
                     const bool peek = n == 0x5001;
                     const uint32_t w = peek ? a1 : a2;
-                    if (a0 >= SPACE) { status = 2; cause = peek ? T_LOAD : T_STORE; tval = a0; stop_pc = run_mode ? dut->pc : pc; stopped = true; }
+                    if (a0 >= LOW) { status = 2; cause = peek ? T_LOAD : T_STORE; tval = a0; stop_pc = run_mode ? dut->pc : pc; stopped = true; }
                     else if (w != 1 && w != 2 && w != 4) set_reg(10, peek ? 0 : uint32_t(-22));
                     else if (peek) { uint32_t v = 0; for (uint32_t i = 0; i < w; i++) v |= uint32_t(mem[a0 + i]) << (8 * i); set_reg(10, v); }
                     else { for (uint32_t i = 0; i < w; i++) vm_write(a0 + i, uint8_t(a1 >> (8 * i))); set_reg(10, 0); }

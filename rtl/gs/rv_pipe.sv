@@ -36,7 +36,13 @@
 // injects the VM's word as the next run's first instruction.  `cancel` and
 // req_spec are the old core's speculation and do nothing here.
 //////////////////////////////////////////////////////////////////////////////////
-module rv_pipe (
+module rv_pipe #(
+    // THE ADDRESS SPACE: AW bits of byte address.  25 = the whole 32 MB DDR3 bank
+    // the card gives main memory - the lower 16 MB the 65816's own, the upper
+    // 16 MB the engine's alone (docs/REQ_RVVM.md).  An address at or above
+    // 2**AW, or in the null guard, faults.  24 = the 65816's space only.
+    parameter integer AW = 25
+) (
     input  wire         clk,
     input  wire         rst,
     // control
@@ -64,23 +70,23 @@ module rv_pipe (
     output wire  [31:0] pc,
     // instruction fetch
     output wire         f_req,
-    output wire  [21:0] f_addr,
-    output wire  [21:0] f_pre,          // the address F will ask for next clock (a guess; rv_mem's
+    output wire  [AW-3:0] f_addr,
+    output wire  [AW-3:0] f_pre,          // the address F will ask for next clock (a guess; rv_mem's
                                         // instruction cache reads it a clock early)
     output wire         req_spec,
     input  wire         f_valid,
     input  wire         f_delegate,
     input  wire         f_abort,
     input  wire  [31:0] f_data,
-    output wire  [21:0] pk_addr,
+    output wire  [AW-3:0] pk_addr,
     output wire         pk_use,
     input  wire         pk_hit,
     input  wire  [31:0] pk_word,
     // data
     output wire         d_req,
     output wire         d_we,
-    output wire  [21:0] d_addr,
-    output wire  [21:0] d_pre,
+    output wire  [AW-3:0] d_addr,
+    output wire  [AW-3:0] d_pre,
     output wire  [3:0]  d_be,
     output wire  [31:0] d_wdata,
     input  wire         d_valid,
@@ -104,11 +110,11 @@ module rv_pipe (
     } op_t;
 
     assign req_spec = 1'b0;
-    assign pk_addr  = 22'd0;
+    assign pk_addr  = '0;
     assign pk_use   = 1'b0;
 
     function automatic logic addr_ok(input logic [31:0] ad);
-        return ad[31:24] == 8'd0 && ad[23:8] != 16'd0;
+        return ad[31:AW] == '0 && ad[AW-1:8] != '0;
     endfunction
     function automatic logic [31:0] ld_ext(input logic [31:0] w, input logic [1:0] off,
                                            input logic [1:0] sz, input logic u);
@@ -154,7 +160,7 @@ module rv_pipe (
     logic [31:0] fb_pc, fb_iw;
     logic [7:0]  fb_ev;
     logic        fo_v, fo_drop;     // a request out and unanswered; its answer is not wanted
-    logic [21:0] fo_addr;
+    logic [AW-3:0] fo_addr;
     // D
     logic        d_v;
     logic [31:0] d_pc, d_iw;
@@ -178,7 +184,7 @@ module rv_pipe (
     logic        m_v, m_wr, m_mem, m_we, m_done, m_ldu;
     logic [31:0] m_pc, m_iw, m_res, m_npc, m_ea, m_c, m_evaddr;
     logic [4:0]  m_rd;
-    logic [21:0] m_addr;
+    logic [AW-3:0] m_addr;
     logic [3:0]  m_be;
     logic [31:0] m_wdata;
     logic [1:0]  m_ldw;
@@ -233,7 +239,7 @@ module rv_pipe (
     wire [31:0] c = fwd(e_rs2, e_c);
     wire [31:0] b = e_bimm ? e_imm : c;
     wire [31:0] ea_now = a + e_imm;
-    assign d_pre = ea_now[23:2];
+    assign d_pre = ea_now[AW-1:2];
 
     // the single-cycle units
     function automatic logic [31:0] shf(input op_t o, input logic [31:0] v, input logic [4:0] n);
@@ -458,7 +464,7 @@ module rv_pipe (
     // fetch while running (STEP: the one instruction), with room, no answer waited out
     wire f_want  = run_on && (run || !one) && !fb_v && !inj_v;
     assign f_req  = fo_v || (f_want && !fpc_bad);
-    assign f_addr = fo_v ? fo_addr : fpc[23:2];
+    assign f_addr = fo_v ? fo_addr : fpc[AW-1:2];
     wire f_got   = f_req && f_valid && !(fo_v && fo_drop);        // an answer the pipe wants
     wire redir   = mr_now || dr_now || flush_ev;
     // what F offers D this clock: the injected word, the buffer, a fetch fault, the answer
@@ -477,10 +483,10 @@ module rv_pipe (
     // (that would put the whole stall chain in front of the cache's RAM): a
     // redirect E or D has decided, else the next word after an answer, else the
     // same word; the start of a run while idle.  A wrong guess costs a clock.
-    assign f_pre = !busy ? pc_q[23:2] :
-                   mr_now ? m_rtgt[23:2] :
-                   dr_now ? d_tgt[23:2] :
-                   (f_req && f_valid) ? f_addr + 22'd1 : f_addr;
+    assign f_pre = !busy ? pc_q[AW-1:2] :
+                   mr_now ? m_rtgt[AW-1:2] :
+                   dr_now ? d_tgt[AW-1:2] :
+                   (f_req && f_valid) ? f_addr + 1'b1 : f_addr;
     wire d_take = !d_v || d_adv;
     wire f_into_d = fo_off && d_take && !redir;
     // an answer (or fault) this clock that D cannot take goes to the buffer
@@ -588,7 +594,7 @@ module rv_pipe (
                 m_mem    <= e_ls && e_evo == R_NEXT;
                 m_we     <= e_op == OP_STORE;
                 m_done   <= 1'b0;
-                m_addr   <= ea_now[23:2];
+                m_addr   <= ea_now[AW-1:2];
                 m_ea     <= ea_now;
                 m_ldw    <= e_sz; m_ldu <= e_fn3[2];
                 m_be     <= (e_sz == 2'd0 ? 4'b0001 : e_sz == 2'd1 ? 4'b0011 : 4'b1111) << ea_now[1:0];

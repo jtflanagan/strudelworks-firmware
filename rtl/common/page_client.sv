@@ -39,7 +39,12 @@
 //////////////////////////////////////////////////////////////////////////////////
 module page_client #(
     parameter integer PH_ROT_LO = 30,
-    parameter integer PH_ROT_HI = 50
+    parameter integer PH_ROT_HI = 50,
+    // THE LINE'S WIDTH: 20 = 16 MB of 16-byte lines (the 65C02 card; the 65816's
+    // own space); 21 = the whole 32 MB bank 0, the upper half the RISC-V
+    // engine's (docs/REQ_RVVM.md).  Rows 0-8191 hold the lower 16 MB, 8192-16383
+    // the upper.
+    parameter integer LW = 20
 ) (
     input  wire         clk,
     input  wire         rst,
@@ -55,7 +60,7 @@ module page_client #(
     input  wire         pq_busy,
     input  wire         pq_valid,
     input  wire         pq_we,
-    input  wire [19:0]  pq_line,
+    input  wire [LW-1:0] pq_line,
     input  wire [127:0] pq_wdata,
     input  wire [15:0]  pq_sel,      // the lanes a write carries (a2: all; gs: a write-around's one)
     output wire         pq_ready,
@@ -82,8 +87,8 @@ module page_client #(
     output wire         image_ready
 );
 
-    function automatic [23:0] line_to_wb(input [19:0] l);
-        line_to_wb = {1'b0, l[19:7], 3'b000, l[6:0]};
+    function automatic [23:0] line_to_wb(input [LW-1:0] l);
+        line_to_wb = {14'(l[LW-1:7]), 3'b000, l[6:0]};   // {row, bank 0, column}
     endfunction
 
     // ---- the stream, passed through ------------------------------------------

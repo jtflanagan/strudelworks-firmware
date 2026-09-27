@@ -73,14 +73,19 @@
 //////////////////////////////////////////////////////////////////////////////////
 module page_cam #(
     parameter integer SETS = 16,               // sets (a power of two)
-    parameter integer WAYS = 8                 // ways a set (a power of two)
+    parameter integer WAYS = 8,                // ways a set (a power of two)
+    // THE PAGE NUMBER'S WIDTH: 16 = the 65816's 16 MB; 17 = the whole 32 MB DDR3
+    // bank, the upper 16 MB the RISC-V engine's alone (docs/REQ_RVVM.md).  A page
+    // with any bit above 15 set is NOT in the 65816's map: nothing bank-derived
+    // (the machine banks, bank $00's copy, the SCB watch's taps) may see it.
+    parameter integer PW = 16
 ) (
     input  wire        clk,
     input  wire        rst,
     // The classified op stream (P1).
     input  wire        cl_valid,
     input  wire [1:0]  cl_cls,
-    input  wire [15:0] cl_ppn,
+    input  wire [PW-1:0] cl_ppn,
     input  wire [7:0]  cl_off,
     input  wire        cl_rw,
     input  wire        cl_wr_image,
@@ -90,14 +95,14 @@ module page_cam #(
     input  wire        pw_pending,
     output wire        pw_ready,
     // The op's preview (P0).
-    input  wire [15:0] pf_ppn,
+    input  wire [PW-1:0] pf_ppn,
     input  wire [7:0]  pf_off,
     // The posted seam's entrant and the shadow duplicate's.
     input  wire        pw_take,
-    input  wire [15:0] pw_ppn,
+    input  wire [PW-1:0] pw_ppn,
     input  wire [7:0]  pw_off,
     input  wire        shd_take,
-    input  wire [15:0] shd_ppn,
+    input  wire [PW-1:0] shd_ppn,
     input  wire [7:0]  shd_off,
     // The op itself, for the monitor.
     input  wire [15:0] op_addr,
@@ -108,7 +113,7 @@ module page_cam #(
     output logic       sub_en,
     output logic       op_row_v,
     output logic [127:0] op_row,
-    output logic [15:0] op_row_ppn,
+    output logic [PW-1:0] op_row_ppn,
     output logic [7:0] sub_data,
     output logic       decided,
     output logic       op_blocked,
@@ -125,7 +130,7 @@ module page_cam #(
     // an op-path read miss starts - as a posted read nobody waits on - and its
     // retag is reported on op_place_* as every fill's is.
     input  wire        il_req,
-    input  wire [15:0] il_ppn,
+    input  wire [PW-1:0] il_ppn,
     input  wire [3:0]  il_line,
     input  wire        il_src,
     input  wire        il_fill,
@@ -145,7 +150,7 @@ module page_cam #(
     output logic [$clog2(SETS)-1:0]    evict_set,
     output logic [$clog2(WAYS)-1:0]    evict_way,
     output logic                       op_place_v,
-    output logic [15:0]                op_place_ppn,
+    output logic [PW-1:0]              op_place_ppn,
     output logic [$clog2(SETS)-1:0]    op_place_set,
     output logic [$clog2(WAYS)-1:0]    op_place_way,
     input  wire                        dr_req,
@@ -183,7 +188,7 @@ module page_cam #(
     output wire         pq_busy,
     output logic        pq_valid,
     output logic        pq_we,
-    output logic [19:0] pq_line,
+    output logic [PW+3:0] pq_line,
     output wire [127:0] pq_wdata,
     output wire [15:0]  pq_sel,      // the lanes written: all but for a write-around
     input  wire         pq_ready,
@@ -211,7 +216,7 @@ module page_cam #(
     localparam integer N     = SETS * WAYS;     // slots
     localparam integer AW    = SW + 4;          // a row address
     localparam integer NODES = WAYS - 1;        // the PLRU tree over a set's ways
-    localparam integer DW    = 25;              // a directory word: {tag[15:0], referenced, last[7:0]}
+    localparam integer DW    = PW + 9;          // a directory word: {tag[PW-1:0], referenced, last[7:0]}
 
 `ifndef SYNTHESIS
     initial begin
@@ -223,10 +228,14 @@ module page_cam #(
     // THE SET: every SIDX-bit slice of the page number XORed together, the
     // bank byte included (the 64-set bug of 2026-09-19: a fold of bits 11:0
     // alone put bank $E0's pages in bank $00's sets).
-    function automatic [SIDX-1:0] set_of(input [15:0] ppn);
+    function automatic [SIDX-1:0] set_of(input [PW-1:0] ppn);
         int i;
         set_of = '0;
-        for (i = 0; i < 16; i = i + SIDX) set_of = set_of ^ SIDX'(ppn >> i);
+        for (i = 0; i < PW; i = i + SIDX) set_of = set_of ^ SIDX'(ppn >> i);
+    endfunction
+    // In the 65816's 16 MB: the only pages a bank number means anything for.
+    function automatic logic low16(input [PW-1:0] ppn);
+        low16 = (ppn >> 16) == '0;
     endfunction
     function automatic [WAYS-1:0] lowest_bit(input [WAYS-1:0] v);
         lowest_bit = v & (-v);
@@ -301,7 +310,7 @@ module page_cam #(
     wire            e_sh  = shd_take;
     wire            e_il  = il_ack;
     wire            e_any = e_op || e_pw || e_sh || e_il;
-    wire [15:0]     en_ppn = e_op ? pf_ppn      : e_pw ? pw_ppn      :
+    wire [PW-1:0]   en_ppn = e_op ? pf_ppn      : e_pw ? pw_ppn      :
                              e_sh ? shd_ppn     : il_ppn;
     wire [3:0]      en_ln  = e_op ? pf_off[7:4] : e_pw ? pw_off[7:4] :
                              e_sh ? shd_off[7:4] : il_line;
@@ -312,7 +321,7 @@ module page_cam #(
     logic [WAYS-1:0] m0;
     logic [WAYS-1:0] ref0;
     always_comb for (int i = 0; i < WAYS; i = i + 1) begin
-        m0[i]   = v0[i] && (dir_a[i][24:9] == en_ppn);
+        m0[i]   = v0[i] && (dir_a[i][DW-1:9] == en_ppn);
         ref0[i] = dir_a[i][8];
     end
     wire           hit0  = |m0;
@@ -350,6 +359,7 @@ module page_cam #(
     logic [15:0]     wl_be;
     logic [127:0]    wl_data;
     logic            wl_main;
+    logic            wl_low;         // the landing is in the 65816's 16 MB (its bank means something)
     logic [7:0]      wl_bank;
     logic [15:0]     wl_addr;
     logic [SW-1:0]   wl_slot;
@@ -397,7 +407,7 @@ module page_cam #(
 
     // ---- P1: what P0 found, and the set's bits for the victim -------------------
     logic             e1_v, e1_op, e1_il, e1_fill;
-    logic [15:0]      e1_ppn;
+    logic [PW-1:0]    e1_ppn;
     logic [3:0]       e1_line;
     logic [SIDX-1:0]  e1_set;
     logic             c_hit;
@@ -463,7 +473,8 @@ module page_cam #(
     // ---- P1 -> P2: the op's stage, and a write's landing -------------------
     logic            s_v, s_posted, s_rw, s_wr_image, s_machine, s_hit, s_vdty, s_probe;
     logic [1:0]      s_cls;
-    logic [15:0]     s_ppn, s_addr;
+    logic [PW-1:0]   s_ppn;
+    logic [15:0]     s_addr;
     logic [7:0]      s_off;
     logic [31:0]     s_wdata;
     logic [3:0]      s_be;
@@ -509,7 +520,7 @@ module page_cam #(
             s_wdata    <= cl_wdata;
             s_be       <= cl_be;
             s_addr     <= op_addr;
-            s_machine  <= (cl_ppn[15:8] <= 8'd1);
+            s_machine  <= low16(cl_ppn) && (cl_ppn[15:8] <= 8'd1);
             s_hit      <= c_hit;
             s_slot     <= c_slot;
             s_set      <= e1_set;
@@ -523,7 +534,8 @@ module page_cam #(
             wl_row  <= {c_slot, cl_off[7:4]};
             wl_be   <= 16'(cl_be) << cl_off[3:0];
             wl_data <= {4{cl_wdata}};
-            wl_main <= (cl_ppn[15:8] == 8'd0);
+            wl_main <= low16(cl_ppn) && (cl_ppn[15:8] == 8'd0);
+            wl_low  <= low16(cl_ppn);
             wl_bank <= cl_ppn[15:8];
             wl_addr <= {cl_ppn[7:0], cl_off};
         end
@@ -532,10 +544,10 @@ module page_cam #(
     wire [7:0]   rbyte   = mux_row[8 * s_off[3:0] +: 8];
     // The victim's tag, for the flush: read at P2 from the LUTRAM at the
     // op's set (a retag is the only writer of a tag and never the victim's).
-    logic [15:0] v_tag2;
+    logic [PW-1:0] v_tag2;
     always_comb begin
-        v_tag2 = 16'd0;
-        for (int i = 0; i < WAYS; i = i + 1) if (s_vic[i]) v_tag2 = v_tag2 | dir_b[i][24:9];
+        v_tag2 = '0;
+        for (int i = 0; i < WAYS; i = i + 1) if (s_vic[i]) v_tag2 = v_tag2 | dir_b[i][DW-1:9];
     end
 
     logic il_hit_q;
@@ -556,11 +568,12 @@ module page_cam #(
     end
 
     // ---- the engine ---------------------------------------------------------
-    logic [15:0]     e_ppn, e_old, e_addr;
+    logic [PW-1:0]   e_ppn, e_old;
+    logic [15:0]     e_addr;
     logic [3:0]      e_crit, e_boff;
     logic [31:0]     e_wword;       // a write-around's data, as s_wdata
     logic [15:0]     e_lanes;       // ...and its lanes in the row
-    logic            e_dirty, e_rw, e_serve, e_cmp, e_main, e_probe;
+    logic            e_dirty, e_rw, e_serve, e_cmp, e_main, e_low, e_probe;
     logic [4:0]      snap_k;
     wire             snap_hold = (snap_k == 5'd0) && wl_v && (wl_slot == e_slot);
     logic [3:0]      req_n, fl_k;
@@ -608,7 +621,8 @@ module page_cam #(
     wire eng_retag = (state == E_FILL) && pr_valid && (resp_n == 5'd15);
     wire   e_wr_stb = (state == E_PATCH) || (state == E_WARD && accept);
     assign mw_stb  = (wl_v && wl_main) || (e_wr_stb && e_main);
-    assign mwx_stb = wl_v || e_wr_stb;
+    // ANY bank's writes for the SCB watch - but only the 65816's 16 MB has banks
+    assign mwx_stb = (wl_v && wl_low) || (e_wr_stb && e_low);
     assign mw_bank = wl_v ? wl_bank : e_ppn[15:8];
     assign mw_addr = wl_v ? wl_addr : e_addr;
     // ONE BYTE WIDE: its consumers (the video copy of main, the SCBs in $E1)
@@ -716,9 +730,9 @@ module page_cam #(
             wire w_dr    = dr_ack    && (dr_way == LEV'(gw));
             always_ff @(posedge clk) begin
                 if (w_retag)     mem[e_set]  <= {e_ppn, 1'b0, e_crit, e_boff};
-                else if (w_op)   mem[s_set]  <= {dir_b[gw][24:9], dir_b[gw][8] | nonseq_b, s_off};
-                else if (w_skip) mem[s_set]  <= {dir_b[gw][24:9], 1'b0, last_b};
-                else if (w_dr)   mem[dr_set] <= {dir_c[gw][24:9], dir_c[gw][8] | nonseq_c, dr_line, 4'd0};
+                else if (w_op)   mem[s_set]  <= {dir_b[gw][DW-1:9], dir_b[gw][8] | nonseq_b, s_off};
+                else if (w_skip) mem[s_set]  <= {dir_b[gw][DW-1:9], 1'b0, last_b};
+                else if (w_dr)   mem[dr_set] <= {dir_c[gw][DW-1:9], dir_c[gw][8] | nonseq_c, dr_line, 4'd0};
             end
         end
     endgenerate
@@ -733,8 +747,8 @@ module page_cam #(
 
 `ifndef SYNTHESIS
     // The benches' view of the directory: a tag a slot (boot_gs_tb's peek).
-    logic [15:0] d_tag [N];
-    initial for (int i = 0; i < N; i = i + 1) d_tag[i] = 16'd0;
+    logic [PW-1:0] d_tag [N];
+    initial for (int i = 0; i < N; i = i + 1) d_tag[i] = '0;
     always_ff @(posedge clk) if (eng_retag) d_tag[e_slot] <= e_ppn;
     // mw_* carries one byte: a wider write must never land where it is watched.
     always @(posedge clk)
@@ -754,14 +768,14 @@ module page_cam #(
                    ((state == E_FILL) && pr_valid && (resp_n == 5'd0) && e_rw && !e_probe);
         if (rst) begin
             sub_en <= 1'b0; sub_data <= 8'd0;
-            op_row_v <= 1'b0; op_row <= 128'd0; op_row_ppn <= 16'd0;
+            op_row_v <= 1'b0; op_row <= 128'd0; op_row_ppn <= '0;
             decided <= 1'b0;
             cmp_valid <= 1'b0; cmp_byte <= 8'd0;
             state <= E_IDLE;
-            pq_valid <= 1'b0; pq_we <= 1'b0; pq_line <= 20'd0;
-            e_ppn <= 16'd0; e_old <= 16'd0; e_slot <= {SW{1'b0}};
+            pq_valid <= 1'b0; pq_we <= 1'b0; pq_line <= '0;
+            e_ppn <= '0; e_old <= '0; e_slot <= {SW{1'b0}};
             e_crit <= 4'd0; e_boff <= 4'd0; e_wword <= 32'd0; e_lanes <= 16'd0; e_addr <= 16'd0;
-            e_dirty <= 1'b0; e_rw <= 1'b1; e_serve <= 1'b0; e_cmp <= 1'b0; e_main <= 1'b0; e_probe <= 1'b0;
+            e_dirty <= 1'b0; e_rw <= 1'b1; e_serve <= 1'b0; e_cmp <= 1'b0; e_main <= 1'b0; e_low <= 1'b0; e_probe <= 1'b0;
             snap_k <= 5'd0; req_n <= 4'd0; fl_k <= 4'd0; resp_n <= 5'd0;
             hits <= 32'd0; misses <= 32'd0; served <= 32'd0;
             mismatches <= 32'd0; last_mismatch <= 32'd0; diverted <= 32'd0;
@@ -780,7 +794,7 @@ module page_cam #(
                 state      <= E_LDWR;
                 pq_valid   <= 1'b1;
                 pq_we      <= 1'b1;
-                pq_line    <= ld_line;
+                pq_line    <= (PW+4)'(ld_line);   // the loader writes the 65816's 16 MB
                 ld_wdata_q <= ld_wdata;
             end
 
@@ -812,7 +826,8 @@ module page_cam #(
                 e_wword    <= s_wdata;
                 e_lanes    <= 16'(s_be) << s_off[3:0];
                 e_addr     <= {s_ppn[7:0], s_off};
-                e_main     <= (s_ppn[15:8] == 8'd0);
+                e_main     <= low16(s_ppn) && (s_ppn[15:8] == 8'd0);
+                e_low      <= low16(s_ppn);
             end else if ((dec_read || dec_write) && !s_hit) begin
                 misses <= misses + 32'd1;
                 if (image_ready) begin
@@ -830,7 +845,8 @@ module page_cam #(
                     e_serve   <= serve_this && !s_posted;
                     e_probe   <= s_probe;
                     e_cmp     <= s_rw && s_machine;
-                    e_main    <= (s_ppn[15:8] == 8'd0);
+                    e_main    <= low16(s_ppn) && (s_ppn[15:8] == 8'd0);
+                    e_low     <= low16(s_ppn);
                     mem_fills <= mem_fills + 32'd1;
                     snap_k    <= 5'd0;
                     if (!s_vdty) begin

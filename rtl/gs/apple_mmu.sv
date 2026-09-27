@@ -225,7 +225,12 @@ module apple_mmu #(
     // one.  It survives RES' - KEGS sets it before do_reset() and do_reset()
     // does not touch it - which is why this register is reset by the card's
     // `rst` alone below and not by res_sync.
-    parameter logic [7:0] GS_CYAREG_POR = 8'hC0
+    parameter logic [7:0] GS_CYAREG_POR = 8'hC0,
+    // THE PAGE NUMBER'S WIDTH on cl_ppn and the engine's pe_ppn (rtl/gs/page_cam.sv
+    // PW): 17 lets the RISC-V engine's stores reach the upper 16 MB; the 65816's
+    // own pages are zero-extended.  cl_aux/cl_bank mean nothing for a page above
+    // 16 MB (gs_top gates every bank-minded consumer of cl_* on low16).
+    parameter integer PW = 16
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -292,7 +297,7 @@ module apple_mmu #(
     // RAM under every map), posted the same way after L1-D's FIFO - the
     // 65816's writes are the older ones.
     input  wire         pe_valid,
-    input  wire [15:0]  pe_ppn,
+    input  wire [PW-1:0] pe_ppn,
     input  wire [7:0]   pe_off,        // word aligned
     input  wire [3:0]   pe_be,
     input  wire [31:0]  pe_data,
@@ -313,7 +318,7 @@ module apple_mmu #(
     // SPACE): the classified op's page, and its preview - the physical page
     // cache's P0 index source.  Nothing consumes these yet; the old triple
     // above is still what rtl/page_cache.sv takes.
-    output logic [15:0] cl_ppn,
+    output logic [PW-1:0] cl_ppn,
     output wire  [15:0] pf_ppn,
 
     // The switches, for a status register:
@@ -1469,7 +1474,7 @@ module apple_mmu #(
                 shd_valid <= 1'b1;
                 // The same page in $E0 or $E1, by the side the write landed
                 // on: cl_ppn's bank bit 0 IS that side.
-                shd_ppn   <= {7'h70, cl_ppn[8], cl_ppn[7:0]};
+                shd_ppn   <= {7'h70, cl_ppn[8], cl_ppn[7:0]};   // (the 65816's banks $00/$01 only)
                 shd_off   <= cl_off[7:0];
                 shd_data  <= cl_wdata[7:0];
             end else if (shd_take) begin
@@ -1491,7 +1496,7 @@ module apple_mmu #(
             cl_wdata    <= 32'd0;
             cl_be       <= 4'b0001;
             cl_eng      <= 1'b0;
-            cl_ppn      <= 16'd0;
+            cl_ppn      <= '0;
             cl_sh       <= 1'b0;
         end else begin
             cl_valid <= op_present || pw_take || shd_take || pe_take;
@@ -1506,7 +1511,7 @@ module apple_mmu #(
                 cl_wr_image <= n_wr_image;
                 cl_posted   <= 1'b0;
                 cl_wdata    <= {4{op_wdata}};
-                cl_ppn      <= pf_ppn;
+                cl_ppn      <= PW'(pf_ppn);
                 cl_sh       <= n_sh;
             end else if (shd_take) begin
                 // The shadow's second landing.  A RAM write into the Mega II
@@ -1519,7 +1524,7 @@ module apple_mmu #(
                 cl_wr_image <= 1'b1;
                 cl_posted   <= 1'b1;
                 cl_wdata    <= {4{shd_data}};
-                cl_ppn      <= shd_ppn;
+                cl_ppn      <= PW'(shd_ppn);
                 cl_sh       <= 1'b0;
             end else if (pw_take) begin
                 cl_cls      <= CLS_RAM;      // the front posts RAM class only
@@ -1540,7 +1545,7 @@ module apple_mmu #(
                 // carries its page; its shadow is the front's to stamp when
                 // the fronts serve a IIgs (docs/GS.md, rung 6).  Nothing
                 // posts on the GS build yet.
-                cl_ppn      <= pw_ppn;
+                cl_ppn      <= PW'(pw_ppn);
                 cl_sh       <= 1'b0;
             end else if (pe_take) begin
                 // The engine's word: RAM class in $02-$DF, never shadowed

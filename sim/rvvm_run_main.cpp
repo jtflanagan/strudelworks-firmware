@@ -151,7 +151,7 @@ int main(int argc, char **argv) {
     }
     if (!guest || (!ref_only && (!hex || !vm))) { fprintf(stderr, "need --guest= and (--hex= --vm= | --ref-only)\n"); return 2; }
 
-    if (load < 0 || load >= SPACE) { fprintf(stderr, "--load=$%llX is outside the 24-bit space\n", load); return 2; }
+    if (load < 0 || load >= LOW) { fprintf(stderr, "--load=$%llX is outside the 65816's 16 MB\n", load); return 2; }
     if (pc0 < 0) pc0 = load;
 
     // The VM image and its header; the options patch the header, as a loader would.
@@ -169,13 +169,14 @@ int main(int argc, char **argv) {
     const uint32_t sp0 = sp_arg > 0 ? uint32_t(sp_arg) : DEFAULT_SP;
 
     // The guest image at --load; the model starts from the same 16 MB.
-    load_file(guest, mem, size_t(load), SPACE - size_t(load));
+    load_file(guest, mem, size_t(load), LOW - size_t(load));
     Ref ref;
-    ref.m.assign(SPACE + 8, 0);
+    ref.m.assign(LOW + 8, 0);
+    ref.space = LOW;   // the memory side is the 65816: the engine reaches only its 16 MB here
     ref.x[2] = sp0;
     ref.pc = uint32_t(pc0);
     ref.in = input;
-    if (ref_only) memcpy(ref.m.data(), mem.data(), SPACE);
+    if (ref_only) memcpy(ref.m.data(), mem.data(), LOW);
 
     if (ref_only) {
         while (ref.status == 0) ref.step();
@@ -203,7 +204,7 @@ int main(int argc, char **argv) {
     };
     memcpy(&mem[0x000800], stub, sizeof stub);
     mem[0x00FFFC] = 0x00; mem[0x00FFFD] = 0x08;
-    memcpy(ref.m.data(), mem.data(), SPACE);   // the model sees what the VM sees
+    memcpy(ref.m.data(), mem.data(), LOW);   // the model sees what the VM sees
 
     dut = new Vrvvm_sys;
     dut->irq_n = 1; dut->nmi_n = 1; dut->cyc_en = 1; dut->i_din = 0; dut->d_din = 0;
@@ -231,7 +232,7 @@ int main(int argc, char **argv) {
         // the engine's pc and registers must equal the model's.
     auto on_clock = [&]() {
         if (!(engine && dut->retired)) return;
-            const uint32_t rpc = ref.pc, iw = ref.pc < SPACE ? ref.ld(ref.pc & ~3u, 4) : 0;
+            const uint32_t rpc = ref.pc, iw = ref.pc < LOW ? ref.ld(ref.pc & ~3u, 4) : 0;
             const char *mn = mnemonic(iw);
             if (instret == 0) first_dispatch = cycles;
             if (prof && instret) { auto &h = hist[last_name]; h.first++; h.second += cycles - last_dispatch; }
@@ -367,7 +368,7 @@ int main(int argc, char **argv) {
         if (vm_out.compare(0, ref.out.size(), ref.out) != 0) fail += "LOCKSTEP: console output differs\n";
         // All of memory but the VM's own direct page and stack.
         size_t bad = 0, first = 0;
-        for (uint32_t i = 0x200; i < SPACE; i++) if (mem[i] != ref.m[i]) { if (!bad++) first = i; }
+        for (uint32_t i = 0x200; i < LOW; i++) if (mem[i] != ref.m[i]) { if (!bad++) first = i; }
         if (bad) { snprintf(msg, sizeof msg, "LOCKSTEP: %zu bytes differ, first at %06zx (vm %02x ref %02x)\n", bad, first, mem[first], ref.m[first]); fail += msg; }
         if (fail.empty()) printf("rvvm: lockstep with the reference: %" PRIu64 " instructions agree\n", ref.instret);
     }

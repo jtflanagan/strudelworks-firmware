@@ -8,7 +8,8 @@
 //////////////////////////////////////////////////////////////////////////////////
 module rv_mem_tb #(
     parameter integer DROWS = 512,      // rv_mem's data row cache (run_rv_mem.sh: DROWS=N)
-    parameter integer TN = 4            // rv_mem's page table entries (run_rv_mem.sh: TN=N)
+    parameter integer TN = 4,           // rv_mem's page table entries (run_rv_mem.sh: TN=N)
+    parameter integer AW = 25           // the address space: 25 = 32 MB (rv_pipe, rv_mem)
 ) (
     input  wire         clk,
     input  wire         rst,
@@ -40,7 +41,7 @@ module rv_mem_tb #(
     input  wire  [7:0]  dhi,
     // the L2's face
     output wire         il_req,
-    output wire  [15:0] il_ppn,
+    output wire  [AW-9:0] il_ppn,
     output wire  [3:0]  il_line,
     output wire         il_fill,
     input  wire         il_ack,
@@ -57,9 +58,9 @@ module rv_mem_tb #(
     input  wire         dr_done,
     input  wire  [127:0] dr_row,
     input  wire         op_place_v,
-    input  wire  [15:0] op_place_ppn,
+    input  wire  [AW-9:0] op_place_ppn,
     output wire         pw_req,
-    output wire  [21:0] pw_addr,
+    output wire  [AW-3:0] pw_addr,
     output wire  [3:0]  pw_be,
     output wire  [31:0] pw_data,
     input  wire         pw_ack,
@@ -76,14 +77,14 @@ module rv_mem_tb #(
     output wire         wr_busy
 );
     wire        req_spec, f_req, f_valid, f_delegate, f_abort, d_req, d_we, d_valid, d_delegate, d_abort;
-    wire [21:0] f_addr, d_addr;
+    wire [AW-3:0] f_addr, d_addr;
     wire [3:0]  d_be;
     wire [31:0] f_data, d_wdata, d_rdata, pk_word;
-    wire [21:0] pk_addr, d_pre, f_pre;
+    wire [AW-3:0] pk_addr, d_pre, f_pre;
     wire        pk_use;
     wire        pk_hit;
 
-    rv_pipe u_core (
+    rv_pipe #(.AW (AW)) u_core (
         .clk (clk), .rst (rst),
         .step (step), .cancel (cancel), .resume (resume), .resume_val (resume_val),
         .run (run), .hold (hold), .paid (paid),
@@ -102,7 +103,7 @@ module rv_mem_tb #(
     logic        wsn_v_q = 1'b0, inval_q = 1'b0;
     logic [23:0] wsn_a_q = 24'd0;
     always_ff @(posedge clk) begin wsn_v_q <= !rst && cancel; inval_q <= !rst && inval; wsn_a_q <= wsn_a; end
-    rv_mem #(.DROWS (DROWS), .TN (TN)) u_mem (
+    rv_mem #(.DROWS (DROWS), .TN (TN), .AW (AW)) u_mem (
         .clk (clk), .rst (rst), .dlo (dlo), .dhi (dhi), .wsn_v (wsn_v_q), .wsn_a (wsn_a_q), .inval (inval_q),
         .req_spec (req_spec),
         .f_req (f_req), .f_addr (f_addr), .f_pre (f_pre), .f_valid (f_valid), .f_delegate (f_delegate), .f_abort (f_abort), .f_data (f_data),

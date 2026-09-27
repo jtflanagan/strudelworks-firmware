@@ -58,7 +58,12 @@ module rv_mem #(
     // translation - the map is the identity - it lets a row miss use the direct
     // way read instead of a probe through the L2's directory.  Probing every
     // miss instead was measured slower (Embench 1.763 -> 1.791, nsichneu +15%).
-    parameter integer TN = 4
+    parameter integer TN = 4,
+    // THE ADDRESS SPACE (rv_pipe's AW): 25 = the whole 32 MB bank, the upper 16 MB
+    // the engine's alone and always direct; 24 = the 65816's 16 MB only.  A word
+    // address is AW-2 bits, a 16-byte row AW-4, a 256-byte page AW-8 - the L2's
+    // page number, 17 bits at 25.
+    parameter integer AW = 25
 ) (
     input  wire              clk,
     input  wire              rst,
@@ -73,16 +78,16 @@ module rv_mem #(
     // the core
     input  wire              req_spec,
     input  wire              f_req,
-    input  wire  [21:0]      f_addr,
-    input  wire  [21:0]      f_pre,         // the core's next fetch address (a guess: a wrong one costs a clock)
+    input  wire  [AW-3:0]    f_addr,
+    input  wire  [AW-3:0]    f_pre,         // the core's next fetch address (a guess: a wrong one costs a clock)
     output wire              f_valid,
     output logic             f_delegate,
     output logic             f_abort,
     output wire  [31:0]      f_data,
     input  wire              d_req,
     input  wire              d_we,
-    input  wire  [21:0]      d_addr,
-    input  wire  [21:0]      d_pre,         // the core's next data address (its execute stage)
+    input  wire  [AW-3:0]    d_addr,
+    input  wire  [AW-3:0]    d_pre,         // the core's next data address (its execute stage)
     input  wire  [3:0]       d_be,
     input  wire  [31:0]      d_wdata,
     output wire              d_valid,
@@ -91,13 +96,13 @@ module rv_mem #(
     output wire  [31:0]      d_rdata,
     // THE PEEK: the fetch row buffer, looked up combinationally for the core's
     // next pc as it writes back (a hit starts that instruction with no fetch)
-    input  wire  [21:0]      pk_addr,
+    input  wire  [AW-3:0]    pk_addr,
     input  wire              pk_use,        // the core started an instruction from the peek
     output wire              pk_hit,
     output wire  [31:0]      pk_word,
     // the L2: probe by page
     output logic             il_req,
-    output logic [15:0]      il_ppn,
+    output logic [AW-9:0]    il_ppn,
     output logic [3:0]       il_line,
     output logic             il_fill,
     input  wire              il_ack,
@@ -116,10 +121,10 @@ module rv_mem #(
     input  wire  [127:0]     dr_row,
     // the L2: every fill's retag (the placement report)
     input  wire              op_place_v,
-    input  wire  [15:0]      op_place_ppn,
+    input  wire  [AW-9:0]    op_place_ppn,
     // the L2: a word write (the widened posted seam)
     output logic             pw_req,
-    output logic [21:0]      pw_addr,
+    output logic [AW-3:0]    pw_addr,
     output logic [3:0]       pw_be,
     output logic [31:0]      pw_data,
     input  wire              pw_ack,
@@ -146,22 +151,26 @@ module rv_mem #(
 
     // ---- the request -------------------------------------------------------------
     logic        is_f;              // the request being served is a fetch
-    logic [21:0] ra;                // its word address
+    logic [AW-3:0] ra;              // its word address
     // A fetch and a load are both asked for at once by the pipelined core; each
     // is judged direct (and a hit) on its own, and the one the miss engine
     // serves - `a_now` - is the data request first (the older instruction).
-    wire         direct_f = f_addr[21:14] >= dlo && f_addr[21:14] <= dhi;
-    wire         direct_d = d_addr[21:14] >= dlo && d_addr[21:14] <= dhi;
+    // DIRECT: the whole upper 16 MB (the engine's alone), and the lower 16 MB's
+    // banks dlo..dhi (the rest of the 65816's space is delegated to the VM).
+    wire         f_hi     = AW > 24 && f_addr[AW-3];
+    wire         d_hi     = AW > 24 && d_addr[AW-3];
+    wire         direct_f = f_hi || (f_addr[21:14] >= dlo && f_addr[21:14] <= dhi);
+    wire         direct_d = d_hi || (d_addr[21:14] >= dlo && d_addr[21:14] <= dhi);
     wire         sel_d;             // the miss engine takes the data request
-    wire  [21:0] a_now  = sel_d ? d_addr : f_addr;
+    wire  [AW-3:0] a_now = sel_d ? d_addr : f_addr;
     wire         direct_now = sel_d ? direct_d : direct_f;
-    wire  [15:0] ppn = ra[21:6];    // {bank, page}
+    wire  [AW-9:0] ppn = ra[AW-3:6];  // {bank, page}
     wire  [3:0]  line = ra[5:2];
     wire  [1:0]  wsel = ra[1:0];
 
     // ---- the rows ----------------------------------------------------------------------
     logic         stale;               // a write to this row (or an inval) since it was asked for
-    wire  [19:0]  wsn_row = wsn_a[23:4];
+    wire  [AW-5:0] wsn_row = (AW-4)'(wsn_a[23:4]);   // the 65816 writes only the lower 16 MB
 
     // THE DATA ROW CACHE: DROWS rows of 16 bytes, direct-mapped by the row's low
     // bits, row and tag in BLOCK RAM.  Its read is registered, so it is addressed
@@ -170,7 +179,7 @@ module rv_mem #(
     // clock and a hit still answers then.  Valid bits in flops, read registered
     // beside it (the snoop drops one, an inval all, in one clock).
     localparam integer DI = $clog2(DROWS);
-    localparam integer TW = 20 - DI;            // the tag: the row's bits above the index
+    localparam integer TW = AW - 4 - DI;        // the tag: the row's bits above the index
     // THE HIT IS DECIDED WHEN THE ROW IS READ, a clock before it is used: a LUTRAM
     // copy of the tags is read asynchronously at the same address as the RAM, and
     // the hit is registered beside the RAM's output.  On the request's clock a hit
@@ -180,16 +189,16 @@ module rv_mem #(
     (* ram_style = "block" *) logic [127:0] dc_mem [DROWS];
     logic [TW-1:0]     dc_tagl [DROWS];         // the tags, read asynchronously
     logic [127:0]      dc_row;                  // the row at rd_row_q
-    logic [19:0]       rd_row_q;                // the row read
+    logic [AW-5:0]     rd_row_q;                // the row read
     logic              dc_hitq;                 // ...and it was there, valid, as the read saw it
     wire  [DI-1:0]     d_idx   = d_addr[DI+1:2];
     wire  [DI-1:0]     ra_idx  = ra[DI+1:2];
     // (a store reads its own row - its merge's - on the clock it is taken; a load
     // its own while it waits; otherwise the next one, from the execute stage)
-    wire  [19:0]       rd_row  = (st == M_WR) ? pw_addr[21:2] :
-                                 (d_req && (d_we || !d_valid)) ? d_addr[21:2] : d_pre[21:2];
+    wire  [AW-5:0]     rd_row  = (st == M_WR) ? pw_addr[AW-3:2] :
+                                 (d_req && (d_we || !d_valid)) ? d_addr[AW-3:2] : d_pre[AW-3:2];
     wire  [DI-1:0]     rd_idx  = rd_row[DI-1:0];
-    wire               d_in_c  = dc_hitq && rd_row_q == d_addr[21:2];
+    wire               d_in_c  = dc_hitq && rd_row_q == d_addr[AW-3:2];
 
     function automatic logic [31:0] word_of(input logic [127:0] r, input logic [1:0] k);
         return r[{k, 5'd0} +: 32];
@@ -206,7 +215,7 @@ module rv_mem #(
     // ---- the translation table ---------------------------------------------------------
     localparam integer TW_ = $clog2(TN);
     logic [TN-1:0]   t_v;
-    logic [15:0]     t_ppn [TN];
+    logic [AW-9:0]   t_ppn [TN];
     logic [SIDX-1:0] t_set [TN];
     logic [LEV-1:0]  t_way [TN];
     logic [TW_-1:0]  t_next;            // round-robin replacement
@@ -219,7 +228,7 @@ module rv_mem #(
     end
     // ...and the same lookup on the live request, so a miss issues its read on
     // the clock it is presented (no separate lookup state)
-    wire  [15:0]     ppn_now  = a_now[21:6];
+    wire  [AW-9:0]   ppn_now  = a_now[AW-3:6];
     logic            t_hit_now;
     logic [TW_-1:0]  t_idx_now;
     always_comb begin
@@ -241,27 +250,27 @@ module rv_mem #(
     // it; a LUTRAM copy of the tags lets a store or the snoop drop only a row that
     // really holds what was written, and the prefetch see what is there.
     localparam integer IDI = $clog2(IROWS);
-    localparam integer ITW = 20 - IDI;
+    localparam integer ITW = AW - 4 - IDI;
     logic [IROWS-1:0]  ic_v;
     (* ram_style = "block" *) logic [127:0] ic_mem [IROWS];
     logic [ITW-1:0]    ic_tagl [IROWS];         // the tags, read asynchronously
     logic [127:0]      ic_out;
-    logic [19:0]       ic_row_q;                // the row read
+    logic [AW-5:0]     ic_row_q;                // the row read
     logic              ic_hitq;                 // ...and it was held, as the read saw it
     // (the read is this fetch's row: a hit, or - not held - a real miss)
-    wire               ic_match  = ic_row_q == f_addr[21:2];
+    wire               ic_match  = ic_row_q == f_addr[AW-3:2];
     wire               ic_tagok  = ic_hitq;
-    function automatic logic ic_has(input logic [19:0] row);
-        return ic_v[row[IDI-1:0]] && ic_tagl[row[IDI-1:0]] == row[19:IDI];
+    function automatic logic ic_has(input logic [AW-5:0] row);
+        return ic_v[row[IDI-1:0]] && ic_tagl[row[IDI-1:0]] == row[AW-5:IDI];
     endfunction
 
     // THE PREFETCH: while nothing needs the miss engine, the row after the one
     // last fetched - same page, its translation in the table, not already held -
     // is read into the cache (M_PF), so a straight run finds it there.  A fetch
     // asking for it as it lands is answered then.
-    logic [19:0]  pf_tag;
+    logic [AW-5:0] pf_tag;
     logic         pf_stale;
-    logic [19:0]  f_last;              // the row the last answered fetch came from
+    logic [AW-5:0] f_last;             // the row the last answered fetch came from
     logic         f_last_v;
     wire hit_ok  = (st == M_IDLE || st == M_PF) && !wsn_v && !inval;
     // (a fetch hit takes no port but the cache's: it goes on while a store is out -
@@ -289,7 +298,7 @@ module rv_mem #(
     // a fetch asking for the very row the prefetch is bringing: answered as it lands
     wire pf_done = dr_done;
     wire [127:0] pf_row = dr_row;
-    wire f_pfland = (st == M_PF) && pf_done && f_req && direct_f && f_addr[21:2] == pf_tag &&
+    wire f_pfland = (st == M_PF) && pf_done && f_req && direct_f && f_addr[AW-3:2] == pf_tag &&
                     !pf_stale && !wsn_v && !inval;
     assign f_valid = f_valid_q || f_fast || f_pfland || (dr_land && is_f) || (il_land && is_f);
     assign f_data  = f_fast ? word_of(ic_out, f_addr[1:0]) :
@@ -306,11 +315,11 @@ module rv_mem #(
     logic            pf_t_hit;
     logic [SIDX-1:0] pf_set;
     logic [LEV-1:0]  pf_way;
-    wire  [19:0]     pf_next = f_last + 20'd1;
+    wire  [AW-5:0]   pf_next = f_last + 1'b1;
     always_comb begin
         pf_t_hit = 1'b0; pf_set = '0; pf_way = '0;
         for (int i = 0; i < TN; i++)
-            if (t_v[i] && t_ppn[i] == f_last[19:4]) begin pf_t_hit = 1'b1; pf_set = t_set[i]; pf_way = t_way[i]; end
+            if (t_v[i] && t_ppn[i] == f_last[AW-5:4]) begin pf_t_hit = 1'b1; pf_set = t_set[i]; pf_way = t_way[i]; end
     end
     wire pf_go = (st == M_IDLE) && !f_need && !d_need && f_last_v && f_last[3:0] != 4'hF &&
                  !ic_has(pf_next) && pf_tag != pf_next && !wsn_v && !inval &&
@@ -324,7 +333,7 @@ module rv_mem #(
     logic [LEV-1:0]  pin_way;
 
     // Keep a row that answered the core combinationally (unless it went stale).
-    wire keep_ok = !stale && !inval && !(wsn_v && wsn_row == ra[21:2]);
+    wire keep_ok = !stale && !inval && !(wsn_v && wsn_row == ra[AW-3:2]);
     task automatic keep_row(input logic [127:0] r);
         if (keep_ok) begin
             if (is_f) ic_v[ra[IDI+1:2]] <= 1'b1;     // (the rows themselves: the caches' write ports)
@@ -336,7 +345,7 @@ module rv_mem #(
     always_ff @(posedge clk) begin
         if (rst) begin
             st <= M_IDLE; t_v <= '0; t_next <= '0; dc_v <= '0; ic_v <= '0;
-            pf_stale <= 1'b0; f_last_v <= 1'b0; pf_tag <= 20'hFFFFF;
+            pf_stale <= 1'b0; f_last_v <= 1'b0; pf_tag <= '1;
             f_valid_q <= 1'b0; f_delegate <= 1'b0; f_abort <= 1'b0;
             d_valid_q <= 1'b0; d_delegate <= 1'b0; d_abort <= 1'b0;
             il_req <= 1'b0; dr_req <= 1'b0; pw_req <= 1'b0; il_fill <= 1'b0;
@@ -351,7 +360,7 @@ module rv_mem #(
                 pin_pend <= 1'b0;
             end
             // the row the fetch is in (the prefetch runs ahead of it)
-            if (f_req && f_valid && direct_f) begin f_last <= f_addr[21:2]; f_last_v <= 1'b1; end
+            if (f_req && f_valid && direct_f) begin f_last <= f_addr[AW-3:2]; f_last_v <= 1'b1; end
             // An eviction kills the translation it names.
             if (evict_v)
                 for (int i = 0; i < TN; i++)
@@ -400,7 +409,7 @@ module rv_mem #(
             M_PF: begin
                 if (dr_req && dr_ack) dr_req <= 1'b0;
                 else if (dr_req && ((evict_v && evict_set == dr_set && evict_way == dr_way) ||
-                                    d_need || (f_need && f_addr[21:2] != pf_tag))) begin
+                                    d_need || (f_need && f_addr[AW-3:2] != pf_tag))) begin
                     // its way evicted, or a demand request is waiting: give it up
                     dr_req <= 1'b0; st <= M_IDLE;
                 end
@@ -482,7 +491,8 @@ module rv_mem #(
                 // the row buffers stay true to memory
                 // the engine-write record: {tag B, bank, byte enables, address[15:0]}, the data
                 rec_v <= 1'b1;
-                rec   <= {pw_data, 4'hB, pw_addr[21:14], pw_be, pw_addr[13:0], 2'b00};
+                // the 0xB record (docs/PROTOCOL.md): {data} {tag, enables, 0, word address}
+                rec   <= {pw_data, 4'hB, pw_be, 1'b0, 23'(pw_addr)};
                 st <= M_IDLE;                       // (the core was answered at the issue)
             end
 
@@ -497,7 +507,7 @@ module rv_mem #(
 
             // a store taken drops the instruction row it writes, if held (code written
             // is fetched again from the L2 - the store's landing - after fence.i)
-            if (st_post && ic_has(d_addr[21:2])) ic_v[d_addr[IDI+1:2]] <= 1'b0;
+            if (st_post && ic_has(d_addr[AW-3:2])) ic_v[d_addr[IDI+1:2]] <= 1'b0;
             // THE INVALIDATIONS, last so they win over a fill on the same clock:
             // an inval drops every row; the snoop drops the row it names.
             if (inval) begin
@@ -505,7 +515,7 @@ module rv_mem #(
             end else if (wsn_v) begin
                 if (ic_has(wsn_row)) ic_v[wsn_row[IDI-1:0]] <= 1'b0;
                 dc_v[wsn_row[DI-1:0]] <= 1'b0;
-                if (wsn_row == ra[21:2]) stale <= 1'b1;
+                if (wsn_row == ra[AW-3:2]) stale <= 1'b1;
                 if (wsn_row == pf_tag)   pf_stale <= 1'b1;
             end
         end
@@ -515,7 +525,7 @@ module rv_mem #(
     // probe's row), or an engine store merging into a row it holds - the row
     // read for the store's own address (the core holds it through the store).
     wire [DI-1:0] pw_idx  = pw_addr[DI+1:2];
-    wire          pw_dhit = dc_hitq && rd_row_q == pw_addr[21:2];
+    wire          pw_dhit = dc_hitq && rd_row_q == pw_addr[AW-3:2];
     // (only a row that is kept: an entry whose valid bit still stands for an
     // older row must never take a row that went stale on its way)
     wire dc_fill_dr = (st == M_DR) && dr_done && !is_f && keep_ok;
@@ -528,13 +538,13 @@ module rv_mem #(
     always_ff @(posedge clk) begin
         if (dc_we) begin
             dc_mem[dc_wa] <= dc_wd;
-            if (!dc_merge) dc_tagl[dc_wa] <= ra[21:DI+2];
+            if (!dc_merge) dc_tagl[dc_wa] <= ra[AW-3:DI+2];
         end
         dc_row   <= dc_mem[rd_idx];
         rd_row_q <= rd_row;
         // the hit as this read will stand: not if an inval, a snoop or a write to
         // the same entry on this clock (the RAM reads the old row then)
-        dc_hitq  <= dc_v[rd_idx] && dc_tagl[rd_idx] == rd_row[19:DI] && !inval &&
+        dc_hitq  <= dc_v[rd_idx] && dc_tagl[rd_idx] == rd_row[AW-5:DI] && !inval &&
                     !(wsn_v && wsn_row[DI-1:0] == rd_idx) && !(dc_we && dc_wa == rd_idx);
     end
 
@@ -544,18 +554,18 @@ module rv_mem #(
     wire ic_fill_dr = (st == M_DR) && dr_done && is_f && keep_ok;
     wire ic_fill_il = (st == M_IL) && il_done && il_ok && is_f && keep_ok;
     wire           ic_we = ic_fill_dr || ic_fill_il || pf_keep;
-    wire [19:0]    ic_wrow = pf_keep ? pf_tag : ra[21:2];
+    wire [AW-5:0]  ic_wrow = pf_keep ? pf_tag : ra[AW-3:2];
     wire [IDI-1:0] ic_wa = ic_wrow[IDI-1:0];
     wire [127:0]   ic_wd = ic_fill_il ? il_row : pf_keep ? pf_row : dr_row;
     wire [IDI-1:0] ic_rd_idx = f_pre[IDI+1:2];
-    wire [19:0]    ic_rd_row = f_pre[21:2];
+    wire [AW-5:0]  ic_rd_row = f_pre[AW-3:2];
     // an entry dropped or written on the reading clock reads as not valid
     wire ic_clr = (wsn_v && ic_has(wsn_row) && wsn_row[IDI-1:0] == ic_rd_idx) ||
-                  (st_post && ic_has(d_addr[21:2]) && d_addr[IDI+1:2] == ic_rd_idx);
+                  (st_post && ic_has(d_addr[AW-3:2]) && d_addr[IDI+1:2] == ic_rd_idx);
     always_ff @(posedge clk) begin
         if (ic_we) begin
             ic_mem[ic_wa]  <= ic_wd;
-            ic_tagl[ic_wa] <= ic_wrow[19:IDI];
+            ic_tagl[ic_wa] <= ic_wrow[AW-5:IDI];
         end
         ic_out   <= ic_mem[ic_rd_idx];
         ic_row_q <= ic_rd_row;

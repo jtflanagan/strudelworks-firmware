@@ -52,6 +52,9 @@ module card_link #(
     // The register file at its minimum (rtl/common/wb_regfile.sv MINIMAL):
     // the 65C02 card's top sets it.
     parameter bit MINIMAL_REGS = 1'b0,
+    // The memory image's line width (rtl/common/page_client.sv LW): 20 = 16 MB,
+    // 21 = the GS card's whole 32 MB bank (the RISC-V engine's upper half).
+    parameter integer PQ_LW = 20,
     // CK_PHASE_SHIFT (docs/UBERDDR3.md rung 2): the DDR3 controller walks the
     // CK pin's clock phase under the DRAM's own write-level feedback.  The
     // default since 2026-09-18; `build/build.sh --ck-phase 0` builds without it.
@@ -277,7 +280,7 @@ module card_link #(
     input  wire        pq_busy,
     input  wire        pq_valid,
     input  wire        pq_we,
-    input  wire [19:0] pq_line,
+    input  wire [PQ_LW-1:0] pq_line,
     input  wire [127:0] pq_wdata,
     input  wire [15:0] pq_sel,
     output wire        pq_ready,
@@ -1744,7 +1747,7 @@ module card_link #(
     assign c_data[127:0] = 128'd0;          // the reader carries no data
     assign c_sel[31:0]   = {16'hFFFF, 16'hFFFF};
 
-    page_client u_mem (
+    page_client #(.LW (PQ_LW)) u_mem (
         .clk            (clk_ctrl),
         .rst            (rst),
         .calib_complete (calib_complete),

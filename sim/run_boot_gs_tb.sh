@@ -258,7 +258,7 @@ if [ "$vl" = 1 ]; then
         -GWATCH_FROM="$wfrom" -GWATCH_TO="$wto" \
         -GENG_TRACE="$engtrace" \
         -GENGINE="${engine_on:-0}" -GXROMF="\"$work/engine_vm_$tag.hex\"" -GGUESTF="\"$work/engine_guest_$tag.hex\"" \
-        -GGUEST_AT="${engine_at_dec:-131072}" -GVM_ENTRY="${engine_entry_dec:-14811136}" \
+        -GGUEST_AT="${engine_at_dec:-131072}" -GVM_ENTRY="${engine_entry_dec:-15794176}" \
         -GKEY_AT="$keyat" -GKEY_CODE="$keycode" -GKEY_MODS="$keymods" \
         -GBTN_AT="$btnat" -GBTN_HOLD="$btnhold" \
         -GKEY_HOLD="$keyhold" -GPAGE_WATCH="${pagewatch:-0}" \

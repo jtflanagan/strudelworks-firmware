@@ -13,7 +13,8 @@
 #include <string>
 #include <vector>
 
-static const uint32_t SPACE = 1u << 24;       // the 65816's address space
+static const uint32_t SPACE = 1u << 25;       // the engine's space: the whole 32 MB DDR3 bank
+static const uint32_t LOW   = 1u << 24;       // the 65816's space: the services it performs reach only this
 static const uint32_t GUARD = 0x100;          // the null guard: $000000-$0000FF
 static const uint32_t DEFAULT_SP = 0xE00000;  // the top of $DF
 
@@ -86,7 +87,9 @@ static const char *mnemonic(uint32_t in) {
 }
 
 struct Ref {
-    std::vector<uint8_t> m;   // the whole 24-bit space, plus slack for a straddling access
+    std::vector<uint8_t> m;   // the whole space, plus slack for a straddling access
+    uint32_t space = SPACE;   // where the engine's own accesses are legal (LOW for a bench whose
+                              // memory side is the 65816, which reaches only the lower 16 MB)
     uint32_t x[32] = {0}, pc = 0;
     unsigned status = 0, cause = 0;
     uint32_t code = 0, tval = 0;
@@ -97,9 +100,12 @@ struct Ref {
     // a sizing study's tap: every fetch ('F'), load ('L') and store ('S') address
     void (*on_acc)(char, uint32_t) = nullptr;
 
-    // The VM's range rule: an access is legal when its FIRST byte is below
-    // $0100_0000 and outside the null guard (a straddle off the end is not caught).
-    static bool ok(uint32_t a) { return a < SPACE && a >= GUARD; }
+    // The engine's range rule: an access is legal when its FIRST byte is below
+    // `space` ($0200_0000) and outside the null guard (a straddle off the end is not
+    // caught).  A SERVICE the 65816 performs - a write or read buffer, peek, poke -
+    // must lie in the 65816's own space, below $0100_0000 (low_ok).
+    bool ok(uint32_t a) const { return a < space && a >= GUARD; }
+    static bool low_ok(uint32_t a) { return a < LOW && a >= GUARD; }
     uint32_t ld(uint32_t a, int n) const { uint32_t v = 0; for (int i = 0; i < n; i++) v |= uint32_t(m[a + i]) << (8 * i); return v; }
     void st(uint32_t a, uint32_t v, int n) { for (int i = 0; i < n; i++) m[a + i] = uint8_t(v >> (8 * i)); }
     void trap(unsigned c, uint32_t t) { status = 2; cause = c; tval = t; }
@@ -238,7 +244,7 @@ struct Ref {
                 const uint32_t fd = x[10], buf = x[11], len = x[12];
                 if (fd != 1 && fd != 2) { x[10] = uint32_t(-9); return true; }
                 for (uint32_t i = 0; i < len; i++) {
-                    if (!ok(buf + i)) { trap(T_LOAD, buf + i); return false; }
+                    if (!low_ok(buf + i)) { trap(T_LOAD, buf + i); return false; }
                     out += char(m[buf + i]);
                 }
                 x[10] = len;
@@ -248,7 +254,7 @@ struct Ref {
             case 0x5001: case 0x5002: {                        // peek, poke: anywhere below $0100_0000
                 const bool peek = x[17] == 0x5001;
                 const uint32_t a = x[10], w = peek ? x[11] : x[12];
-                if (a >= SPACE) { trap(peek ? T_LOAD : T_STORE, a); return false; }
+                if (a >= LOW) { trap(peek ? T_LOAD : T_STORE, a); return false; }
                 if (w != 1 && w != 2 && w != 4) { x[10] = peek ? 0 : uint32_t(-22); return true; }
                 if (peek) {
                     x[10] = ld(a, int(w));
@@ -264,7 +270,7 @@ struct Ref {
                 if (fd != 0) { x[10] = uint32_t(-9); return true; }
                 uint32_t n = 0;
                 while (n < len && in_pos < in.size()) {
-                    if (!ok(buf + n)) { trap(T_STORE, buf + n); return false; }
+                    if (!low_ok(buf + n)) { trap(T_STORE, buf + n); return false; }
                     m[buf + n] = uint8_t(in[in_pos++]);
                     n++;
                 }

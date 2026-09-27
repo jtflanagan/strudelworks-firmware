@@ -126,12 +126,17 @@ keeps it and never counts it, and the host's mirror applies it in stream order
 (`src/protocol.hpp` `kEngineWriteTag`, `AppleMemory::apply_engine_write`):
 
 ```
-word 0   [31:28] tag      0xB
-         [27:20] bank     $02-$DF
-         [19:16] enables  bit k: the byte at addr + k is written
-         [15:0]  addr     word aligned ([1:0] = 00)
-word 1   [31:0]  data     the byte at addr + k in bits 8k+7:8k
+word 0   [31:28] tag           0xB
+         [27:24] enables       bit k: the byte at (word address * 4) + k is written
+         [23]    0             reserved
+         [22:0]  word address  byte address >> 2: the whole 32 MB of main memory,
+                               the lower 16 MB the 65816's, the upper 16 MB the
+                               engine's alone (docs/REQ_RVVM.md)
+word 1   [31:0]  data          the byte at (word address * 4) + k in bits 8k+7:8k
 ```
+
+(Until 2026-09-26 word 0 was `{tag, bank[27:20], enables[19:16], addr[15:0]}`, whose two
+low address bits were always zero; the repack for 32 MB kept the record 64 bits.)
 
 It enters `rtl/event_merge.sv` in the fast word's slot on a clock no fast word is
 kept, and waits for room (the engine holds its next store until the take) rather

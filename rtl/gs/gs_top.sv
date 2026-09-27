@@ -188,6 +188,15 @@ module gs_top #(
     inout  wire [1:0]  ddr3_dqs_n
 );
 
+    // THE MEMORY'S WIDTH (docs/REQ_RVVM.md): main memory is the whole 32 MB of
+    // DDR3 bank 0 - the lower 16 MB the 65816's, the upper 16 MB the RISC-V
+    // engine's alone.  The L2 names a 256-byte page in MEM_PW bits and a 16-byte
+    // line in MEM_PW+4; the engine's byte address is ENG_AW bits.  Everything on
+    // the 65816's side stays 16-bit: a page above 16 MB has no bank, so the L1s
+    // are told of an L2 event only when its page is in the lower 16 MB.
+    localparam integer MEM_PW = 17;
+    localparam integer ENG_AW = MEM_PW + 8;
+
     wire        apple_clk, apple_rst;
     wire        capture_on, capture_real;
     wire [63:0] real_data;
@@ -330,7 +339,7 @@ module gs_top #(
     // beside the core).  See docs/PAGE_CACHE.md.
     wire        pq_busy, pq_valid, pq_we, pq_ready, pr_valid;
     wire [15:0] pq_sel;
-    wire [19:0] pq_line;
+    wire [MEM_PW+3:0] pq_line;
     wire [127:0] pq_wdata, pr_data;
     wire        mem_image_ready, mem_cnt_clr, mem_inval, mem_invalidating, mem_rom_loaded;
     wire [31:0] mem_fills, mem_flushes, mem_declines;
@@ -450,7 +459,7 @@ module gs_top #(
     // (docs/DLINE.md "the miss's read fills the line").
     wire         mem_op_row_v;
     wire [127:0] mem_op_row;
-    wire [15:0]  mem_op_row_ppn;
+    wire [MEM_PW-1:0] mem_op_row_ppn;
     wire        d_pending_w, turbo_wr, dq_rw_w, ev_fast_room_w;
     wire        pw_valid_w, pw_take_w, pw_ready_w, ws_valid_w;
     wire [7:0]  pw_data_w;
@@ -467,7 +476,7 @@ module gs_top #(
     // The 65816's interrupt line; RUN yields to it when the core would take it (I clear).
     wire        cpu_irq_n = apple_irq_sync && !gsio_irq && !mb_irq && !mouse_irq;
     wire [63:0] eng_rec;
-    wire [21:0] pe_waddr_w;         // the word's address: {bank, addr[15:2]}
+    wire [ENG_AW-3:0] pe_waddr_w;   // the word's address (bit ENG_AW-3: the upper 16 MB)
     wire [3:0]  pe_be_w;
     wire [31:0] pe_data_w;
     logic [2:0] pe_drain_sr;
@@ -518,6 +527,7 @@ module gs_top #(
 
     card_link #(
         .MINIMAL_REGS (MINIMAL_REGS),
+        .PQ_LW (MEM_PW + 4),
         .MEM_PAGES_LOG2 ($clog2(MEM_SETS * MEM_WAYS)),
         .BUILD_DATE (BUILD_DATE),
         .BUILD_TIME (BUILD_TIME),
@@ -742,7 +752,8 @@ module gs_top #(
     // identities, the packed read table and the settle window.  Nothing
     // consumes them yet - the fronts and the page cache take them in the
     // rungs that follow - but they are wired so the ports are real.
-    wire [15:0] cl_ppn_w, pf_ppn_w, p_ppn_w, d_ppn_w;
+    wire [MEM_PW-1:0] cl_ppn_w;
+    wire [15:0] pf_ppn_w, p_ppn_w, d_ppn_w;
     wire [3:0]  p_reg_w, d_reg_w;
     wire        p_fold_w, p_fs_w, d_fold_w, d_sh_w, map_settling;
     wire [103:0] rt_rd_flat;
@@ -758,6 +769,11 @@ module gs_top #(
     // page, the placement report, the eviction broadcast, and the direct way
     // read shared by both L1 sides (L1-D first; the source rides a two-deep
     // shift register so each side sees only its own completion).
+    // THE 65816'S SIDE SEES ONLY ITS OWN 16 MB: a placement, an op row or a
+    // classified write whose page is above it is the engine's business alone.
+    wire        cl_low      = (cl_ppn_w >> 16) == '0;
+    wire        place_low_v = op_place_v_w && ((op_place_ppn_w >> 16) == '0);
+    wire        op_row_low_v = mem_op_row_v && ((mem_op_row_ppn >> 16) == '0);
     localparam integer L2_SIDX = $clog2(MEM_SETS);
     localparam integer L2_LEV  = $clog2(MEM_WAYS);
     wire [15:0] la_vpage_w, la_ppn_w, fi_vpage_w, fi_ppn_w, lb_vpage_w, lb_ppn_w, fj_vpage_w, fj_ppn_w;
@@ -765,7 +781,8 @@ module gs_top #(
     wire        lc_hit_w;
     wire [L2_SIDX-1:0] lc_set_w;
     wire [L2_LEV-1:0]  lc_way_w;
-    wire [15:0] kill_ppn_w, op_place_ppn_w;
+    wire [15:0] kill_ppn_w;
+    wire [MEM_PW-1:0] op_place_ppn_w;
     wire [L2_SIDX-1:0] la_set_w, fi_set_w, lb_set_w, fj_set_w, op_place_set_w, evict_set_w, ref_set_w;
     wire [L2_SIDX-1:0] dr_set_w, dr_set_i, dr_set_d;
     wire [L2_LEV-1:0]  la_way_w, fi_way_w, lb_way_w, fj_way_w, op_place_way_w, evict_way_w, ref_way_w;
@@ -783,7 +800,7 @@ module gs_top #(
     wire [L2_LEV-1:0]  dr_way_e, il_way_w;
     wire [3:0]  dr_line_e;
     wire        eng_il_req, eng_il_fill;
-    wire [15:0] eng_il_ppn;
+    wire [MEM_PW-1:0] eng_il_ppn;
     wire [3:0]  eng_il_line;
     wire [31:0] tlb_fills_w, tlb_deaths_w;
 
@@ -1395,10 +1412,10 @@ module gs_top #(
         .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
         .dr_req (dr_req_i), .dr_set (dr_set_i), .dr_way (dr_way_i), .dr_line (dr_line_i),
         .dr_ack (dr_ack_i), .dr_done (dr_done_i), .dr_row (dr_row_w), .dr_erow (dr_erow_w),
-        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_place_v (place_low_v), .op_place_ppn (op_place_ppn_w[15:0]),
         .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
-        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_ppn (cl_ppn_w), .cl_off (cl_off),
+        .cl_valid (cl_valid && cl_low), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_ppn (cl_ppn_w[15:0]), .cl_off (cl_off),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .serve (mem_serve), .inval (mem_inval),
         .dbg_sel (dbg_sel[3:0]), .dbg_val (il_dbg), .fill_busy (il_fill_busy)
@@ -1449,13 +1466,13 @@ module gs_top #(
         .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
         .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
         .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
-        .op_take (seq_mem_served), .op_row_v (mem_op_row_v), .op_row (mem_op_row), .op_row_ppn (mem_op_row_ppn),
-        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_take (seq_mem_served), .op_row_v (op_row_low_v), .op_row (mem_op_row), .op_row_ppn (mem_op_row_ppn[15:0]),
+        .op_place_v (place_low_v), .op_place_ppn (op_place_ppn_w[15:0]),
         .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .dr_req (dr_req_d), .dr_set (dr_set_d), .dr_way (dr_way_d), .dr_line (dr_line_d),
         .dr_ack (dr_ack_d), .dr_done (dr_done_d), .dr_row (dr_row_w),
-        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
-        .cl_eng (cl_eng), .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata[7:0]),
+        .cl_valid (cl_valid && cl_low), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
+        .cl_eng (cl_eng), .cl_ppn (cl_ppn_w[15:0]), .cl_off (cl_off), .wdata (cl_wdata[7:0]),
         .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
         // ...and it is told a take is ITS take only when it was the source:
         // the ROM loader shares this seam.
@@ -1802,7 +1819,7 @@ module gs_top #(
     // answered from here instead of from the bus - through the same din
     // substitution the keyboard uses, so the capture records what the core
     // read.  Nothing on the bus changes.  See docs/PAGE_CACHE.md.
-    apple_mmu #(.GS (GS)) u_mmu (
+    apple_mmu #(.GS (GS), .PW (MEM_PW)) u_mmu (
         .clk        (apple_clk),
         .rst        (apple_rst),
         .res_sync   (apple_res_sync),
@@ -1833,7 +1850,7 @@ module gs_top #(
         .pw_ready   (pw_ready_w),
         .pw_take    (pw_take_w),
         .pe_valid   (pe_valid_w),
-        .pe_ppn     (pe_waddr_w[21:6]),
+        .pe_ppn     (pe_waddr_w[ENG_AW-3:6]),
         .pe_off     ({pe_waddr_w[5:0], 2'b00}),
         .pe_be      (pe_be_w),
         .pe_data    (pe_data_w),
@@ -2050,7 +2067,7 @@ module gs_top #(
     // so are its stores (DIRECT_WRITES = 1), words through the posted seam.
     // Anything but the 65816 writing memory - an invalidate, a DMA's override
     // write - empties its row buffers.
-    rv_engine #(.MEM (1), .DIRECT_WRITES (1), .SIDX (L2_SIDX), .LEV (L2_LEV)) u_eng (
+    rv_engine #(.MEM (1), .DIRECT_WRITES (1), .SIDX (L2_SIDX), .LEV (L2_LEV), .AW (ENG_AW)) u_eng (
         .clk       (apple_clk),
         .rst       (apple_rst),
         .inval     (mem_inval || (u_present && !u_rw && u_ovr)),
@@ -2084,7 +2101,7 @@ module gs_top #(
     assign gs_c000_byte = 8'd0;
     assign eng_il_req   = 1'b0;
     assign eng_il_fill  = 1'b0;
-    assign eng_il_ppn   = 16'd0;
+    assign eng_il_ppn   = '0;
     assign eng_il_line  = 4'd0;
     assign dr_req_e     = 1'b0;
     assign dr_set_e     = '0;
@@ -2200,7 +2217,7 @@ module gs_top #(
     wire [7:0]  pw_any_data  = pw_data_w;
     always_ff @(posedge apple_clk) pe_drain_sr <= apple_rst ? 3'd0 : {pe_drain_sr[1:0], pe_take_w};
 
-    page_cam #(.SETS (MEM_SETS), .WAYS (MEM_WAYS)) u_cache (
+    page_cam #(.SETS (MEM_SETS), .WAYS (MEM_WAYS), .PW (MEM_PW)) u_cache (
         .clk         (apple_clk),
         .rst         (apple_rst),
         .cl_valid    (cl_valid),
@@ -2214,14 +2231,14 @@ module gs_top #(
         .cl_posted   (cl_posted),
         .pw_pending  (d_pending_w || pe_pending),
         .pw_ready    (pw_ready_w),
-        .pf_ppn      (pf_ppn_w),
+        .pf_ppn      (MEM_PW'(pf_ppn_w)),
         .pf_off      (pf_off[7:0]),
         .pw_take     (pw_take_w || pe_take_w),
         // The map's shadow duplicate needs its own P0 (docs/GS.md rung 3e).
         .shd_take    (shd_take_w),
-        .shd_ppn     (shd_ppn_w),
+        .shd_ppn     (MEM_PW'(shd_ppn_w)),
         .shd_off     (shd_off_w),
-        .pw_ppn      (pe_take_w ? pe_waddr_w[21:6] : pw_any_ppn),
+        .pw_ppn      (pe_take_w ? pe_waddr_w[ENG_AW-3:6] : MEM_PW'(pw_any_ppn)),
         .pw_off      (pe_take_w ? {pe_waddr_w[5:0], 2'b00} : pw_any_off),
         .op_addr     (u_addr),
         .op_present  (u_present),

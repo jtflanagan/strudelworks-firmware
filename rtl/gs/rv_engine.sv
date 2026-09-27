@@ -56,7 +56,8 @@ module rv_engine #(
     parameter integer SIDX = 4,
     parameter integer LEV  = 3,
     parameter integer SLICE0 = 4096,    // the RUN slice at reset (+A4/+A5)
-    parameter integer TN     = 4        // rv_mem's page -> {set, way} table: entries
+    parameter integer TN     = 4,       // rv_mem's page -> {set, way} table: entries
+    parameter integer AW     = 25       // the address space: 25 = the whole 32 MB bank (rv_pipe, rv_mem)
 ) (
     input  wire         clk,
     input  wire         rst,
@@ -79,7 +80,7 @@ module rv_engine #(
     output wire         gov_pay,        // ...and one did: charge the governor one op
     // the L2 (MEM = 1)
     output wire             il_req,
-    output wire  [15:0]     il_ppn,
+    output wire  [AW-9:0]   il_ppn,
     output wire  [3:0]      il_line,
     output wire             il_fill,
     input  wire             il_ack,
@@ -96,12 +97,12 @@ module rv_engine #(
     input  wire             dr_done,
     input  wire  [127:0]    dr_row,
     input  wire             op_place_v,
-    input  wire  [15:0]     op_place_ppn,
+    input  wire  [AW-9:0]   op_place_ppn,
     input  wire             evict_v,
     input  wire  [SIDX-1:0] evict_set,
     input  wire  [LEV-1:0]  evict_way,
     output wire             pw_req,
-    output wire  [21:0]     pw_addr,
+    output wire  [AW-3:0]   pw_addr,
     output wire  [3:0]      pw_be,
     output wire  [31:0]     pw_data,
     input  wire             pw_ack,
@@ -128,15 +129,15 @@ module rv_engine #(
     wire         f_req, d_req, d_we, req_spec;
     wire         f_valid, f_delegate, f_abort, d_valid, d_delegate, d_abort;
     wire  [31:0] f_data, d_rdata, pk_word;
-    wire  [21:0] pk_addr, d_pre, f_pre;
+    wire  [AW-3:0] pk_addr, d_pre, f_pre;
     wire         pk_use;
     wire         wr_busy;       // rv_mem: a posted store not yet landed
     wire         pk_hit;
-    wire  [21:0] f_addr, d_addr;
+    wire  [AW-3:0] f_addr, d_addr;
     wire  [3:0]  d_be;
     wire  [31:0] d_wdata;
 
-    rv_pipe u_core (
+    rv_pipe #(.AW (AW)) u_core (
         .clk (clk), .rst (rst),
         .step (step), .cancel (cancel), .resume (resume), .resume_val (resume_val),
         .run (run), .hold (!gov_ok), .paid (gov_pay),
@@ -171,7 +172,7 @@ module rv_engine #(
     logic [7:0]  dlo, dhi;
 
     generate if (MEM != 0) begin : g_mem
-        rv_mem #(.SIDX (SIDX), .LEV (LEV), .DIRECT_WRITES (DIRECT_WRITES), .TN (TN)) u_mem (
+        rv_mem #(.SIDX (SIDX), .LEV (LEV), .DIRECT_WRITES (DIRECT_WRITES), .TN (TN), .AW (AW)) u_mem (
             .clk (clk), .rst (rst), .dlo (dlo), .dhi (dhi), .wsn_v (wsn_v_q), .wsn_a (wsn_a_q), .inval (inval_q),
             .req_spec (req_spec),
             .f_req (f_req), .f_addr (f_addr), .f_pre (f_pre), .f_valid (f_valid), .f_delegate (f_delegate), .f_abort (f_abort), .f_data (f_data),
@@ -193,9 +194,9 @@ module rv_engine #(
         assign f_valid = f_req;  assign f_delegate = 1'b1; assign f_abort = 1'b0; assign f_data = 32'd0;
         assign pk_hit = 1'b0;    assign pk_word = 32'd0;
         assign d_valid = d_req;  assign d_delegate = 1'b1; assign d_abort = 1'b0; assign d_rdata = 32'd0;
-        assign il_req = 1'b0; assign il_ppn = 16'd0; assign il_line = 4'd0; assign il_fill = 1'b0;
+        assign il_req = 1'b0; assign il_ppn = '0; assign il_line = 4'd0; assign il_fill = 1'b0;
         assign dr_req = 1'b0; assign dr_set = '0; assign dr_way = '0; assign dr_line = 4'd0;
-        assign pw_req = 1'b0; assign pw_addr = 22'd0; assign pw_be = 4'd0; assign pw_data = 32'd0;
+        assign pw_req = 1'b0; assign pw_addr = '0; assign pw_be = 4'd0; assign pw_data = 32'd0;
         assign ref_v = 1'b0; assign ref_on = 1'b0; assign ref_set = '0; assign ref_way = '0;
         assign rec_v = 1'b0; assign rec = 64'd0; assign wr_busy = 1'b0;
     end endgenerate

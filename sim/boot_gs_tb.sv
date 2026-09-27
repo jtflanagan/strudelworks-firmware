@@ -506,7 +506,14 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        lc_hit_w;
     wire [L2_SIDX-1:0] lc_set_w;
     wire [L2_LEV-1:0]  lc_way_w;
-    wire [15:0] kill_ppn_w, op_place_ppn_w;
+    wire [15:0] kill_ppn_w;
+    wire [MEM_PW-1:0] op_place_ppn_w;
+    // THE MEMORY'S WIDTH, as gs_top's: the whole 32 MB bank 0, the upper 16 MB
+    // the RISC-V engine's.  A page is MEM_PW bits, a line MEM_PW+4; the 65816's
+    // side stays 16-bit and hears of an L2 event only for a page below 16 MB.
+    localparam integer MEM_PW = 17;
+    localparam integer ENG_AW = MEM_PW + 8;
+    localparam integer NPG    = 1 << MEM_PW;       // pages the bookkeeping tracks
     localparam integer L2_SIDX = $clog2(L2_SETS);
     localparam integer L2_LEV  = $clog2(L2_WAYS);
     wire [L2_SIDX-1:0] la_set_w, fi_set_w, lb_set_w, fj_set_w, op_place_set_w, evict_set_w, ref_set_w, dr_set_w, dr_set_i, dr_set_d;
@@ -525,7 +532,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire [L2_LEV-1:0]  dr_way_e, il_way_w;
     wire [3:0]  dr_line_e;
     wire        eng_il_req, eng_il_fill;
-    wire [15:0] eng_il_ppn;
+    wire [MEM_PW-1:0] eng_il_ppn;
     wire [3:0]  eng_il_line;
     wire   dr_sel_i = !dr_req_d && dr_req_i;
     wire   dr_sel_e = !dr_req_d && !dr_req_i && dr_req_e;
@@ -633,10 +640,10 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .kill_v (kill_v_w), .kill_ppn (kill_ppn_w),
         .dr_req (dr_req_i), .dr_set (dr_set_i), .dr_way (dr_way_i), .dr_line (dr_line_i),
         .dr_ack (dr_ack_i), .dr_done (dr_done_i), .dr_row (dr_row_w), .dr_erow (dr_erow_w),
-        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_place_v (place_low_v), .op_place_ppn (op_place_ppn_w[15:0]),
         .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .evict_v (evict_v_w), .evict_set (evict_set_w), .evict_way (evict_way_w),
-        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_ppn (cl_ppn_w), .cl_off (cl_off),
+        .cl_valid (cl_valid && cl_low), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_ppn (cl_ppn_w[15:0]), .cl_off (cl_off),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
         .serve (serve), .inval (1'b0),
         .fill_busy (), .dbg_sel (4'd0), .dbg_val ()
@@ -672,7 +679,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     l1d #(.SIDX (L2_SIDX), .LEV (L2_LEV)) u_l1d (
         .kbd_en (1'b1), .kbd_byte (gs_c000_byte), .kbd_rd (dl_kbd_rd),
         .io_flat (gs_shadow_w[6]), .io_vec (io_vec_q), .swi_busy (swi_commit),
-        .op_take (seq_mem_served_w), .op_row_v (op_row_v_w), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w),
+        .op_take (seq_mem_served_w), .op_row_v (op_row_low_v), .op_row (op_row_w), .op_row_ppn (op_row_ppn_w[15:0]),
         .clk (clk), .rst (rst), .cpu_rst (cpu_rst),
         .d_pred (cpu_d_pred), .d_pred_v (cpu_d_pred_v), .d_pred_rw (cpu_d_pred_rw), .d_pred_vpb (cpu_d_pred_vpb), .d_pred_arms (cpu_d_pred_arms),
         .cpu_addr (cpu_addr_eff), .cpu_bank (cpu_bank_eff), .cyc_int (cyc_internal),
@@ -692,12 +699,12 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .lb_vpage (lb_vpage_w), .lb_hit (lb_hit_w), .lb_ppn (lb_ppn_w), .lb_set (lb_set_w), .lb_way (lb_way_w),
         .fj_v (fj_v_w), .fj_vpage (fj_vpage_w), .fj_ppn (fj_ppn_w), .fj_set (fj_set_w), .fj_way (fj_way_w),
         .fj_reg (fj_reg_w), .fj_fold (fj_fold_w), .fj_ack (fj_ack_w),
-        .op_place_v (op_place_v_w), .op_place_ppn (op_place_ppn_w),
+        .op_place_v (place_low_v), .op_place_ppn (op_place_ppn_w[15:0]),
         .op_place_set (op_place_set_w), .op_place_way (op_place_way_w),
         .dr_req (dr_req_d), .dr_set (dr_set_d), .dr_way (dr_way_d), .dr_line (dr_line_d),
         .dr_ack (dr_ack_d), .dr_done (dr_done_d), .dr_row (dr_row_w),
-        .cl_valid (cl_valid), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
-        .cl_eng (cl_eng), .cl_ppn (cl_ppn_w), .cl_off (cl_off), .wdata (cl_wdata[7:0]),
+        .cl_valid (cl_valid && cl_low), .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_posted (cl_posted),
+        .cl_eng (cl_eng), .cl_ppn (cl_ppn_w[15:0]), .cl_off (cl_off), .wdata (cl_wdata[7:0]),
         .pw_valid (pw_valid_w), .pw_ppn (pw_ppn_w), .pw_off (pw_off_w),
         .pw_data (pw_data_w), .pw_take (pw_take_w && pw_valid_w),
         .ws_valid (ws_valid_w), .ws_ppn (ws_ppn_w), .ws_off8 (ws_off8_w),
@@ -841,7 +848,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        cl_eng;
     // the RISC-V engine's stores into the seam, as gs_top wires them
     wire        pe_valid_w, pe_take_w;
-    wire [21:0] pe_waddr_w;
+    wire [ENG_AW-3:0] pe_waddr_w;
     wire [3:0]  pe_be_w;
     wire [31:0] pe_data_w;
     // ...and its write records, taken as card_link's merge would: when the
@@ -861,7 +868,11 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        tb_mwx_stb;
     wire [7:0]  tb_mw_bank, tb_mw_byte;
     wire [15:0] tb_mw_addr;
-    wire [15:0] cl_off, pf_off, cl_ppn_w, pf_ppn_w;
+    wire [15:0] cl_off, pf_off, pf_ppn_w;
+    wire [MEM_PW-1:0] cl_ppn_w;
+    wire        cl_low      = (cl_ppn_w >> 16) == '0;
+    wire        place_low_v = op_place_v_w && ((op_place_ppn_w >> 16) == '0);
+    wire        op_row_low_v = op_row_v_w && ((op_row_ppn_w >> 16) == '0);
     wire [11:0] sw_state;
     wire [7:0]  rw_bank, rwb_p1_w;
     wire        rom_loaded, invalidating, image_ready, rot_ok, mem_idle;
@@ -878,7 +889,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     reg  [7:0]  msg_type = 8'd0, msg_len = 8'd0;
     reg  [31:0] pay_data = 32'd0;
     wire        pq_busy, pq_valid, pq_we, pq_ready, pr_valid;
-    wire [19:0] pq_line;
+    wire [MEM_PW+3:0] pq_line;
     wire [127:0] pq_wdata, pr_data;
     wire [15:0]  pq_sel;
     wire        pw_take_w, pw_ready_w;
@@ -889,7 +900,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire         op_row_v_w;
     wire         seq_mem_served_w;
     wire [127:0] op_row_w;
-    wire [15:0]  op_row_ppn_w;
+    wire [MEM_PW-1:0] op_row_ppn_w;
     wire [7:0]  gs_c000_byte;
     wire        dl_kbd_rd;
     wire [1:0]  p_cls;
@@ -907,7 +918,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     wire        shd_take_w;
     wire [15:0] shd_ppn_w;
     wire [7:0]  shd_off_w;
-    apple_mmu #(.GS (1'b1)) u_mmu (
+    apple_mmu #(.GS (1'b1), .PW (MEM_PW)) u_mmu (
         .clk (clk), .rst (rst), .res_sync (res_sync),
         .op_bank (u_bank), .op_addr (u_addr), .op_rw (u_rw), .op_wdata (u_wdata),
         .op_present (u_present), .op_commit (u_commit),
@@ -918,7 +929,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .cl_be (cl_be), .cl_eng (cl_eng),
         .pw_valid (pw_any_valid), .pw_ppn (pw_any_ppn), .pw_off (pw_any_off),
         .pw_data (pw_any_data), .pw_ready (pw_ready_w), .pw_take (pw_take_w),
-        .pe_valid (pe_valid_w), .pe_ppn (pe_waddr_w[21:6]), .pe_off ({pe_waddr_w[5:0], 2'b00}),
+        .pe_valid (pe_valid_w), .pe_ppn (pe_waddr_w[ENG_AW-3:6]), .pe_off ({pe_waddr_w[5:0], 2'b00}),
         .pe_be (pe_be_w), .pe_data (pe_data_w), .pe_take (pe_take_w),
         .shd_take_o (shd_take_w), .shd_ppn_o (shd_ppn_w), .shd_off_o (shd_off_w),
         .pf_off (pf_off),
@@ -958,7 +969,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     logic [15:0] eng_ylfsr = 16'hACE1;
     always_ff @(posedge clk) eng_ylfsr <= {eng_ylfsr[14:0], eng_ylfsr[15] ^ eng_ylfsr[13] ^ eng_ylfsr[12] ^ eng_ylfsr[10]};
     wire eng_yforce = (ENG_YIELD != 0) && (eng_ylfsr[7:0] < 8'(ENG_YIELD));
-    rv_engine #(.MEM (1), .DIRECT_WRITES (1), .SIDX (L2_SIDX), .LEV (L2_LEV), .SLICE0 (ENG_SLICE), .TN (ENG_TN)) u_eng (
+    rv_engine #(.MEM (1), .DIRECT_WRITES (1), .SIDX (L2_SIDX), .LEV (L2_LEV), .SLICE0 (ENG_SLICE), .TN (ENG_TN), .AW (ENG_AW)) u_eng (
         .clk (clk), .rst (rst),
         .inval (u_present && !u_rw && u_ovr),
         .il_req (eng_il_req), .il_ppn (eng_il_ppn), .il_line (eng_il_line), .il_fill (eng_il_fill),
@@ -1328,16 +1339,16 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .busy (rom_busy), .overruns (rom_overruns), .rom_ok (rom_loaded)
     );
 
-    page_cam #(.SETS (L2_SETS), .WAYS (L2_WAYS)) u_cache (
+    page_cam #(.SETS (L2_SETS), .WAYS (L2_WAYS), .PW (MEM_PW)) u_cache (
         .clk (clk), .rst (rst),
         .cl_valid (cl_valid), .cl_cls (cl_cls), .cl_ppn (cl_ppn_w), .cl_off (cl_off[7:0]),
         .cl_rw (cl_rw), .cl_wr_image (cl_wr_image), .cl_wdata (cl_wdata), .cl_be (cl_be), .cl_posted (cl_posted),
         .pw_pending (d_pending_w || pe_pending), .pw_ready (pw_ready_w),
-        .pf_ppn (pf_ppn_w), .pf_off (pf_off[7:0]),
+        .pf_ppn (MEM_PW'(pf_ppn_w)), .pf_off (pf_off[7:0]),
         .pw_take (pw_take_w || pe_take_w),
-        .pw_ppn (pe_take_w ? pe_waddr_w[21:6] : pw_any_ppn),
+        .pw_ppn (pe_take_w ? pe_waddr_w[ENG_AW-3:6] : MEM_PW'(pw_any_ppn)),
         .pw_off (pe_take_w ? {pe_waddr_w[5:0], 2'b00} : pw_any_off),
-        .shd_take (shd_take_w), .shd_ppn (shd_ppn_w), .shd_off (shd_off_w),
+        .shd_take (shd_take_w), .shd_ppn (MEM_PW'(shd_ppn_w)), .shd_off (shd_off_w),
         .op_addr (u_addr),
         .op_present (u_present), .op_commit (u_commit), .op_divert (u_divert), .data_sync (data_sync),
         .sub_en (mem_sub_en), .sub_data (mem_sub_data), .decided (decided), .op_blocked (mem_blocked), .busy (busy),
@@ -1387,7 +1398,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         .wb_stall (wb_stall), .wb_ack (wb_ack), .wb_rdata (wb_rdata), .wb_rdata_aux (wb_rdata_aux)
     );
 
-    page_client u_client (
+    page_client #(.LW (MEM_PW + 4)) u_client (
         .clk (clk), .rst (rst), .calib_complete (1'b1),
         .master_active (master_active), .op_present (op_present),
         .accel (accel_on),
@@ -1402,7 +1413,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     );
 
     // ---- the DDR3 stub: the whole 16 MB, in order, twelve clocks late -------------
-    localparam integer IMG = 16 * 1024 * 1024;
+    localparam integer IMG = 32 * 1024 * 1024;   // the whole bank 0: the upper 16 MB the engine's
     reg [7:0] smem [0:IMG-1];
     localparam integer DL = 64;
     reg [127:0] dl_d [0:DL-1];
@@ -1417,15 +1428,15 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // page: a page that comes back wrong having been given none was evicted
     // with no write-back at all.
     integer     bad_flush = 0;
-    reg [15:0]  wb_pg;
+    reg [MEM_PW-1:0] wb_pg;
     integer     wb_ri;
-    integer     wb_lines [0:65535];
+    integer     wb_lines [0:NPG-1];
     integer     wbi;
-    initial for (wbi = 0; wbi < 65536; wbi = wbi + 1) wb_lines[wbi] = 0;
+    initial for (wbi = 0; wbi < NPG; wbi = wbi + 1) wb_lines[wbi] = 0;
     assign wb_ack = wb_ack_r; assign wb_rdata = wb_rdata_r; assign wb_rdata_aux = wb_aux_r;
     assign wb_stall = s_stall;
-    function automatic [23:0] wb_to_byte(input [23:0] a);
-        wb_to_byte = {{a[22:10], a[6:0]}, 4'd0};    // {ppn, line} * 16
+    function automatic [24:0] wb_to_byte(input [23:0] a);
+        wb_to_byte = {{a[23:10], a[6:0]}, 4'd0};    // {row, column} = {ppn, line}, * 16
     endfunction
     integer i;
     always @(posedge clk) begin
@@ -1434,15 +1445,15 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         s_stall <= ((s_cnt % 41) < 2);
         wb_ack_r <= 1'b0;
         if (wb_cyc && wb_stb && !wb_stall) begin
-            if (wb_addr[9:7] != 3'd0 || wb_addr[23])
+            if (wb_addr[9:7] != 3'd0)            // bank 0 only; every row of it is the image's (32 MB)
                 ddr_range_bad = ddr_range_bad + 1;
             if (wb_we) begin
                 for (i = 0; i < 16; i = i + 1)
                     if (wb_sel[i]) smem[wb_to_byte(wb_addr) + i] <= wb_data[8*i +: 8];
-                // rtl/page_client.sv line_to_wb: a[22:10] is ppn[15:3] and
+                // rtl/page_client.sv line_to_wb: a[23:10] is ppn[16:3] and
                 // a[6:0] is {ppn[2:0], line[3:0]}, so the page is both halves.
-                wb_lines[{wb_addr[22:10], wb_addr[6:4]}] =
-                    wb_lines[{wb_addr[22:10], wb_addr[6:4]}] + 1;
+                wb_lines[{wb_addr[23:10], wb_addr[6:4]}] =
+                    wb_lines[{wb_addr[23:10], wb_addr[6:4]}] + 1;
                 // THE FLUSH ORACLE.  A page in the ROM's physical range can
                 // never have changed - nothing in the machine can write it
                 // (apple_mmu gives banks $FC-$FF wr = 0) and the loader is
@@ -1450,8 +1461,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
                 // is a BAD FLUSH, caught here at the clock it is issued
                 // rather than a hundred thousand instructions later when
                 // something fetches from it.  docs/GS.md rung 3e.
-                wb_pg = {wb_addr[22:10], wb_addr[6:4]};
-                if (wb_pg >= 16'hFC00) begin
+                wb_pg = {wb_addr[23:10], wb_addr[6:4]};
+                if (wb_pg >= 'hFC00 && wb_pg <= 'hFFFF) begin   // banks $FC-$FF: never the upper 16 MB's
                     wb_ri = (int'(wb_pg) - 16'hFC00) * 256 + int'(wb_addr[3:0]) * 16;
                     for (i = 0; i < 16; i = i + 1)
                         if (wb_sel[i] && wb_data[8*i +: 8] !== rom_img[wb_ri + i]) begin
@@ -2343,15 +2354,15 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // held to.  Taken from the CLASSIFIED op - the map's own answer for where
     // the byte landed - and not from the virtual address, which is the whole
     // question the mirror is being asked.
-    reg     pg_dirty [0:65535];
+    reg     pg_dirty [0:NPG-1];
     integer pgi, pages_dirty = 0;
-    initial for (pgi = 0; pgi < 65536; pgi = pgi + 1) pg_dirty[pgi] = 1'b0;
+    initial for (pgi = 0; pgi < NPG; pgi = pgi + 1) pg_dirty[pgi] = 1'b0;
     // ...and WHICH BYTES of it, because a byte the stream never wrote has no
     // agreed value: the mirror starts at zero and the card's cache starts at
     // whatever its way was left holding.  Comparing those compares two
     // arbitrary choices.  32 bytes of mask a page, one bit a byte.
-    reg [255:0] pg_mask [0:65535];
-    initial for (pgi = 0; pgi < 65536; pgi = pgi + 1) pg_mask[pgi] = 256'd0;
+    reg [255:0] pg_mask [0:NPG-1];
+    initial for (pgi = 0; pgi < NPG; pgi = pgi + 1) pg_mask[pgi] = 256'd0;
     integer pw_shown = 0, pw_writes = 0;
     reg [7:0] pw_lowest = 8'hFF;
     always @(posedge clk)
@@ -2384,8 +2395,8 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // bench pulls reset.  Those pushes are real writes the cache rightly
     // keeps, and a mask that begins later calls them "never written".  That is
     // the whole of the "previous tenant's bytes" the mirror replay reported.
-    reg [255:0] wr_ever [0:65535];
-    initial for (pgi = 0; pgi < 65536; pgi = pgi + 1) wr_ever[pgi] = 256'd0;
+    reg [255:0] wr_ever [0:NPG-1];
+    initial for (pgi = 0; pgi < NPG; pgi = pgi + 1) wr_ever[pgi] = 256'd0;
     always @(posedge clk)
         if (cl_valid && !cl_rw && cl_wr_image)
             for (int b = 0; b < 4; b = b + 1)
@@ -2481,19 +2492,19 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         end
     end
 
-    // ...written out at the end as {ppn, 256 bytes}, little-endian ppn.
+    // ...written out at the end as {ppn (4 bytes, little-endian), 32 bytes of mask, 256 bytes}.
     task dump_pages;
         integer f, k, off;
         begin
             if (PAGESF == "") return;
             f = $fopen(PAGESF, "wb");
-            for (k = 0; k < 65536; k = k + 1)
+            for (k = 0; k < NPG; k = k + 1)
                 if (pg_dirty[k]) begin
-                    $fwrite(f, "%c%c", k[7:0], k[15:8]);
+                    $fwrite(f, "%c%c%c%c", k[7:0], k[15:8], k[23:16], k[31:24]);   // the ppn, 4 bytes (17 bits used)
                     for (off = 0; off < 32; off = off + 1)
                         $fwrite(f, "%c", pg_mask[k][8*off +: 8]);
                     for (off = 0; off < 256; off = off + 1)
-                        $fwrite(f, "%c", card_byte(16'(k), 8'(off)));
+                        $fwrite(f, "%c", card_byte(MEM_PW'(k), 8'(off)));
                 end
             $fclose(f);
             // ...and the op stream's own tail, which is buffered and would
@@ -3078,7 +3089,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
     // look for it.
     localparam integer MEM_SETS = L2_SETS * L2_WAYS;   // slots: a slot is {set, way}
     localparam integer SIDX = $clog2(MEM_SETS);
-    function automatic [7:0] card_byte(input [15:0] ppn, input [7:0] off);
+    function automatic [7:0] card_byte(input [MEM_PW-1:0] ppn, input [7:0] off);
         int w, hit;
         logic [127:0] row;
         begin
@@ -3090,7 +3101,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
         end
     endfunction
 
-    function automatic integer card_resident(input [15:0] ppn);
+    function automatic integer card_resident(input [MEM_PW-1:0] ppn);
         int w;
         begin
             card_resident = 0;
@@ -3619,7 +3630,7 @@ module boot_gs_tb #(parameter UCODE  = "cpu65816_ucode.hex",
             // How much write-back actually reached the DDR3, against what
             // the flush count says was sent: 16 line writes per flush.
             p0 = 0; res = 0;
-            for (k = 0; k < 65536; k = k + 1)
+            for (k = 0; k < NPG; k = k + 1)
                 if (wb_lines[k] != 0) begin p0 = p0 + wb_lines[k]; res = res + 1; end
             $display("      the DDR3 was given %0d line writes over %0d pages; %0d flushes x 16 = %0d",
                      p0, res, mem_flushes, mem_flushes * 16);

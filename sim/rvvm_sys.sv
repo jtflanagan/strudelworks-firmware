@@ -44,7 +44,7 @@ module rvvm_sys #(
 
     wire [7:0] p_flags;
     assign win_sel = vda && addr[23:8] == 16'hEFFE;
-    rv_engine u_eng (
+    rv_engine #(.AW (24)) u_eng (   // every access served by the 65816: its 16 MB
         .clk (clk), .rst (rst),
         // one live bus: both faces
         .pre_sel (win_sel), .pre_rw (rw), .pre_off (addr[7:0]),

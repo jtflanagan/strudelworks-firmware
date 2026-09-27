@@ -28,16 +28,20 @@ done
 vm="$root/sim/rvvm_work/rvengine.bin"
 
 # Loads and stores of every width, both directions of every branch kind, the
-# jumps, M, Zba/Zbb, fence.i over code the guest wrote, and a C program.
+# jumps, M, Zba/Zbb, fence.i over code the guest wrote, and a C program; then
+# guests in the engine's upper 16 MB (NAME@LOAD), through the L2 like the rest.
 guests=(rv32ui-add rv32ui-addi rv32ui-lw rv32ui-lh rv32ui-lhu rv32ui-lb rv32ui-lbu
         rv32ui-sw rv32ui-sh rv32ui-sb rv32ui-beq rv32ui-bltu rv32ui-jal rv32ui-jalr
-        rv32ui-fence_i rv32um-mul rv32um-divu rv32uzba-sh2add rv32uzbb-rev8 rvvm-c-hello)
+        rv32ui-fence_i rv32um-mul rv32um-divu rv32uzba-sh2add rv32uzbb-rev8 rvvm-c-hello
+        rvvm-hi_top@0x1800000 rvvm-c-pie@0x1800000)
+# (hi_cross is not here: it straddles $0100_0000 from bank $FF, which on the IIgs
+# is ROM - the flat-memory benches, run_rvvm_tests.sh, keep it)
 pass=0; fail=0; failed=()
-run() {   # name, binary, extra runner args...
-    local n="$1" bin="$2"; shift 2
+run() {   # name, binary, load address, extra runner args...
+    local n="$1" bin="$2" at="$3"; shift 3
     [ -f "$bin" ] || { echo "no $bin (run sim/run_rvvm_tests.sh first)" >&2; exit 2; }
     local log="$work/$n.log"   # one tag: the card is built once and each guest read at run time
-    "$root/sim/run_boot_gs_tb.sh" --engine="$vm" --guest="$bin" --guest-at=0x020000 --tag=rvb "$@" > "$log" 2>&1 || true
+    "$root/sim/run_boot_gs_tb.sh" --engine="$vm" --guest="$bin" --guest-at="$at" --tag=rvb "$@" > "$log" 2>&1 || true
     if grep -q '^PASS$' "$log" && grep -q 'the guest exited 0 through the engine' "$log"; then
         pass=$((pass + 1)); printf "PASS %-20s %s\n" "$n" "$(grep -E 'clocks from the first step' "$log" | head -1 | sed 's/^ *//')"
     else
@@ -45,12 +49,14 @@ run() {   # name, binary, extra runner args...
         printf "FAIL %-20s %s\n" "$n" "$(grep -E '^FAIL|rror|exit|trap' "$log" | head -3 | tr '\n' ' ')"
     fi
 }
-for n in "${guests[@]}"; do
+for g in "${guests[@]}"; do
+    n="${g%@*}"; at=0x020000; [ "$g" != "$n" ] && at="${g#*@}"
     [ -n "$filter" ] && [[ "$n" != *"$filter"* ]] && continue
-    run "$n" "$tests/$n.bin" --instrs=20000000
+    tag="$n"; [ "$at" != 0x020000 ] && tag="$n@$at"
+    run "$tag" "$tests/$n.bin" "$at" --instrs=20000000
 done
 if [ $cm = 1 ]; then
-    run coremark "$root/sim/rvvm_work/coremark/coremark.bin" --room=0 --instrs=2000000000 --clks=2000000000
+    run coremark "$root/sim/rvvm_work/coremark/coremark.bin" 0x020000 --room=0 --instrs=2000000000 --clks=2000000000
     grep -E 'crcfinal|clocks from the first step' "$work/coremark.log" || true
 fi
 echo "$pass passed, $fail failed${failed:+: ${failed[*]}}"

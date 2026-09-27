@@ -6,9 +6,11 @@
 # the RISC-V engine, each in lockstep with the reference model (docs/REQ_RVVM.md).
 # An edge test names its verdict on a "# rvvm-expect: exit" or "trap N" line,
 # its load (= link) address on "# rvvm-load:" (default $800000) and extra
-# runner arguments on "# rvvm-args:".  The C tests (apple/rvvm/guest/ctests)
+# runner arguments on "# rvvm-args:".  A test marked "# rvvm-hi" needs the upper
+# 16 MB, which only the engine's own memory side reaches: --engine-sys (the
+# 65816 serving every access) skips it.  The C tests (apple/rvvm/guest/ctests)
 # are static PIEs, each run at two load addresses (the identity map: crt0
-# relocates itself).
+# relocates itself), and one marked "rvvm-hi" (no I/O) at a third in the upper 16 MB.
 #
 #   sim/run_rvvm_tests.sh [--ref-only | --engine | --engine-mem | --engine-sys] [NAME-FILTER]
 #
@@ -36,12 +38,13 @@ filter=""
 # RVVM_EXTRA: more runner arguments for every test (e.g. --rung1 with --engine).
 read -r -a extra_all <<< "${RVVM_EXTRA:-}"
 runner="$root/sim/run_rv_core.sh"
+sys=0
 for a in "$@"; do
     case "$a" in
         --ref-only) mode=(--ref-only);;
         --engine) runner="$root/sim/run_rv_core.sh";;
         --engine-mem) runner="$root/sim/run_rv_mem.sh";;
-        --engine-sys) runner="$root/sim/run_rvvm.sh";;
+        --engine-sys) runner="$root/sim/run_rvvm.sh"; sys=1;;
         *) filter="$a";;
     esac
 done
@@ -50,7 +53,7 @@ done
 [ -x "$xgcc" ] || { echo "no RISC-V gcc at $xgcc" >&2; exit 1; }
 "$runner" --build-only >/dev/null
 
-pass=0; fail=0; failed=()
+pass=0; fail=0; skip=0; failed=()
 for d in rv32ui rv32um rv32uzba rv32uzbb; do
     for src in "$tests/isa/$d"/*.S; do
         n="$d-$(basename "$src" .S)"
@@ -75,6 +78,7 @@ done
 for src in "$root/apple/rvvm/guest/tests"/*.S; do
     n="rvvm-$(basename "$src" .S)"
     [ -n "$filter" ] && [[ "$n" != *"$filter"* ]] && continue
+    if [ $sys = 1 ] && grep -q '^# rvvm-hi$' "$src"; then skip=$((skip + 1)); continue; fi
     expect="$(sed -n 's/^# rvvm-expect: *//p' "$src")"
     read -r -a extra <<< "$(sed -n 's/^# rvvm-args: *//p' "$src")"
     at="$(sed -n 's/^# rvvm-load: *//p' "$src")"; at="${at:-0x800000}"
@@ -111,7 +115,12 @@ for src in "$root/apple/rvvm/guest/ctests"/*.c; do
         printf "FAIL %-24s build: %s\n" "$n" "$(grep -m1 -i error "$work/$n.log")"
         continue
     fi
-    for at in 0x800000 0x20000; do
+    ats="0x800000 0x20000"
+    # the upper 16 MB only for a test that does no I/O: the 65816 performs I/O,
+    # and how a guest up there reaches it is the interop design's, still open
+    grep -q 'rvvm-hi' "$src" && ats="$ats 0x1800000"
+    for at in $ats; do
+        [ $sys = 1 ] && [ $((at)) -ge $((0x1000000)) ] && { skip=$((skip + 1)); continue; }
         if "$runner" --guest="$work/$n.bin" --load="$at" "${mode[@]}" "${extra_all[@]}" > "$work/$n@$at.log" 2>&1; then
             pass=$((pass + 1))
             printf "PASS %-24s at %-8s %s\n" "$n" "$at" "$(grep -E 'rvvm: (exit|trap)|^ref:' "$work/$n@$at.log" | head -1)"
@@ -121,5 +130,6 @@ for src in "$root/apple/rvvm/guest/ctests"/*.c; do
         fi
     done
 done
-echo "$pass passed, $fail failed${failed:+: ${failed[*]}}"
+note=""; [ $skip -gt 0 ] && note=", $skip skipped (the upper 16 MB)"
+echo "$pass passed, $fail failed${failed:+: ${failed[*]}}$note"
 [ $fail = 0 ]
