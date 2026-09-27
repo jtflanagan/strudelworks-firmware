@@ -7,7 +7,9 @@
    the left), never $00 (that stops a DOC voice); the runtime's interrupt
    copies each into the DOC.  Mixed as the ring has room, SND_AHEAD chunks
    ahead of the DOC, from DOOM's per-tic Update and from its sleeps
-   (snd_pump, doom_rv.c) - paced by the DOC's own clock.  Music: none yet. */
+   (snd_pump, doom_rv.c) - paced by the DOC's own clock.  The music: Chocolate
+   Doom's OPL player (the music module, app.mk) on an OPL2 of our own
+   (opl_rv.c), its samples mixed into both sides. */
 #include <stdint.h>
 #include <stdio.h>
 #include "doomtype.h"
@@ -18,6 +20,15 @@
 
 #define NCH       8
 #define SND_AHEAD 3                             /* chunks mixed ahead of the DOC */
+/* The balance, in the mix's unit (1/128 of an 8-bit step): the OPL's 16 bits
+   x MUS_GAIN, the effects' samples x volume x SFX_GAIN/4.  DOOM's music on
+   DBOPL peaks ~800-1400 at the default volume (on the card, opl_rv_peak); the
+   top 8 bits alone (>> 8) were inaudible, x8 quiet beside the effects (by ear,
+   user): x20, the effects at 3/4 - the loudest passages at the clamp. */
+#define MUS_GAIN  20
+#define SFX_GAIN  3
+
+void opl_rv_fill(int16_t *out, unsigned n);     /* opl_rv.c */
 
 struct chan {
     const uint8_t *data;                        /* the samples; NULL = free */
@@ -35,14 +46,16 @@ void I_InitTimidityConfig(void) {}
 
 static void mix_chunk(void) {
     static uint8_t l[RVGS_SND_CHUNK] __attribute__((aligned(4))), r[RVGS_SND_CHUNK] __attribute__((aligned(4)));
+    static int16_t mus[RVGS_SND_CHUNK];
+    opl_rv_fill(mus, RVGS_SND_CHUNK);
     for (unsigned i = 0; i < RVGS_SND_CHUNK; i++) {
-        int sl = 0, sr = 0;
+        int sl = mus[i] * MUS_GAIN, sr = sl;
         for (unsigned c = 0; c < NCH; c++) {
             struct chan *h = &ch[c];
             if (!h->data) continue;
             const int s = (int)h->data[h->pos >> 16] - 128;
-            sl += s * h->vl;
-            sr += s * h->vr;
+            sl += s * h->vl * SFX_GAIN / 4;
+            sr += s * h->vr * SFX_GAIN / 4;
             h->pos += h->step;
             if ((h->pos >> 16) >= h->len) h->data = NULL;
         }
@@ -122,19 +135,4 @@ sound_module_t DG_sound_module = {
     devices, sizeof devices / sizeof devices[0],
     snd_init, snd_shutdown, snd_lump, snd_update, snd_params,
     snd_start, snd_stop, snd_playing, NULL,
-};
-
-/* Music: none yet (docs/RVV2_DOOM.md) - a module that plays nothing. */
-static boolean mus_init(void) { return true; }
-static void mus_void(void) {}
-static void mus_volume(int v) { (void)v; }
-static void *mus_register(void *data, int len) { (void)data; (void)len; return NULL; }
-static void mus_unregister(void *h) { (void)h; }
-static void mus_play(void *h, boolean loop) { (void)h; (void)loop; }
-static boolean mus_playing(void) { return false; }
-
-music_module_t DG_music_module = {
-    NULL, 0,
-    mus_init, mus_void, mus_volume, mus_void, mus_void,
-    mus_register, mus_unregister, mus_play, mus_void, mus_playing, NULL,
 };

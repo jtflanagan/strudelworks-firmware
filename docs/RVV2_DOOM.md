@@ -1,10 +1,10 @@
 # DOOM on the RISC-V engine
 
-Status: **2026-09-27, branch `riscv_v2`. DOOM PLAYS ON HARDWARE WITH SOUND AND THE MOUSE: launched
-from the Finder off its own volume (hd2), 35 frames a second (DOOM's own tic rate), keys from the raw
-ADB events, the mouse through the Miscellaneous Tool Set, and its sound effects mixed on the engine and
-played by the IIgs's Ensoniq in stereo - sound, left/right, delay and the mouse judged good by ear
-(user). D1-D5, S1-S3 and M1 done; music next.**
+Status: **2026-09-27, branch `riscv_v2`. DOOM PLAYS ON HARDWARE WITH SOUND, MUSIC AND THE MOUSE:
+launched from the Finder off its own volume (hd2); keys from the raw ADB events, the mouse through the
+Miscellaneous Tool Set; effects and music (Chocolate Doom's OPL player on DBOPL) mixed on the engine
+and played by the IIgs's Ensoniq in stereo - judged good by ear (user). ~35 frames a second without
+music, ~29.5 with it. D1-D5, S1-S3, M1 and MU1 done.**
 
 ## The base: doomgeneric
 
@@ -157,6 +157,37 @@ later. The mouse the IIgs's, as GS/OS keeps it.
   as the Sound Tool Set would; RVTEST mixes 12 numbered chunks and `--expect-sound` checks every
   interrupt's 512 writes - the pages SND_LEAD ahead, the chunk whole and in order, or silence - and that
   each launch ends with the vector back, the generators given back and the timer halted.
+
+## Music (rung MU1)
+
+DOOM's music is MUS - MIDI-like - played on an OPL2 with the WAD's GENMIDI instruments. *(user)*: do
+the music; the route is the effects' - made on the engine, mixed into the same chunks, played by the
+Ensoniq - so its clock is the DOC's too.
+
+- **Whose code**: Chocolate Doom's OPL player (`src/i_oplmusic.c`, with `midifile.c`, doomgeneric's
+  `mus2mid.c`) and OPL library (`opl/opl.c`, `opl_queue.c`) with DOSBox's DBOPL (`opl/dbopl.c`), from
+  the sibling checkout `../chocolate-doom` at the tag `chocolate-doom-2.2.1` - the last with DBOPL:
+  integer, and made at any rate, so at the DOC's 11026.8 Hz directly (3.0's Nuked OPL3 runs at 49716 Hz
+  internally, several times the cost). Compiled from there unedited (`apple/rvvm/doom/app.mk`):
+  `-Dmusic_opl_module=DG_music_module` makes the player doomgeneric's music module,
+  `-Dopl_sdl_driver=opl_rv_driver` makes ours OPL's only driver.
+- **The driver** (`opl_rv.c`): Chocolate Doom's SDL driver without SDL - the callback queue timed in the
+  samples made, the two timers modelled (OPL_Detect), DBOPL at the DOC's rate; the mixer asks for each
+  chunk's samples (`opl_rv_fill`), running each callback at its sample. OPL_Delay's wait (a condition
+  variable the SDL thread would signal) runs the next callback at once (`compat/SDL.h`: one thread, the
+  mutexes nothing) - only detection waits.
+- **What else it needed**: `/tmp/` in the program's own memory (librvgs's `rvgs_posix.c`: the player
+  writes the song as a MIDI file and reads it back); `compat/SDL.h`, `SDL_endian.h`, `SDL_mixer.h`
+  (Chocolate Doom's own headers are found first by its files: they match doomgeneric's where it
+  matters - the music module's struct identical, `boolean` 4 bytes either way).
+- **The mix** (`snd_rv.c`): the OPL's 16 bits x MUS_GAIN (20) into both sides, the effects at
+  SFX_GAIN/4 (3/4); DOOM's music volume is the player's (its channel levels). DBOPL peaks ~800-1400 at
+  the default slider (DOOM's report `$EE:FE14` writes, `$EE:FE18` the second's peak): >> 8 was
+  inaudible, x8 quiet, x20 with the effects at 3/4 a good balance by ear (user); the loudest passages
+  reach the clamp - louder needs the DOC's level at the host (docs/AUDIO.md), not more gain here.
+- **On hardware**: the title's and the demos' music heard (user). The cost: 29.5 frames a second in
+  the demos against ~35 without music - DBOPL takes about a sixth of the engine. The mix is topped up
+  after every frame as well as in DOOM's sleeps (a busy DOOM seldom sleeps: ~0.5% silent chunks before).
 
 ## Open
 

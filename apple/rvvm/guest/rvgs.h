@@ -93,8 +93,8 @@ uint32_t rvgs_ticks(void);
    Nothing reads it but a person; nothing clears it. */
 #define RVGS_REPORT 0x00EEFE00u
 
-void *memcpy(void *d, const void *s, unsigned long n);
-void *memset(void *d, int c, unsigned long n);
+void *memcpy(void *d, const void *s, __SIZE_TYPE__ n);
+void *memset(void *d, int c, __SIZE_TYPE__ n);
 
 static inline __attribute__((noreturn)) void rvgs_exit(int code) {
     register long a0 __asm__("a0") = code;

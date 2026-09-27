@@ -13,7 +13,7 @@
 #define CALL_PULLN  64
 #define CALL_SCR    320
 
-void *memcpy(void *d, const void *s, unsigned long n) {
+void *memcpy(void *d, const void *s, __SIZE_TYPE__ n) {
     uint8_t *dp = d; const uint8_t *sp = s;
     if ((((uintptr_t)dp | (uintptr_t)sp | n) & 3) == 0) {
         for (; n; n -= 4, dp += 4, sp += 4) *(uint32_t *)dp = *(const uint32_t *)sp;
@@ -22,7 +22,7 @@ void *memcpy(void *d, const void *s, unsigned long n) {
     while (n--) *dp++ = *sp++;
     return d;
 }
-void *memset(void *d, int c, unsigned long n) {
+void *memset(void *d, int c, __SIZE_TYPE__ n) {
     uint8_t *dp = d;
     while (n--) *dp++ = (uint8_t)c;
     return d;

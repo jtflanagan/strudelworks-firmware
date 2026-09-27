@@ -3,7 +3,8 @@
    the Event Manager's ticks, the WAD beside the program (9:DOOM1.WAD), keys
    from the ADB itself.  Its report ($EE:FE00): 'DOOM', frames drawn, the ticks at
    the first frame, the ticks now, and the frames of the last whole second
-   (tenths).  That rate is drawn in the picture's top right corner, "RV 35.0" -
+   (tenths), then the music's OPL register writes and its loudest sample over
+   that second (opl_rv.c).  That rate is drawn in the picture's top right corner, "RV 35.0" -
    the engine's, DOOM's own ceiling being 35; the host's HUD shows beside it the
    rate the Pi puts on the screen ("PI"). */
 #include <stdint.h>
@@ -15,6 +16,8 @@
 #define ROW_BYTES  640
 
 extern boolean palette_changed;
+
+void snd_pump(void);                    /* snd_rv.c: the sound mixed ahead */
 
 static volatile uint32_t *const report = (volatile uint32_t *)(uintptr_t)RVGS_REPORT;
 static uint16_t lut[256];
@@ -90,9 +93,14 @@ void DG_DrawFrame(void) {
         rate10 = (frames - rate_frames) * 600 / (now - rate_tick);
         rate_tick = now; rate_frames = frames;
         report[4] = rate10;
+        extern uint32_t opl_rv_writes, opl_rv_peak;         /* opl_rv.c: the music's */
+        report[5] = opl_rv_writes;
+        report[6] = opl_rv_peak;
+        opl_rv_peak = 0;
         rate_known = 1;
     }
     if (rate_known) draw_rate();
+    snd_pump();                                 /* the mix topped up each frame too: a busy DOOM seldom sleeps */
     volatile uint8_t *ctl = (volatile uint8_t *)(uintptr_t)rv_env->video;
     ctl[0x10] = 0;                      /* COMMIT mode slot 0: this frame */
     if (frames++ == 0) {
@@ -102,8 +110,6 @@ void DG_DrawFrame(void) {
     report[1] = frames;
     report[3] = now;
 }
-
-void snd_pump(void);                    /* snd_rv.c: the sound effects mixed ahead */
 
 void DG_SleepMs(uint32_t ms) {
     const uint32_t end = DG_GetTicksMs() + ms;
