@@ -6,10 +6,11 @@
 // engine on the L2"): between rtl/gs/rv_core.sv's two ports and the L2
 // (rtl/gs/page_cam.sv), outside L1, a DMA layer of its own.
 //
-// WHAT IT SERVES ITSELF.  An address whose bank is in the engine-direct range
-// [dlo, dhi] (the permission map; the identity map makes a guest address the
-// 65816's) - every other access goes back to the core as DELEGATED, for the VM
-// to perform with all of the IIgs's semantics.
+// WHAT IT SERVES ITSELF.  What the machine's map makes engine-direct (DIRECT,
+// below: plain RAM, our banks, the ROM for reading, the upper 16 MB; the
+// identity map makes a guest address the 65816's) - every other access goes
+// back to the core as DELEGATED, for the VM to perform with all of the IIgs's
+// semantics.
 //
 // READS go through a ROW BUFFER for fetches, a ROW CACHE (DROWS rows) for loads - 16-byte L2
 // row, four words, answered on the clock it is asked on a hit (and the fetch
@@ -67,8 +68,7 @@ module rv_mem #(
 ) (
     input  wire              clk,
     input  wire              rst,
-    input  wire  [7:0]       dlo,
-    input  wire  [7:0]       dhi,
+    input  wire              all_deleg,     // every access delegated (a bench's baseline mode)
     // THE SNOOP: a 65816 data write (outside the window), and where.  The rows
     // it names are dropped; anything else that writes guest memory is `inval`,
     // which drops them all.
@@ -155,12 +155,30 @@ module rv_mem #(
     // A fetch and a load are both asked for at once by the pipelined core; each
     // is judged direct (and a hit) on its own, and the one the miss engine
     // serves - `a_now` - is the data request first (the older instruction).
-    // DIRECT: the whole upper 16 MB (the engine's alone), and the lower 16 MB's
-    // banks dlo..dhi (the rest of the 65816's space is delegated to the VM).
-    wire         f_hi     = AW > 24 && f_addr[AW-3];
-    wire         d_hi     = AW > 24 && d_addr[AW-3];
-    wire         direct_f = f_hi || (f_addr[21:14] >= dlo && f_addr[21:14] <= dhi);
-    wire         direct_d = d_hi || (d_addr[21:14] >= dlo && d_addr[21:14] <= dhi);
+    // DIRECT - the engine's own access, through the L2 - is the machine's map,
+    // fixed (docs/RVV2_INTEROP.md, the user 2026-09-26):
+    //   read:  the upper 16 MB, $02-$DF, $E2-$FF (our RAM and the ROM)
+    //   write: the upper 16 MB, $02-$DF, $E2-$EF
+    // Everything else goes to the VM as a real 65816 access: all of banks $00,
+    // $01, $E0 and $E1 (the switched bank-0/1 views, the I/O page, the Mega II's
+    // watched banks - protection for them is later), and a write to the ROM
+    // ($F0-$FF), which the 65816 drops as the machine does.  The null guard in
+    // $00 faults in the core, before any of this.
+    // As EQUALITIES, not ranges (gs_map2 missed timing on the range compares'
+    // carry chains): "$02-$DF or $E2-$FF" is every bank but $00, $01, $E0, $E1 -
+    // bank[7:1] neither $00 nor $70 - and the ROM is bank[7:4] = $F.
+    function automatic logic rd_direct(input logic [AW-3:0] wa);
+        logic [7:0] b;
+        b = wa[21:14];
+        return (AW > 24 && wa[AW-3]) || !(b[7:1] == 7'h00 || b[7:1] == 7'h70);
+    endfunction
+    function automatic logic wr_direct(input logic [AW-3:0] wa);
+        logic [7:0] b;
+        b = wa[21:14];
+        return (AW > 24 && wa[AW-3]) || !(b[7:1] == 7'h00 || b[7:1] == 7'h70 || b[7:4] == 4'hF);
+    endfunction
+    wire         direct_f = !all_deleg && rd_direct(f_addr);
+    wire         direct_d = !all_deleg && (d_we ? wr_direct(d_addr) : rd_direct(d_addr));
     wire         sel_d;             // the miss engine takes the data request
     wire  [AW-3:0] a_now = sel_d ? d_addr : f_addr;
     wire         direct_now = sel_d ? direct_d : direct_f;

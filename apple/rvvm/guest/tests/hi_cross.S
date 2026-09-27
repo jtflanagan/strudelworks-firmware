@@ -1,11 +1,12 @@
 # rvvm-expect: exit
 # rvvm-load: 0xFF0000
 # rvvm-hi
-# The 16 MB line is only a line to the engine: straight-line code, branches and
-# jal/jalr across $0100_0000 in both directions, and aligned loads and stores of
-# every width on both sides of it (the lower 16 MB is the 65816's space, the
-# upper the engine's alone; both are engine-direct).  Aligned only: a misaligned
-# access still goes to the 65816, which cannot reach the upper half.
+# The 16 MB line: straight-line code, branches and jal/jalr across $0100_0000 in
+# both directions, and aligned loads and stores of every width on both sides.
+# Below the line is bank $FF - the ROM (docs/RVV2_INTEROP.md, the engine's map):
+# read directly, and a store there is dropped as the machine drops it; above it
+# the engine's own RAM.  Aligned only: a misaligned access still goes to the
+# 65816, which cannot reach the upper half.
 #include "rvvm_exit.h"
         .section .text.init
         .globl  _start
@@ -42,17 +43,17 @@ fwd:    li      gp, 5
 1:      li      gp, 6
         jal     ra, sub0                # backward across, and ret forward across
         li      gp, 7
-        li      t0, 0x00FFFFF0          # the last row below the line
+        li      t0, 0x00FFFFF0          # the last row below the line (the ROM)
         li      t1, 0x01000000          # the first row above it
+        lw      s4, 12(t0)              # the ROM's word at $00FFFFFC, before
         li      t2, 0x11223344
-        sw      t2, 12(t0)              # $00FFFFFC
+        sw      t2, 12(t0)              # $00FFFFFC: dropped
         sw      t2, 0(t1)               # $01000000
         not     t3, t2
-        sh      t3, 14(t0)              # $00FFFFFE
+        sh      t3, 14(t0)              # $00FFFFFE: dropped
         sb      t3, 1(t1)               # $01000001
         lw      a1, 12(t0)
-        li      a2, 0xCCBB3344
-        beq     a1, a2, 1f
+        beq     a1, s4, 1f              # the ROM is unchanged
         j       fail
 1:      li      gp, 8
         lw      a1, 0(t1)
@@ -65,8 +66,8 @@ fwd:    li      gp, 5
         beq     a1, a2, 1f
         j       fail
 1:      li      gp, 10
-        lbu     a1, 15(t0)              # $00FFFFFF
-        li      a2, 0xCC
+        lbu     a1, 15(t0)              # $00FFFFFF: still the ROM's byte
+        srli    a2, s4, 24
         beq     a1, a2, 1f
         j       fail
 1:      li      gp, 11

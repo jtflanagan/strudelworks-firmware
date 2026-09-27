@@ -94,7 +94,14 @@ static unsigned long long clocks = 0;
 static int f_wait = -1, d_wait = -1;
 
 static uint32_t rd32(uint32_t a) { return mem[a] | (mem[a + 1] << 8) | (mem[a + 2] << 16) | (uint32_t(mem[a + 3]) << 24); }
-static bool direct(uint32_t a) { unsigned bank = a >> 16; return !delegate_all && (a >= LOW || (bank >= 0x02 && bank <= 0xDF)); }
+// rv_mem's DIRECT: the machine's map (docs/RVV2_INTEROP.md) - reads of the upper
+// 16 MB, $02-$DF and $E2-$FF; writes of the upper 16 MB, $02-$DF and $E2-$EF.
+static bool direct(uint32_t a, bool we) {
+    const unsigned bank = a >> 16;
+    if (delegate_all) return false;
+    if (a >= LOW || (bank >= 0x02 && bank <= 0xDF)) return true;
+    return we ? (bank >= 0xE2 && bank <= 0xEF) : bank >= 0xE2;
+}
 
 // The VM's own write to guest memory (a 65816 write: the stream carries it).
 // Every VM write is a 65816 write: with the memory side it is snooped, a byte a
@@ -102,6 +109,7 @@ static bool direct(uint32_t a) { unsigned bank = a >> 16; return !delegate_all &
 // steps or resumes the core, as the 65816's own do.
 static std::deque<uint32_t> snoopq;
 static void vm_write(uint32_t a, uint8_t v) {
+    if (a >= ROM_LO && a < LOW) return;          // the ROM: the 65816's write is dropped, as the machine drops it
     mem[a] = v; if (!mirror.empty()) mirror[a] = v; vm_wrote = true;
 #ifdef RV_MEM
     snoopq.push_back(a);
@@ -312,7 +320,7 @@ static void tick() {
         if (f_wait < 0) f_wait = int(rng() % 4);
         if (f_wait == 0) {
             dut->f_valid = 1;
-            if (delegate_fetch) dut->f_delegate = 1;
+            if (delegate_fetch || !direct(uint32_t(dut->f_addr) << 2, false)) dut->f_delegate = 1;
             else dut->f_data = rd32(uint32_t(dut->f_addr) << 2);
             f_wait = -1;
         }
@@ -323,8 +331,8 @@ static void tick() {
         if (d_wait == 0) {
             const uint32_t a = uint32_t(dut->d_addr) << 2;
             dut->d_valid = 1;
-            if (acc_dump && direct(a)) fprintf(acc_dump, "%c %06x\n", dut->d_we ? 'S' : 'L', a);
-            if (!direct(a)) dut->d_delegate = 1;
+            if (acc_dump && direct(a, dut->d_we)) fprintf(acc_dump, "%c %06x\n", dut->d_we ? 'S' : 'L', a);
+            if (!direct(a, dut->d_we)) dut->d_delegate = 1;
             else if (dut->d_we) {
                 for (int i = 0; i < 4; i++) if (dut->d_be & (1u << i)) mem[a + i] = uint8_t(dut->d_wdata >> (8 * i));
             } else dut->d_rdata = rd32(a);
@@ -510,8 +518,7 @@ int main(int argc, char **argv) {
 #ifdef RV_MEM
     for (auto &s : slot_ppn) for (auto &w : s) w = -1;
     mirror = mem;
-    dut->dlo = delegate_all ? 1 : 0x02;          // --delegate-all: an empty range
-    dut->dhi = delegate_all ? 0 : 0xDF;
+    dut->all_deleg = delegate_all;               // --delegate-all: nothing direct
 #endif
     dut->rst = 1; tick(); tick(); dut->rst = 0;
     dut->pc_we = 1; dut->pc_wval = uint32_t(pc0); tick();

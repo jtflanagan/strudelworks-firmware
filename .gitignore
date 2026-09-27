@@ -52,7 +52,7 @@ __pycache__/
 /sim/kbd_a2_work/
 /sim/gs_io_claim_work/
 /sim/gs_iwm_write_work/
-/sim/mirror_work/
+/sim/mirror_work*/
 /sim/mem_work/
 /sim/mmu_work/
 /sim/mmu_xlate_work/

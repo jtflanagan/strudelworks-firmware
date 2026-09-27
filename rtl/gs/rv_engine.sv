@@ -27,7 +27,6 @@
 //   +94-+97  the resume value (a delegated load's, a fetch's)    R/W
 //   +98-+9B  the ID: "RVE" and the version, 2 (RUN)              R
 //   +9C      status: bit 0 busy, bit 1 an event pending          R
-//   +A0,+A1  the engine-direct bank range, low and high          R/W
 //   +A4,+A5  the RUN slice: clocks per read before a yield (4096) R/W
 // A register, the pc and the resume value are written in 16-bit halves: the
 // even byte is latched and the odd byte commits the half (so a 16-bit STA -
@@ -37,7 +36,7 @@
 // THE MEMORY SIDE.  MEM = 0 (integration rung 1): the VM - every fetch, load
 // and store is delegated, the engine never touches memory itself.  MEM = 1:
 // rtl/gs/rv_mem.sv on the L2's ports (il_*, dr_*, the eviction broadcast and
-// the placement report), serving the engine-direct bank range [+A0, +A1] -
+// the placement report), serving what the machine's map makes engine-direct (rv_mem.sv) -
 // with DIRECT_WRITES = 0 (rung 3a) stores are still delegated.  `cancel` (a
 // 65816 write outside the window) cancels a speculation and empties the row
 // buffers; `inval` (anything else that writes guest memory) empties them.
@@ -116,7 +115,7 @@ module rv_engine #(
 );
     localparam logic [7:0] O_PC = 8'h80, O_STEP = 8'h84, O_RESUME = 8'h86, O_EVADDR = 8'h88,
                            O_EVIW = 8'h8C, O_EVDATA = 8'h90, O_RVAL = 8'h94, O_ID = 8'h98,
-                           O_STAT = 8'h9C, O_DLO = 8'hA0, O_DHI = 8'hA1,
+                           O_STAT = 8'h9C,
                            O_RUN = 8'h85, O_SLICE = 8'hA4;
 
     // ---- the core -------------------------------------------------------------
@@ -169,11 +168,10 @@ module rv_engine #(
     // The engine-direct bank range: the window's registers, rv_mem's permission map
     // (declared ahead of the generate that names it - Vivado resolves no forward
     // reference into a generate scope).
-    logic [7:0]  dlo, dhi;
 
     generate if (MEM != 0) begin : g_mem
         rv_mem #(.SIDX (SIDX), .LEV (LEV), .DIRECT_WRITES (DIRECT_WRITES), .TN (TN), .AW (AW)) u_mem (
-            .clk (clk), .rst (rst), .dlo (dlo), .dhi (dhi), .wsn_v (wsn_v_q), .wsn_a (wsn_a_q), .inval (inval_q),
+            .clk (clk), .rst (rst), .all_deleg (1'b0), .wsn_v (wsn_v_q), .wsn_a (wsn_a_q), .inval (inval_q),
             .req_spec (req_spec),
             .f_req (f_req), .f_addr (f_addr), .f_pre (f_pre), .f_valid (f_valid), .f_delegate (f_delegate), .f_abort (f_abort), .f_data (f_data),
             .pk_addr (pk_addr), .pk_use (pk_use), .pk_hit (pk_hit), .pk_word (pk_word),
@@ -254,8 +252,6 @@ module rv_engine #(
         else if (is_rval)                        win_rdata = byte_of(rval_q, win_off[1:0]);
         else if (win_off[7:2] == O_ID[7:2])      win_rdata = byte_of({8'd2, "E", "V", "R"}, win_off[1:0]);
         else if (win_off == O_STAT)              win_rdata = {6'd0, result != 8'd0, busy};
-        else if (win_off == O_DLO)               win_rdata = dlo;
-        else if (win_off == O_DHI)               win_rdata = dhi;
         else if (win_off == O_SLICE)             win_rdata = slice[7:0];
         else if (win_off == O_SLICE + 8'd1)      win_rdata = slice[15:8];
     end
@@ -280,13 +276,11 @@ module rv_engine #(
         if (rst) begin
             // $80-$DF is VOID to the 65816 until it becomes RAM (REQ_RVVM), and the
             // engine reads the physical image: keep the two views equal - $02-$7F.
-            lo_latch <= 8'd0; rval_q <= 32'd0; dlo <= 8'h02; dhi <= 8'h7F;
+            lo_latch <= 8'd0; rval_q <= 32'd0;
             slice <= 16'(SLICE0);
         end else if (wr) begin
             if (!win_off[0]) lo_latch <= srv_wdata;
             if (commit_half && is_rval) rval_q <= merge(rval_q, win_off[1], half);
-            if (win_off == O_DLO) dlo <= srv_wdata;
-            if (win_off == O_DHI) dhi <= srv_wdata;
             if (win_off == O_SLICE)         slice[7:0]  <= srv_wdata;
             if (win_off == O_SLICE + 8'd1)  slice[15:8] <= srv_wdata;
         end

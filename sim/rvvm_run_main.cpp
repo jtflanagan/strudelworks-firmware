@@ -319,8 +319,9 @@ int main(int argc, char **argv) {
             const unsigned char v = dut->dout;
             if (addr == PORT_PUTC) { vm_out += char(v); fputc(v, stdout); }
             else if (dut->win_sel) {}                       // the engine's register, not memory
-            else if ((addr >> 16) != vm_bank) mem[addr] = v;
-            else {
+            else if (addr < ROM_LO) mem[addr] = v;
+            else if ((addr >> 16) != vm_bank) {}            // the ROM ($F0-$FF): dropped, as the machine drops it
+            else {                                          // ...but the VM writing its own bank is a VM bug
                 snprintf(msg, sizeof msg, "stray write $%02X to $%06X (VM pc $%02X/%04X)\n", v, addr,
                          CPU(pbr), CPU(pc));
                 fail += msg;

@@ -37,8 +37,7 @@ module rv_mem_tb #(
     input  wire         pc_we,
     input  wire  [31:0] pc_wval,
     output wire  [31:0] pc,
-    input  wire  [7:0]  dlo,
-    input  wire  [7:0]  dhi,
+    input  wire         all_deleg,
     // the L2's face
     output wire         il_req,
     output wire  [AW-9:0] il_ppn,
@@ -104,7 +103,7 @@ module rv_mem_tb #(
     logic [23:0] wsn_a_q = 24'd0;
     always_ff @(posedge clk) begin wsn_v_q <= !rst && cancel; inval_q <= !rst && inval; wsn_a_q <= wsn_a; end
     rv_mem #(.DROWS (DROWS), .TN (TN), .AW (AW)) u_mem (
-        .clk (clk), .rst (rst), .dlo (dlo), .dhi (dhi), .wsn_v (wsn_v_q), .wsn_a (wsn_a_q), .inval (inval_q),
+        .clk (clk), .rst (rst), .all_deleg (all_deleg), .wsn_v (wsn_v_q), .wsn_a (wsn_a_q), .inval (inval_q),
         .req_spec (req_spec),
         .f_req (f_req), .f_addr (f_addr), .f_pre (f_pre), .f_valid (f_valid), .f_delegate (f_delegate), .f_abort (f_abort), .f_data (f_data),
             .pk_addr (pk_addr), .pk_use (pk_use), .pk_hit (pk_hit), .pk_word (pk_word),

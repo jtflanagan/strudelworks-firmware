@@ -83,7 +83,63 @@ hdr:        .byte   "RVVM"
 hdr_pc:     .dword  $800000                 ; the guest's entry pc (the loader's)
 hdr_sp:     .dword  0                       ; the guest's initial sp; 0 = $E00000
 
+; THE FIXED DOORS for GS/OS applications backed by RISC-V (docs/RVV2_INTEROP.md).
+; A stub checks "RVVM" at $F1:0000, then JSLs $F1:0020 - an address that never
+; moves, so a stub needs no relocation.  $F1:0030 is a QuitGS parameter block
+; with pCount 0; a zeroed bank (no runtime) reads the same there, so a stub can
+; quit through it either way.
+            .res    $20 - (* - hdr)
+app_door:   jml     app_entry               ; $F1:0020
+            .res    $30 - (* - hdr)
+quit_pb:    .word   0                       ; $F1:0030: QuitGS, pCount 0
+
         .segment "CODE"
+
+; ---- a GS/OS application's entry (docs/RVV2_INTEROP.md) ------------------------------
+; From a stub's JSL $F1:0020: A = the application's user ID, X/Y = its header's
+; address (X the low word, Y the bank).  Returns (RTL) with A = the exit code,
+; the stub then quits.  Rung I1: the door only - no engine yet, exit code 0 -
+; and THE TRACE, so the machine's memory says the door was really taken: at
+; $EE:FF00 (our RAM) "RVRT", a count of entries (restarting at 1 whenever the
+; marker is not there), the last user ID, the last header address and the
+; header's first four bytes read through it ("RVAP" if the stub's PER was
+; right), read from the host's mirror.  The stub's memory is gone once it
+; quits, so the header is read here, while it lives.
+RT_TRACE = $EEFF00
+T_PTR    = $00                          ; a long pointer in the stub's direct page (scratch)
+app_entry:
+        rep     #$30
+        .a16
+        .i16
+        sta     f:RT_TRACE + 6          ; the user ID
+        stx     T_PTR
+        sty     T_PTR + 2               ; the header, as a long pointer
+        txa
+        sta     f:RT_TRACE + 8          ; the header's address, low word...
+        tya
+        sta     f:RT_TRACE + 10         ; ...and its bank
+        lda     [T_PTR]
+        sta     f:RT_TRACE + 12         ; the header's first four bytes
+        ldy     #2
+        lda     [T_PTR],y
+        sta     f:RT_TRACE + 14
+        lda     f:RT_TRACE
+        cmp     #$5652                  ; "RV"...
+        bne     @first
+        lda     f:RT_TRACE + 2
+        cmp     #$5452                  ; ..."RT": count on
+        bne     @first
+        lda     f:RT_TRACE + 4
+        inc
+        bra     @count
+@first: lda     #$5652
+        sta     f:RT_TRACE
+        lda     #$5452
+        sta     f:RT_TRACE + 2
+        lda     #1
+@count: sta     f:RT_TRACE + 4
+        lda     #0
+        rtl
 
 ; ---- entry ------------------------------------------------------------------------------
 ; Arrives native (the caller did CLC/XCE), M/X unknown.

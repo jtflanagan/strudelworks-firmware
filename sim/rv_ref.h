@@ -16,6 +16,7 @@
 static const uint32_t SPACE = 1u << 25;       // the engine's space: the whole 32 MB DDR3 bank
 static const uint32_t LOW   = 1u << 24;       // the 65816's space: the services it performs reach only this
 static const uint32_t GUARD = 0x100;          // the null guard: $000000-$0000FF
+static const uint32_t ROM_LO = 0xF00000;      // banks $F0-$FF: ROM - a store there is dropped, as the machine drops it
 static const uint32_t DEFAULT_SP = 0xE00000;  // the top of $DF
 
 // Trap causes.
@@ -107,7 +108,9 @@ struct Ref {
     bool ok(uint32_t a) const { return a < space && a >= GUARD; }
     static bool low_ok(uint32_t a) { return a < LOW && a >= GUARD; }
     uint32_t ld(uint32_t a, int n) const { uint32_t v = 0; for (int i = 0; i < n; i++) v |= uint32_t(m[a + i]) << (8 * i); return v; }
-    void st(uint32_t a, uint32_t v, int n) { for (int i = 0; i < n; i++) m[a + i] = uint8_t(v >> (8 * i)); }
+    void st(uint32_t a, uint32_t v, int n) {
+        for (int i = 0; i < n; i++) if (a + i < ROM_LO || a + i >= LOW) m[a + i] = uint8_t(v >> (8 * i));
+    }
     void trap(unsigned c, uint32_t t) { status = 2; cause = c; tval = t; }
     bool target(uint32_t t) { if ((t & 3) || !ok(t)) { trap(T_FETCH, t); return false; } return true; }
 
@@ -271,7 +274,7 @@ struct Ref {
                 uint32_t n = 0;
                 while (n < len && in_pos < in.size()) {
                     if (!low_ok(buf + n)) { trap(T_STORE, buf + n); return false; }
-                    m[buf + n] = uint8_t(in[in_pos++]);
+                    st(buf + n, uint8_t(in[in_pos++]), 1);   // (the ROM drops it, as any 65816 write)
                     n++;
                 }
                 x[10] = n;
