@@ -1,26 +1,26 @@
 /* doom_rv.c - doomgeneric's platform on the RISC-V engine (docs/RVV2_DOOM.md):
-   the frame through the palette to RGB565 in enhanced video's mode 1, time from
+   the frame as DOOM draws it - 8-bit indices and its palette - in enhanced
+   video's mode 4 (the indexed bitmap), time from
    the Event Manager's ticks, the WAD beside the program (9:DOOM1.WAD), keys
    from the ADB itself.  Its report ($EE:FE00): 'DOOM', frames drawn, the ticks at
    the first frame, the ticks now, and the frames of the last whole second
    (tenths), then the music's OPL register writes and its loudest sample over
    that second (opl_rv.c).  That rate is drawn in the picture's top right corner, "RV 35.0" -
    the engine's, DOOM's own ceiling being 35; the host's HUD shows beside it the
-   rate the Pi puts on the screen ("PI"). */
+   Pi's own on-time refreshes ("FPS"). */
 #include <stdint.h>
 #include "doomgeneric.h"
 #include "i_video.h"
 #include "rvgs.h"
 
 #define VIDEO_BANK 0x00800000u
-#define ROW_BYTES  640
 
 extern boolean palette_changed;
 
 void snd_pump(void);                    /* snd_rv.c: the sound mixed ahead */
 
 static volatile uint32_t *const report = (volatile uint32_t *)(uintptr_t)RVGS_REPORT;
-static uint16_t lut[256];
+static uint8_t ink, paper;              /* the palette's brightest and darkest: the rate's colours */
 static uint32_t frames;
 static uint32_t rate_tick, rate_frames, rate10;   /* the last whole second's frames, in tenths */
 static int rate_known;                             /* drawn from the first whole second on (frame 1 stays DOOM's own) */
@@ -33,9 +33,8 @@ static const uint8_t glyph[][5] = {
 };
 enum { G_R = 10, G_V, G_DOT, G_SP };
 
-static void put_px(uint32_t x, uint32_t y, uint16_t c) {
-    volatile uint16_t *row = (volatile uint16_t *)(uintptr_t)(VIDEO_BANK + (y / 100) * 0x10000u + (y % 100) * ROW_BYTES);
-    row[x] = c;
+static void put_px(uint32_t x, uint32_t y, uint8_t c) {
+    ((volatile uint8_t *)(uintptr_t)VIDEO_BANK)[y * 320 + x] = c;
 }
 
 /* "RV dd.d" on black in the top right corner, over DOOM's own picture. */
@@ -47,14 +46,14 @@ static void draw_rate(void) {
     text[6] = (uint8_t)(r % 10);
     const uint32_t x0 = 320 - 7 * 8 - 1, y0 = 1;
     for (uint32_t y = y0 - 1; y < y0 + 11; y++)
-        for (uint32_t x = x0 - 2; x < 320; x++) put_px(x, y, 0);
+        for (uint32_t x = x0 - 2; x < 320; x++) put_px(x, y, paper);
     for (uint32_t i = 0; i < 7; i++)
         for (uint32_t gy = 0; gy < 5; gy++)
             for (uint32_t gx = 0; gx < 3; gx++)
                 if (glyph[text[i]][gy] & (4 >> gx)) {
                     const uint32_t x = x0 + i * 8 + gx * 2, y = y0 + gy * 2;
-                    put_px(x, y, 0xFFFF); put_px(x + 1, y, 0xFFFF);
-                    put_px(x, y + 1, 0xFFFF); put_px(x + 1, y + 1, 0xFFFF);
+                    put_px(x, y, ink); put_px(x + 1, y, ink);
+                    put_px(x, y + 1, ink); put_px(x + 1, y + 1, ink);
                 }
 }
 
@@ -65,26 +64,46 @@ void DG_Init(void) {
 
 static void video_on(void) {
     volatile uint8_t *ctl = (volatile uint8_t *)(uintptr_t)rv_env->video;
-    ctl[0x11] = 1;                      /* mode slot 0: bitmap 320x200 RGB565 */
+    ctl[0x11] = 4;                      /* mode slot 0: 320x200 of 8-bit indices (docs/ENHANCED_VIDEO.md) */
     ctl[0x12] = 0;
     ctl[0x13] = 0x80;
-    ctl[0x14] = 2;
+    ctl[0x14] = 1;
     volatile uint32_t *claim = (volatile uint32_t *)(uintptr_t)(rv_env->video + 0x1000);
     for (int i = 0; i < 4000 / 4; i++) claim[i] = 0x55555555u;
     ctl[0] = 1;                         /* ENABLE, latched by the global commit */
     ctl[1] = 0;
 }
 
+/* The frame as DOOM draws it, mode 4 (the host's indexed bitmap): its 8-bit
+   indices into bank $80, row y at 320*y, four a store; its palette - when DOOM
+   changes it (damage, pickups) - into mode 0's control window ($E2:4000), an
+   entry {R, G, B, 0} a 32-bit store.  Half the stores RGB565 took, and no
+   conversion (sim/profile_doom.sh: 16.6% of the engine in play before). */
 void DG_DrawFrame(void) {
     if (palette_changed) {
-        for (int i = 0; i < 256; i++)
-            lut[i] = (uint16_t)(((colors[i].r >> 3) << 11) | ((colors[i].g >> 2) << 5) | (colors[i].b >> 3));
+        volatile uint32_t *pal = (volatile uint32_t *)(uintptr_t)(rv_env->video + 0x4000);
+        unsigned hi = 0, lo = 0x7FFFFFFF;
+        for (int i = 0; i < 256; i++) {
+            pal[i] = colors[i].r | (uint32_t)colors[i].g << 8 | (uint32_t)colors[i].b << 16;
+            const unsigned sum = colors[i].r + colors[i].g + colors[i].b;
+            if (sum > hi || i == 0) { hi = sum; ink = (uint8_t)i; }
+            if (sum < lo) { lo = sum; paper = (uint8_t)i; }
+        }
         palette_changed = false;
     }
-    const uint8_t *src = (const uint8_t *)DG_ScreenBuffer;
-    for (uint32_t y = 0; y < 200; y++, src += 320) {
-        volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)(VIDEO_BANK + (y / 100) * 0x10000u + (y % 100) * ROW_BYTES);
-        for (uint32_t x = 0; x < 320; x += 2) dst[x / 2] = lut[src[x]] | ((uint32_t)lut[src[x + 1]] << 16);
+    /* DOOM's own frame, read where it drew it: doomgeneric copies it line by
+       line into DG_ScreenBuffer first (I_FinishUpdate), 6% of the engine in
+       play (sim/profile_doom.sh) - so DG_ScreenBuffer IS that frame from here
+       on, and librvgs's memcpy returns at once for a copy onto itself. */
+    DG_ScreenBuffer = (pixel_t *)I_VideoBuffer;
+    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)VIDEO_BANK;
+    if (((uintptr_t)I_VideoBuffer & 3) == 0) {
+        const uint32_t *src = (const uint32_t *)I_VideoBuffer;
+        for (uint32_t i = 0; i < 320 * 200 / 4; i++) dst[i] = src[i];
+    } else {
+        const uint8_t *src = I_VideoBuffer;
+        for (uint32_t i = 0; i < 320 * 200 / 4; i++, src += 4)
+            dst[i] = src[0] | (uint32_t)src[1] << 8 | (uint32_t)src[2] << 16 | (uint32_t)src[3] << 24;
     }
     /* the rate: the frames committed over the last whole second (60 ticks or more) */
     const uint32_t now = rvgs_ticks();
@@ -102,11 +121,11 @@ void DG_DrawFrame(void) {
     if (rate_known) draw_rate();
     snd_pump();                                 /* the mix topped up each frame too: a busy DOOM seldom sleeps */
     volatile uint8_t *ctl = (volatile uint8_t *)(uintptr_t)rv_env->video;
-    ctl[0x10] = 0;                      /* COMMIT mode slot 0: this frame */
-    if (frames++ == 0) {
+    if (frames++ == 0) {                /* the mode described before its first commit: the host checks it there */
         video_on();
         report[2] = rvgs_ticks();
     }
+    ctl[0x10] = 0;                      /* COMMIT mode slot 0: this frame */
     report[1] = frames;
     report[3] = now;
 }
@@ -204,8 +223,14 @@ int DG_GetKey(int *pressed, unsigned char *key) {
 void DG_SetWindowTitle(const char *title) { (void)title; }
 
 int main(void) {
+#if defined(DOOM_WARP)                  /* the profile's builds (app.mk, DOOM_PROFILE=): straight into E1M1 */
+    static char *args[] = {"doom", "-iwad", "9:DOOM1.WAD", "-warp", "1", "1", 0};
+#elif defined(DOOM_TIMEDEMO)            /*   or DEMO1 as fast as it draws, a tic a frame, no cap */
+    static char *args[] = {"doom", "-iwad", "9:DOOM1.WAD", "-timedemo", "demo1", 0};
+#else
     static char *args[] = {"doom", "-iwad", "9:DOOM1.WAD", 0};
+#endif
     if (!(rv_env->flags & RV_ENV_VIDEO)) return 1;
-    doomgeneric_Create(3, args);
+    doomgeneric_Create(sizeof args / sizeof args[0] - 1, args);
     for (;;) doomgeneric_Tick();
 }

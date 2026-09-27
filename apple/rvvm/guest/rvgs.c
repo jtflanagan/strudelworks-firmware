@@ -15,6 +15,7 @@
 
 void *memcpy(void *d, const void *s, __SIZE_TYPE__ n) {
     uint8_t *dp = d; const uint8_t *sp = s;
+    if (dp == sp) return d;                 /* a copy onto itself: nothing to do (doom_rv.c's frame) */
     if ((((uintptr_t)dp | (uintptr_t)sp | n) & 3) == 0) {
         for (; n; n -= 4, dp += 4, sp += 4) *(uint32_t *)dp = *(const uint32_t *)sp;
         return d;
@@ -24,6 +25,9 @@ void *memcpy(void *d, const void *s, __SIZE_TYPE__ n) {
 }
 void *memset(void *d, int c, __SIZE_TYPE__ n) {
     uint8_t *dp = d;
+    while (n && ((uintptr_t)dp & 3)) { *dp++ = (uint8_t)c; n--; }
+    const uint32_t w = 0x01010101u * (uint8_t)c;
+    for (; n >= 4; n -= 4, dp += 4) *(uint32_t *)dp = w;   /* a word at a time: DOOM clears a lot */
     while (n--) *dp++ = (uint8_t)c;
     return d;
 }

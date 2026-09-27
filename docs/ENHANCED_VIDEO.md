@@ -1,6 +1,8 @@
 # Enhanced video for the IIgs
 
-Status: 2026-09-26, **MERGED to master** from branch `enhanced_video` (fw off
+Status: 2026-09-27, branch `riscv_v2`: **mode 4, the 8-bit indexed bitmap, added** for DOOM (host
+`ev_render_test` 38/38 on the Pi, every canvas pixel against its palette colour, mutation-checked;
+DOOM on the card in it). Before that: 2026-09-26, **MERGED to master** from branch `enhanced_video` (fw off
 master 79bfd94 / host off 6f8e9e9).  Design agreed with the user.  **The
 text mode is 160x50 of 8x16 cells** since the user saw the first cut's 8x8 on
 the machine (too small to read) and the 8x16 ("very close to what I
@@ -178,6 +180,14 @@ bank's start, i.e. bank `first + ((($2000 + 512*n) >> 16)`, 16 rows of 16
 pixels.  A tile never straddles a bank; the first bank holds 112, every other
 128 (12,272 over all 96).  An index past the mode's banks draws black.  No
 control window.
+
+**4 - Bitmap 320x200, 8-bit indexed, 4x** (1 bank; added 2026-09-27 for DOOM,
+docs/RVV2_DOOM.md - the user).  A VGA mode 13h picture as a program draws it:
+row y at `320*y` in the bank (64,000 bytes), a byte a pixel, so one 32-bit
+store writes four.  Control window: the palette at `$0000`, 256 entries of 4
+bytes - red, green, blue, one unused - so one 32-bit store writes an entry;
+written rarely, it keeps a full 8 bits a channel.  Half the bytes of mode 1 a
+frame, and no conversion by the program.
 
 ## Where the host does the work
 

@@ -3,8 +3,9 @@
 Status: **2026-09-27, branch `riscv_v2`. DOOM PLAYS ON HARDWARE WITH SOUND, MUSIC AND THE MOUSE:
 launched from the Finder off its own volume (hd2); keys from the raw ADB events, the mouse through the
 Miscellaneous Tool Set; effects and music (Chocolate Doom's OPL player on DBOPL) mixed on the engine
-and played by the IIgs's Ensoniq in stereo - judged good by ear (user). ~35 frames a second without
-music, ~29.5 with it. D1-D5, S1-S3, M1 and MU1 done.**
+and played by the IIgs's Ensoniq in stereo - judged good by ear (user). Drawn in enhanced video's
+mode 4 (8-bit indexed): at DOOM's cap of 35 frames a second in E1M1 with music, dipping in heavy
+scenes (DEMO1 uncapped: median 38.7 fps, the worst frames ~50 ms). D1-D5, S1-S3, M1 and MU1 done.**
 
 ## The base: doomgeneric
 
@@ -188,6 +189,31 @@ Ensoniq - so its clock is the DOC's too.
 - **On hardware**: the title's and the demos' music heard (user). The cost: 29.5 frames a second in
   the demos against ~35 without music - DBOPL takes about a sixth of the engine. The mix is topped up
   after every frame as well as in DOOM's sleeps (a busy DOOM seldom sleeps: ~0.5% silent chunks before).
+
+## Speed (2026-09-27)
+
+- **Where the engine's time goes** (`sim/profile_doom.sh`, new): DOOM built to warp into E1M1, or
+  with `--demo` to play DEMO1 as fast as it draws (`-timedemo`: a tic a frame, no cap), run on the
+  application bench; every clock charged to the oldest instruction not yet retired (the runner's
+  `--profile`: its stalls and the 65816's service of its events land on it), summed by function from
+  the ELF; `--frame-log` gives each frame's cycles.
+- **Found, E1M1 with music** (31 fps in sim, 29.5 on the card): the renderer 58%, getting the frame
+  out 23% (the RGB565 conversion and stores 16.6%, doomgeneric's copy of each frame 5.9%), the music
+  4.6%, TickCount 4.2%, the effects' mix 2%. Not floating point: DBOPL's floats are its tables at
+  set-up.
+- **Done**: *(user)* an 8-bit indexed enhanced video mode, **mode 4** (docs/ENHANCED_VIDEO.md; the
+  host's renderer): DOOM's frame as it draws it - 16,000 stores a frame of four indices, the palette
+  (256 x {R, G, B, 0}, a full 8 bits a channel) only when DOOM changes it. And doomgeneric's copy
+  gone: DG_ScreenBuffer is pointed at DOOM's own frame, librvgs's memcpy returns at once for a copy
+  onto itself (memset a word at a time too). Frame out 16.6% -> 5.1%; E1M1 with music at DOOM's cap
+  (36.7 frames a second in sim's window, 35 on the card - "quite a bit better", user).
+- **DEMO1, uncapped** (6 s of the card, 224 frames): median 25.8 ms (38.7 fps); 60 frames over the
+  28.6 ms tic, 24 over 33 ms, the worst ~50 ms - the dips. There the music is ~12% (the demo's song
+  keeps more OPL voices busy), TickCount 7%, the effects' mix 3.6%, stdio's byte-at-a-time fread of
+  the WAD ~3.5%.
+- **Not done**: *(user)* reading ticks without calling the toolbox (a heartbeat task counting into
+  $EE was built and taken out: no toolbox call is to be replaced so that GS/OS never sees it).
+  Still open: the WAD's reads straight to `read()`, the effects' mix by channel, the music's rate.
 
 ## Open
 

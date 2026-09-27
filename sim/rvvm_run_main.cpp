@@ -184,10 +184,11 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
                    const char *image_path, long expect_code, unsigned launches,
                    const std::vector<std::string> &extra_files, int key, const char *expect_video,
                    bool stop_at_video, const std::map<unsigned, std::vector<uint8_t>> &adb_events,
-                   unsigned long long max_cycles, int expect_sound) {
+                   unsigned long long max_cycles, int expect_sound, const char *profile,
+                   unsigned long long profile_from, const char *frame_log) {
 #if !RVVM_MEM
     (void)hex; (void)vm; (void)vm_bank; (void)stub_path; (void)stale; (void)image_path; (void)expect_code; (void)launches;
-    (void)extra_files; (void)key; (void)expect_video; (void)stop_at_video; (void)adb_events; (void)max_cycles; (void)expect_sound;
+    (void)extra_files; (void)key; (void)expect_video; (void)stop_at_video; (void)adb_events; (void)max_cycles; (void)expect_sound; (void)profile; (void)profile_from; (void)frame_log;
     fprintf(stderr, "--app= needs the runner built with the engine's memory side (sim/run_rv_app.sh)\n");
     return 2;
 #else
@@ -204,9 +205,25 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         if (fv) { while ((ch = fgetc(fv)) != EOF) want_video.push_back(uint8_t(ch)); fclose(fv); }
         if (want_video.size() != 320 * 200 * 2) { fprintf(stderr, "--expect-video=%s: not a 320x200 RGB565 picture\n", expect_video); return 2; }
     }
+    // Mode 0's picture as RGB565 rows, whichever type it is: 1 the RGB565 bitmap
+    // in banks $80/$81; 4 the indexed bitmap in $80 through its palette (R, G,
+    // B, unused a 4-byte entry) at mode 0's control window, $E2:4000, each
+    // entry reduced to RGB565 as the references are (tools/wad_titlepic.py)
+    auto video_row = [&](unsigned y, uint8_t *out) {
+        if (mem[0xE20011] == 4) {
+            for (unsigned x = 0; x < 320; x++) {
+                const uint8_t *p = &mem[0xE24000 + 4u * mem[0x800000 + y * 320 + x]];
+                const unsigned v = ((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3);
+                out[2 * x] = uint8_t(v); out[2 * x + 1] = uint8_t(v >> 8);
+            }
+        } else memcpy(out, &mem[0x800000 + (y / 100) * 0x10000 + (y % 100) * 640], 640);
+    };
     auto video_is = [&]() {
-        for (unsigned y = 0; y < 200; y++)
-            if (memcmp(&mem[0x800000 + (y / 100) * 0x10000 + (y % 100) * 640], &want_video[y * 640], 640)) return false;
+        uint8_t row[640];
+        for (unsigned y = 0; y < 200; y++) {
+            video_row(y, row);
+            if (memcmp(row, &want_video[y * 640], 640)) return false;
+        }
         return true;
     };
     std::vector<uint8_t> image;                     // the program's file, as GS/OS would read it
@@ -333,6 +350,10 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     // whatever clock it retires - the engine runs while the 65816 waits on RUN),
     // before it relocates itself and clears its bss.
     uint32_t entered_at = 0;
+    std::map<uint32_t, uint64_t> prof;                  // --profile: cycles by pc
+    FILE *flog = frame_log ? fopen(frame_log, "w") : nullptr;   // --frame-log: frame, at, cycles since the last
+    uint64_t last_commit = 0;
+    uint64_t prof_n = 0;
     bool entered_same = false;
     // Enhanced video as the program drove it: its own stores, seen in its 0xB
     // records - ENABLE set, and the global commit after it.
@@ -354,6 +375,9 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
                 if (a + i == EV_CTL && v == 1) eng_enable_at = long(cycles);
                 if (a + i == EV_CTL + 0x10) {           // mode slot 0's COMMIT: a frame
                     mode_commits++;
+                    if (flog) { fprintf(flog, "%llu %llu %llu\n", mode_commits, (unsigned long long)cycles,
+                                        (unsigned long long)(cycles - last_commit)); fflush(flog); }
+                    last_commit = cycles;
                     if (stop_at_video && !video_matched && video_is()) video_matched = true;
                 }
                 if (a + i == EV_CTL + 1 && eng_enable_at >= 0) eng_commit_at = long(cycles);
@@ -363,6 +387,10 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         dut->clk = 1; dut->eval();
         l2.post_edge(dut);
         dut->clk = 0; dut->eval();
+        // THE PROFILE: each clock charged to the oldest instruction not yet
+        // retired (pc_q, in order) - its stalls and the 65816's service of its
+        // event (an ECALL, a delegated access) land on it
+        if (profile && cycles >= profile_from) { prof[ENG(pc_q)]++; prof_n++; }
         if (dut->retired && !entered_at && ENG(pc_q) >= HI) {
             entered_at = ENG(pc_q);
             entered_same = entered_at + image.size() <= SPACE_APP &&
@@ -808,6 +836,15 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         cycles++;
     }
 
+    if (profile) {
+        if (FILE *pf = fopen(profile, "w")) {
+            fprintf(pf, "# cycles %llu entered %08x frames %llu\n", (unsigned long long)prof_n, entered_at, mode_commits);
+            for (auto &e : prof) fprintf(pf, "%08x %llu\n", e.first, (unsigned long long)e.second);
+            fclose(pf);
+            printf("app: profile: %llu cycles in %s\n", (unsigned long long)prof_n, profile);
+        }
+    }
+
     // --stop-at-video: the run ends at the first frame that is the reference; the
     // program never quits, so the lifecycle's own checks do not apply.
     if (stop_at_video) {
@@ -818,7 +855,8 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             const std::string dump = std::string(expect_video) + ".last";
             FILE *fd = fopen(dump.c_str(), "wb");
             if (fd) {
-                for (unsigned y = 0; y < 200; y++) fwrite(&mem[0x800000 + (y / 100) * 0x10000 + (y % 100) * 640], 1, 640, fd);
+                uint8_t row[640];
+                for (unsigned y = 0; y < 200; y++) { video_row(y, row); fwrite(row, 1, 640, fd); }
                 fclose(fd);
                 printf("app: the last frame is in %s\n", dump.c_str());
             }
@@ -997,6 +1035,9 @@ int main(int argc, char **argv) {
     bool stop_at_video = false;
     std::map<unsigned, std::vector<uint8_t>> adb_events;   // --adb-events=ASK:CODE[+CODE],...
     int expect_sound = -1;                                  // --expect-sound=N: the chunks in RVTEST's pattern
+    const char *profile = nullptr;                          // --profile=FILE: cycles by pc, from --profile-from=CYCLE
+    unsigned long long profile_from = 0;
+    const char *frame_log = nullptr;                        // --frame-log=FILE: each mode 0 commit, its cycles
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto val = [&](const char *k) { return a.substr(strlen(k)); };
@@ -1016,6 +1057,9 @@ int main(int argc, char **argv) {
         else if (a.rfind("--file=", 0) == 0) app_files.push_back(val("--file="));
         else if (a.rfind("--expect-video=", 0) == 0) expect_video = argv[i] + 15;
         else if (a.rfind("--stop-at-video=", 0) == 0) { expect_video = argv[i] + 16; stop_at_video = true; }
+        else if (a.rfind("--profile=", 0) == 0) { static std::string pf; pf = val("--profile="); profile = pf.c_str(); }
+        else if (a.rfind("--frame-log=", 0) == 0) { static std::string fl; fl = val("--frame-log="); frame_log = fl.c_str(); }
+        else if (a.rfind("--profile-from=", 0) == 0) profile_from = strtoull(val("--profile-from=").c_str(), nullptr, 0);
         else if (a.rfind("--expect-sound=", 0) == 0) expect_sound = int(strtol(val("--expect-sound=").c_str(), nullptr, 0));
         else if (a.rfind("--adb-events=", 0) == 0) {
             std::string list = val("--adb-events=");
@@ -1049,7 +1093,7 @@ int main(int argc, char **argv) {
     if (app) {
         if (!hex || !vm || guest || ref_only || use_ref) { fprintf(stderr, "--app= takes --hex= --vm= and no guest, no reference\n"); return 2; }
         return run_app(hex, vm, vm_bank, app, stale, image, expect_code, launches, app_files, key, expect_video, stop_at_video,
-                       adb_events, max_cycles, expect_sound);
+                       adb_events, max_cycles, expect_sound, profile, profile_from, frame_log);
     }
     if (!guest || (!ref_only && (!hex || !vm))) { fprintf(stderr, "need --guest= and (--hex= --vm= | --ref-only)\n"); return 2; }
 
