@@ -95,51 +95,671 @@ quit_pb:    .word   0                       ; $F1:0030: QuitGS, pCount 0
 
         .segment "CODE"
 
-; ---- a GS/OS application's entry (docs/RVV2_INTEROP.md) ------------------------------
+; ---- a GS/OS application's lifecycle (docs/RVV2_INTEROP.md, rung I2) -----------------
 ; From a stub's JSL $F1:0020: A = the application's user ID, X/Y = its header's
-; address (X the low word, Y the bank).  Returns (RTL) with A = the exit code,
-; the stub then quits.  Rung I1: the door only - no engine yet, exit code 0 -
-; and THE TRACE, so the machine's memory says the door was really taken: at
-; $EE:FF00 (our RAM) "RVRT", a count of entries (restarting at 1 whenever the
-; marker is not there), the last user ID, the last header address and the
-; header's first four bytes read through it ("RVAP" if the stub's PER was
-; right), read from the host's mirror.  The stub's memory is gone once it
-; quits, so the header is read here, while it lives.
-RT_TRACE = $EEFF00
-T_PTR    = $00                          ; a long pointer in the stub's direct page (scratch)
+; address (X the low word, Y the bank), D/S the stub's direct page and stack
+; (its ~Direct segment), which are the runtime's while the application runs.
+; Returns (RTL) with A = the exit code's low word, D and S as they came, B
+; restored; the stub then quits.
+;
+;   register in $EE -> TLStartUp, MMStartUp -> the low block (NewHandle) -> the
+;   environment block and the start/stop record in it -> StartUpTools -> enhanced
+;   video, if the header asks -> the engine runs, a0 = the environment block ->
+;   and everything undone in reverse (DONE says what was done).
+;
+; The direct page (the step loop's own at $00-$19 and $C0-$CB):
+APPM    = $1A           ; nonzero: an application's run - no console, an exit returns
+RUN_S   = $1C           ; S when the engine was started: an exit or a trap returns to it
+UID     = $1E           ; the application's user ID
+HDR     = $20           ; its header (4)
+LOWH    = $24           ; the low block's handle (4)
+LOWP    = $28           ; its address = the environment block (4)
+RECP    = $2C           ; the start/stop record, in the low block (4)
+BNC     = $30           ; the bounce buffer (4)
+CALLP   = $34           ; the call area (4)
+LSIZE   = $38           ; the low block's size
+BOFF    = $3A           ; the bounce buffer's offset in it
+COFF    = $3C           ; the call area's
+DONE    = $3E           ; the steps done, to undo
+ERR     = $40           ; the last toolbox error
+NTOOLS  = $42           ; the header's tool count
+LIST    = $44           ; the header's tool pairs (4)
+
+D_REG   = $0001         ; DONE: registered in $EE
+D_MM    = $0002         ;       TLStartUp + MMStartUp
+D_LOW   = $0004         ;       the low block
+D_TOOLS = $0008         ;       StartUpTools
+D_VIDEO = $0010         ;       enhanced video owned
+
+; The stub's header (apple/rvvm/stub/stub.s)
+H_VER    = 4
+H_FLAGS  = 6
+H_VMODE  = 8
+H_BOUNCE = 10
+H_CALL   = 12
+H_TOOLS  = 14
+HF_VIDEO = $0001
+MAX_TOOLS = 32
+
+; The environment block, first in the low block (the guest's `struct rv_env`)
+EV_MAGIC  = 0           ; 'RVEN'
+EV_VER    = 4
+EV_SIZE   = 6
+EV_UID    = 8
+EV_FLAGS  = 10          ; bit 0: owns enhanced video
+EV_LOW    = 12
+EV_LOWSZ  = 16
+EV_BNC    = 20
+EV_BNCSZ  = 24
+EV_CALL   = 28
+EV_CALLSZ = 32
+EV_HI     = 36          ; the upper half's banks (rung I3)
+EV_HISZ   = 40
+EV_IMG    = 44
+EV_IMGSZ  = 48
+EV_HEAP   = 52
+EV_PATH   = 56
+EV_VIDEO  = 60          ; the enhanced video control bank, 0 = not the owner
+ENV_LEN   = 64
+REC_LEN   = 12          ; the start/stop record before its tool pairs
+
+; The registration table, bank $EE (ours): read by nothing else.  One owner word
+; per 64 KB bank of the upper half; one application slot (a RISC-V desk
+; accessory would get slots of its own).
+REG       = $EE0000     ; "RVRG"
+REG_VER   = REG + 4     ; 1
+REG_VIDEO = REG + 6     ; enhanced video's owner, a user ID, 0 = none
+REG_APP   = REG + 8     ; the application's user ID, 0 = none
+REG_LOW   = REG + 10    ; its low block (4)
+REG_BANKS = REG + $100  ; 256 owner words: banks $100-$1FF
+EV_CTL    = $E20000     ; enhanced video: ENABLE; +1 the global commit
+
+; The trace, $EE:FF00: what the last application's lifecycle did, for the host's
+; mirror (every field rewritten at each entry but the count).
+RT_TRACE = $EEFF00      ; "RVRT"
+TR_COUNT = 4            ; entries (restarting at 1 when the marker is not there)
+TR_UID   = 6
+TR_HDR   = 8            ; (4)
+TR_STEP  = 12           ; the last step taken (below), $FF when it came back
+TR_ERR   = 14           ; the last toolbox error
+TR_LOW   = 16           ; the low block (4)
+TR_CODE  = 20           ; the exit code (4)
+TR_STAT  = 24           ; 1 exit, 2 trap, 0 never ran
+TR_CAUSE = 26
+TR_TVAL  = 28           ; (4)
+TR_PC    = 32           ; the engine's pc at the stop (4)
+TR_REF   = 36           ; StartUpTools' startStopRef (4)
+TR_DONE  = 40           ; DONE at its highest
+TR_LEN   = 42
+.macro  step    n
+        lda     #n
+        sta     f:RT_TRACE + TR_STEP
+.endmacro
+
+TOOLS   = $E10000
+TL_STARTUP   = $0201
+TL_SHUTDOWN  = $0301
+MM_STARTUP   = $0202
+MM_SHUTDOWN  = $0302
+NEW_HANDLE   = $0902
+DISPOSE_HANDLE = $1002
+STARTUP_TOOLS  = $1801
+SHUTDOWN_TOOLS = $1901
+; locked, fixed, page-aligned, not across a bank, not in special memory (banks
+; $00/$01/$E0/$E1): the engine reads and writes the low block itself.
+LOW_ATTR = $C01C
+
 app_entry:
         rep     #$30
         .a16
         .i16
-        sta     f:RT_TRACE + 6          ; the user ID
-        stx     T_PTR
-        sty     T_PTR + 2               ; the header, as a long pointer
-        txa
-        sta     f:RT_TRACE + 8          ; the header's address, low word...
-        tya
-        sta     f:RT_TRACE + 10         ; ...and its bank
-        lda     [T_PTR]
-        sta     f:RT_TRACE + 12         ; the header's first four bytes
+        phb
+        pha
+        phx
+        phy
+        ldx     #$00CE                  ; the direct page is ours now
+:       stz     0,x
+        dex
+        dex
+        bpl     :-
+        ply
+        plx
+        pla
+        sta     UID
+        stx     HDR
+        sty     HDR+2
+        inc     APPM
+        jsr     tr_enter
+        jsr     hdr_check               ; C: not a header this runtime knows
+        bcs     @bad
+        jsr     reg_up
+        step    2
+        jsr     mm_up
+        step    3
+        jsr     low_up                  ; C: NewHandle refused
+        bcs     @fail
+        jsr     env_fill
+        step    4
+        jsr     tools_up                ; C: StartUpTools refused
+        bcs     @fail
+        step    5
+        jsr     video_up
+        step    6
+        jsr     app_run
+        step    7
+        bra     @down
+@bad:   lda     #$FFFE                  ; -2: the header
+        bra     @code
+@fail:  lda     #$FFFD                  ; -3: a toolbox call (TR_ERR, TR_STEP say which)
+@code:  sta     CODE
+        lda     #$FFFF
+        sta     CODE+2
+@down:  jsr     app_down
+        jsr     tr_leave
+        lda     CODE
+        plb
+        rtl
+
+; ---- the steps ------------------------------------------------------------------------
+; The header: "RVAP", version 2, a sane tool count; the low block's layout from it.
+hdr_check:
+        lda     [HDR]
+        cmp     #('V' << 8) | 'R'
+        bne     @no
         ldy     #2
-        lda     [T_PTR],y
-        sta     f:RT_TRACE + 14
+        lda     [HDR],y
+        cmp     #('P' << 8) | 'A'
+        bne     @no
+        ldy     #H_VER
+        lda     [HDR],y
+        cmp     #2
+        bne     @no
+        ldy     #H_TOOLS                ; LIST = the tool list (the stub is one bank)
+        lda     [HDR],y
+        clc
+        adc     HDR
+        sta     LIST
+        lda     HDR+2
+        sta     LIST+2
+        lda     [LIST]
+        cmp     #MAX_TOOLS + 1
+        bcs     @no
+        sta     NTOOLS
+        lda     LIST                    ; LIST = the pairs, after the count
+        inc
+        inc
+        sta     LIST
+        lda     NTOOLS                  ; env, record, pairs; then the bounce buffer...
+        asl
+        asl
+        adc     #ENV_LEN + REC_LEN + 3
+        and     #$FFFC
+        sta     BOFF
+        ldy     #H_BOUNCE
+        lda     [HDR],y
+        jsr     round4
+        bcs     @no
+        adc     BOFF
+        bcs     @no
+        sta     COFF                    ; ...then the call area
+        ldy     #H_CALL
+        lda     [HDR],y
+        jsr     round4
+        bcs     @no
+        adc     COFF
+        bcs     @no
+        sta     LSIZE
+        clc
+        rts
+@no:    sec
+        rts
+round4: clc                             ; A = A rounded up to 4; C on overflow
+        adc     #3
+        and     #$FFFC
+        rts
+
+; The registration table: made when it is not there; an application found in the
+; slot is gone (only one runs at a time - its quit never unregistered it: a reset,
+; a crash), and what it held is taken back; then the slot is ours.
+reg_up: lda     f:REG
+        cmp     #('V' << 8) | 'R'
+        bne     @init
+        lda     f:REG+2
+        cmp     #('G' << 8) | 'R'
+        bne     @init
+        lda     f:REG_VER
+        cmp     #1
+        beq     @ok
+@init:  lda     #0
+        ldx     #$02FE
+:       sta     f:REG,x
+        dex
+        dex
+        bpl     :-
+        lda     #('V' << 8) | 'R'
+        sta     f:REG
+        lda     #('G' << 8) | 'R'
+        sta     f:REG+2
+        lda     #1
+        sta     f:REG_VER
+@ok:    lda     f:REG_APP
+        beq     :+
+        jsr     reclaim
+:       lda     UID
+        sta     f:REG_APP
+        lda     #D_REG
+        tsb     DONE
+        rts
+
+; Everything registered to the user ID in A goes back: its upper-half banks, and
+; enhanced video (turned off) if it owned it.
+reclaim:
+        sta     TGT
+        ldx     #$01FE
+@b:     lda     f:REG_BANKS,x
+        cmp     TGT
+        bne     :+
+        lda     #0
+        sta     f:REG_BANKS,x
+:       dex
+        dex
+        bpl     @b
+        lda     f:REG_VIDEO
+        cmp     TGT
+        bne     :+
+        jsr     video_off
+        lda     #0
+        sta     f:REG_VIDEO
+:       rts
+
+reg_down:
+        lda     UID
+        jsr     reclaim
+        lda     #0
+        sta     f:REG_APP
+        sta     f:REG_LOW
+        sta     f:REG_LOW+2
+        rts
+
+mm_up:  ldx     #TL_STARTUP
+        jsl     TOOLS
+        pha                             ; MMStartUp: the user ID (the loader's, again)
+        ldx     #MM_STARTUP
+        jsl     TOOLS
+        pla
+        lda     #D_MM
+        tsb     DONE
+        rts
+
+; NewHandle(size, user ID, attributes, location): the low block.
+low_up: pha
+        pha                             ; the handle
+        pea     0
+        pei     (LSIZE)
+        pei     (UID)
+        pea     LOW_ATTR
+        pea     0
+        pea     0
+        ldx     #NEW_HANDLE
+        jsl     TOOLS
+        sta     ERR
+        pla
+        sta     LOWH
+        pla
+        sta     LOWH+2
+        bcs     @no
+        lda     [LOWH]                  ; the master pointer: the block, locked in place
+        sta     LOWP
+        ldy     #2
+        lda     [LOWH],y
+        sta     LOWP+2
+        sta     RECP+2                  ; the pieces: one bank (not across one)
+        sta     BNC+2
+        sta     CALLP+2
+        lda     LOWP
+        clc
+        adc     #ENV_LEN
+        sta     RECP
+        lda     LOWP
+        adc     BOFF
+        sta     BNC
+        lda     LOWP
+        adc     COFF
+        sta     CALLP
+        lda     LOWP
+        sta     f:REG_LOW
+        lda     LOWP+2
+        sta     f:REG_LOW+2
+        lda     #D_LOW
+        tsb     DONE
+        clc
+        rts
+@no:    lda     ERR
+        sta     f:RT_TRACE + TR_ERR
+        sec
+        rts
+
+; The environment block, every field.
+env_fill:
+        lda     #('V' << 8) | 'R'
+        ldy     #EV_MAGIC
+        sta     [LOWP],y
+        lda     #('N' << 8) | 'E'
+        ldy     #EV_MAGIC+2
+        sta     [LOWP],y
+        lda     #1
+        ldy     #EV_VER
+        sta     [LOWP],y
+        lda     #ENV_LEN
+        ldy     #EV_SIZE
+        sta     [LOWP],y
+        lda     UID
+        ldy     #EV_UID
+        sta     [LOWP],y
+        lda     #0                      ; flags, and every upper-half field: rung I3
+        ldy     #EV_FLAGS
+        sta     [LOWP],y
+        ldy     #EV_HI
+:       sta     [LOWP],y
+        iny
+        iny
+        cpy     #ENV_LEN
+        bne     :-
+        ldy     #EV_LOW
+        ldx     #LOWP
+        jsr     env_ptr
+        lda     LSIZE
+        ldy     #EV_LOWSZ
+        jsr     env_word
+        ldy     #EV_BNC
+        ldx     #BNC
+        jsr     env_ptr
+        lda     COFF
+        sec
+        sbc     BOFF
+        ldy     #EV_BNCSZ
+        jsr     env_word
+        ldy     #EV_CALL
+        ldx     #CALLP
+        jsr     env_ptr
+        lda     LSIZE
+        sec
+        sbc     COFF
+        ldy     #EV_CALLSZ
+        jmp     env_word
+; env[Y] = the long pointer in the direct page at X
+env_ptr:
+        lda     0,x
+        sta     [LOWP],y
+        iny
+        iny
+        lda     2,x
+        sta     [LOWP],y
+        rts
+; env[Y] = A, a 32-bit field
+env_word:
+        sta     [LOWP],y
+        iny
+        iny
+        lda     #0
+        sta     [LOWP],y
+        rts
+
+; StartUpTools(user ID, 0 = a pointer, the start/stop record): the record in the
+; low block (StartUpTools writes its resource file and direct page handle back
+; into it, and ShutDownTools reads them) - flags 0, the header's video mode, then
+; the header's tools.
+tools_up:
+        lda     #0
+        sta     [RECP]                  ; flags
+        ldy     #4
+        sta     [RECP],y                ; resFileID
+        ldy     #6
+        sta     [RECP],y                ; dPageHandle
+        ldy     #8
+        sta     [RECP],y
+        ldy     #H_VMODE
+        lda     [HDR],y
+        ldy     #2
+        sta     [RECP],y                ; videoMode
+        lda     NTOOLS
+        ldy     #10
+        sta     [RECP],y                ; numTools
+        lda     RECP                    ; TGT = the record's pairs
+        clc
+        adc     #REC_LEN
+        sta     TGT
+        lda     RECP+2
+        sta     TGT+2
+        lda     NTOOLS
+        asl
+        asl
+        tax                             ; bytes of pairs
+        ldy     #0
+@c:     cpx     #0
+        beq     @go
+        lda     [LIST],y
+        sta     [TGT],y
+        iny
+        iny
+        dex
+        dex
+        bra     @c
+@go:    pha
+        pha                             ; startStopRef
+        pei     (UID)
+        pea     0
+        pei     (RECP+2)
+        pei     (RECP)
+        ldx     #STARTUP_TOOLS
+        jsl     TOOLS
+        sta     ERR
+        pla
+        sta     f:RT_TRACE + TR_REF
+        pla
+        sta     f:RT_TRACE + TR_REF + 2
+        bcs     @no
+        lda     #D_TOOLS
+        tsb     DONE
+        clc
+        rts
+@no:    lda     ERR
+        sta     f:RT_TRACE + TR_ERR
+        sec
+        rts
+
+; Enhanced video: the one owner is the running application (the user,
+; 2026-09-26).  It starts off (ENABLE 0, latched), whatever was left.
+video_up:
+        ldy     #H_FLAGS
+        lda     [HDR],y
+        and     #HF_VIDEO
+        beq     @no
+        lda     UID
+        sta     f:REG_VIDEO
+        jsr     video_off
+        ldy     #EV_FLAGS
+        lda     #1
+        sta     [LOWP],y
+        ldy     #EV_VIDEO
+        lda     #.loword(EV_CTL)
+        sta     [LOWP],y
+        ldy     #EV_VIDEO+2
+        lda     #^EV_CTL
+        sta     [LOWP],y
+        lda     #D_VIDEO
+        tsb     DONE
+@no:    rts
+video_off:
+        sep     #$20
+        .a8
+        lda     #0
+        sta     f:EV_CTL                ; ENABLE 0...
+        sta     f:EV_CTL + 1            ; ...latched by the global commit
+        rep     #$20
+        .a16
+        rts
+
+; The engine runs the program: DBR $EF (the window), x1-x31 zero, a0 = the
+; environment block.  sys_exit and the traps come back through app_done to
+; app_run's caller.  Rung I2's program is rt_null, in this bank.
+app_run:
+        sep     #$20
+        .a8
+        lda     #$EF
+        pha
+        plb
+        rep     #$20
+        .a16
+        lda     a:WID
+        cmp     #('V' << 8) | 'R'
+        beq     :+
+        lda     #$FFFC                  ; -4: no engine
+        sta     CODE
+        lda     #$FFFF
+        sta     CODE+2
+        rts
+:       jsr     eng_mode
+        jsr     eng_clear
+        lda     LOWP
+        sta     a:WA0
+        lda     LOWP+2
+        sta     a:WA0+2
+        lda     #.loword(rt_null)
+        sta     a:WPC
+        lda     #^rt_null
+        sta     a:WPC+2
+        tsc
+        sta     RUN_S
+        jmp     loop
+app_done:
+        rep     #$30
+        .a16
+        .i16
+        lda     RUN_S
+        tcs
+        rts
+
+; RUNM: the engine has RUN from version 2 ("E", the version, in WID+2).
+eng_mode:
+        lda     a:WID+2
+        and     #$FF00
+        cmp     #$0200
+        bcc     :+
+        inc     RUNM
+:       rts
+; x1..x31 = 0: the register file has no reset.
+eng_clear:
+        ldx     #4
+:       stz     a:WX,x
+        stz     a:WX+2,x
+        inx
+        inx
+        inx
+        inx
+        cpx     #$80
+        bne     :-
+        rts
+
+; Undo what DONE says, in reverse.
+app_down:
+        lda     DONE
+        sta     f:RT_TRACE + TR_DONE
+        lda     #D_VIDEO
+        trb     DONE
+        beq     :+
+        jsr     video_off
+        lda     #0
+        sta     f:REG_VIDEO
+        step    8
+:       lda     #D_TOOLS
+        trb     DONE
+        beq     :+
+        pea     0                       ; ShutDownTools(0 = a pointer, the record)
+        pei     (RECP+2)
+        pei     (RECP)
+        ldx     #SHUTDOWN_TOOLS
+        jsl     TOOLS
+        step    9
+:       lda     #D_LOW
+        trb     DONE
+        beq     :+
+        pei     (LOWH+2)                  ; DisposeHandle
+        pei     (LOWH)
+        ldx     #DISPOSE_HANDLE
+        jsl     TOOLS
+        step    10
+:       lda     #D_MM
+        trb     DONE
+        beq     :+
+        pei     (UID)
+        ldx     #MM_SHUTDOWN
+        jsl     TOOLS
+        ldx     #TL_SHUTDOWN
+        jsl     TOOLS
+        step    11
+:       lda     #D_REG
+        trb     DONE
+        beq     :+
+        jsr     reg_down
+        step    12
+:       rts
+
+; The trace: counted, the fields of the last run cleared.
+tr_enter:
         lda     f:RT_TRACE
-        cmp     #$5652                  ; "RV"...
+        cmp     #('V' << 8) | 'R'
         bne     @first
         lda     f:RT_TRACE + 2
-        cmp     #$5452                  ; ..."RT": count on
+        cmp     #('T' << 8) | 'R'
         bne     @first
-        lda     f:RT_TRACE + 4
+        lda     f:RT_TRACE + TR_COUNT
         inc
         bra     @count
-@first: lda     #$5652
+@first: lda     #('V' << 8) | 'R'
         sta     f:RT_TRACE
-        lda     #$5452
+        lda     #('T' << 8) | 'R'
         sta     f:RT_TRACE + 2
         lda     #1
-@count: sta     f:RT_TRACE + 4
+@count: sta     f:RT_TRACE + TR_COUNT
         lda     #0
-        rtl
+        ldx     #TR_UID
+:       sta     f:RT_TRACE,x
+        inx
+        inx
+        cpx     #TR_LEN
+        bne     :-
+        lda     UID
+        sta     f:RT_TRACE + TR_UID
+        lda     HDR
+        sta     f:RT_TRACE + TR_HDR
+        lda     HDR+2
+        sta     f:RT_TRACE + TR_HDR + 2
+        step    1
+        rts
+tr_leave:
+        lda     LOWP
+        sta     f:RT_TRACE + TR_LOW
+        lda     LOWP+2
+        sta     f:RT_TRACE + TR_LOW + 2
+        lda     CODE
+        sta     f:RT_TRACE + TR_CODE
+        lda     CODE+2
+        sta     f:RT_TRACE + TR_CODE + 2
+        lda     STATUS
+        sta     f:RT_TRACE + TR_STAT
+        lda     CAUSE
+        sta     f:RT_TRACE + TR_CAUSE
+        lda     TVAL
+        sta     f:RT_TRACE + TR_TVAL
+        lda     TVAL+2
+        sta     f:RT_TRACE + TR_TVAL + 2
+        lda     f:$EF0000 + WPC
+        sta     f:RT_TRACE + TR_PC
+        lda     f:$EF0000 + WPC + 2
+        sta     f:RT_TRACE + TR_PC + 2
+        step    $FF
+        rts
 
 ; ---- entry ------------------------------------------------------------------------------
 ; Arrives native (the caller did CLC/XCE), M/X unknown.
@@ -172,20 +792,8 @@ entry:  rep     #$30
         lda     #2
         sta     STATUS
         stp
-@eng:   lda     a:WID+2                 ; "E", the version: RUN from version 2
-        and     #$FF00
-        cmp     #$0200
-        bcc     :+
-        inc     RUNM
-:       ldx     #4                      ; x1..x31 = 0 (the register file has no reset)
-:       stz     a:WX,x
-        stz     a:WX+2,x
-        inx
-        inx
-        inx
-        inx
-        cpx     #$80
-        bne     :-
+@eng:   jsr     eng_mode
+        jsr     eng_clear
         lda     f:hdr_sp                ; sp: the header's, or $E00000
         ora     f:hdr_sp+2
         bne     :+
@@ -642,16 +1250,27 @@ puthex8:
         jmp     plat_putc
         .a16
 
-; ---- the platform: the sim's ports ---------------------------------------------------
+; ---- the platform: the sim's ports; an application has neither ---------------------
+; An application's run (APPM) has no console: what it writes is discarded, as a
+; desktop application's stdout is (docs/RVV2_INTEROP.md), and it reads nothing;
+; its exit or trap goes back to the lifecycle instead of stopping the machine.
         .a8
 plat_putc:
+        pha
+        lda     APPM
+        bne     :+
+        pla
         sta     f:PORT_PUTC
+        rts
+:       pla
         rts
 plat_getc:
         lda     f:PORT_GETC
         rts
         .a16
 plat_avail:
+        lda     APPM
+        bne     :+
         sep     #$20
         .a8
         lda     f:PORT_AVAIL
@@ -664,7 +1283,10 @@ plat_avail:
 :       sec
         rts
 plat_halt:
-        stp
+        lda     APPM
+        beq     :+
+        jmp     app_done
+:       stp
 
         .segment "RODATA"
 s_noeng: .byte  "rvengine: no RISC-V engine at $EF:FE00", 10, 0
@@ -681,6 +1303,13 @@ c_ld:   .byte   "load fault", 0
 c_st:   .byte   "store fault", 0
 c_fe:   .byte   "fetch fault", 0
 causes: .word   .loword(c_ill), .loword(c_ebr), .loword(c_ld), .loword(c_st), .loword(c_fe)
+
+; ---- RISC-V code the runtime runs, in this bank (apple/rvvm/rt; the engine reads
+; the ROM itself).  rt_null: rung I2's program - it checks the environment block
+; it is given and exits 0, or the number of the check that failed.
+        .segment "RVCODE"
+rt_null:
+        .incbin "rt_null.bin"
 
 ; The engine's result code (even, under 32) to its handler.
 evtab:  .word   .loword(loop)           ;  0 NEXT (never here)

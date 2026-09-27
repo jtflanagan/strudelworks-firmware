@@ -21,7 +21,7 @@ mkdir -p "$work"
 
 # The stub: position-independent, linked at 0, wrapped as a relocation-free S16.
 printf 'MEMORY { S: start = $0000, size = $10000, file = %%O; }\nSEGMENTS { CODE: load = S, type = ro; }\n' > "$work/stub.cfg"
-ca65 -o "$work/stub.o" "$root/apple/rvvm/stub/stub.s"
+ca65 -I "$root/apple/rvvm/splash" -o "$work/stub.o" "$root/apple/rvvm/stub/stub.s"
 ld65 -C "$work/stub.cfg" -o "$work/stub.bin" "$work/stub.o"
 python3 "$root/tools/omf_s16.py" "$work/stub.bin" "$work/SPLASH" > /dev/null
 

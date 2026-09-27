@@ -13,7 +13,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 out="${1:-$root/../strudelworks-host/assets/rvruntime.bin}"
 work="$root/sim/rvvm_work"
 mkdir -p "$work"
-ca65 -g -o "$work/rvruntime.o" "$root/apple/rvvm/rvengine.s"
+"$root/apple/rvvm/rt/build.sh" "$work/rt"
+ca65 -g --bin-include-dir "$work/rt" -o "$work/rvruntime.o" "$root/apple/rvvm/rvengine.s"
 ld65 -C "$root/apple/rvvm/rvengine.cfg" -o "$work/rvruntime.raw" -Ln "$work/rvruntime.lbl" "$work/rvruntime.o"
 n=$(stat -c %s "$work/rvruntime.raw")
 [ "$n" -le 65536 ] || { echo "the runtime is $n bytes: more than the one bank" >&2; exit 1; }

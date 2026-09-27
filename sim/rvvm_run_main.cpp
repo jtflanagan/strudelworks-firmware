@@ -34,6 +34,20 @@
 //
 // Exit status: 0 when the guest exits 0 (or, with --expect-trap, stops on that
 // trap cause) and nothing failed, 1 otherwise.
+//
+// THE APPLICATION MODE (--app=STUB.bin, docs/RVV2_INTEROP.md rung I2): no guest;
+// the stub of a GS/OS application (apple/rvvm/stub, raw bytes) is entered as the
+// GS/OS loader would - at $03:1000, native, A = the user ID, D/S = a direct page /
+// stack segment at $00:2000-$2FFF - and GS/OS is a STAND-IN: the toolbox's
+// dispatcher ($E1:0000) and GS/OS's entry ($E1:00A8) are 65816 trampolines that
+// hand S and the call number to this harness through ports ($EF:FFF0-$EF:FFF9);
+// the harness does the call against the flat memory, takes the parameters (or the
+// inline block) off the stack, and hands back the new S and the error.  The run
+// ends at QuitGS, and the verdict is the lifecycle's: the calls in their order
+// and with their arguments, the registration table in $EE and the trace at
+// $EE:FF00, enhanced video left off, the stack balanced, and no write anywhere
+// the lifecycle does not own.  --stale first leaves a dead application in the
+// registration table (a bank of the upper half, enhanced video on) to reclaim.
 
 #include "Vrvvm_sys.h"
 #include "Vrvvm_sys___024root.h"
@@ -121,6 +135,305 @@ static void dump_regs(const char *who, const uint32_t *x, uint32_t pc) {
     for (int i = 0; i < 32; i++) printf("  %-4s=%08x%s", abi[i], x[i], (i % 4 == 3) ? "\n" : "");
 }
 
+// ---- the application mode: a GS/OS stand-in (docs/RVV2_INTEROP.md, rung I2) ----------
+static const unsigned APP_STUB = 0x031000;              // where the "loader" put the stub
+static const unsigned APP_DP = 0x2000, APP_DP_END = 0x2FFF;   // its ~Direct segment
+static const unsigned APP_UID = 0x1002;
+static const unsigned SC_S = 0xEFFFF0, SC_CALL = 0xEFFFF2, SC_GS = 0xEFFFF4,
+                      SC_SOUT = 0xEFFFF6, SC_ERR = 0xEFFFF8;
+static const unsigned HEAP = 0x060000, MPTRS = 0x05F000, DPAGE_H = 0x05FF00;
+static const unsigned REG = 0xEE0000, TRACE = 0xEEFF00, EV_CTL = 0xE20000;
+
+static void wr16(unsigned a, unsigned v) { mem[a] = uint8_t(v); mem[a + 1] = uint8_t(v >> 8); }
+static void wr32(unsigned a, uint32_t v) { wr16(a, v & 0xFFFF); wr16(a + 2, v >> 16); }
+
+struct AppCall { std::string name; std::vector<uint32_t> args; };
+
+static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char *stub_path, bool stale,
+                   unsigned long long max_cycles) {
+    const unsigned vmb = vm_bank << 16;
+    load_file(vm, mem, vmb, 0x10000);
+    if (memcmp(&mem[vmb], "RVVM", 4) != 0) { fprintf(stderr, "%s: no RVVM header\n", vm); return 2; }
+    const size_t stub_len = load_file(stub_path, mem, APP_STUB, 0x10000 - (APP_STUB & 0xFFFF));
+    if (!load_fetch_word(hex)) { fprintf(stderr, "cannot read %s\n", hex); return 2; }
+
+    // The stub's header, read as the runtime reads it: its tool list is what
+    // StartUpTools must be handed.
+    unsigned hdr = 0;
+    for (size_t i = 0; i + 4 <= stub_len; i++)
+        if (!memcmp(&mem[APP_STUB + i], "RVAP", 4)) { hdr = APP_STUB + unsigned(i); break; }
+    if (!hdr) { fprintf(stderr, "%s: no RVAP header\n", stub_path); return 2; }
+    const unsigned h_flags = rd16(hdr + 6), h_vmode = rd16(hdr + 8);
+    const unsigned list = hdr + rd16(hdr + 14), ntools = rd16(list);
+    std::vector<uint32_t> want_tools;
+    for (unsigned i = 0; i < ntools; i++) want_tools.push_back(rd32(list + 2 + 4 * i));
+
+    // The machine as the loader leaves it: the stub entered native, 16-bit, with
+    // A = the user ID and D/S on its direct page / stack segment.
+    const unsigned char boot[] = {
+        0x18, 0xFB, 0xC2, 0x30,                         // CLC XCE REP #$30
+        0xA9, APP_DP & 0xFF, APP_DP >> 8, 0x5B,         // LDA #dp TCD
+        0xA9, APP_DP_END & 0xFF, APP_DP_END >> 8, 0x1B, // LDA #end TCS
+        0xA9, APP_UID & 0xFF, APP_UID >> 8,             // LDA #uid
+        0x5C, APP_STUB & 0xFF, (APP_STUB >> 8) & 0xFF, APP_STUB >> 16,   // JML stub
+    };
+    memcpy(&mem[0x000800], boot, sizeof boot);
+    mem[0x00FFFC] = 0x00; mem[0x00FFFD] = 0x08;
+    // The trampolines: REP #$30, S and the call to the harness, the new S and the
+    // error back, C = an error (the toolbox's convention), RTL.
+    auto tramp = [&](unsigned at, unsigned trigger) {
+        const unsigned char t[] = {
+            0xC2, 0x30, 0x3B,                                   // REP #$30 TSC
+            0x8F, SC_S & 0xFF, (SC_S >> 8) & 0xFF, SC_S >> 16,  // STA SC_S
+            0x8A,                                               // TXA
+            0x8F, uint8_t(trigger), uint8_t(trigger >> 8), uint8_t(trigger >> 16),   // STA trigger
+            0xAF, SC_SOUT & 0xFF, (SC_SOUT >> 8) & 0xFF, SC_SOUT >> 16, 0x1B,        // LDA SC_SOUT TCS
+            0xAF, SC_ERR & 0xFF, (SC_ERR >> 8) & 0xFF, SC_ERR >> 16,                 // LDA SC_ERR
+            0xC9, 0x01, 0x00, 0x6B,                                                  // CMP #1 RTL
+        };
+        memcpy(&mem[at], t, sizeof t);
+    };
+    tramp(0xE10000, SC_CALL);
+    tramp(0xE100A8, SC_GS);
+    for (unsigned a = APP_DP; a <= APP_DP_END; a++) mem[a] = 0xA5;   // the stack's high-water mark
+    if (stale) {   // a dead application: registered, one upper bank, enhanced video on
+        memcpy(&mem[REG], "RVRG", 4); wr16(REG + 4, 1);
+        wr16(REG + 6, 0x3003); wr16(REG + 8, 0x3003); wr32(REG + 10, 0x123400);
+        wr16(REG + 0x100 + 2 * 5, 0x3003);
+        mem[EV_CTL] = 1;
+    }
+
+    dut = new Vrvvm_sys;
+    dut->irq_n = 1; dut->nmi_n = 1; dut->cyc_en = 1; dut->i_din = 0; dut->d_din = 0;
+    dut->rst = 1; tick(); tick(); dut->rst = 0; dut->eval();
+
+    std::string fail;
+    char msg[512];
+    std::vector<AppCall> calls;
+    unsigned sc_s = 0, sc_sout = 0, sc_err = 0, quit_s = 0;
+    bool quit = false;
+    unsigned hp = HEAP, nmp = 0;
+    struct Block { uint32_t ptr, size; unsigned uid; bool live; };
+    std::map<uint32_t, Block> handles;
+    uint32_t tools_ref = 0;
+    unsigned low_water = APP_DP_END + 1;
+    long ev_enable_at = -1, ev_commit_at = -1;
+    unsigned ev_enable = 0xFF;
+    unsigned long long cycles = 0;
+    unsigned stray = 0;
+
+    // A toolbox call: X = the call number, S as the dispatcher saw it (the
+    // return address at S+1, the parameters from S+4, the last pushed first).
+    // The numbers and parameter sizes are read off System 6.0.1's own Tool
+    // Locator on the machine (2026-09-26: StartUpTools $1801 takes 8 bytes and
+    // returns a long, ShutDownTools $1901 takes 6), never recalled - a stand-in
+    // written from memory agreed with a runtime written from the same memory,
+    // and both were wrong.
+    auto tool = [&](unsigned num) {
+        const unsigned P = sc_s + 4;
+        unsigned npop = 0, err = 0;
+        AppCall c;
+        switch (num) {
+        case 0x0201: c.name = "TLStartUp"; break;
+        case 0x0301: c.name = "TLShutDown"; break;
+        case 0x0202: c.name = "MMStartUp"; wr16(P, APP_UID); break;
+        case 0x0302: c.name = "MMShutDown"; c.args = {rd16(P)}; npop = 2; break;
+        case 0x0902: {
+            c.name = "NewHandle";
+            const uint32_t size = rd32(P + 8);
+            const unsigned uid = rd16(P + 6), attr = rd16(P + 4);
+            c.args = {size, uid, attr};
+            npop = 12;
+            if (attr & 0x0004) hp = (hp + 0xFF) & ~0xFFu;
+            if ((attr & 0x0010) && (hp >> 16) != ((hp + size - 1) >> 16)) hp = (hp + 0xFFFF) & ~0xFFFFu;
+            const uint32_t mp = MPTRS + 8 * nmp++;
+            wr32(mp, hp);
+            handles[mp] = {hp, size, uid, true};
+            wr32(P + 12, mp);
+            c.args.push_back(mp);
+            hp += size;
+            break;
+        }
+        case 0x1002: {
+            c.name = "DisposeHandle";
+            const uint32_t h = rd32(P);
+            c.args = {h};
+            npop = 4;
+            auto it = handles.find(h);
+            if (it == handles.end() || !it->second.live) { err = 0x0206; snprintf(msg, sizeof msg, "DisposeHandle of $%06X: not a live handle\n", h); fail += msg; }
+            else it->second.live = false;
+            break;
+        }
+        case 0x1801: {
+            c.name = "StartUpTools";
+            const uint32_t ref = rd32(P);
+            const unsigned desc = rd16(P + 4), uid = rd16(P + 6);
+            c.args = {uid, desc, ref};
+            npop = 8;
+            if (desc != 0) { snprintf(msg, sizeof msg, "StartUpTools: refDesc %u, want 0 (a pointer)\n", desc); fail += msg; }
+            if (rd16(ref) != 0) { snprintf(msg, sizeof msg, "StartUpTools: record flags $%04X, want 0\n", rd16(ref)); fail += msg; }
+            if (rd16(ref + 2) != h_vmode) { snprintf(msg, sizeof msg, "StartUpTools: video mode $%04X, the header says $%04X\n", rd16(ref + 2), h_vmode); fail += msg; }
+            std::vector<uint32_t> got;
+            for (unsigned i = 0, n = rd16(ref + 10); i < n && i < 64; i++) got.push_back(rd32(ref + 12 + 4 * i));
+            if (got != want_tools) { snprintf(msg, sizeof msg, "StartUpTools: %zu tools, not the header's %zu\n", got.size(), want_tools.size()); fail += msg; }
+            wr16(ref + 4, 0);            // resFileID
+            wr32(ref + 6, DPAGE_H);      // dPageHandle: ShutDownTools reads it back
+            wr32(P + 8, ref);
+            tools_ref = ref;
+            break;
+        }
+        case 0x1901: {
+            c.name = "ShutDownTools";
+            const uint32_t ref = rd32(P);
+            const unsigned desc = rd16(P + 4);
+            c.args = {desc, ref};
+            npop = 6;
+            if (desc != 0 || ref != tools_ref) { snprintf(msg, sizeof msg, "ShutDownTools(%u, $%06X): not StartUpTools' record $%06X\n", desc, ref, tools_ref); fail += msg; }
+            else if (rd32(ref + 6) != DPAGE_H) { snprintf(msg, sizeof msg, "ShutDownTools: the record's direct page handle is $%06X, StartUpTools wrote $%06X\n", rd32(ref + 6), DPAGE_H); fail += msg; }
+            break;
+        }
+        default:
+            snprintf(msg, sizeof msg, "the stand-in has no toolbox call $%04X\n", num);
+            fail += msg;
+            err = 0x0002;
+            c.name = "?";
+        }
+        calls.push_back(c);
+        for (int i = 3; i >= 1; i--) mem[sc_s + npop + i] = mem[sc_s + i];   // the return address, over the parameters
+        sc_sout = sc_s + npop;
+        sc_err = err;
+    };
+    // GS/OS: JSL $E100A8, then the call number and the parameter block inline.
+    auto gsos = [&]() {
+        const uint32_t ret = mem[sc_s + 1] | (mem[sc_s + 2] << 8) | (mem[sc_s + 3] << 16);
+        const unsigned num = rd16(ret + 1);
+        const uint32_t pb = rd32(ret + 3) & 0xFFFFFF;
+        AppCall c;
+        c.args = {num, pb};
+        sc_sout = sc_s;
+        sc_err = 0;
+        if (num == 0x2029) {
+            c.name = "QuitGS";
+            if (rd16(pb) != 0) { snprintf(msg, sizeof msg, "QuitGS: pCount %u, want 0\n", rd16(pb)); fail += msg; }
+            quit = true;
+            quit_s = sc_s;
+        } else {
+            c.name = "?";
+            snprintf(msg, sizeof msg, "the stand-in has no GS/OS call $%04X\n", num);
+            fail += msg;
+            sc_err = 0x0001;
+        }
+        for (int i = 0; i < 3; i++) mem[sc_s + 1 + i] = uint8_t((ret + 6) >> (8 * i));   // past the inline block
+        calls.push_back(c);
+    };
+
+    // What the lifecycle may write: its direct page and stack, the low block, the
+    // registration table and the trace, enhanced video's two control bytes, the
+    // stand-in's ports - and the engine's window.
+    auto owned = [&](unsigned a) {
+        if (a >= APP_DP && a <= APP_DP_END) return true;
+        if (a >= REG && a < REG + 0x300) return true;
+        if (a >= TRACE && a < TRACE + 0x100) return true;
+        if (a == EV_CTL || a == EV_CTL + 1) return true;
+        if (a >= SC_S && a < SC_ERR + 2) return true;
+        for (auto &h : handles) if (h.second.live && a >= h.second.ptr && a < h.second.ptr + h.second.size) return true;
+        return false;
+    };
+
+    while (!dut->halted && !quit) {
+        if (cycles >= max_cycles) { fail += "runaway: no QuitGS in " + std::to_string(max_cycles) + " cycles\n"; break; }
+        const unsigned addr = dut->addr, rw = dut->rw;
+        unsigned char din = 0;
+        if (rw && (dut->vda || dut->vpa)) {
+            if (dut->vda && addr >= SC_SOUT && addr < SC_SOUT + 2) din = uint8_t(sc_sout >> (8 * (addr - SC_SOUT)));
+            else if (dut->vda && addr >= SC_ERR && addr < SC_ERR + 2) din = uint8_t(sc_err >> (8 * (addr - SC_ERR)));
+            else din = mem[addr];
+        }
+        if (dut->vpa) { dut->i_din = din; dut->d_din = 0; } else { dut->d_din = din; dut->i_din = 0; }
+        dut->eval();
+        if (dut->win_sel) {
+            while (dut->win_stall) {
+                dut->cyc_en = 0; tick(); cycles++;
+                if (cycles >= max_cycles) break;
+            }
+            dut->cyc_en = 1;
+            if (rw) dut->d_din = dut->win_rdata;
+            dut->eval();
+        }
+        if (!rw && dut->vda) {
+            const unsigned char v = dut->dout;
+            if (addr == SC_S) sc_s = (sc_s & 0xFF00) | v;
+            else if (addr == SC_S + 1) sc_s = (sc_s & 0xFF) | (v << 8);
+            else if (addr == SC_CALL) sc_err = v;                                   // the call's low byte, for a moment
+            else if (addr == SC_CALL + 1) tool(sc_err | (v << 8));
+            else if (addr == SC_GS + 1) gsos();
+            if (dut->win_sel) {}
+            else if (!owned(addr)) {
+                if (!stray++) { snprintf(msg, sizeof msg, "a write the lifecycle does not own: $%02X to $%06X (pc $%02X/%04X)\n", v, addr, CPU(pbr), CPU(pc)); fail += msg; }
+            }
+            else mem[addr] = v;
+            if (addr == EV_CTL) { ev_enable = v; ev_enable_at = long(cycles); }
+            if (addr == EV_CTL + 1) ev_commit_at = long(cycles);
+            if (addr >= APP_DP + 0x100 && addr <= APP_DP_END && addr < low_water) low_water = addr;
+        }
+        tick();
+        cycles++;
+    }
+
+    // The verdict.
+    std::string seq;
+    for (auto &c : calls) seq += (seq.empty() ? "" : " ") + c.name;
+    printf("app: %s\n", seq.c_str());
+    const char *want[] = {"TLStartUp", "MMStartUp", "NewHandle", "StartUpTools", "ShutDownTools",
+                          "DisposeHandle", "MMShutDown", "TLShutDown", "QuitGS"};
+    std::string wseq;
+    for (auto w : want) wseq += (wseq.empty() ? "" : " ") + std::string(w);
+    if (seq != wseq) fail += "the calls are not the lifecycle's: want " + wseq + "\n";
+    if (!quit) fail += "the stub never quit\n";
+    else if (quit_s != APP_DP_END - 3) { snprintf(msg, sizeof msg, "the stack at QuitGS is $%04X, want $%04X: the runtime left it unbalanced\n", quit_s, APP_DP_END - 3); fail += msg; }
+    uint32_t low = 0, handle = 0;
+    for (auto &c : calls) {
+        if (c.name == "NewHandle") {
+            handle = c.args[3];
+            low = handles[handle].ptr;
+            if (c.args[1] != APP_UID) { snprintf(msg, sizeof msg, "NewHandle for user ID $%04X\n", c.args[1]); fail += msg; }
+            if ((c.args[2] & 0xC01C) != 0xC01C) { snprintf(msg, sizeof msg, "NewHandle attributes $%04X: not locked, fixed, page-aligned, in one bank, out of special memory ($C01C)\n", c.args[2]); fail += msg; }
+            printf("app: the low block $%06X, %u bytes\n", low, c.args[0]);
+        }
+        if (c.name == "DisposeHandle" && c.args[0] != handle) { snprintf(msg, sizeof msg, "DisposeHandle $%06X, not the low block's $%06X\n", c.args[0], handle); fail += msg; }
+        if (c.name == "StartUpTools" && c.args[0] != APP_UID) { snprintf(msg, sizeof msg, "StartUpTools for user ID $%04X\n", c.args[0]); fail += msg; }
+        if (c.name == "MMShutDown" && c.args[0] != APP_UID) { snprintf(msg, sizeof msg, "MMShutDown for user ID $%04X\n", c.args[0]); fail += msg; }
+    }
+    if (tools_ref && (tools_ref < low || tools_ref >= low + 0x10000)) fail += "the start/stop record is not in the low block\n";
+    // The trace
+    const unsigned t_step = rd16(TRACE + 12), t_err = rd16(TRACE + 14), t_stat = rd16(TRACE + 24), t_done = rd16(TRACE + 40);
+    const uint32_t t_code = rd32(TRACE + 20), t_low = rd32(TRACE + 16);
+    printf("app: trace step $%02X, exit %d (status %u, cause %u, pc $%08X), toolbox error $%04X, done $%02X\n",
+           t_step, int32_t(t_code), t_stat, rd16(TRACE + 26), rd32(TRACE + 32), t_err, t_done);
+    if (memcmp(&mem[TRACE], "RVRT", 4)) fail += "no trace at $EE:FF00\n";
+    if (t_step != 0xFF) fail += "the trace: the lifecycle did not come back\n";
+    if (t_stat != 1 || t_code != 0) fail += "the program did not exit 0 (rt_null: the failing check's number)\n";
+    if (t_low != low) fail += "the trace's low block is not NewHandle's\n";
+    const unsigned want_done = 0x0F | ((h_flags & 1) ? 0x10 : 0);
+    if (t_done != want_done) { snprintf(msg, sizeof msg, "the steps done $%02X, want $%02X\n", t_done, want_done); fail += msg; }
+    // The registration table: made, and empty again
+    if (memcmp(&mem[REG], "RVRG", 4) || rd16(REG + 4) != 1) fail += "no registration table at $EE:0000\n";
+    if (rd16(REG + 6) || rd16(REG + 8) || rd32(REG + 10)) { snprintf(msg, sizeof msg, "the registration table still holds video $%04X, application $%04X\n", rd16(REG + 6), rd16(REG + 8)); fail += msg; }
+    for (unsigned b = 0; b < 256; b++)
+        if (rd16(REG + 0x100 + 2 * b)) { snprintf(msg, sizeof msg, "upper bank $%03X still owned by $%04X\n", 0x100 + b, rd16(REG + 0x100 + 2 * b)); fail += msg; break; }
+    // Enhanced video: off, and the global commit after it
+    if ((h_flags & 1) || stale) {
+        if (ev_enable != 0 || ev_commit_at < ev_enable_at) fail += "enhanced video: not left off (ENABLE 0, then the global commit)\n";
+    }
+    if (low_water <= APP_DP_END) printf("app: the stack's deepest write $%04X: %u bytes of the %u-byte segment\n", low_water, APP_DP_END + 1 - low_water, APP_DP_END + 1 - APP_DP);
+    if (stray > 1) { snprintf(msg, sizeof msg, "%u stray writes in all\n", stray); fail += msg; }
+    printf("app: %llu cycles\n", cycles);
+    if (!fail.empty()) printf("%sFAIL\n", fail.c_str());
+    else printf("app: PASS\n");
+    delete dut;
+    return fail.empty() ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     const char *hex = nullptr, *vm = nullptr, *guest = nullptr;
@@ -131,6 +444,8 @@ int main(int argc, char **argv) {
     unsigned long long trace = 0;
     long expect_trap = -1;
     std::string input;
+    const char *app = nullptr;
+    bool stale = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto val = [&](const char *k) { return a.substr(strlen(k)); };
@@ -144,10 +459,16 @@ int main(int argc, char **argv) {
         else if (a.rfind("--max-cycles=", 0) == 0) max_cycles = strtoull(val("--max-cycles=").c_str(), nullptr, 0);
         else if (a.rfind("--trace=", 0) == 0) trace = strtoull(val("--trace=").c_str(), nullptr, 0);
         else if (a.rfind("--expect-trap=", 0) == 0) expect_trap = strtol(val("--expect-trap=").c_str(), nullptr, 0);
+        else if (a.rfind("--app=", 0) == 0) app = argv[i] + 6;
+        else if (a == "--stale") stale = true;
         else if (a == "--ref") use_ref = true;
         else if (a == "--ref-only") ref_only = true;
         else if (a == "--prof") prof = true;
         else { fprintf(stderr, "unknown argument %s\n", argv[i]); return 2; }
+    }
+    if (app) {
+        if (!hex || !vm || guest || ref_only || use_ref) { fprintf(stderr, "--app= takes --hex= --vm= and no guest, no reference\n"); return 2; }
+        return run_app(hex, vm, vm_bank, app, stale, max_cycles);
     }
     if (!guest || (!ref_only && (!hex || !vm))) { fprintf(stderr, "need --guest= and (--hex= --vm= | --ref-only)\n"); return 2; }
 

@@ -1,12 +1,19 @@
 # RISC-V applications under GS/OS: the high/low interop
 
 Status: **2026-09-26, branch `riscv_v2`. DESIGN reviewed by the user 2026-09-26. The engine's map
-rule is built (gs_map3, TIMING MET 0/91,875, on the card). RUNG I1 DONE ON HARDWARE: the Finder
-launches `/RVDEMO/SPLASH/SPLASH` (tools/omf_s16.py, apple/rvvm/make_disk.sh), the stub finds
-"RVVM" in `$F1` (the host's `gs_rvrom`), JSLs `$F1:0020` and quits through `$F1:0030`; the
-runtime's trace at `$EE:FF00` shows the entry taken once per launch, the user ID ($1002) and the
-stub's header read back through the address it passed ("RVAP").** The card's main memory is the whole 32 MB DDR3 bank: the lower 16 MB the 65816's, the
-upper 16 MB the RISC-V engine's alone, all of it through the L2 (fw 06b4b3f, on hardware). This
+rule is built (gs_map3, TIMING MET 0/91,875, on the card). RUNG I1 DONE ON HARDWARE (fw d422b82).
+RUNG I2 DONE ON HARDWARE: the lifecycle - registration in `$EE`, TLStartUp/MMStartUp, the low
+block (NewHandle `$C01C`), the environment block and the start/stop record in it, StartUpTools,
+enhanced video's ownership, the engine running `rt_null` from `$F1` with a0 = the environment block,
+and all of it undone in reverse - passes `sim/run_rv_app.sh` (GS/OS played by a stand-in, clean and
+with a stale registration to reclaim; three mutations caught), and on the card under System 6.0.1:
+launched from the Finder, the trace says every step done (`$1F`), the low block at `$08:6300`,
+rt_null's checks all passed (exit 0 at its ECALL, `$F1:E0F8`), the table empty and enhanced video off
+afterwards, back to the Finder. The first hardware run crashed: StartUpTools is `$1801` and
+ShutDownTools `$1901` (read off the Tool Locator's own table on the machine), not the numbers recalled
+- and the stand-in, written from the same recollection, had agreed.** The card's main memory is
+the whole 32 MB DDR3 bank: the lower 16 MB the 65816's, the upper 16 MB the RISC-V engine's alone,
+all of it through the L2 (fw 06b4b3f, on hardware). This
 document is how a RISC-V program becomes a GS/OS application. The decisions marked *(user)* were
 made by the user on 2026-09-26; everything else is proposed and open to change.
 
@@ -87,6 +94,27 @@ header: "RVAP", version
 The stub's own direct page and stack are the runtime's 65816 context while the application runs;
 the header asks GS/OS's loader for enough (the `~Direct` / stack segment size).
 
+### The stub's header (version 2, built at rung I2)
+
+`apple/rvvm/stub/stub.s` is the one template; each application's `app.inc` (e.g.
+`apple/rvvm/splash/app.inc`) gives its values and lists. Offsets from the header:
+
+| off | what |
+|---|---|
+| +0 | `"RVAP"` |
+| +4 | the header's version, 2 |
+| +6 | flags: bit 0 = the application owns enhanced video |
+| +8 | StartUpTools' video mode (`$0000` 320, `$0080` 640) |
+| +10 | the bounce buffer, bytes |
+| +12 | the call area, bytes |
+| +14 | the tool list's offset: a count (at most 32), then (tool number, minimum version) word pairs |
+| +16 | the program image's name's offset: a GS/OS class-1 string, `9:` = the application's folder (rung I3) |
+
+`tools/omf_s16.py` writes the stub's code segment and a `~Direct` segment (KIND `$12`, 4 KB, reserved
+space only): GS/OS enters the stub with D at its start and S at its end, and that direct page and
+stack are the runtime's while the application runs. The sim measures the stack the lifecycle itself
+uses (25 bytes of the stand-in's calls; the real tools take more - hence 4 KB, not the loader's default).
+
 ## The runtime's lifecycle (one application)
 
 1. **Enter** from the stub: the user ID, the header, the stub's D and S.
@@ -110,6 +138,27 @@ the header asks GS/OS's loader for enough (the `~Direct` / stack segment size).
 8. **Exit** (ECALL `exit`, or a trap): tools down, enhanced video released, upper-half banks
    freed, the user ID unregistered; the low block goes with the user ID's memory at `_QuitGS`.
    The exit code returns to the stub.
+
+**As built at rung I2** (`apple/rvvm/rvengine.s`, `app_entry`): the order is register -> TLStartUp,
+MMStartUp -> NewHandle (the low block, attributes `$C01C`: locked, fixed, page-aligned, not across a
+bank, not in banks `$00`/`$01`/`$E0`/`$E1` - so the engine reads and writes it itself) -> the
+environment block and the start/stop record in it -> StartUpTools(user ID, 0, the record) ->
+enhanced video (header flag) -> the engine -> and the undoing, driven by a DONE mask so a failure part
+way undoes exactly what was done: video off, ShutDownTools(0, the record), DisposeHandle (explicitly,
+not left to QuitGS), MMShutDown, TLShutDown, unregister. The start/stop record lives in the low block
+because StartUpTools writes the resource file and direct page handle back into it and ShutDownTools
+reads them. The low block is: the environment block (64 bytes), the start/stop record (12 + 4 per
+tool), the bounce buffer, the call area, each 4-aligned.
+
+While the engine runs for an application the runtime's platform changes: the console is discarded,
+nothing is read, and an exit or a trap returns to the lifecycle (to the S saved when the engine
+started) instead of stopping the machine. Exit codes the runtime makes itself: -2 a header it does
+not know, -3 a toolbox call refused (the trace says which and why), -4 no engine.
+
+At rung I2 the program is `rt_null` (`apple/rvvm/rt/rt_null.S`, RISC-V code in the runtime's bank at
+`$F1:E000`, run in place): it checks the environment block - the magic, version and size, the user
+ID, the low block's bank, the pieces inside it in order, a word written to the call area, the video
+field against the flags and ENABLE off - and exits 0 or the failing check's number.
 
 ## The environment block
 
@@ -141,6 +190,25 @@ Allocation is whole banks, contiguous, first fit. It lives in bank `$EE` (ours, 
 anything else; `$E2` is enhanced video's, `$EF` the panel's) *(user: `$EE` and 64 KB banks)*. A registration table beside it names
 the live RISC-V applications (user ID, their low block) - one entry today, room for more later (a
 RISC-V desk accessory beside an application).
+
+As built at rung I2 (`$EE:0000`, made when its magic is not there - DDR3 holds whatever it held):
+
+| at | what |
+|---|---|
+| `+$000` | `"RVRG"`, then the version (1) at `+4` |
+| `+$006` | enhanced video's owner: a user ID, 0 = none |
+| `+$008` | the application slot: its user ID (0 = free), its low block (long) at `+$00A` |
+| `+$100` | 256 owner words, banks `$100`-`$1FF` of the engine's space |
+
+Only one application runs at a time, so one found in the slot at an entry is dead (its quit never
+unregistered it: a reset, a crash): everything registered to its user ID is taken back - its banks,
+and enhanced video, turned off - before the slot is reused.
+
+**The trace** (`$EE:FF00`, `"RVRT"`): what the last lifecycle did, read from the host's mirror - an
+entry count, the user ID, the header's address, the last step taken (`$FF` when it came back), the
+last toolbox error, the low block, the exit code, the engine's status/cause/tval/pc at the stop,
+StartUpTools' ref, and the DONE mask at its highest. (The mirror shows only what was written since
+swhost started: the marker and the count may read 0 there while the card holds them.)
 
 ## Loading into the upper half: the loader in ROM *(user)*
 
@@ -188,10 +256,12 @@ registers more banks), enhanced video helpers (the control bank, descriptors, co
 
 ## How it is tested
 
-- **Sim, without GS/OS**: the GS bench's engine mode with the GS/OS and toolbox entry points
-  (`$E100A8`, `$E10000`) played by a small 65816 stand-in that answers the calls the runtime makes
-  (NewHandle, Open/Read/Close, the tool startups, GetNextEvent with a scripted key). The runtime's
-  logic and the loader, in lockstep as today.
+- **Sim, without GS/OS**: `sim/run_rv_app.sh [APP]` - `rvvm_run --app=STUB.bin`: the card's 65816
+  and the engine, the stub entered as the loader would, GS/OS's two entry points (`$E10000`,
+  `$E100A8`) 65816 trampolines into a C++ stand-in that answers the calls the runtime makes. The
+  verdict: the calls in order with their arguments (the start/stop record against the stub's header),
+  the trace, the registration table empty again, enhanced video left off, the stack balanced at
+  QuitGS, and no write outside what the lifecycle owns. Run clean and `--stale`.
 - **Hardware, with GS/OS**: an 800K ProDOS disk *(user)*, a folder holding the stub, the image and
   its resources, mounted on the 3.5" drive (`fd35 =`), launched from the Finder.
 
@@ -200,16 +270,16 @@ registers more banks), enhanced video helpers (the control bank, descriptors, co
 | # | What | Proves |
 |---|------|--------|
 | I1 **done** | `$F1` on the card (a host conf key loads the runtime image there as the panel is at `$F0`), `tools/omf_s16.py`, the host's 800K disk builder, a stub whose runtime entry only returns | the Finder launches the stub, it enters `$F1` and quits back, on hardware |
-| I2 | registration, the low block, the environment block, tool startup/shutdown, enhanced video ownership | the lifecycle, in sim (stand-in) and on hardware |
+| I2 **done** | registration, the low block, the environment block, tool startup/shutdown, enhanced video ownership | the lifecycle, in sim (stand-in) and on hardware |
 | I3 | the loader, the image read through GS/OS, upper-half banks | a guest loaded into the upper 16 MB runs and exits back to the Finder |
 | I4 | `call65816`, generated wrappers, bounce I/O, callbacks, the Event Manager key | a guest reads a file and waits for a key |
 | I5 | the splash: enhanced video mode 1, the PNG decoder (measured) | DOOM's title screen, a key, back to the Finder |
 
 ## Open
 
-- The stub's exact header layout and the OMF details (`~Direct` size, KIND).
-- Where the runtime's own per-application state lives (in the low block, found through the
-  registration table, is the proposal).
+- Where the runtime's own per-application state lives: the stub's direct page while the application
+  runs, and the start/stop record in the low block (rung I2); a second RISC-V client (a desk
+  accessory) will need it found through the registration table.
 - Console output (fd 1/2): a GS/OS desktop application has no console - it draws in windows - so C's
   stdout is **discarded**, as any desktop application's would be. A debug channel to the host's log
   is a possible development aid, decided when a real application needs it.

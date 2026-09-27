@@ -46,7 +46,8 @@ for a in "$@"; do
     [ "$a" = "--engine-vm" ] || args+=("$a")
 done
 set -- "${args[@]+"${args[@]}"}"
-ca65 -g -o "$work/$vmsrc.o" "$root/apple/rvvm/$vmsrc.s"
+"$root/apple/rvvm/rt/build.sh" "$work/rt"
+ca65 -g --bin-include-dir "$work/rt" -o "$work/$vmsrc.o" "$root/apple/rvvm/$vmsrc.s"
 ld65 -C "$root/apple/rvvm/$vmsrc.cfg" -o "$work/$vmsrc.bin" -Ln "$work/$vmsrc.lbl" "$work/$vmsrc.o"
 
 [ "${1:-}" = "--build-only" ] && { echo "built $run and $work/$vmsrc.bin ($(stat -c %s "$work/$vmsrc.bin") bytes)"; exit 0; }
