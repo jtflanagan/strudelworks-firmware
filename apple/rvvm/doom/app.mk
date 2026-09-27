@@ -4,9 +4,10 @@ dg="$root/../doomgeneric/doomgeneric"
 [ -d "$dg" ] || { echo "no doomgeneric at $dg" >&2; exit 1; }
 PICOLIBC=1
 python3 "$root/tools/adb_ascii_h.py" > "$out/adb_ascii.h"   # the ADB micro's own keymap
+: > "$out/SDL_mixer.h"                  # i_sound.c includes it under FEATURE_SOUND; snd_rv.c needs none of it
 HEAP=0xB00000                           # the 6 MB zone, the WAD's cached lumps, the screen
 STACK=0x40000
-EXTRA_CFLAGS="-I$out -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -DNORMALUNIX -D_DEFAULT_SOURCE -I$dg -Wno-everything"
+EXTRA_CFLAGS="-I$out -DFEATURE_SOUND -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -DNORMALUNIX -D_DEFAULT_SOURCE -I$dg -Wno-everything"
 EXTRA_SRCS=""
 for f in dummy am_map doomdef doomstat dstrings d_event d_items d_iwad d_loop d_main d_mode d_net f_finale \
          f_wipe g_game hu_lib hu_stuff info i_cdmus i_endoom i_joystick i_scale i_sound i_system i_timer memio \

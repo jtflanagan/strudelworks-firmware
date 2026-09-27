@@ -12,10 +12,11 @@ APP_CALL   = 1024
 
 ; The tools StartUpTools starts (Tool Locator and Memory Manager are the
 ; runtime's own): a count, then (tool, minimum version) pairs.
-tools:  .word   3
+tools:  .word   4
         .word   $03, $0000              ; Miscellaneous Tool Set
         .word   $04, $0000              ; QuickDraw II
         .word   $06, $0000              ; Event Manager
+        .word   $08, $0000              ; Sound Tool Set: the runtime's voices (rvgs_snd_on)
 
 ; The program image, a GS/OS class-1 string; prefix 9: is the application's
 ; own folder (loaded at rung I3).

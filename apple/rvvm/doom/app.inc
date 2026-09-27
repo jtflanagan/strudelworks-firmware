@@ -9,10 +9,11 @@ APP_VMODE  = $0000                      ; QuickDraw II at 320
 APP_BOUNCE = 16384                      ; the WAD's lumps come through here
 APP_CALL   = 1024
 
-tools:  .word   3
+tools:  .word   4
         .word   $03, $0000              ; Miscellaneous Tool Set
         .word   $04, $0000              ; QuickDraw II
         .word   $06, $0000              ; Event Manager
+        .word   $08, $0000              ; Sound Tool Set: the runtime's voices (rvgs_snd_on)
 
 image:  .word   .strlen("9:DOOM.RV")
         .byte   "9:DOOM.RV"

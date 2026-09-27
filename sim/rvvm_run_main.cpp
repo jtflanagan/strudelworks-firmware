@@ -184,10 +184,10 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
                    const char *image_path, long expect_code, unsigned launches,
                    const std::vector<std::string> &extra_files, int key, const char *expect_video,
                    bool stop_at_video, const std::map<unsigned, std::vector<uint8_t>> &adb_events,
-                   unsigned long long max_cycles) {
+                   unsigned long long max_cycles, int expect_sound) {
 #if !RVVM_MEM
     (void)hex; (void)vm; (void)vm_bank; (void)stub_path; (void)stale; (void)image_path; (void)expect_code; (void)launches;
-    (void)extra_files; (void)key; (void)expect_video; (void)stop_at_video; (void)adb_events; (void)max_cycles;
+    (void)extra_files; (void)key; (void)expect_video; (void)stop_at_video; (void)adb_events; (void)max_cycles; (void)expect_sound;
     fprintf(stderr, "--app= needs the runner built with the engine's memory side (sim/run_rv_app.sh)\n");
     return 2;
 #else
@@ -290,6 +290,27 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         };
         memcpy(&mem[ADB_SHIM], shim, sizeof shim);
     }
+    // THE SOUND INTERRUPT (rungs S1-S3), as the Sound Tool Set's handler calls
+    // its user vector for an application's generator (ROM 03 $FCD50B): 8-bit,
+    // A = the type ($08); here after a toolbox call returns, every 256 samples
+    // of the DOC's clock the timer is running for, marked on either side so the
+    // GLU's writes between are the interrupt's; everything kept for the caller.
+    const unsigned SND_SHIM = TRAMPS + 0x140, SND_MARK = 0x004200;
+    const uint64_t SND_PERIOD = 2321600;            // 256 / 11026.8 Hz at 100 MHz
+    {
+        const unsigned char shim[] = {
+            0x08, 0x8B, 0xC2, 0x30, 0x48, 0xDA, 0x5A,          // PHP PHB REP #$30 PHA PHX PHY
+            0xE2, 0x30,                                         // SEP #$30
+            0x8F, SND_MARK & 0xFF, (SND_MARK >> 8) & 0xFF, 0x00,// STA $004200 (in)
+            0xA9, 0x08, 0xA2, 0x00,                             // LDA #$08 LDX #$00
+            0x22, 0x44, 0x00, 0xF1,                             // JSL $F10044 (the runtime's door)
+            0x90, 0x04,                                         // BCC +4
+            0x8F, (SND_MARK + 2) & 0xFF, ((SND_MARK + 2) >> 8) & 0xFF, 0x00, // STA $004202 (carry set)
+            0x8F, (SND_MARK + 1) & 0xFF, ((SND_MARK + 1) >> 8) & 0xFF, 0x00, // STA $004201 (out)
+            0xC2, 0x30, 0x7A, 0xFA, 0x68, 0xAB, 0x28, 0x6B,     // REP #$30 PLY PLX PLA PLB PLP RTL
+        };
+        memcpy(&mem[SND_SHIM], shim, sizeof shim);
+    }
     for (unsigned a = APP_DP; a <= APP_DP_END; a++) mem[a] = 0xA5;   // the stack's high-water mark
     if (stale) {   // a dead application: registered, one upper bank, enhanced video on
         memcpy(&mem[REG], "RVRG", 4); wr16(REG + 4, 1);
@@ -366,6 +387,19 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     struct OpenFile { const std::vector<uint8_t> *data; size_t pos; };
     std::map<unsigned, OpenFile> open;              // by refNum
     unsigned next_ref = 1, events_asked = 0, adb_asks = 0;
+    // The sound GLU and the DOC's memory and registers, as the program's
+    // voices leave them; the Sound Tool Set's generators and user vector.
+    static const unsigned snd_osc_of[15] = {0, 16, 8, 24, 4, 20, 12, 28, 2, 18, 10, 26, 6, 22, 14};
+    std::vector<uint8_t> doc_ram(65536, 0), doc_reg(256, 0);
+    unsigned glu_ctl = 0, glu_adr = 0;
+    const uint32_t SND_VEC0 = 0xFE1DC0;                 // the vector before any program's
+    uint32_t snd_vec = SND_VEC0;
+    unsigned gen_type[15] = {0};
+    int snd_timer = -1;                                 // the running timer's oscillator
+    uint64_t snd_t0 = 0, snd_fired = 0;
+    bool snd_shim_next = false, snd_in = false;
+    struct SndIrq { std::vector<std::pair<unsigned, uint8_t>> ram; bool carry = false; };
+    std::vector<SndIrq> snd_irqs;                       // this launch's, since the voices started
     bool adb_shim_next = false;
     const unsigned KEY_AFTER = 5;                   // GetNextEvent: nothing this many times, then the key
 
@@ -449,6 +483,47 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             adb_shim_next = true;
             break;
         }
+        case 0x1108: {                              // FFGeneratorStatus(genNum): the control block's first word
+            c.name = "FFGeneratorStatus";
+            const unsigned g = rd16(P);
+            c.args = {g};
+            npop = 2;
+            wr16(P + 2, g < 15 && gen_type[g] ? (g << 8) | gen_type[g] : 0);
+            break;
+        }
+        case 0x1308: {                              // SetUserSoundIRQV(vector): the old one
+            c.name = "SetUserSoundIRQV";
+            const uint32_t v = rd32(P);
+            c.args = {v};
+            npop = 4;
+            wr32(P + 4, snd_vec);
+            snd_vec = v;
+            break;
+        }
+        case 0x1708: {                              // SetDOCReg(block): the type, and each oscillator asked for
+            c.name = "SetDOCReg";                   // (ROM 03 $FC:D273: freq lo, hi, volume, table, control, size)
+            const uint32_t pb = rd32(P);
+            const unsigned w = rd16(pb), g = (w >> 8) & 15;
+            c.args = {w};
+            npop = 4;
+            if (g >= 15) { err = 0x0811; break; }
+            gen_type[g] = w & 15;
+            static const unsigned regs[6] = {0x00, 0x20, 0x40, 0x80, 0xA0, 0xC0};
+            for (unsigned o = 0; o < 2; o++)
+                if (w & (0x8000 >> o))
+                    for (unsigned r = 0; r < 6; r++) doc_reg[regs[r] + snd_osc_of[g] + o] = mem[pb + 2 + 6 * o + r];
+            break;
+        }
+        case 0x1703:                                // ReadMouse: mode, status, y, x (ROM 03 $FE:B0AC) -
+            c.name = "ReadMouse";                   // at DOOM's home (160,100), no button: no motion
+            mem[P] = 0; mem[P + 1] = 0;
+            wr16(P + 2, 100); wr16(P + 4, 160);
+            break;
+        case 0x1E03:                                // PosMouse(x, y): x pushed first ($FE:B3E2)
+            c.name = "PosMouse";
+            c.args = {rd16(P + 2), rd16(P)};
+            npop = 4;
+            break;
         case 0x1006:                                // TickCount: a long, no parameters -
             c.name = "TickCount";                   // 60 a second of the card's 100 MHz clock,
             wr32(P, uint32_t(cycles / 1666667));    // so a program's own sense of time is the card's
@@ -490,6 +565,11 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         if (adb_shim_next) {                        // RTL into the completion's shim first, then to the caller
             adb_shim_next = false;
             const uint32_t via = ADB_SHIM - 1;
+            mem[sc_sout] = uint8_t(via >> 16); mem[sc_sout - 1] = uint8_t(via >> 8); mem[sc_sout - 2] = uint8_t(via);
+            sc_sout -= 3;
+        } else if (snd_timer >= 0 && snd_vec == 0xF10044 && (cycles - snd_t0) / SND_PERIOD > snd_fired) {
+            snd_fired++;                            // the timer's end, due: the interrupt on the way back
+            const uint32_t via = SND_SHIM - 1;
             mem[sc_sout] = uint8_t(via >> 16); mem[sc_sout - 1] = uint8_t(via >> 8); mem[sc_sout - 2] = uint8_t(via);
             sc_sout -= 3;
         }
@@ -588,6 +668,31 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             quit_s.push_back(sc_s);
             sc_err = 0;
             adb_asks = 0;                           // --adb-events count each launch's asks
+            // the voices given back, however the program ended
+            if (snd_vec != SND_VEC0) { snprintf(msg, sizeof msg, "the Sound Tool Set's user vector is still $%06X at QuitGS\n", snd_vec); fail += msg; }
+            for (unsigned g = 0; g < 15; g++)
+                if (gen_type[g]) { snprintf(msg, sizeof msg, "generator %u still claimed (type %u) at QuitGS\n", g, gen_type[g]); fail += msg; }
+            if (snd_timer >= 0) { snprintf(msg, sizeof msg, "the sound timer (oscillator %d) still runs at QuitGS\n", snd_timer); fail += msg; }
+            // each interrupt: 256 bytes into the left ring's page SND_LEAD ahead
+            // of the players, 256 into the right's - a chunk, whole, in order,
+            // or silence
+            if (expect_sound >= 0) {
+                unsigned next = 1, quiet = 0;
+                for (size_t i = 0; i < snd_irqs.size(); i++) {
+                    const auto &q = snd_irqs[i];
+                    const unsigned pl = 0xF000 + (((i + 3) & 7) << 8), pr = pl + 0x800;
+                    bool ok = q.ram.size() == 512 && !q.carry;
+                    for (unsigned k = 0; ok && k < 512; k++)
+                        ok = q.ram[k].first == (k < 256 ? pl + k : pr + k - 256) && q.ram[k].second == q.ram[k < 256 ? 0 : 256].second;
+                    const unsigned vl = q.ram.empty() ? 0 : q.ram[0].second, vr = q.ram.size() > 256 ? q.ram[256].second : 0;
+                    if (ok && vl == 0x80 && vr == 0x80) quiet++;
+                    else if (ok && vl == next && vr == 0x80 + next) next++;
+                    else { snprintf(msg, sizeof msg, "sound interrupt %zu: %zu writes, left $%02X right $%02X%s - want chunk %u at pages $%04X/$%04X\n", i, q.ram.size(), vl, vr, q.carry ? ", carry set" : "", next, pl, pr); fail += msg; break; }
+                }
+                printf("app: sound: %zu interrupts, %u chunks, %u silent\n", snd_irqs.size(), next - 1, quiet);
+                if (next - 1 < unsigned(expect_sound)) { snprintf(msg, sizeof msg, "sound: %u chunks reached the DOC, want %d\n", next - 1, expect_sound); fail += msg; }
+            }
+            snd_irqs.clear();
             // launched again, as the Finder would - on the same engine, which
             // nothing resets between applications - or the run is over
             if (quit_s.size() < launches) back = 0x0007FF;   // RTL -> the boot stub at $0800
@@ -665,7 +770,32 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             else if (addr == SC_CALL + 1) tool(sc_err | (v << 8));
             else if (addr == SC_GS + 1) gsos_inline();
             else if (addr == SC_GSS + 1) gsos_stack();
-            if (dut->win_sel) {}
+            const unsigned lo16 = addr & 0xFFFF, bank = addr >> 16;
+            if (lo16 >= 0xC03C && lo16 <= 0xC03F && (bank == 0x00 || bank == 0x01 || bank == 0xE0 || bank == 0xE1)) {
+                // the sound GLU: control, data, the address; the DOC's RAM or registers
+                if (lo16 == 0xC03C) glu_ctl = v;
+                else if (lo16 == 0xC03E) glu_adr = (glu_adr & 0xFF00) | v;
+                else if (lo16 == 0xC03F) glu_adr = (glu_adr & 0xFF) | (v << 8);
+                else {
+                    if (glu_ctl & 0x40) {
+                        doc_ram[glu_adr] = v;
+                        if (snd_in && !snd_irqs.empty()) snd_irqs.back().ram.push_back({glu_adr, v});
+                    } else {
+                        const unsigned r = glu_adr & 0xFF;
+                        doc_reg[r] = v;
+                        if (r >= 0xA0 && r < 0xC0) {        // a control: a timer starts, or stops
+                            const int o = int(r - 0xA0);
+                            if ((v & 0x09) == 0x08) { snd_timer = o; snd_t0 = cycles; snd_fired = 0; snd_irqs.clear(); }
+                            else if (o == snd_timer && (v & 1)) snd_timer = -1;
+                        }
+                    }
+                    if (glu_ctl & 0x20) glu_adr = (glu_adr + 1) & 0xFFFF;
+                }
+            }
+            else if (addr == SND_MARK) { snd_in = true; snd_irqs.push_back({}); }
+            else if (addr == SND_MARK + 1) snd_in = false;
+            else if (addr == SND_MARK + 2) { if (!snd_irqs.empty()) snd_irqs.back().carry = true; }
+            else if (dut->win_sel) {}
             else if (!owned(addr)) {
                 if (!stray++) { snprintf(msg, sizeof msg, "a write the lifecycle does not own: $%02X to $%06X (pc $%02X/%04X)\n", v, addr, CPU(pbr), CPU(pc)); fail += msg; }
             }
@@ -682,6 +812,8 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     // program never quits, so the lifecycle's own checks do not apply.
     if (stop_at_video) {
         printf("app: %llu frames committed, %llu cycles, %zu calls\n", mode_commits, cycles, calls.size());
+        printf("app: sound: %zu interrupts since the voices started, %u chunks mixed, %u copied, %u silent\n",
+               snd_irqs.size(), rd16(REG + 0x320), rd16(REG + 0x322), rd16(REG + 0x324));
         {   // the banks as the run left them, beside the reference, to look at
             const std::string dump = std::string(expect_video) + ".last";
             FILE *fd = fopen(dump.c_str(), "wb");
@@ -864,6 +996,7 @@ int main(int argc, char **argv) {
     const char *expect_video = nullptr;
     bool stop_at_video = false;
     std::map<unsigned, std::vector<uint8_t>> adb_events;   // --adb-events=ASK:CODE[+CODE],...
+    int expect_sound = -1;                                  // --expect-sound=N: the chunks in RVTEST's pattern
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto val = [&](const char *k) { return a.substr(strlen(k)); };
@@ -883,6 +1016,7 @@ int main(int argc, char **argv) {
         else if (a.rfind("--file=", 0) == 0) app_files.push_back(val("--file="));
         else if (a.rfind("--expect-video=", 0) == 0) expect_video = argv[i] + 15;
         else if (a.rfind("--stop-at-video=", 0) == 0) { expect_video = argv[i] + 16; stop_at_video = true; }
+        else if (a.rfind("--expect-sound=", 0) == 0) expect_sound = int(strtol(val("--expect-sound=").c_str(), nullptr, 0));
         else if (a.rfind("--adb-events=", 0) == 0) {
             std::string list = val("--adb-events=");
             size_t p = 0;
@@ -915,7 +1049,7 @@ int main(int argc, char **argv) {
     if (app) {
         if (!hex || !vm || guest || ref_only || use_ref) { fprintf(stderr, "--app= takes --hex= --vm= and no guest, no reference\n"); return 2; }
         return run_app(hex, vm, vm_bank, app, stale, image, expect_code, launches, app_files, key, expect_video, stop_at_video,
-                       adb_events, max_cycles);
+                       adb_events, max_cycles, expect_sound);
     }
     if (!guest || (!ref_only && (!hex || !vm))) { fprintf(stderr, "need --guest= and (--hex= --vm= | --ref-only)\n"); return 2; }
 

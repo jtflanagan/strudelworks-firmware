@@ -1,13 +1,10 @@
 # DOOM on the RISC-V engine
 
-Status: **2026-09-27, branch `riscv_v2`. DOOM RUNS ON HARDWARE: launched from the Finder off its own
-volume (hd2), the title, the demo loop at 35 frames a second (DOOM's own tic rate), the menus and a new
-game driven from the keyboard's raw ADB events, and a held arrow walks the marine (D1-D5 done; the
-key-loss fix below proven on hardware: every down and up of Esc, three Returns and an arrow arrived).** The SPLASH milestone is done on hardware
-(docs/RVV2_INTEROP.md): a GS/OS application whose program runs on the engine in the upper 16 MB,
-reads files through GS/OS, calls the toolbox, takes keys and draws on enhanced video. DOOM is the
-next goal: the shareware DOOM1.WAD, launched from the Finder, played from the keyboard, drawn on
-enhanced video mode 1. Decisions marked *(user)* were the user's, 2026-09-26.
+Status: **2026-09-27, branch `riscv_v2`. DOOM PLAYS ON HARDWARE WITH SOUND AND THE MOUSE: launched
+from the Finder off its own volume (hd2), 35 frames a second (DOOM's own tic rate), keys from the raw
+ADB events, the mouse through the Miscellaneous Tool Set, and its sound effects mixed on the engine and
+played by the IIgs's Ensoniq in stereo - sound, left/right, delay and the mouse judged good by ear
+(user). D1-D5, S1-S3 and M1 done; music next.**
 
 ## The base: doomgeneric
 
@@ -111,6 +108,55 @@ DOOM needs it (it is compiled for strict alignment first).
   and librvgs's `$30C` asks, `$30E` refusals, `$310` the last refusal, `$312` requests given up on.
   On hardware every ask is answered (the ROM completes an empty Talk with count 0), about 85 a second
   while DOOM runs.
+
+## Sound and the mouse (rungs S1-S3, M1)
+
+*(user, 2026-09-27)*: the effects mixed on the engine and played by the IIgs's own Ensoniq; music
+later. The mouse the IIgs's, as GS/OS keeps it.
+
+- **The DOC, as the card has it** (`rtl/gs/gs_doc.sv`, KEGS's `doc.c`): in wall time whatever the
+  acceleration, the GLU at core speed; a `$00` byte stops a voice; each voice on one side (control bit
+  4: set is the right) - so the effects are stereo, a player a side. The accumulator is not readable:
+  where the players are is known by a timer's interrupt, not read.
+- **Owning voices under GS/OS** - HyperCard IIgs's way: the Sound Tool Set (tool 8, in the
+  application's tool list, StartUpTools starting it) keeps the DOC's interrupt; the runtime claims two
+  generators it is not using (FFGeneratorStatus `$1108` = 0; SetDOCReg `$1708` writes the type,
+  `$08`, and programs the pair halted - its block read off ROM 03 `$FC:D273`: generator word, then
+  freq lo, hi, volume, table, control, size per oscillator), installs its vector (SetUserSoundIRQV
+  `$1308`; the handler calls it for a type not its own: 8-bit, A the type, CLC RTL) and plays the
+  oscillators directly through the GLU. Numbers read off the live function table (tool 8 at
+  `$05:8266` under System 6.0.1, FFStartSound patched into RAM - the rest ROM). Generator g's pair is
+  ROM 03's table `$FC:CE5E` (0, 16, 8, 24, ...) and the next.
+- **The players and the timer**: generator A's pair play 2 KB rings in DOC RAM (`$F000` left, `$F800`
+  right: 8 segments of 256) free-running; generator B's first oscillator plays 256 bytes of silence
+  (`$E000`, volume 0) free-running with its interrupt on. All at frequency 429 with the resolution one
+  above the table's (26320 Hz scans with 32 oscillators: 11026.8 Hz, 0.42 bytes a scan): the timer
+  ends exactly every 256 samples the players play - one clock, no drift - and each interrupt the
+  runtime (`snd_irq`, `$F1:0044`) copies the next chunk, left and right, into the segment SND_LEAD (3)
+  ahead of the players, or silence when none is ready. The runtime's service (`$F1:0048`, call65816:
+  on/off) sets all this up and takes it down; the lifecycle's undo turns it off however the program
+  ends (D_SND), before ShutDownTools.
+- **The chunks** (librvgs `rvgs_snd_*`): 16 a side in `$EE:1000`/`$EE:2000`, counted by SND_HEAD (the
+  program's) and SND_TAIL (the interrupt's) at `$EE:0320`; the engine's writes kill the 65816's L1-D
+  rows (rtl/gs/l1d.sv), so the interrupt reads them fresh. The program mixes by the ring's room - the
+  DOC's clock paces it; 11026.8 Hz is not 11025, so nothing else may.
+- **DOOM** (`apple/rvvm/doom/snd_rv.c`): doomgeneric's sound module (FEATURE_SOUND; an empty
+  SDL_mixer.h for i_sound.c's include; a music module that plays nothing): eight channels of the WAD's
+  DS lumps as they are (11025 Hz, the DMX padding skipped), volume and separation by SDL's rule, the
+  mix clamped to never $00, SND_AHEAD (3) chunks ahead - from each tic's Update and from DOOM's sleeps.
+  Latency: up to ~140 ms (3 DOC segments + 3 chunks) - judged good by ear.
+- **On hardware**: generators 14 and 13 claimed, ~43 interrupts a second, the mixer 2-3 chunks ahead,
+  silence only before DOOM's loop mixes (start-up); left and right as KEGS's channel bit (set = the
+  right) - correct by ear, whatever Tech Note #19 says of stereo cards.
+- **The mouse** (M1, `doom_rv.c`): ReadMouse `$1703` (mode, status - bit 7 the button - y, x; ROM 03
+  `$FE:B0AC`) and PosMouse `$1E03` (x pushed first) back to (160,100) after every move; the moves add
+  up and go to DOOM once a tic (G_Responder SETS the motion from an event), a button change at once.
+- **The bench**: the stand-in answers FFGeneratorStatus, SetDOCReg (the DOC's registers written as the
+  ROM would), SetUserSoundIRQV, ReadMouse and PosMouse; the GLU is modelled (DOC RAM and registers, auto-
+  increment); while a timer runs, a shim calls the runtime's vector every 256 samples of the DOC's clock
+  as the Sound Tool Set would; RVTEST mixes 12 numbered chunks and `--expect-sound` checks every
+  interrupt's 512 writes - the pages SND_LEAD ahead, the chunk whole and in order, or silence - and that
+  each launch ends with the vector back, the generators given back and the timer halted.
 
 ## Open
 

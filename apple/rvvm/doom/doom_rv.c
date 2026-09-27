@@ -103,9 +103,11 @@ void DG_DrawFrame(void) {
     report[3] = now;
 }
 
+void snd_pump(void);                    /* snd_rv.c: the sound effects mixed ahead */
+
 void DG_SleepMs(uint32_t ms) {
     const uint32_t end = DG_GetTicksMs() + ms;
-    while (DG_GetTicksMs() < end) {}
+    while (DG_GetTicksMs() < end) snd_pump();
 }
 
 uint32_t DG_GetTicksMs(void) { return rvgs_ticks() * 50 / 3; }    /* 60 ticks a second */
@@ -141,10 +143,50 @@ static unsigned char doom_key(unsigned code) {
     }
 }
 
+/* The mouse: the IIgs's own, as the Miscellaneous Tool Set keeps it from the
+   ADB (ReadMouse $1703: mode, status - bit 7 the button - y, x; read off ROM 03
+   $FE:B0AC), put back at MOUSE_X,MOUSE_Y after every move (PosMouse $1E03, x
+   pushed first) so it never stops at an edge - inside the clamps in 320 and
+   640 mode alike; the picture covers the cursor.  DOOM's G_Responder SETS the
+   motion from each event rather than adding to it, so the moves add up here
+   and go out once a DOOM tic, a button change at once. */
+#include "d_event.h"
+#include "i_timer.h"
+#define MOUSE_X 160
+#define MOUSE_Y 100
+#define MOUSE_SCALE 4
+
+static int mouse_dx, mouse_dy, mouse_btn = -1, mouse_tic = -1;
+
+static void poll_mouse(void) {
+    uint8_t r[6];
+    if (rvgs_tool(0x1703, 0, 0, r, sizeof r) != 0) return;
+    const int y = (int16_t)(r[2] | r[3] << 8), x = (int16_t)(r[4] | r[5] << 8);
+    const int btn = (r[1] & 0x80) != 0;
+    if (x != MOUSE_X || y != MOUSE_Y) {
+        mouse_dx += x - MOUSE_X;
+        mouse_dy += y - MOUSE_Y;
+        static const uint8_t home[4] = {MOUSE_Y & 0xFF, MOUSE_Y >> 8, MOUSE_X & 0xFF, MOUSE_X >> 8};
+        rvgs_tool(0x1E03, home, sizeof home, 0, 0);
+    }
+    const int tic = I_GetTime();
+    if (btn != mouse_btn || ((mouse_dx || mouse_dy) && tic != mouse_tic)) {
+        event_t ev = {0};
+        ev.type = ev_mouse;
+        ev.data1 = btn;                          /* bit 0: fire */
+        ev.data2 = mouse_dx * MOUSE_SCALE;       /* right: turn right */
+        ev.data3 = -mouse_dy * MOUSE_SCALE;      /* up the screen: forward */
+        D_PostEvent(&ev);
+        mouse_dx = mouse_dy = 0;
+        mouse_btn = btn;
+        mouse_tic = tic;
+    }
+}
+
 int DG_GetKey(int *pressed, unsigned char *key) {
     for (;;) {
         const int ev = rvgs_adb_event();
-        if (ev < 0) return 0;
+        if (ev < 0) { poll_mouse(); return 0; }
         const unsigned char k = doom_key((unsigned)ev & 0x7F);
         if (!k) continue;                       /* a key DOOM has no use for */
         *pressed = !(ev & RVGS_ADB_UP);

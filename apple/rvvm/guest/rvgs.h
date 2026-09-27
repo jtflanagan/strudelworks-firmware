@@ -67,6 +67,24 @@ int rvgs_key(void);
 int rvgs_adb_event(void);
 #define RVGS_ADB_UP 0x80
 
+/* Sound (docs/RVV2_DOOM.md, S1-S3): the program mixes, the IIgs's Ensoniq
+   plays.  Chunks of RVGS_SND_CHUNK samples at RVGS_SND_RATE (11026.8 Hz, the
+   DOC's own clock: pace the mixing by rvgs_snd_room, never by a timer), 8-bit
+   unsigned - $80 silence, and never $00, which stops the DOC's voice - a left
+   and a right.  The runtime owns the voices (two Sound Tool Set generators,
+   played directly) and gives them back when the program ends, however it ends;
+   the application's tool list must name the Sound Tool Set (tool 8).
+   rvgs_snd_on: 0, or the Sound Tool Set's error ($FFFF: not two generators
+   free).  rvgs_snd_room: the chunks the ring takes now (0 = full). */
+#define RVGS_SND_CHUNK 256
+#define RVGS_SND_RATE  11027
+#define RVGS_SND_RING  16
+unsigned rvgs_snd_on(void);
+void     rvgs_snd_off(void);
+unsigned rvgs_snd_room(void);
+void     rvgs_snd_put(const uint8_t *left, const uint8_t *right);
+unsigned rvgs_snd_played(void);   /* chunks the DOC has taken so far */
+
 /* The Event Manager's tick count (TickCount $1006): 60 a second. */
 uint32_t rvgs_ticks(void);
 

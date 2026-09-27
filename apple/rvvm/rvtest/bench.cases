@@ -2,6 +2,6 @@
 # $up: the build directory and the application's name).  Each launched twice on
 # the one engine; RVTEST exits $100 | the key.  --adb-events: the keyboard's
 # raw events, by the ask they answer (RVTEST looks for A down/up, Esc down/up).
-clean   --image=$work/$up.RV --launches=2 --key=Z --expect-code=0x15A --adb-events=2:0x00+0x80,4:0x35+0xB5
-stale   --image=$work/$up.RV --stale --launches=2 --key=q --expect-code=0x171 --adb-events=1:0x12+0x92,3:0x00,5:0x80+0x35,6:0xB5
+clean   --image=$work/$up.RV --launches=2 --key=Z --expect-code=0x15A --adb-events=2:0x00+0x80,4:0x35+0xB5 --expect-sound=12
+stale   --image=$work/$up.RV --stale --launches=2 --key=q --expect-code=0x171 --adb-events=1:0x12+0x92,3:0x00,5:0x80+0x35,6:0xB5 --expect-sound=12
 noimage --expect-code=-5 --launches=2
