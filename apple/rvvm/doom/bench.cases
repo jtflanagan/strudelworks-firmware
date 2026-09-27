@@ -1,0 +1,5 @@
+# sim/run_rv_app.sh's cases for DOOM: NAME, then the runner's arguments ($work,
+# $up: the build directory and the application's name).  D1: DOOM starts, reads
+# its WAD through GS/OS, and draws its title page - the run ends at the first
+# frame that is TITLEPIC through the first palette.
+title   --image=$work/$up.RV --stop-at-video=$work/TITLEPIC.565 --max-cycles=20000000000

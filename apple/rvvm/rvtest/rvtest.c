@@ -19,7 +19,10 @@
     21 9:RVTEST.DAT opens               22 its size is 40000
     23 read into the upper half: 40000 bytes, every one as resources.sh made it
     24 read again at its end: 0         25 it closes
-    26 the key: GetNextEvent gave a character */
+    26 the key: GetNextEvent gave a character
+   Rung D3 (raw ADB keys, presses and releases):
+    27 A down and up, then Esc down and up ($00 $80 $35 $B5) did not come within
+       10 seconds (other events may come between: the key above, say) */
 #include "rvgs.h"
 
 static const char *const self_name = "RVTEST.RV";
@@ -89,11 +92,23 @@ static int files(void) {
     return 0;
 }
 
+static int adb(void) {
+    static const uint8_t want[4] = {0x00, 0x80, 0x35, 0xB5};
+    unsigned got = 0;
+    const uint32_t t0 = rvgs_ticks();
+    while (got < 4 && rvgs_ticks() - t0 < 600) {
+        const int ev = rvgs_adb_event();
+        if (ev >= 0 && ev == want[got]) got++;
+    }
+    return got == 4 ? 0 : 27;
+}
+
 int main(void) {
     int r = check();
     if (r) return r;
     if ((r = files()) != 0) return r;
     const int key = rvgs_key();
     if (key < 0) return 26;
+    if ((r = adb()) != 0) return r;
     return 0x100 | key;
 }

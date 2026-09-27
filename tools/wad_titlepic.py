@@ -7,8 +7,13 @@ patch (columns of posts), through PLAYPAL's first palette, written as an 8-bit
 palette PNG; and, for sim/run_rv_app.sh, the RGB565 picture a right decoder and
 blit leave in the video banks.  Nothing made from the WAD goes into git.
 
-  tools/wad_titlepic.py WAD OUT.PNG [OUT.565]
+  tools/wad_titlepic.py WAD OUT.PNG [OUT.565] [--gamma-from TABLES.C]
+
+--gamma-from: the .565 picture through DOOM's own gamma level 0 (the first row
+of `gammatable` in doomgeneric's tables.c - every value one up, not the
+identity), as DOOM's I_SetPalette leaves the palette: what DOOM itself draws.
 """
+import re
 import struct
 import sys
 
@@ -39,9 +44,26 @@ def patch_pixels(p):
     return w, h, px
 
 
+def gamma0(path):
+    src = open(path).read()
+    body = src[src.index("gammatable[5][256]"):]
+    body = body[body.index("{", body.index("{") + 1) + 1:]
+    row = [int(v) for v in re.findall(r"\d+", body[:body.index("}")])]
+    if len(row) != 256:
+        sys.exit(f"{path}: gammatable's first row has {len(row)} entries")
+    return row
+
+
 def main():
-    if len(sys.argv) not in (3, 4):
+    args = sys.argv[1:]
+    gamma = list(range(256))
+    if "--gamma-from" in args:
+        i = args.index("--gamma-from")
+        gamma = gamma0(args[i + 1])
+        del args[i:i + 2]
+    if len(args) not in (2, 3):
         sys.exit(__doc__.strip().splitlines()[-1])
+    sys.argv[1:] = args
     L = lumps(open(sys.argv[1], "rb").read())
     pal = L["PLAYPAL"][:768]
     w, h, px = patch_pixels(L["TITLEPIC"])
@@ -52,7 +74,7 @@ def main():
     if len(sys.argv) == 4:
         out = bytearray()
         for i in px:
-            r, g, b = pal[3 * i], pal[3 * i + 1], pal[3 * i + 2]
+            r, g, b = gamma[pal[3 * i]], gamma[pal[3 * i + 1]], gamma[pal[3 * i + 2]]
             out += struct.pack("<H", ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
         open(sys.argv[3], "wb").write(out)
 

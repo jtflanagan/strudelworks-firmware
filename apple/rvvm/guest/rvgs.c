@@ -125,6 +125,23 @@ int rvgs_close(int ref) {
     return err ? -(int)err : 0;
 }
 
+struct pb_mark { uint16_t pcount, ref, base; uint32_t disp; } __attribute__((packed));
+struct pb_getmark { uint16_t pcount, ref; uint32_t pos; } __attribute__((packed));
+
+long rvgs_seek(int ref, unsigned long pos) {
+    volatile struct pb_mark *p = (volatile struct pb_mark *)((uint8_t *)rvgs_scratch(0) + PB_AT);
+    p->pcount = 3; p->ref = (uint16_t)ref; p->base = 0; p->disp = pos;   /* base 0: from the start */
+    const unsigned err = rvgs_gsos(0x2016, (void *)p);
+    return err ? -(long)err : 0;
+}
+
+long rvgs_tell(int ref) {
+    volatile struct pb_getmark *p = (volatile struct pb_getmark *)((uint8_t *)rvgs_scratch(0) + PB_AT);
+    p->pcount = 2; p->ref = (uint16_t)ref; p->pos = 0;
+    const unsigned err = rvgs_gsos(0x2017, (void *)p);
+    return err ? -(long)err : (long)p->pos;
+}
+
 /* ---- events ----------------------------------------------------------------------- */
 /* GetNextEvent $0A06 (read off the machine's Event Manager: the event record's
    long address pushed last, the mask before it, a word result pushed first;
@@ -148,4 +165,46 @@ uint32_t rvgs_ticks(void) {
     uint32_t t = 0;
     rvgs_tool(0x1006, 0, 0, &t, 4);             /* no parameters, a long result */
     return t;
+}
+
+/* ---- raw ADB keys --------------------------------------------------------------- */
+/* The ring (apple/rvvm/rvengine.s KEY_*): in our RAM bank $EE, which the engine
+   reads and writes itself; the completion (65816, interrupt time) writes the
+   head and clears the request, the program the tail and the request. */
+#define KEY_HEAD ((volatile uint16_t *)(uintptr_t)0x00EE0300u)
+#define KEY_TAIL ((volatile uint16_t *)(uintptr_t)0x00EE0302u)
+#define KEY_ASK  ((volatile uint16_t *)(uintptr_t)0x00EE0304u)
+#define KEY_RING ((volatile uint8_t *)(uintptr_t)0x00EE0400u)
+/* ours beside it, for the host's mirror: asks, refusals, the last refusal, and
+   requests given up on (the runtime's own counters are $306-$30B) */
+#define KEY_ASKS ((volatile uint16_t *)(uintptr_t)0x00EE030Cu)
+#define KEY_REFS ((volatile uint16_t *)(uintptr_t)0x00EE030Eu)
+#define KEY_RERR ((volatile uint16_t *)(uintptr_t)0x00EE0310u)
+#define KEY_GONE ((volatile uint16_t *)(uintptr_t)0x00EE0312u)
+
+int rvgs_adb_event(void) {
+    static unsigned waited;                     /* polls since the request went out */
+    if (*KEY_ASK != 0 && ++waited > 64) {      /* never answered: ask again */
+        *KEY_ASK = 0;
+        ++*KEY_GONE;
+    }
+    if (*KEY_TAIL == *KEY_HEAD && *KEY_ASK == 0) {
+        waited = 0;
+        /* AsyncADBReceive(completion, command): the command pushed last, so first
+           on the stack; the completion's long address after it (its top byte 0) */
+        static const uint8_t params[6] = {0xC2, 0x00, 0x40, 0x00, 0xF1, 0x00};
+        *KEY_ASK = 1;
+        ++*KEY_ASKS;
+        const int err = rvgs_tool(0x0D09, params, 6, 0, 0);
+        if (err != 0) {                         /* busy: ask again next time */
+            *KEY_ASK = 0;
+            ++*KEY_REFS;
+            *KEY_RERR = (uint16_t)err;
+        }
+    }
+    const uint16_t tail = *KEY_TAIL;
+    if (tail == *KEY_HEAD) return -1;
+    const int ev = KEY_RING[tail & 0xFF];
+    *KEY_TAIL = (uint16_t)((tail + 1) & 0xFF);
+    return ev;
 }

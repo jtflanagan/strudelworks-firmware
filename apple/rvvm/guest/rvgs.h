@@ -53,9 +53,20 @@ int  rvgs_open(const char *path);
 long rvgs_eof(int ref);
 long rvgs_read(int ref, void *buf, unsigned long n);   /* bytes read; fewer at the end */
 int  rvgs_close(int ref);
+long rvgs_seek(int ref, unsigned long pos);            /* SetMark from the start; 0 or -(error) */
+long rvgs_tell(int ref);                               /* GetMark */
 
 /* The next key-down (or auto-key) from the Event Manager: its character. */
 int rvgs_key(void);
+/* The keyboard's raw ADB events, presses AND releases (docs/RVV2_DOOM.md, D3):
+   {bit 7 released, keycode}, from the Pi's keyboard and the IIe's alike, or -1
+   when there is none now.  When the ring the runtime keeps in $EE is empty and
+   nothing is outstanding, it asks the ADB Tool Set for the keyboard's register
+   0 (AsyncADBReceive $0D09, command $C2), whose answer the runtime's completion
+   ($F1:0040) puts in the ring. */
+int rvgs_adb_event(void);
+#define RVGS_ADB_UP 0x80
+
 /* The Event Manager's tick count (TickCount $1006): 60 a second. */
 uint32_t rvgs_ticks(void);
 

@@ -62,7 +62,16 @@
 // gives, after five calls that give nothing (default Z).
 // Rung I5: --expect-video=FILE, the RGB565 picture (320x200) the program must
 // have left in mode 1's banks, the mode described and claimed, and ENABLE set
-// then the global commit by its own stores.  TickCount counts 1000 cycles.
+// then the global commit by its own stores.  TickCount counts 60 a second of the
+// card's 100 MHz fabric clock (a bench cycle).
+// DOOM (docs/RVV2_DOOM.md): SetMark/GetMark; --stop-at-video=FILE ends the run at
+// the first committed frame that is FILE (the program does not quit); the
+// program's console (ECALL write to fd 1/2, which the runtime discards) is
+// printed as "guest|" lines.
+// Rung D3: AsyncADBReceive answers as the micro would, the Nth ask with the
+// events --adb-events=N:CODE[+CODE],... gives it (two at most, {bit 7 up,
+// keycode}), and the completion is the RUNTIME'S OWN: called through a shim
+// the way ROM 03's ADB interrupt calls it (8-bit, a long pointer to the answer).
 
 #include "Vrvvm_sys.h"
 #include "Vrvvm_sys___024root.h"
@@ -174,10 +183,11 @@ struct AppCall { std::string name; std::vector<uint32_t> args; unsigned err = 0;
 static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char *stub_path, bool stale,
                    const char *image_path, long expect_code, unsigned launches,
                    const std::vector<std::string> &extra_files, int key, const char *expect_video,
+                   bool stop_at_video, const std::map<unsigned, std::vector<uint8_t>> &adb_events,
                    unsigned long long max_cycles) {
 #if !RVVM_MEM
     (void)hex; (void)vm; (void)vm_bank; (void)stub_path; (void)stale; (void)image_path; (void)expect_code; (void)launches;
-    (void)extra_files; (void)key; (void)expect_video; (void)max_cycles;
+    (void)extra_files; (void)key; (void)expect_video; (void)stop_at_video; (void)adb_events; (void)max_cycles;
     fprintf(stderr, "--app= needs the runner built with the engine's memory side (sim/run_rv_app.sh)\n");
     return 2;
 #else
@@ -187,6 +197,18 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     if (memcmp(&mem[vmb], "RVVM", 4) != 0) { fprintf(stderr, "%s: no RVVM header\n", vm); return 2; }
     const size_t stub_len = load_file(stub_path, mem, APP_STUB, 0x10000 - (APP_STUB & 0xFFFF));
     if (!load_fetch_word(hex)) { fprintf(stderr, "cannot read %s\n", hex); return 2; }
+    std::vector<uint8_t> want_video;                // --expect-video's picture
+    if (expect_video) {
+        FILE *fv = fopen(expect_video, "rb");
+        int ch;
+        if (fv) { while ((ch = fgetc(fv)) != EOF) want_video.push_back(uint8_t(ch)); fclose(fv); }
+        if (want_video.size() != 320 * 200 * 2) { fprintf(stderr, "--expect-video=%s: not a 320x200 RGB565 picture\n", expect_video); return 2; }
+    }
+    auto video_is = [&]() {
+        for (unsigned y = 0; y < 200; y++)
+            if (memcmp(&mem[0x800000 + (y / 100) * 0x10000 + (y % 100) * 640], &want_video[y * 640], 640)) return false;
+        return true;
+    };
     std::vector<uint8_t> image;                     // the program's file, as GS/OS would read it
     if (image_path) {
         FILE *f = fopen(image_path, "rb");
@@ -251,6 +273,23 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     tramp(0xE10000, TRAMPS + 0x00, SC_CALL);        // the toolbox's dispatcher
     tramp(0xE100A8, TRAMPS + 0x40, SC_GS);          // GS/OS, inline
     tramp(0xE100B0, TRAMPS + 0x80, SC_GSS);         // GS/OS, the stack entry
+    // The ADB interrupt's call of an AsyncADBReceive completion, as ROM 03 makes
+    // it ($FC/DB0F: PEA $0000, PHD, SEP #$30, JSL $E103DC) - here with the answer
+    // at $00:ADB_ANSWER - then back to the caller of AsyncADBReceive, its A and P
+    // kept: the stand-in's trampoline returns through this.
+    const unsigned ADB_SHIM = TRAMPS + 0x100, ADB_ANSWER = 0x004000;
+    {
+        const unsigned char shim[] = {
+            0x08, 0x48,                                         // PHP PHA
+            0xF4, 0x00, 0x00,                                   // PEA $0000
+            0xF4, ADB_ANSWER & 0xFF, (ADB_ANSWER >> 8) & 0xFF,  // PEA answer
+            0xE2, 0x30,                                         // SEP #$30
+            0x22, 0x40, 0x00, 0xF1,                             // JSL $F10040 (the runtime's door)
+            0xC2, 0x30, 0x68, 0x68,                             // REP #$30 PLA PLA
+            0x68, 0x28, 0x6B,                                   // PLA PLP RTL
+        };
+        memcpy(&mem[ADB_SHIM], shim, sizeof shim);
+    }
     for (unsigned a = APP_DP; a <= APP_DP_END; a++) mem[a] = 0xA5;   // the stack's high-water mark
     if (stale) {   // a dead application: registered, one upper bank, enhanced video on
         memcpy(&mem[REG], "RVRG", 4); wr16(REG + 4, 1);
@@ -277,6 +316,8 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     // Enhanced video as the program drove it: its own stores, seen in its 0xB
     // records - ENABLE set, and the global commit after it.
     long eng_enable_at = -1, eng_commit_at = -1;
+    unsigned long long mode_commits = 0;
+    bool video_matched = false;
     auto app_tick = [&]() {
         l2.pre_edge(dut);
         dut->inval = inval_next; inval_next = false;
@@ -290,6 +331,10 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
                 const uint8_t v = uint8_t(data >> (8 * i));
                 if (a + i >= HI) mirror[a + i - HI] = v;
                 if (a + i == EV_CTL && v == 1) eng_enable_at = long(cycles);
+                if (a + i == EV_CTL + 0x10) {           // mode slot 0's COMMIT: a frame
+                    mode_commits++;
+                    if (stop_at_video && !video_matched && video_is()) video_matched = true;
+                }
                 if (a + i == EV_CTL + 1 && eng_enable_at >= 0) eng_commit_at = long(cycles);
             }
             recs++;
@@ -320,7 +365,8 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     unsigned stray = 0;
     struct OpenFile { const std::vector<uint8_t> *data; size_t pos; };
     std::map<unsigned, OpenFile> open;              // by refNum
-    unsigned next_ref = 1, events_asked = 0;
+    unsigned next_ref = 1, events_asked = 0, adb_asks = 0;
+    bool adb_shim_next = false;
     const unsigned KEY_AFTER = 5;                   // GetNextEvent: nothing this many times, then the key
 
 
@@ -384,9 +430,28 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             tools_ref = ref;
             break;
         }
-        case 0x1006:                                // TickCount: a long, no parameters (cycles here)
-            c.name = "TickCount";
-            wr32(P, uint32_t(cycles / 1000));
+        case 0x0D09: {                              // AsyncADBReceive(completion, command)
+            c.name = "AsyncADBReceive";
+            const unsigned cmd = rd16(P);
+            const uint32_t comp = rd32(P + 2);
+            c.args = {cmd, comp};
+            npop = 6;
+            if (cmd != 0xC2 || comp != 0xF10040) { snprintf(msg, sizeof msg, "AsyncADBReceive($%06X, $%04X): want the runtime's completion $F10040 and Talk R0 keyboard $C2\n", comp, cmd); fail += msg; break; }
+            // the micro's answer: this ask's scripted events, two at most, $FF the filler.
+            // As ROM 03 hands it over ($FC/DB36): the count is the micro's status byte's
+            // low bits, the bytes LESS ONE (0 = none), then the bytes, the first event first.
+            auto ev = adb_events.find(++adb_asks);
+            const std::vector<uint8_t> none;
+            const std::vector<uint8_t> &e = ev == adb_events.end() ? none : ev->second;
+            mem[ADB_ANSWER] = e.empty() ? 0 : 1;
+            mem[ADB_ANSWER + 1] = e.size() > 0 ? e[0] : 0xFF;
+            mem[ADB_ANSWER + 2] = e.size() > 1 ? e[1] : 0xFF;
+            adb_shim_next = true;
+            break;
+        }
+        case 0x1006:                                // TickCount: a long, no parameters -
+            c.name = "TickCount";                   // 60 a second of the card's 100 MHz clock,
+            wr32(P, uint32_t(cycles / 1666667));    // so a program's own sense of time is the card's
             break;
         case 0x0A06: {
             // GetNextEvent (the event record's long address at S+4, the mask,
@@ -421,8 +486,14 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         c.err = err;
         calls.push_back(c);
         for (int i = 3; i >= 1; i--) mem[sc_s + npop + i] = mem[sc_s + i];   // the return address, over the parameters
-        inval_next = true;     // what a tool writes the engine would have snooped: written here, its rows go
         sc_sout = sc_s + npop;
+        if (adb_shim_next) {                        // RTL into the completion's shim first, then to the caller
+            adb_shim_next = false;
+            const uint32_t via = ADB_SHIM - 1;
+            mem[sc_sout] = uint8_t(via >> 16); mem[sc_sout - 1] = uint8_t(via >> 8); mem[sc_sout - 2] = uint8_t(via);
+            sc_sout -= 3;
+        }
+        inval_next = true;     // what a tool writes the engine would have snooped: written here, its rows go
         sc_err = err;
     };
     // A class-1 GS/OS call on its parameter block.  The stand-in writes memory
@@ -468,6 +539,26 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             inval_next = true;
             return n == 0 ? 0x004C : 0;                                // eofEncountered
         }
+        case 0x2016: {                              // SetMark: base 0 start, 1 end, 2/3 +/- the mark
+            c.name = "SetMark";
+            auto f = open.find(rd16(pb + 2));
+            if (f == open.end()) return 0x0043;
+            const unsigned base = rd16(pb + 4);
+            const uint32_t d = rd32(pb + 6);
+            const size_t size = f->second.data->size();
+            long long pos = base == 0 ? d : base == 1 ? (long long)size - d : base == 2 ? (long long)f->second.pos + d
+                                                                                 : (long long)f->second.pos - d;
+            if (pos < 0 || pos > (long long)size) return 0x004D;          // outOfRange
+            f->second.pos = size_t(pos);
+            return 0;
+        }
+        case 0x2017: {                              // GetMark
+            c.name = "GetMark";
+            auto f = open.find(rd16(pb + 2));
+            if (f == open.end()) return 0x0043;
+            wr32(pb + 4, uint32_t(f->second.pos));
+            return 0;
+        }
         case 0x2014: {
             c.name = "Close";
             auto f = open.find(rd16(pb + 2));
@@ -496,6 +587,7 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             if (rd16(pb) != 0) { snprintf(msg, sizeof msg, "QuitGS: pCount %u, want 0\n", rd16(pb)); fail += msg; }
             quit_s.push_back(sc_s);
             sc_err = 0;
+            adb_asks = 0;                           // --adb-events count each launch's asks
             // launched again, as the Finder would - on the same engine, which
             // nothing resets between applications - or the run is over
             if (quit_s.size() < launches) back = 0x0007FF;   // RTL -> the boot stub at $0800
@@ -523,7 +615,7 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     // stand-in's ports - and the engine's window.
     auto owned = [&](unsigned a) {
         if (a >= APP_DP && a <= APP_DP_END) return true;
-        if (a >= REG && a < REG + 0x300) return true;
+        if (a >= REG && a < REG + 0x600) return true;       // the table, the key ring and its log ($300-$5FF)
         if (a >= TRACE && a < TRACE + 0x100) return true;
         if (a == EV_CTL || a == EV_CTL + 1) return true;
         if (a >= SC_S && a < SC_GSS + 2) return true;
@@ -531,8 +623,14 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         return false;
     };
 
-    while (!dut->halted && !quit) {
+    unsigned long long next_progress = 100000000;
+    while (!dut->halted && !quit && !video_matched) {
         if (cycles >= max_cycles) { fail += "runaway: no QuitGS in " + std::to_string(max_cycles) + " cycles\n"; break; }
+        if (cycles >= next_progress) {
+            printf("app: %lluM cycles, %zu calls, %llu frames\n", cycles / 1000000, calls.size(), mode_commits);
+            fflush(stdout);
+            next_progress += 100000000;
+        }
         const unsigned addr = dut->addr, rw = dut->rw;
         unsigned char din = 0;
         if (rw && (dut->vda || dut->vpa)) {
@@ -550,6 +648,14 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
             dut->cyc_en = 1;
             if (rw) dut->d_din = dut->win_rdata;
             dut->eval();
+            // THE CONSOLE TAP: the program's ECALL write (64) to fd 1/2, as the
+            // runtime sees its RUN answer - the runtime discards it, the bench
+            // shows it (the engine's registers name the buffer)
+            if (rw && ((addr & 0xFF) == 0x85 || (addr & 0xFF) == 0x84) && dut->win_rdata == 2 &&
+                ENG(rf)[17] == 64 && (ENG(rf)[10] == 1 || ENG(rf)[10] == 2)) {
+                const uint32_t b = ENG(rf)[11], n = ENG(rf)[12];
+                if (b + n <= SPACE_APP && n < 4096) { printf("guest| %.*s", int(n), reinterpret_cast<const char *>(&mem[b])); if (!n || mem[b + n - 1] != '\n') printf("\n"); fflush(stdout); }
+            }
         }
         if (!rw && dut->vda) {
             const unsigned char v = dut->dout;
@@ -572,6 +678,35 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
         cycles++;
     }
 
+    // --stop-at-video: the run ends at the first frame that is the reference; the
+    // program never quits, so the lifecycle's own checks do not apply.
+    if (stop_at_video) {
+        printf("app: %llu frames committed, %llu cycles, %zu calls\n", mode_commits, cycles, calls.size());
+        {   // the banks as the run left them, beside the reference, to look at
+            const std::string dump = std::string(expect_video) + ".last";
+            FILE *fd = fopen(dump.c_str(), "wb");
+            if (fd) {
+                for (unsigned y = 0; y < 200; y++) fwrite(&mem[0x800000 + (y / 100) * 0x10000 + (y % 100) * 640], 1, 640, fd);
+                fclose(fd);
+                printf("app: the last frame is in %s\n", dump.c_str());
+            }
+        }
+        if (quit) {                                 // the program ended before the picture came
+            std::string seq;
+            char e[16];
+            for (auto &c : calls) { snprintf(e, sizeof e, "(err $%02X)", c.err); seq += c.name + (c.err ? e : "") + " "; }
+            printf("app: the program quit: %s\n", seq.c_str());
+            printf("app: trace exit %d, status %u, cause %u, pc $%08X, tval $%08X\n", int32_t(rd32(TRACE + 20)), rd16(TRACE + 24),
+                   rd16(TRACE + 26), rd32(TRACE + 32), rd32(TRACE + 28));
+        }
+        if (memcmp(&mem[0xEEFE00], "DOOM", 4) == 0) printf("app: the program's report: frames %u, first frame at tick %u\n", rd32(0xEEFE04), rd32(0xEEFE08));
+        if (!video_matched) fail += "no frame was the reference picture\n";
+        else printf("app: frame %llu is the reference picture\n", mode_commits);
+        if (!fail.empty()) printf("%sFAIL\n", fail.c_str());
+        else printf("app: PASS\n");
+        delete dut;
+        return fail.empty() ? 0 : 1;
+    }
     // The verdict.
     std::string seq;
     for (auto &c : calls) seq += (seq.empty() ? "" : " ") + c.name;
@@ -727,6 +862,8 @@ int main(int argc, char **argv) {
     std::vector<std::string> app_files;
     int key = 'Z';
     const char *expect_video = nullptr;
+    bool stop_at_video = false;
+    std::map<unsigned, std::vector<uint8_t>> adb_events;   // --adb-events=ASK:CODE[+CODE],...
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto val = [&](const char *k) { return a.substr(strlen(k)); };
@@ -745,6 +882,28 @@ int main(int argc, char **argv) {
         else if (a.rfind("--image=", 0) == 0) image = argv[i] + 8;
         else if (a.rfind("--file=", 0) == 0) app_files.push_back(val("--file="));
         else if (a.rfind("--expect-video=", 0) == 0) expect_video = argv[i] + 15;
+        else if (a.rfind("--stop-at-video=", 0) == 0) { expect_video = argv[i] + 16; stop_at_video = true; }
+        else if (a.rfind("--adb-events=", 0) == 0) {
+            std::string list = val("--adb-events=");
+            size_t p = 0;
+            while (p < list.size()) {
+                size_t comma = list.find(',', p);
+                if (comma == std::string::npos) comma = list.size();
+                const std::string item = list.substr(p, comma - p);
+                const size_t colon = item.find(':');
+                if (colon == std::string::npos) { fprintf(stderr, "--adb-events: want ASK:CODE[+CODE]\n"); return 2; }
+                const unsigned ask = unsigned(strtoul(item.substr(0, colon).c_str(), nullptr, 0));
+                std::string codes = item.substr(colon + 1);
+                size_t q = 0;
+                while (q < codes.size()) {
+                    size_t plus = codes.find('+', q);
+                    if (plus == std::string::npos) plus = codes.size();
+                    adb_events[ask].push_back(uint8_t(strtoul(codes.substr(q, plus - q).c_str(), nullptr, 0)));
+                    q = plus + 1;
+                }
+                p = comma + 1;
+            }
+        }
         else if (a.rfind("--key=", 0) == 0) key = (unsigned char)val("--key=")[0];
         else if (a.rfind("--launches=", 0) == 0) launches = unsigned(strtoul(val("--launches=").c_str(), nullptr, 0));
         else if (a.rfind("--expect-code=", 0) == 0) expect_code = strtol(val("--expect-code=").c_str(), nullptr, 0);
@@ -755,7 +914,8 @@ int main(int argc, char **argv) {
     }
     if (app) {
         if (!hex || !vm || guest || ref_only || use_ref) { fprintf(stderr, "--app= takes --hex= --vm= and no guest, no reference\n"); return 2; }
-        return run_app(hex, vm, vm_bank, app, stale, image, expect_code, launches, app_files, key, expect_video, max_cycles);
+        return run_app(hex, vm, vm_bank, app, stale, image, expect_code, launches, app_files, key, expect_video, stop_at_video,
+                       adb_events, max_cycles);
     }
     if (!guest || (!ref_only && (!hex || !vm))) { fprintf(stderr, "need --guest= and (--hex= --vm= | --ref-only)\n"); return 2; }
 

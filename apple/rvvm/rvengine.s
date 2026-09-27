@@ -93,6 +93,8 @@ hdr_sp:     .dword  0                       ; the guest's initial sp; 0 = $E0000
 app_door:   jml     app_entry               ; $F1:0020
             .res    $30 - (* - hdr)
 quit_pb:    .word   0                       ; $F1:0030: QuitGS, pCount 0
+            .res    $40 - (* - hdr)
+adb_door:   jml     adb_done                ; $F1:0040: the ADB completion for raw keys
 
         .segment "CODE"
 
@@ -216,6 +218,22 @@ REG_VIDEO = REG + 6     ; enhanced video's owner, a user ID, 0 = none
 REG_APP   = REG + 8     ; the application's user ID, 0 = none
 REG_LOW   = REG + 10    ; its low block (4)
 REG_BANKS = REG + $100  ; 256 owner words: banks $100-$1FF
+; The raw ADB key events (docs/RVV2_DOOM.md, rung D3): a program asks the ADB
+; Tool Set for the keyboard's register 0 (AsyncADBReceive, command $C2) with
+; the completion at $F1:0040; the completion appends each event, {is_up,
+; keycode}, to a ring the program reads directly.  Reset at every entry.
+KEY_HEAD  = REG + $300  ; the next event's place (the completion's)
+KEY_TAIL  = REG + $302  ; the next unread (the program's)
+KEY_ASK   = REG + $304  ; nonzero while a request is outstanding (the completion clears it)
+; What the key path did, for the host's mirror: the completion's calls, the last
+; answer's count and the answers themselves ({count, bytes...} end to end in a
+; 256-byte log, KEY_LOGH its next place); $30C-$313 are the program's (librvgs:
+; asks, refusals, the last refusal, requests given up on).
+KEY_DONE  = REG + $306  ; completions
+KEY_LAST  = REG + $308  ; the last answer's count
+KEY_LOGH  = REG + $30A  ; the log's next place
+KEY_RING  = REG + $400  ; 256 events
+KEY_LOG   = REG + $500  ; 256 bytes of answers
 EV_CTL    = $E20000     ; enhanced video: ENABLE; +1 the global commit
 
 ; The trace, $EE:FF00: what the last application's lifecycle did, for the host's
@@ -413,7 +431,13 @@ reg_up: lda     f:REG
         sta     f:REG+2
         lda     #1
         sta     f:REG_VER
-@ok:    lda     f:REG_APP
+@ok:    lda     #0                      ; the key ring: empty, nothing asked, nothing counted
+        ldx     #$12
+:       sta     f:KEY_HEAD,x
+        dex
+        dex
+        bpl     :-
+        lda     f:REG_APP
         beq     :+
         jsr     reclaim
 :       lda     UID
@@ -1570,7 +1594,14 @@ cur_fault:
         jmp     trap
 
 sys_write:
-        lda     a:WA0+2
+        lda     APPM                    ; an application's console is discarded: its
+        beq     :+                      ; buffer is not read (it may be in the upper half)
+        lda     a:WA2
+        sta     a:WA0
+        lda     a:WA2+2
+        sta     a:WA0+2
+        jmp     resume
+:       lda     a:WA0+2
         bne     :+
         lda     a:WA0
         cmp     #1
@@ -1601,7 +1632,11 @@ sys_write:
         bra     cur_fault
 
 sys_read:
-        lda     a:WA0+2
+        lda     APPM                    ; an application has no console to read
+        beq     :+
+        lda     #0
+        jmp     ret_a
+:       lda     a:WA0+2
         ora     a:WA0
         beq     :+
         jmp     ebadf
@@ -1867,6 +1902,72 @@ plat_halt:
         beq     :+
         jmp     app_done
 :       stp
+
+; ---- the ADB completion (rung D3) -------------------------------------------------
+; Called by the ROM's ADB interrupt handler (ROM 03 $FC/DB0F: PEA $0000, PHD,
+; SEP #$30, JSL $E103DC) once the keyboard's register 0 has answered a
+; program's AsyncADBReceive: 8-bit, at interrupt time, a long pointer to the
+; answer on the stack (bank 0: a count, then the bytes - the count as $FC/DB36
+; keeps it, the micro's status bits: the bytes LESS ONE, 0 for none; a Talk
+; register 0 is two bytes, count 1).  Each byte is an event, {is_up, keycode},
+; the first first; $FF is the micro's "nothing here".  Only long addressing and
+; the stack: at interrupt time there is no direct page of ours.
+        .a8
+        .i8
+adb_done:
+        phb
+        lda     #0
+        pha
+        plb                             ; DBR 0: the answer is in bank 0
+        lda     f:KEY_DONE              ; counted: the low byte (it wraps at 256)
+        inc     a
+        sta     f:KEY_DONE
+        ldy     #0
+        lda     ($05,s),y               ; the count (the pointer: S+5, past B and the RTL)
+        sta     f:KEY_LAST
+        jsr     @log
+        cmp     #0
+        beq     @end
+        inc     a                       ; the micro's own count: the bytes LESS ONE ($FC/DB36)
+        tax
+@next:  iny
+        lda     ($05,s),y               ; an event (nothing pushed yet: the pointer is at S+5)
+        jsr     @log
+        cmp     #$FF
+        beq     @skip
+        phx                             ; the count left
+        pha                             ; the event
+        lda     f:KEY_HEAD              ; the head's low byte: the ring's 256 places
+        tax
+        pla
+        sta     f:KEY_RING,x
+        inx
+        txa
+        sta     f:KEY_HEAD              ; (its high byte stays 0)
+        plx
+@skip:  dex
+        bne     @next
+@end:   lda     #0
+        sta     f:KEY_ASK
+        plb
+        rtl
+; A in the log, kept (X kept; the pointer moves 2 deeper for the JSR's return,
+; which is why the callers read the answer before calling).
+@log:   phx
+        pha
+        lda     f:KEY_LOGH
+        tax
+        pla
+        sta     f:KEY_LOG,x
+        inx
+        pha
+        txa
+        sta     f:KEY_LOGH
+        pla
+        plx
+        rts
+        .a16
+        .i16
 
         .segment "RODATA"
 s_noeng: .byte  "rvengine: no RISC-V engine at $EF:FE00", 10, 0

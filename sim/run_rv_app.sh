@@ -11,7 +11,7 @@
 # the registration table to reclaim, and no program file, each launched twice on
 # the one engine (nothing resets it in between); SPLASH its picture on mode 1.
 #
-#   sim/run_rv_app.sh [APP, default rvtest] [RUNNER ARGS...]
+#   sim/run_rv_app.sh [APP, default rvtest] [RUNNER ARGS...]   (after the case's: they win)
 # The cases are the application's own: apple/rvvm/APP/bench.cases.
 # A run is stopped at 200M cycles: a runtime that loses its way would otherwise run
 # to the runner's 2G.  The application's resources (APP.res) are GS/OS's files too;
@@ -48,14 +48,14 @@ fi
 files=()
 while read -r f; do [ -n "$f" ] && files+=(--file="9:$f=$work/$f"); done < "$work/$up.res"
 args=(--hex="$root/rtl/gs/cpu65816_ucode.hex" --vm="$root/sim/rvvm_work/rvengine.bin" --app="$work/$up.stub"
-      --max-cycles=200000000 "${files[@]}" "$@")
+      --max-cycles=200000000 "${files[@]}")
 rc=0
 cases="$root/apple/rvvm/$app/bench.cases"
 [ -f "$cases" ] || { echo "no $cases" >&2; exit 1; }
 while read -r name rest; do
     case "$name" in ''|'#'*) continue;; esac
     eval "extra=($rest)"                        # $work and $up, as the cases file writes them
-    if "$run" "${args[@]}" "${extra[@]}" < /dev/null > "$work/$app-$name.log" 2>&1; then
+    if "$run" "${args[@]}" "${extra[@]}" "$@" < /dev/null > "$work/$app-$name.log" 2>&1; then
         echo "PASS rv-app-$app-$name: $(grep -m1 'trace step' "$work/$app-$name.log" | sed 's/^app: trace //')"
         grep -E "the program's report|the picture in" "$work/$app-$name.log" | sed 's/^app: /    /' || true
     else
