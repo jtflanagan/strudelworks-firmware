@@ -3,7 +3,7 @@
    render_opl - DOOM's music on the PC through the port's own OPL path
    (tools/doom_music, docs/RVV2_DOOM.md MU3): Chocolate Doom 2.2.1's player
    (i_oplmusic.c, midifile.c, opl.c, opl_queue.c), the engine's driver
-   (apple/rvvm/doom/opl_rv.c) and its DBOPL (dbopl_rv.c), at OPL_RATE (the
+   (tools/doom_music/opl_rv.c, the engine's until MU3) and its DBOPL (dbopl_rv.c), at OPL_RATE (the
    build's -DOPL_RATE); writes the OPL's 16-bit mono samples - opl_rv_fill's
    output, before snd_rv.c's gain - to a raw file.  A song from the WAD, or a
    MIDI file (the table builder's one-note captures).  Built by

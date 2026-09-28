@@ -4,8 +4,8 @@
    the Event Manager's ticks, the WAD beside the program (9:DOOM1.WAD), keys
    from the ADB itself.  Its report ($EE:FE00): 'DOOM', frames drawn, the ticks at
    the first frame, the ticks now, and the frames of the last whole second
-   (tenths), then the music's OPL register writes and its loudest sample over
-   that second (opl_rv.c).  That rate is drawn in the picture's top right corner, "RV 35.0" -
+   (tenths), then the music's notes started and its loudest sample over that
+   second, of 127 before the clamp (mus_rv.c, snd_rv.c).  That rate is drawn in the picture's top right corner, "RV 35.0" -
    the engine's, DOOM's own ceiling being 35; the host's HUD shows beside it the
    Pi's own on-time refreshes ("FPS"). */
 #include <stdint.h>
@@ -112,10 +112,10 @@ void DG_DrawFrame(void) {
         rate10 = (frames - rate_frames) * 600 / (now - rate_tick);
         rate_tick = now; rate_frames = frames;
         report[4] = rate10;
-        extern uint32_t opl_rv_writes, opl_rv_peak;         /* opl_rv.c: the music's */
-        report[5] = opl_rv_writes;
-        report[6] = opl_rv_peak;
-        opl_rv_peak = 0;
+        extern uint32_t mus_rv_notes, mus_rv_peak;          /* mus_rv.c: the music's */
+        report[5] = mus_rv_notes;
+        report[6] = mus_rv_peak;
+        mus_rv_peak = 0;
         rate_known = 1;
     }
     if (rate_known) draw_rate();

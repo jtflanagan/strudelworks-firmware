@@ -50,7 +50,7 @@ cap_dir = os.path.join(a.work, "cap"); os.makedirs(cap_dir, exist_ok=True)
 render = os.path.join(a.work, "render_opl")
 choc, dg, fwd = os.path.join(ROOT, "..", "chocolate-doom"), os.path.join(ROOT, "..", "doomgeneric", "doomgeneric"), os.path.join(ROOT, "apple", "rvvm", "doom")
 srcs = [os.path.join(HERE, "render_opl.c"), f"{choc}/src/i_oplmusic.c", f"{choc}/src/midifile.c", f"{choc}/opl/opl.c",
-        f"{choc}/opl/opl_queue.c", f"{fwd}/opl_rv.c", f"{fwd}/dbopl_rv.c", f"{dg}/mus2mid.c", f"{dg}/memio.c"]
+        f"{choc}/opl/opl_queue.c", f"{HERE}/opl_rv.c", f"{HERE}/dbopl_rv.c", f"{dg}/mus2mid.c", f"{dg}/memio.c"]
 if not os.path.exists(f"{choc}/opl/dbopl.c"):
     sys.exit(f"no chocolate-doom-2.2.1 at {choc} (git -C {choc} checkout chocolate-doom-2.2.1)")
 if not os.path.exists(render) or any(os.path.getmtime(s) > os.path.getmtime(render) for s in srcs):

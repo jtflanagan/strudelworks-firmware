@@ -1,25 +1,20 @@
 # DOOM's program (apple/rvvm/build_app.sh): doomgeneric (the sibling checkout
-# ../doomgeneric) on picolibc, its platform in doom_rv.c; its music Chocolate
-# Doom's OPL player and DBOPL (the sibling checkout ../chocolate-doom at the tag
-# chocolate-doom-2.2.1, the last with DBOPL - docs/RVV2_DOOM.md, MU1).
+# ../doomgeneric) on picolibc, its platform in doom_rv.c; its music mus_rv.c,
+# sampled instruments from DOOMMUS.INS (docs/RVV2_DOOM.md, MU3).
 dg="$root/../doomgeneric/doomgeneric"
 [ -d "$dg" ] || { echo "no doomgeneric at $dg" >&2; exit 1; }
-choc="$root/../chocolate-doom"
-[ -f "$choc/opl/dbopl.c" ] || { echo "no chocolate-doom-2.2.1 at $choc (git -C $choc checkout chocolate-doom-2.2.1)" >&2; exit 1; }
 compat="$root/apple/rvvm/doom/compat"
 PICOLIBC=1
 python3 "$root/tools/adb_ascii_h.py" > "$out/adb_ascii.h"   # the ADB micro's own keymap
 HEAP=0xB00000                           # the 6 MB zone, the WAD's cached lumps, the screen
 STACK=0x40000
-# doomgeneric's headers before Chocolate Doom's (only midifile.h is wanted from
-# its src/); SDL's stand-in (compat/SDL.h) in every file; Chocolate Doom's OPL
-# player as doomgeneric's music module, our driver as OPL's only one.
-EXTRA_CFLAGS="-I$out -I$compat -include $compat/SDL.h -DFEATURE_SOUND -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -DNORMALUNIX -D_DEFAULT_SOURCE -I$dg -I$choc/opl -I$choc/src -Dmusic_opl_module=DG_music_module -Dopl_sdl_driver=opl_rv_driver -Wno-everything"
+# SDL's stand-in (compat/SDL.h) in every file.
+EXTRA_CFLAGS="-I$out -I$compat -include $compat/SDL.h -DFEATURE_SOUND -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -DNORMALUNIX -D_DEFAULT_SOURCE -I$dg -Wno-everything"
 case "${DOOM_PROFILE:-}" in             # sim/profile_doom.sh's builds
     warp)     EXTRA_CFLAGS="$EXTRA_CFLAGS -DDOOM_WARP";;       # straight into E1M1
     timedemo) EXTRA_CFLAGS="$EXTRA_CFLAGS -DDOOM_TIMEDEMO";;   # DEMO1, no cap
 esac
-EXTRA_SRCS="$choc/src/i_oplmusic.c $choc/src/midifile.c $choc/opl/opl.c $choc/opl/opl_queue.c"   # (dbopl_rv.c, the tuned DBOPL, is in this folder: built as one of its *.c)
+EXTRA_SRCS=""                           # (this folder's *.c are built too: doom_rv.c, snd_rv.c, mus_rv.c)
 for f in dummy am_map doomdef doomstat dstrings d_event d_items d_iwad d_loop d_main d_mode d_net f_finale \
          f_wipe g_game hu_lib hu_stuff info i_cdmus i_endoom i_joystick i_scale i_sound i_system i_timer memio \
          m_argv m_bbox m_cheat m_config m_controls m_fixed m_menu m_misc m_random mus2mid p_ceilng p_doors p_enemy \

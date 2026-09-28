@@ -274,9 +274,22 @@ linear interpolation, the envelope ramped every sample. Against the OPL at 52640
 follows it at 0.80 (E1M1) and 0.79 (the title) - the prototype, with its own allocation and 1.5 s
 holds, 0.79 and 0.70.
 
-Next: the engine's side - `DOOMMUS.INS` a resource beside the WAD, the sequencer and mixer in C in
-place of the OPL player, `opl_rv.c` and DBOPL, and the runtime's centre stream at 26320 Hz (all three
-run at 13160 today).
+**The centre at 26320 Hz** (runtime): generator C's pair play a 4 KB ring at `$D000` at a byte a
+scan - the same frequency value (512) taken whole by a 4 KB table at resolution 4, so one timer still
+paces all three; each interrupt copies 512 centre bytes (two pages) beside 256 of left and right; the
+engine's centre chunks are 512 bytes (`RVGS_SND_CCHUNK`, `RVGS_SND_CRATE`), 16 of them to `$EE:4FFF`.
+The bench checks every interrupt's 1024 writes.
+
+**The engine's player** (`apple/rvvm/doom/mus_rv.c`, doomgeneric's music module): `preview.py` in
+integers - the MUS read as it plays, DMX's allocation and volume law, 16.16 table positions, 8.8
+interpolated samples times 16-bit amplitudes ramped every sample, 188 samples a tic exactly - loading
+`9:DOOMMUS.INS` (a resource beside the WAD, built by `resources.sh`) at the music's start-up.
+`snd_rv.c` takes its sum >> 8 into the centre (E1M1 peaks 107 of 127, the title 80, at DOOM's default
+volume); DOOM's report (`$EE:FE14`, `$EE:FE18`) now counts its notes and that peak. Chocolate Doom's
+player, `opl_rv.c` and DBOPL leave the program (33 KB smaller); the last two live on in
+`tools/doom_music/` for the captures. `tools/doom_music/render_mus.c` builds the same `mus_rv.c` on the
+PC: against `preview.py` its output correlates 0.9996 over 45 s of each song (0.9987 at worst in any
+second) - the rest is rounding.
 
 ## Speed (2026-09-27)
 

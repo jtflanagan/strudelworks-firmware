@@ -1,4 +1,4 @@
-/* DBOPL, original against apple/rvvm/doom/dbopl_rv.c: the same register writes
+/* DBOPL, original against tools/doom_music/dbopl_rv.c: the same register writes
    into both, every 256-sample chunk hashed (sim/run_dbopl_equiv.sh builds this
    twice, once with each, and compares the output line for line).
      phase 1: OPL2, Chip__GenerateBlock2 (DOOM's): random writes over every

@@ -7,13 +7,12 @@
    the left), never $00 (that stops a DOC voice); the runtime's interrupt
    copies each into the DOC.  Mixed as the ring has room, SND_AHEAD chunks
    ahead of the DOC, from DOOM's per-tic Update and from its sleeps
-   (snd_pump, doom_rv.c) - paced by the DOC's own clock.  The music: Chocolate
-   Doom's OPL player (the music module, app.mk) on an OPL2 of our own
-   (opl_rv.c) at the same rate, in the runtime's centre stream: the DOC adds
-   it to both sides,
-   so the music and the effects each have all 8 bits and never squash each
-   other (they shared one sample until 2026-09-27: the music turned up to be
-   heard clipped, its bass a buzz, and buried the effects under the clamp). */
+   (snd_pump, doom_rv.c) - paced by the DOC's own clock.  The music: sampled
+   instruments (mus_rv.c, rung MU3) mixed at 26320 Hz - 512 samples a chunk -
+   into the runtime's centre stream: the DOC adds it to both sides, so the
+   music and the effects each have all 8 bits and never squash each other
+   (they shared one sample until 2026-09-27: the music turned up to be heard
+   clipped, its bass a buzz, and buried the effects under the clamp). */
 #include <stdint.h>
 #include <stdio.h>
 #include "doomtype.h"
@@ -24,15 +23,16 @@
 
 #define NCH       8
 #define SND_AHEAD 8                             /* chunks mixed ahead of the DOC: 156 ms at 13160 Hz (3 ran dry under a slow frame) */
-/* Each stream's scale, in the mix's unit (1/128 of an 8-bit step): the OPL's
-   16 bits x MUS_GAIN, the effects' samples x volume x SFX_GAIN/4.  DOOM's music
-   on DBOPL peaks ~800-1400 at the default volume on the title, 3726 in E1M1's
-   demo (on the card, opl_rv_peak): x4 puts that at 116 of 127.  One effect at
-   full volume is 94; several together may clamp, in their own stream only. */
-#define MUS_GAIN  4
+/* Each stream's scale: the music's sum (mus_rv.c) >> MUS_SHIFT - E1M1 peaks
+   ~107 of 127, the title ~81, at DOOM's default volume (tools/doom_music's
+   preview); the effects' samples x volume x SFX_GAIN/4 in 1/128 of an 8-bit
+   step.  One effect at full volume is 94; several together may clamp, in their
+   own stream only. */
+#define MUS_SHIFT 8
 #define SFX_GAIN  3
 
-void opl_rv_fill(int16_t *out, unsigned n);     /* opl_rv.c */
+void mus_rv_fill(int32_t *out, unsigned n);     /* mus_rv.c */
+extern uint32_t mus_rv_peak;
 
 struct chan {
     const uint8_t *data;                        /* the samples; NULL = free */
@@ -51,12 +51,16 @@ void I_InitTimidityConfig(void) {}
 static void mix_chunk(void) {
     static uint8_t l[RVGS_SND_CHUNK] __attribute__((aligned(4))), r[RVGS_SND_CHUNK] __attribute__((aligned(4))),
                    c[RVGS_SND_CCHUNK] __attribute__((aligned(4)));
-    static int16_t mus[RVGS_SND_CHUNK];
-    opl_rv_fill(mus, RVGS_SND_CHUNK);
-    for (unsigned i = 0; i < RVGS_SND_CHUNK; i++) {
-        int sc = (mus[i] * MUS_GAIN) >> 7;
+    static int32_t mus[RVGS_SND_CCHUNK];
+    mus_rv_fill(mus, RVGS_SND_CCHUNK);
+    for (unsigned i = 0; i < RVGS_SND_CCHUNK; i++) {
+        int sc = mus[i] >> MUS_SHIFT;
+        const uint32_t a = (uint32_t)(sc < 0 ? -sc : sc);
+        if (a > mus_rv_peak) mus_rv_peak = a;
         if (sc < -127) sc = -127; else if (sc > 127) sc = 127;
-        c[2 * i] = c[2 * i + 1] = (uint8_t)(sc + 128);   /* the centre runs at twice the rate (MU3: until the wavetable player) */
+        c[i] = (uint8_t)(sc + 128);
+    }
+    for (unsigned i = 0; i < RVGS_SND_CHUNK; i++) {
         int sl = 0, sr = 0;
         for (unsigned c = 0; c < NCH; c++) {
             struct chan *h = &ch[c];

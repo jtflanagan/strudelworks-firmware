@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DOOM's tuned DBOPL (apple/rvvm/doom/dbopl_rv.c) against Chocolate Doom's own
+# DOOM's tuned DBOPL (tools/doom_music/dbopl_rv.c) against Chocolate Doom's own
 # (../chocolate-doom/opl/dbopl.c, tag chocolate-doom-2.2.1): sim/dbopl_equiv.c
 # built on the PC once with each, the same register writes into both, every
 # 256-sample chunk's hash compared line for line (OPL2 then OPL3).  PASS = the
@@ -12,7 +12,7 @@ choc="$root/../chocolate-doom"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 for v in orig rv; do
-    src="$choc/opl/dbopl.c"; [ $v = rv ] && src="$root/apple/rvvm/doom/dbopl_rv.c"
+    src="$choc/opl/dbopl.c"; [ $v = rv ] && src="$root/tools/doom_music/dbopl_rv.c"
     cc -O2 -I"$choc/opl" -I"$choc/src" -o "$work/$v" "$root/sim/dbopl_equiv.c" "$src" -lm
     "$work/$v" > "$work/$v.out"
 done
