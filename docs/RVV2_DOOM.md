@@ -8,6 +8,9 @@ mode 4 (8-bit indexed): at DOOM's cap of 35 frames a second in E1M1 with music, 
 scenes (DEMO1 uncapped: median 38.7 fps, the worst frames ~50 ms). D1-D5, S1-S3, M1 and MU1 done.
 Evening 2026-09-27 (MU2, below): the music a stream of its own beside the effects, everything at
 13160.1 Hz - two DOC scans a sample - and the mix 8 chunks ahead; better by ear (user).**
+2026-09-28 (MU3, below): the music to move off DBOPL onto sampled instruments the engine mixes into
+one stream at 26320 Hz (user, by ear on the PC) - the tables and the reference player built on the
+PC (`tools/doom_music/`); the engine's side not started.
 
 ## The base: doomgeneric
 
@@ -222,6 +225,57 @@ What the user heard, in order, and what each was:
   the original on the PC (6000 chunks, OPL2 and OPL3, random register writes).
 - **Next for quality**: the 8 bits. The high byte on one oscillator at volume 255 and the low on a
   second at volume 1 sum to ~16 bits in the DOC - of which the card's `doc_l[20:5]` keeps ~11.
+
+## Music, third pass: the DOC's way (rung MU3, 2026-09-28)
+
+*(user)*: the music is poor. Heard on the PC - the port's own OPL path (`tools/doom_music/render_opl.c`:
+Chocolate Doom's player, `opl_rv.c`, `dbopl_rv.c`) rendered at several rates and depths, then cut as
+`snd_rv.c` cuts it:
+
+- **The fault is aliasing, not the 9 voices and hardly the 8 bits**: DBOPL made at 13160 Hz has no band
+  limit - an FM voice's overtones above 6.58 kHz fold back into the band. DBOPL at 52640 Hz band-limited
+  down to 13160 sounds much better, and 8 bits against 16 there "roughly comparable" (user). But that is
+  DBOPL at four times its rate - its 4.6% (E1M1) / ~12% (DEMO1) of the engine, x4.
+- **The DOC's rates**: a voice steps once a scan, 894886 Hz / (oscillators + 2) = 26320 Hz with GS/OS's
+  32; a stream is clean at 26320 / k (26320, 13160, 8773, ...). Above 26320 only by enabling fewer
+  oscillators - `$E1`, GS/OS's - so not.
+- **The ES5503's memory** (MAME's `es5503.cpp`; KEGS and `gs_doc.sv` model the IIgs's 64 KB): 17
+  address bits, 128 KB - bit 6 of `$C0-$DF` is A16, per oscillator, unwired on the IIgs; the channel
+  bits (control 4-7) are on the pins during wave reads, so a board could bank per voice (1 MB keeping
+  bit 4 as the side, 2 MB without). Not pursued *(user: not exotic yet)*.
+- **DOC voices, one a note** (the Note Synthesizer's way), modelled scan by scan: sound, but stereo
+  sinks it - a centred voice needs an oscillator on each side (two pairs with swap mode), so 9 voices
+  want more than the Sound Tool Set's 15 generators.
+- **Chosen *(user)*: the engine plays sampled instruments into ONE stream the DOC plays** - the Yamaha
+  only offline: DOOM's own GENMIDI patches captured through the OPL path when the program is built,
+  and at run time a sequencer (DMX's) and a wavetable mixer, the centre stream at 26320 Hz, 8 bits.
+  "Quite acceptable"; what it cannot do (the timbre frozen after the attack) is the hardware's accent
+  *(user)*. Estimated 1.5-3% of the engine (not measured) against DBOPL's 4.6-12%.
+
+**The tables** (`tools/doom_music/instruments.py WAD OUT.INS` -> `DOOMMUS.INS`, layout in
+`tools/doom_music/dmus.py`; ~50 s on the PC, captures cached under `sim/rvvm_work/doom_music/`):
+one entry for every OPL voice DMX plays - an instrument's voice 0, and voice 1 of a double-voice one,
+each captured alone (`DMUS_MUTE`: the other voice's attack rates zeroed; the two sum to the normal
+capture bit for bit) - at every note the WAD's songs play it, so only a bend moves a table. An attack
+(~100 ms, whole periods, 2048 bytes) runs in phase into a loop (one cycle from the harmonics after it),
+band-limited to 11 kHz at the entry's reach; the loop's amplitude a tick at a time through an 8 s
+hold (kept until one decay carries the rest within 0.5 dB - most keep their tremolo), the release to
+-60 dB; percussion one-shots at 13160 Hz. The shareware WAD's 13 songs: 521 entries, 70 voices of 60
+instruments, 2.2 MB (the engine's heap is 11 MB, the zone 6 of it). `--all`: every instrument an
+octave apart, for songs the WAD does not have.
+
+**The player** (`tools/doom_music/preview.py WAD DOOMMUS.INS SONG OUT.wav`: the reference for the
+engine's): MUS at its 140 Hz tic; DMX's 9 OPL voices allocated as Chocolate Doom's `opl_v_new` does
+(the free list from its head, back at its tail; a double voice's second only if one is free; else
+ReplaceExistingVoice's victim - a second voice, else the last on the highest MIDI channel, mus2mid's
+order); a released voice sounding on with its volume and bend frozen until taken; DMX's volume law;
+linear interpolation, the envelope ramped every sample. Against the OPL at 52640 Hz, 100 ms loudness
+follows it at 0.80 (E1M1) and 0.79 (the title) - the prototype, with its own allocation and 1.5 s
+holds, 0.79 and 0.70.
+
+Next: the engine's side - `DOOMMUS.INS` a resource beside the WAD, the sequencer and mixer in C in
+place of the OPL player, `opl_rv.c` and DBOPL, and the runtime's centre stream at 26320 Hz (all three
+run at 13160 today).
 
 ## Speed (2026-09-27)
 
