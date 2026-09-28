@@ -10,7 +10,8 @@ Evening 2026-09-27 (MU2, below): the music a stream of its own beside the effect
 13160.1 Hz - two DOC scans a sample - and the mix 8 chunks ahead; better by ear (user).**
 2026-09-28 (MU3, below): the music to move off DBOPL onto sampled instruments the engine mixes into
 one stream at 26320 Hz (user, by ear on the PC) - the tables and the reference player built on the
-PC (`tools/doom_music/`); the engine's side not started.
+PC (`tools/doom_music/`); then the engine's player (`mus_rv.c`, 2.96% of the engine in E1M1 against
+DBOPL's 4.6% at half the rate) and the centre at 26320 Hz - running on hardware, by ear pending.
 
 ## The base: doomgeneric
 
@@ -290,6 +291,13 @@ player, `opl_rv.c` and DBOPL leave the program (33 KB smaller); the last two liv
 `tools/doom_music/` for the captures. `tools/doom_music/render_mus.c` builds the same `mus_rv.c` on the
 PC: against `preview.py` its output correlates 0.9996 over 45 s of each song (0.9987 at worst in any
 second) - the rest is rounding.
+
+**Measured** (`sim/profile_doom.sh`, E1M1 with its music, 3 s of the card): `mus_rv_fill` 2.96% of the
+engine - at 26320 Hz; DBOPL took 4.6% at half that rate - and `snd_pump` (the effects' mix and the
+centre's cut) 2.1%; frames median 26.8 ms (37.3 fps), 90th 30.5 ms, the worst 33.4 ms - DOOM's cap,
+none over 40 ms. **On hardware** (2026-09-28, fw 6da55c2 / host 93fc0c1, the bit unchanged): DOOM
+from the Finder, the tables read at start-up, the title song played (97 notes) and the demo's after it
+(peak 34 of 127 in a second), the engine at 37 frames a second; by ear: the user's to judge.
 
 ## Speed (2026-09-27)
 
