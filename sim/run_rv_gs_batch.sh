@@ -33,7 +33,9 @@ vm="$root/sim/rvvm_work/rvengine.bin"
 guests=(rv32ui-add rv32ui-addi rv32ui-lw rv32ui-lh rv32ui-lhu rv32ui-lb rv32ui-lbu
         rv32ui-sw rv32ui-sh rv32ui-sb rv32ui-beq rv32ui-bltu rv32ui-jal rv32ui-jalr
         rv32ui-fence_i rv32um-mul rv32um-divu rv32uzba-sh2add rv32uzbb-rev8 rvvm-c-hello
-        rvvm-map rvvm-hi_top@0x1800000 rvvm-c-pie@0x1800000)
+        rvvm-map rvvm-probe_land rvvm-hi_top@0x1800000 rvvm-c-pie@0x1800000)
+# (probe_land: an L2 probe against a 65816 write's landing - page_cam's il_ack,
+# the engine fault of 2026-09-27; page_cam's own check names the clash)
 # (hi_cross is not here: it straddles $0100_0000 from bank $FF, which on the IIgs
 # is ROM - the flat-memory benches, run_rvvm_tests.sh, keep it)
 pass=0; fail=0; failed=()

@@ -301,7 +301,13 @@ module page_cam #(
     wire        eng_idle = (state == E_IDLE);
 
     wire il_busy = il_sr[0] || il_sr[1];
-    assign il_ack = il_req && !op_present && !pw_take && !shd_take && !wl_v && !il_busy &&
+    // NOT WHILE AN OP IS IN P1 (!cl_valid, as pw_ready has it): a write there
+    // lands next clock - the probe's P1, whose row read the landing takes (port
+    // A is the landing's on its clock), and il_row would be the row the write
+    // landed in.  The suspected cause of the HW trap of 2026-09-27 (the engine
+    // ran $00F1E000, a word memory did not hold, after an ECALL; the write most
+    // likely an interrupt's stack push - docs/RVV2_DOOM.md, Open); not proven.
+    assign il_ack = il_req && !op_present && !cl_valid && !pw_take && !shd_take && !wl_v && !il_busy &&
                     !pw_pending && !iv_run && (state != E_PATCH);
 
     // ---- P0: the entrant, the set, the compare, the row read --------------------
@@ -329,8 +335,9 @@ module page_cam #(
     wire [SW-1:0]  slot0 = {en_set, way0};
 `ifndef SYNTHESIS
     // The P1 read must address exactly the row P0's compare chose, and a
-    // landing must never steal a hit's read clock (it never has: land_clash is
-    // zero over a 20 M-instruction row, the ops being three clocks apart).
+    // landing must never steal a hit's read clock.  The ops are three clocks
+    // apart; the engine's probe was not, until il_ack waited out an op in P1
+    // (2026-09-27: acked the clock after a write's P0, its read would be the landing's).
     logic [AW-1:0] en_row_q;
     logic          en_row_qv;
     always_ff @(posedge clk) begin

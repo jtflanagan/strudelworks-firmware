@@ -254,8 +254,18 @@ What the user heard, in order, and what each was:
   instruction at `$01000C50`, the instruction after the ECALL in `rvgs_ticks` (TickCount). The word
   executed was `$00F1E000`; memory held the right one (`bnez a0`, the host's mirror, identical to the
   file). `$00F1E000` is `rt_loader`'s address - the value the 65816 writes to `WPC` (`$EF:FE80`) at each
-  launch, its only other copy in the 32 MB. The fetch after an ECALL's resume took a window register's
-  value, not memory: an engine bug to find (rv_pipe's resume and fetch against the window's writes).
+  launch, its only other copy in the 32 MB - but the window's writes never reach the L2 (the page is
+  claimed like I/O), so that copy is the host mirror's alone.
+  **Suspected mechanism, fixed in bit `ilack1` (TIMING MET, flash 20260927 205651), not proven**: an
+  L2 probe (the engine's, `page_cam.sv` il_ack) was acknowledged the clock after a 65816 write's P0;
+  the write lands on the probe's P1 and takes BRAM port A, so the probe's row read never happens and
+  `il_row` is the landed row, kept by rv_mem as its own. The shadow and posted-write entrants wait out
+  an op in P1 (`pw_ready`'s `!cl_valid`); the probe did not - now it does. The likely write is an
+  interrupt's (the stack pushes and the handler's writes, at a clock unrelated to anything else): a
+  stack row, rewritten before the dump, explains a word found nowhere afterwards. The fetch that met it:
+  the one out when the ECALL flushed the pipe, missing the L1 and the L2, re-probing through the VM's
+  service. `rvvm-probe_land` (GS batch) sets that up; with no interrupt source in the GS bench it has
+  not met the timing (unfixed page_cam: no clash in 2000 ECALLs), so it guards, it does not prove.
 - How fast a sim run reaches DOOM's first frame on the application bench (the engine and the 65816
   in Verilator); a faster bring-up path - the reference model running the program with the runtime's
   services emulated at the ECALL - may be worth building for the port's iterations.
