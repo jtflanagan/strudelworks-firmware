@@ -1,0 +1,6 @@
+# LF everywhere, so a Windows clone (core.autocrlf) cannot turn the scripts
+# into CRLF.  The two files below are kept exactly as committed.
+* text=auto eol=lf
+
+ref/mig_pt_v2.prj -text
+build/depth_baseline.txt -text
