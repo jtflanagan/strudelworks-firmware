@@ -239,15 +239,16 @@ KEY_LAST  = REG + $308  ; the last answer's count
 KEY_LOGH  = REG + $30A  ; the log's next place
 KEY_RING  = REG + $400  ; 256 events
 KEY_LOG   = REG + $500  ; 256 bytes of answers
-; Sound (docs/RVV2_DOOM.md, rungs S1-S3): the program mixes 256-sample chunks,
-; left, right and centre, into three rings of 16 here and counts them in
-; SND_HEAD; the runtime owns three Sound Tool Set generators - their oscillators
-; played directly - and at each timer interrupt (every 256 samples) copies the
-; next chunk into the DOC's own rings, SND_LEAD segments ahead of the players,
-; or silence when none is ready.  The centre is a stream of its own (DOOM's
-; music beside its effects): two oscillators play its one ring, one to each
-; side, and the DOC adds them to the left and right - each stream has all 8
-; bits, none squashes another.  All below reset at every entry.
+; Sound (docs/RVV2_DOOM.md, rungs S1-S3, MU3): the program mixes chunks - 256
+; samples of left and right at 13160 Hz, 512 of centre at 26320 Hz, the same
+; time - into three rings of 16 here and counts them in SND_HEAD; the runtime
+; owns three Sound Tool Set generators - their oscillators played directly -
+; and at each timer interrupt (every 256 left samples) copies the next chunk
+; into the DOC's own rings, SND_LEAD segments ahead of the players, or silence
+; when none is ready.  The centre is a stream of its own (DOOM's music beside
+; its effects), at a byte a DOC scan: two oscillators play its one ring, one to
+; each side, and the DOC adds them to the left and right - each stream has all
+; 8 bits, none squashes another.  All below reset at every entry.
 SND_HEAD  = REG + $320  ; chunks the program has mixed (the program's)
 SND_TAIL  = REG + $322  ; chunks copied to the DOC (the interrupt's)
 SND_UNDER = REG + $324  ; interrupts with no chunk ready (silence played)
@@ -264,7 +265,7 @@ SND_GC    = REG + $33A  ; generator C (the centre's players), $FFFF none
 SND_PB    = REG + $340  ; SetDOCReg's parameter block (14)
 SND_L     = REG + $1000 ; 16 chunks of 256, the left
 SND_R     = REG + $2000 ; 16 chunks of 256, the right
-SND_C     = REG + $3000 ; 16 chunks of 256, the centre (both sides)
+SND_C     = REG + $3000 ; 16 chunks of 512, the centre (both sides): to $EE:4FFF
 SND_LEAD  = 3           ; DOC segments between the players and the chunk written
 SND_RATE  = $0200       ; 13160.1 Hz: 26320 Hz scans (32 oscillators) x 512 / 2^10 - a
                         ; sample every two scans exactly.  A rate that does not divide
@@ -273,7 +274,9 @@ SND_RATE  = $0200       ; 13160.1 Hz: 26320 Hz scans (32 oscillators) x 512 / 2^
 SND_PL    = $F0         ; the DOC's left ring: pages $F0-$F7 (2 KB, aligned)
 SND_PR    = $F8         ; the right ring: $F8-$FF
 SND_PT    = $E0         ; the timer's page: 256 samples of silence
-SND_PC    = $E8         ; the centre's ring: pages $E8-$EF, both its players
+SND_PC    = $D0         ; the centre's ring: pages $D0-$DF (4 KB, aligned), both its
+                        ; players at a byte a scan (26320 Hz: 4 KB at resolution 4
+                        ; takes SND_RATE's 512 as a whole byte); a segment is two pages
 GLU_CTL   = $E1C03C     ; the sound GLU: bit 6 RAM, bit 5 auto-increment, 3:0 the volume
 GLU_DATA  = $E1C03D
 GLU_ADL   = $E1C03E
@@ -2079,9 +2082,9 @@ snd_call:
 ; Three generators the Sound Tool Set has no use for, claimed (SetDOCReg writes
 ; the type, $08: the application's), their oscillators programmed halted: A's
 ; pair the players (left, right: a 2 KB ring each), C's pair the centre's (one
-; 2 KB ring, one to each side), B's first the timer (256 samples of silence,
-; its interrupt on) - all at SND_RATE, so the timer ends exactly each 256
-; samples the players play.  The DOC's rings silent, our vector installed,
+; 4 KB ring, one to each side, a byte a scan), B's first the timer (256 samples
+; of silence, its interrupt on) - all at SND_RATE, so the timer ends exactly
+; each 256 samples the left and right players play (512 of the centre's).  The DOC's rings silent, our vector installed,
 ; then the five started together.
 snd_on:
         lda     f:SND_ON
@@ -2136,7 +2139,7 @@ snd_on:
         ldx     #16                     ; pages $F0-$FF
         jsr     snd_fill
         lda     #SND_PC
-        ldx     #8                      ; pages $E8-$EF
+        ldx     #16                     ; pages $D0-$DF
         jsr     snd_fill
         lda     #SND_PT
         ldx     #1
@@ -2171,12 +2174,12 @@ snd_on:
         lda     #SND_RATE
         sta     f:SND_PB + 2
         sta     f:SND_PB + 8
-        lda     #(SND_PC << 8) | $FF    ; volume $FF, both the table at $E800
+        lda     #(SND_PC << 8) | $FF    ; volume $FF, both the table at $D000
         sta     f:SND_PB + 4
         sta     f:SND_PB + 10
-        lda     #$1C01                  ; halted, free-run, channel 0 (left); 2 KB at resolution 4
+        lda     #$2401                  ; halted, free-run, channel 0 (left); 4 KB at resolution 4
         sta     f:SND_PB + 6
-        lda     #$1C11                  ; channel 1 (right)
+        lda     #$2411                  ; channel 1 (right)
         sta     f:SND_PB + 12
         jsr     snd_setdoc
         bcc     :+
@@ -2464,13 +2467,22 @@ snd_irq:
         pla
         pla
         pla
+        asl                             ; the centre's: two pages a chunk
         clc
-        adc     #>(SND_C & $FFFF)       ; the centre's
+        adc     #>(SND_C & $FFFF)
         pha
         lda     #0
         pha
         txa
+        asl                             ;   into two pages a segment
         ora     #SND_PC
+        jsr     snd_page
+        lda     2,s                     ; the chunk's second page
+        inc
+        sta     2,s
+        txa
+        asl
+        ora     #SND_PC + 1
         jsr     snd_page
         pla
         pla
@@ -2489,7 +2501,12 @@ snd_irq:
         ora     #SND_PR
         jsr     snd_hush
         txa
+        asl
         ora     #SND_PC
+        jsr     snd_hush
+        txa
+        asl
+        ora     #SND_PC + 1
         jsr     snd_hush
         rep     #$20
         .a16

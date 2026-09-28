@@ -702,17 +702,21 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
                 if (gen_type[g]) { snprintf(msg, sizeof msg, "generator %u still claimed (type %u) at QuitGS\n", g, gen_type[g]); fail += msg; }
             if (snd_timer >= 0) { snprintf(msg, sizeof msg, "the sound timer (oscillator %d) still runs at QuitGS\n", snd_timer); fail += msg; }
             // each interrupt: 256 bytes into the left ring's page SND_LEAD ahead
-            // of the players, 256 into the right's, 256 into the centre's - a
-            // chunk, whole, in order, or silence
+            // of the players, 256 into the right's, 512 into the centre's two
+            // pages (its 4 KB ring at $D000, a byte a scan) - a chunk, whole, in
+            // order, or silence
             if (expect_sound >= 0) {
                 unsigned next = 1, quiet = 0;
                 for (size_t i = 0; i < snd_irqs.size(); i++) {
                     const auto &q = snd_irqs[i];
-                    const unsigned pl = 0xF000 + (((i + 3) & 7) << 8), pr = pl + 0x800, pc = pl - 0x800;
-                    const unsigned page[3] = {pl, pr, pc};
-                    bool ok = q.ram.size() == 768 && !q.carry;
-                    for (unsigned k = 0; ok && k < 768; k++)
-                        ok = q.ram[k].first == page[k / 256] + k % 256 && q.ram[k].second == q.ram[k - k % 256].second;
+                    const unsigned seg = (i + 3) & 7;
+                    const unsigned pl = 0xF000 + (seg << 8), pr = pl + 0x800, pc = 0xD000 + (seg << 9);
+                    bool ok = q.ram.size() == 1024 && !q.carry;
+                    for (unsigned k = 0; ok && k < 1024; k++) {
+                        const unsigned part = k < 256 ? 0 : k < 512 ? 1 : 2, first = part * 256;   // left, right, centre
+                        const unsigned base = part == 0 ? pl : part == 1 ? pr : pc;
+                        ok = q.ram[k].first == base + (k - first) && q.ram[k].second == q.ram[first].second;
+                    }
                     const unsigned vl = q.ram.empty() ? 0 : q.ram[0].second, vr = q.ram.size() > 256 ? q.ram[256].second : 0,
                                    vc = q.ram.size() > 512 ? q.ram[512].second : 0;
                     if (ok && vl == 0x80 && vr == 0x80 && vc == 0x80) quiet++;

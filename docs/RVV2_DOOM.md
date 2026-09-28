@@ -135,17 +135,18 @@ later. The mouse the IIgs's, as GS/OS keeps it.
   `$05:8266` under System 6.0.1, FFStartSound patched into RAM - the rest ROM). Generator g's pair is
   ROM 03's table `$FC:CE5E` (0, 16, 8, 24, ...) and the next.
 - **The players and the timer**: generator A's pair play 2 KB rings in DOC RAM (`$F000` left, `$F800`
-  right: 8 segments of 256) free-running; generator C's pair both play one more (`$E800`, the centre),
-  one to each side; generator B's first oscillator plays 256 bytes of silence (`$E000`, volume 0)
+  right: 8 segments of 256) free-running; generator C's pair both play one more, one to each side -
+  the centre, since MU3 a 4 KB ring at `$D000` (8 segments of 512) at a byte a scan (26320.2 Hz: the
+  same frequency, 512, taken whole by a 4 KB table at resolution 4); generator B's first oscillator plays 256 bytes of silence (`$E000`, volume 0)
   free-running with its interrupt on. All at frequency 512 with the resolution one above the table's
   (26320 Hz scans with 32 oscillators: 13160.1 Hz, exactly two scans a byte): the timer ends exactly
   every 256 samples the players play - one clock, no drift - and each interrupt the runtime
-  (`snd_irq`, `$F1:0044`) copies the next chunk, left, right and centre, into the segment SND_LEAD (3)
+  (`snd_irq`, `$F1:0044`) copies the next chunk, left, right and centre (256, 256, 512 bytes), into the segment SND_LEAD (3)
   ahead of the players, or silence when none is ready. The runtime's service (`$F1:0048`, call65816:
   on/off) sets all this up and takes it down; the lifecycle's undo turns it off however the program
   ends (D_SND), before ShutDownTools.
 - **The chunks** (librvgs `rvgs_snd_*`, `rvgs_snd_put(left, right, centre)`): 16 of each in
-  `$EE:1000`/`$EE:2000`/`$EE:3000`, counted by SND_HEAD (the program's) and SND_TAIL (the interrupt's)
+  `$EE:1000`/`$EE:2000` (256 bytes) and `$EE:3000` (512: to `$EE:4FFF`), counted by SND_HEAD (the program's) and SND_TAIL (the interrupt's)
   at `$EE:0320`; the engine's writes kill the 65816's L1-D
   rows (rtl/gs/l1d.sv), so the interrupt reads them fresh. The program mixes by the ring's room - the
   DOC's clock paces it; 13160.1 Hz is nothing else's, so nothing else may.
@@ -165,7 +166,7 @@ later. The mouse the IIgs's, as GS/OS keeps it.
   ROM would), SetUserSoundIRQV, ReadMouse and PosMouse; the GLU is modelled (DOC RAM and registers, auto-
   increment); while a timer runs, a shim calls the runtime's vector every 256 samples of the DOC's clock
   as the Sound Tool Set would; RVTEST mixes 12 numbered chunks and `--expect-sound` checks every
-  interrupt's 768 writes - the pages SND_LEAD ahead, the chunk whole and in order, or silence - and that
+  interrupt's 1024 writes - the pages SND_LEAD ahead, the chunk whole and in order, or silence - and that
   each launch ends with the vector back, the generators given back and the timer halted.
 
 ## Music (rung MU1)

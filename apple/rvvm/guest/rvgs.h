@@ -67,27 +67,30 @@ int rvgs_key(void);
 int rvgs_adb_event(void);
 #define RVGS_ADB_UP 0x80
 
-/* Sound (docs/RVV2_DOOM.md, S1-S3): the program mixes, the IIgs's Ensoniq
-   plays.  Chunks of RVGS_SND_CHUNK samples at RVGS_SND_RATE (13160.1 Hz, the
-   DOC's own clock: pace the mixing by rvgs_snd_room, never by a timer), 8-bit
-   unsigned - $80 silence, and never $00, which stops the DOC's voice - a left,
-   a right and a centre.  Three streams, each with all 8 bits: the DOC adds
-   the centre (played to both sides) to the left and the right, so a program's
-   music and its effects need not share - and squash - one sample.  The rate
-   divides the DOC's scan exactly (two scans a sample): nothing is resampled
-   there.  The runtime
+/* Sound (docs/RVV2_DOOM.md, S1-S3, MU3): the program mixes, the IIgs's Ensoniq
+   plays.  A chunk is RVGS_SND_CHUNK samples of left and of right at
+   RVGS_SND_RATE (13160.1 Hz) and RVGS_SND_CCHUNK of centre at RVGS_SND_CRATE
+   (26320.2 Hz) - the same time; the DOC's own clock: pace the mixing by
+   rvgs_snd_room, never by a timer - 8-bit unsigned, $80 silence, and never
+   $00, which stops the DOC's voice.  Three streams, each with all 8 bits: the
+   DOC adds the centre (played to both sides) to the left and the right, so a
+   program's music and its effects need not share - and squash - one sample.
+   Both rates divide the DOC's scan exactly (two scans a sample, one): nothing
+   is resampled there.  The runtime
    owns the voices (three Sound Tool Set generators, played directly) and gives
    them back when the program ends, however it ends; the application's tool
    list must name the Sound Tool Set (tool 8).  rvgs_snd_on: 0, or the Sound
    Tool Set's error ($FFFF: not three generators free).  rvgs_snd_room: the
    chunks the ring takes now (0 = full). */
-#define RVGS_SND_CHUNK 256
-#define RVGS_SND_RATE  13160
+#define RVGS_SND_CHUNK  256
+#define RVGS_SND_RATE   13160
+#define RVGS_SND_CCHUNK 512
+#define RVGS_SND_CRATE  26320
 #define RVGS_SND_RING  16
 unsigned rvgs_snd_on(void);
 void     rvgs_snd_off(void);
 unsigned rvgs_snd_room(void);
-void     rvgs_snd_put(const uint8_t *left, const uint8_t *right, const uint8_t *centre);
+void     rvgs_snd_put(const uint8_t *left, const uint8_t *right, const uint8_t *centre);   /* 256, 256, 512 */
 unsigned rvgs_snd_played(void);   /* chunks the DOC has taken so far */
 
 /* The Event Manager's tick count (TickCount $1006): 60 a second. */

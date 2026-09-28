@@ -50,13 +50,13 @@ void I_InitTimidityConfig(void) {}
 
 static void mix_chunk(void) {
     static uint8_t l[RVGS_SND_CHUNK] __attribute__((aligned(4))), r[RVGS_SND_CHUNK] __attribute__((aligned(4))),
-                   c[RVGS_SND_CHUNK] __attribute__((aligned(4)));
+                   c[RVGS_SND_CCHUNK] __attribute__((aligned(4)));
     static int16_t mus[RVGS_SND_CHUNK];
     opl_rv_fill(mus, RVGS_SND_CHUNK);
     for (unsigned i = 0; i < RVGS_SND_CHUNK; i++) {
         int sc = (mus[i] * MUS_GAIN) >> 7;
         if (sc < -127) sc = -127; else if (sc > 127) sc = 127;
-        c[i] = (uint8_t)(sc + 128);
+        c[2 * i] = c[2 * i + 1] = (uint8_t)(sc + 128);   /* the centre runs at twice the rate (MU3: until the wavetable player) */
         int sl = 0, sr = 0;
         for (unsigned c = 0; c < NCH; c++) {
             struct chan *h = &ch[c];
