@@ -240,11 +240,14 @@ KEY_LOGH  = REG + $30A  ; the log's next place
 KEY_RING  = REG + $400  ; 256 events
 KEY_LOG   = REG + $500  ; 256 bytes of answers
 ; Sound (docs/RVV2_DOOM.md, rungs S1-S3): the program mixes 256-sample chunks,
-; left and right, into two rings of 16 here and counts them in SND_HEAD; the
-; runtime owns two Sound Tool Set generators - their oscillators played
-; directly - and at each timer interrupt (every 256 samples) copies the next
-; chunk into the DOC's own rings, SND_LEAD segments ahead of the players, or
-; silence when none is ready.  All below reset at every entry.
+; left, right and centre, into three rings of 16 here and counts them in
+; SND_HEAD; the runtime owns three Sound Tool Set generators - their oscillators
+; played directly - and at each timer interrupt (every 256 samples) copies the
+; next chunk into the DOC's own rings, SND_LEAD segments ahead of the players,
+; or silence when none is ready.  The centre is a stream of its own (DOOM's
+; music beside its effects): two oscillators play its one ring, one to each
+; side, and the DOC adds them to the left and right - each stream has all 8
+; bits, none squashes another.  All below reset at every entry.
 SND_HEAD  = REG + $320  ; chunks the program has mixed (the program's)
 SND_TAIL  = REG + $322  ; chunks copied to the DOC (the interrupt's)
 SND_UNDER = REG + $324  ; interrupts with no chunk ready (silence played)
@@ -257,14 +260,20 @@ SND_GB    = REG + $330  ; generator B (the timer), $FFFF none
 SND_OLDV  = REG + $332  ; the user vector before ours (4)
 SND_TMPA  = REG + $336  ; the interrupt's scratch: A to hand on
 SND_TMPV  = REG + $338  ;   and the old vector - 1's low word
+SND_GC    = REG + $33A  ; generator C (the centre's players), $FFFF none
 SND_PB    = REG + $340  ; SetDOCReg's parameter block (14)
 SND_L     = REG + $1000 ; 16 chunks of 256, the left
 SND_R     = REG + $2000 ; 16 chunks of 256, the right
+SND_C     = REG + $3000 ; 16 chunks of 256, the centre (both sides)
 SND_LEAD  = 3           ; DOC segments between the players and the chunk written
-SND_RATE  = $01AD       ; 11026.8 Hz: 26320 Hz scans (32 oscillators) x 429 / 2^10
+SND_RATE  = $0200       ; 13160.1 Hz: 26320 Hz scans (32 oscillators) x 512 / 2^10 - a
+                        ; sample every two scans exactly.  A rate that does not divide
+                        ; the scans (11026.8 Hz was 0.42 a scan) is resampled by the DOC,
+                        ; nearest, no interpolation: inharmonic spurs in the audible band
 SND_PL    = $F0         ; the DOC's left ring: pages $F0-$F7 (2 KB, aligned)
 SND_PR    = $F8         ; the right ring: $F8-$FF
 SND_PT    = $E0         ; the timer's page: 256 samples of silence
+SND_PC    = $E8         ; the centre's ring: pages $E8-$EF, both its players
 GLU_CTL   = $E1C03C     ; the sound GLU: bit 6 RAM, bit 5 auto-increment, 3:0 the volume
 GLU_DATA  = $E1C03D
 GLU_ADL   = $E1C03E
@@ -479,6 +488,7 @@ reg_up: lda     f:REG
         dec
         sta     f:SND_GA                ; no generators
         sta     f:SND_GB
+        sta     f:SND_GC
         lda     f:REG_APP
         beq     :+
         jsr     reclaim
@@ -2053,7 +2063,7 @@ adb_done:
 ; ---- sound (docs/RVV2_DOOM.md, rungs S1-S3) -----------------------------------------
 ; The service, called by the program through call65816 ($F1:0048): native,
 ; 16-bit, D the runtime's, B $EF; A = 1 on, 0 off.  Returns (RTL) A = 0, or the
-; Sound Tool Set's error, or $FFFF when two generators are not free.  The
+; Sound Tool Set's error, or $FFFF when three generators are not free.  The
 ; Sound Tool Set must be running (the application's tool list names tool 8).
         .a16
         .i16
@@ -2066,12 +2076,13 @@ snd_call:
         lda     #0
         rtl
 
-; Two generators the Sound Tool Set has no use for, claimed (SetDOCReg writes
+; Three generators the Sound Tool Set has no use for, claimed (SetDOCReg writes
 ; the type, $08: the application's), their oscillators programmed halted: A's
-; pair the players (left, right: a 2 KB ring each), B's first the timer (256
-; samples of silence, its interrupt on) - all at SND_RATE, so the timer ends
-; exactly each 256 samples the players play.  The DOC's rings silent, our
-; vector installed, then the three started together.
+; pair the players (left, right: a 2 KB ring each), C's pair the centre's (one
+; 2 KB ring, one to each side), B's first the timer (256 samples of silence,
+; its interrupt on) - all at SND_RATE, so the timer ends exactly each 256
+; samples the players play.  The DOC's rings silent, our vector installed,
+; then the five started together.
 snd_on:
         lda     f:SND_ON
         beq     :+
@@ -2094,20 +2105,26 @@ snd_on:
         cmp     #0
         bne     @next                   ; in use
         lda     f:SND_GA
-        bpl     :+
+        bpl     @notA
         txa
         sta     f:SND_GA
         bra     @next
-:       txa
+@notA:  lda     f:SND_GB
+        bpl     @notB
+        txa
         sta     f:SND_GB
+        bra     @next
+@notB:  txa
+        sta     f:SND_GC
         bra     @got
 @next:  dex
         bpl     @scan
-        lda     #$FFFF                  ; not two free
+        lda     #$FFFF                  ; not three free
 @fail:  pha
         lda     #$FFFF
         sta     f:SND_GA
         sta     f:SND_GB
+        sta     f:SND_GC
         pla
         rts
 
@@ -2117,6 +2134,9 @@ snd_on:
         .a8
         lda     #SND_PL
         ldx     #16                     ; pages $F0-$FF
+        jsr     snd_fill
+        lda     #SND_PC
+        ldx     #8                      ; pages $E8-$EF
         jsr     snd_fill
         lda     #SND_PT
         ldx     #1
@@ -2135,6 +2155,24 @@ snd_on:
         lda     #(SND_PL << 8) | $FF    ; volume $FF, the table at $F000
         sta     f:SND_PB + 4
         lda     #(SND_PR << 8) | $FF    ;   and $F800
+        sta     f:SND_PB + 10
+        lda     #$1C01                  ; halted, free-run, channel 0 (left); 2 KB at resolution 4
+        sta     f:SND_PB + 6
+        lda     #$1C11                  ; channel 1 (right)
+        sta     f:SND_PB + 12
+        jsr     snd_setdoc
+        bcc     :+
+        jmp     @toolf
+:       lda     f:SND_GC                ; C: the centre's players, one ring to both sides
+        xba
+        and     #$0F00
+        ora     #$C008
+        sta     f:SND_PB
+        lda     #SND_RATE
+        sta     f:SND_PB + 2
+        sta     f:SND_PB + 8
+        lda     #(SND_PC << 8) | $FF    ; volume $FF, both the table at $E800
+        sta     f:SND_PB + 4
         sta     f:SND_PB + 10
         lda     #$1C01                  ; halted, free-run, channel 0 (left); 2 KB at resolution 4
         sta     f:SND_PB + 6
@@ -2202,6 +2240,15 @@ snd_on:
         sta     f:GLU_DATA
         lda     #$10                    ; right: running
         sta     f:GLU_DATA
+        lda     f:SND_GC                ; the centre's pair, the same
+        tax
+        lda     f:snd_osc,x
+        ora     #$A0
+        sta     f:GLU_ADL
+        lda     #$00
+        sta     f:GLU_DATA
+        lda     #$10
+        sta     f:GLU_DATA
         tya
         ora     #$A0
         sta     f:GLU_ADL
@@ -2223,7 +2270,7 @@ snd_on:
         pla
         jmp     @fail
 
-; Off: the three halted, the old vector back, the generators given back.
+; Off: the five halted, the old vector back, the generators given back.
 snd_off:
         lda     f:SND_ON
         bne     :+
@@ -2238,6 +2285,15 @@ snd_off:
         ora     #$20
         sta     f:GLU_CTL
         lda     f:SND_GA
+        tax
+        lda     f:snd_osc,x
+        ora     #$A0
+        sta     f:GLU_ADL
+        lda     #$01
+        sta     f:GLU_DATA
+        lda     #$11
+        sta     f:GLU_DATA
+        lda     f:SND_GC
         tax
         lda     f:snd_osc,x
         ora     #$A0
@@ -2288,9 +2344,16 @@ snd_release:
         and     #$0F00
         sta     f:SND_PB
         jsr     snd_setdoc
+:       lda     f:SND_GC
+        bmi     :+
+        xba
+        and     #$0F00
+        sta     f:SND_PB
+        jsr     snd_setdoc
 :       lda     #$FFFF
         sta     f:SND_GA
         sta     f:SND_GB
+        sta     f:SND_GC
         rts
 
 snd_setdoc:                             ; SetDOCReg(SND_PB): C and A the error
@@ -2329,7 +2392,7 @@ snd_fill:
 ; THE INTERRUPT: the Sound Tool Set's handler calls its user vector for an
 ; oscillator whose generator's type is not its own (ROM 03 $FCD50B): 8-bit, A
 ; = the type, X = the generator's control block, D its direct page, I set.
-; Ours ($08, the timer's): the next chunk - left and right - into the DOC's
+; Ours ($08, the timer's): the next chunk - left, right, centre - into the DOC's
 ; rings SND_LEAD segments ahead of the players, or silence; CLC, RTL.  Any
 ; other: to the vector we replaced, A as it came.
         .a8
@@ -2389,6 +2452,7 @@ snd_irq:
         pla
         pla
         pla
+        pha                             ; (the chunk, again for the centre)
         clc
         adc     #>(SND_R & $FFFF)       ; the right's
         pha
@@ -2396,6 +2460,17 @@ snd_irq:
         pha
         txa
         ora     #SND_PR
+        jsr     snd_page
+        pla
+        pla
+        pla
+        clc
+        adc     #>(SND_C & $FFFF)       ; the centre's
+        pha
+        lda     #0
+        pha
+        txa
+        ora     #SND_PC
         jsr     snd_page
         pla
         pla
@@ -2412,6 +2487,9 @@ snd_irq:
         jsr     snd_hush
         txa
         ora     #SND_PR
+        jsr     snd_hush
+        txa
+        ora     #SND_PC
         jsr     snd_hush
         rep     #$20
         .a16

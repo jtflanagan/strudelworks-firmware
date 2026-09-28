@@ -75,6 +75,7 @@ unsigned rvgs_tool(unsigned num, const void *params, unsigned plen, void *result
 #define SND_TAIL ((volatile uint16_t *)(uintptr_t)0x00EE0322u)
 #define SND_L    ((volatile uint8_t *)(uintptr_t)0x00EE1000u)
 #define SND_R    ((volatile uint8_t *)(uintptr_t)0x00EE2000u)
+#define SND_C    ((volatile uint8_t *)(uintptr_t)0x00EE3000u)
 
 static unsigned snd_service(unsigned on) {
     uint8_t *ca = call_area();
@@ -96,14 +97,16 @@ unsigned rvgs_snd_room(void) {
 
 unsigned rvgs_snd_played(void) { return *SND_TAIL; }
 
-void rvgs_snd_put(const uint8_t *left, const uint8_t *right) {
+void rvgs_snd_put(const uint8_t *left, const uint8_t *right, const uint8_t *centre) {
     const uint16_t h = *SND_HEAD;
     const unsigned at = (h % RVGS_SND_RING) * RVGS_SND_CHUNK;
     /* words: the ring is in memory the 65816 reads, whole bytes land either way */
-    volatile uint32_t *l = (volatile uint32_t *)(SND_L + at), *r = (volatile uint32_t *)(SND_R + at);
+    volatile uint32_t *l = (volatile uint32_t *)(SND_L + at), *r = (volatile uint32_t *)(SND_R + at),
+                      *c = (volatile uint32_t *)(SND_C + at);
     for (unsigned i = 0; i < RVGS_SND_CHUNK / 4; i++) {
         l[i] = ((const uint32_t *)left)[i];
         r[i] = ((const uint32_t *)right)[i];
+        c[i] = ((const uint32_t *)centre)[i];
     }
     *SND_HEAD = (uint16_t)(h + 1);           /* after the chunk: the interrupt takes it whole */
 }

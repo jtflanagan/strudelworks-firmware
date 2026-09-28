@@ -5,7 +5,9 @@ launched from the Finder off its own volume (hd2); keys from the raw ADB events,
 Miscellaneous Tool Set; effects and music (Chocolate Doom's OPL player on DBOPL) mixed on the engine
 and played by the IIgs's Ensoniq in stereo - judged good by ear (user). Drawn in enhanced video's
 mode 4 (8-bit indexed): at DOOM's cap of 35 frames a second in E1M1 with music, dipping in heavy
-scenes (DEMO1 uncapped: median 38.7 fps, the worst frames ~50 ms). D1-D5, S1-S3, M1 and MU1 done.**
+scenes (DEMO1 uncapped: median 38.7 fps, the worst frames ~50 ms). D1-D5, S1-S3, M1 and MU1 done.
+Evening 2026-09-27 (MU2, below): the music a stream of its own beside the effects, everything at
+13160.1 Hz - two DOC scans a sample - and the mix 8 chunks ahead; better by ear (user).**
 
 ## The base: doomgeneric
 
@@ -121,7 +123,7 @@ later. The mouse the IIgs's, as GS/OS keeps it.
   4: set is the right) - so the effects are stereo, a player a side. The accumulator is not readable:
   where the players are is known by a timer's interrupt, not read.
 - **Owning voices under GS/OS** - HyperCard IIgs's way: the Sound Tool Set (tool 8, in the
-  application's tool list, StartUpTools starting it) keeps the DOC's interrupt; the runtime claims two
+  application's tool list, StartUpTools starting it) keeps the DOC's interrupt; the runtime claims three
   generators it is not using (FFGeneratorStatus `$1108` = 0; SetDOCReg `$1708` writes the type,
   `$08`, and programs the pair halted - its block read off ROM 03 `$FC:D273`: generator word, then
   freq lo, hi, volume, table, control, size per oscillator), installs its vector (SetUserSoundIRQV
@@ -130,23 +132,26 @@ later. The mouse the IIgs's, as GS/OS keeps it.
   `$05:8266` under System 6.0.1, FFStartSound patched into RAM - the rest ROM). Generator g's pair is
   ROM 03's table `$FC:CE5E` (0, 16, 8, 24, ...) and the next.
 - **The players and the timer**: generator A's pair play 2 KB rings in DOC RAM (`$F000` left, `$F800`
-  right: 8 segments of 256) free-running; generator B's first oscillator plays 256 bytes of silence
-  (`$E000`, volume 0) free-running with its interrupt on. All at frequency 429 with the resolution one
-  above the table's (26320 Hz scans with 32 oscillators: 11026.8 Hz, 0.42 bytes a scan): the timer
-  ends exactly every 256 samples the players play - one clock, no drift - and each interrupt the
-  runtime (`snd_irq`, `$F1:0044`) copies the next chunk, left and right, into the segment SND_LEAD (3)
+  right: 8 segments of 256) free-running; generator C's pair both play one more (`$E800`, the centre),
+  one to each side; generator B's first oscillator plays 256 bytes of silence (`$E000`, volume 0)
+  free-running with its interrupt on. All at frequency 512 with the resolution one above the table's
+  (26320 Hz scans with 32 oscillators: 13160.1 Hz, exactly two scans a byte): the timer ends exactly
+  every 256 samples the players play - one clock, no drift - and each interrupt the runtime
+  (`snd_irq`, `$F1:0044`) copies the next chunk, left, right and centre, into the segment SND_LEAD (3)
   ahead of the players, or silence when none is ready. The runtime's service (`$F1:0048`, call65816:
   on/off) sets all this up and takes it down; the lifecycle's undo turns it off however the program
   ends (D_SND), before ShutDownTools.
-- **The chunks** (librvgs `rvgs_snd_*`): 16 a side in `$EE:1000`/`$EE:2000`, counted by SND_HEAD (the
-  program's) and SND_TAIL (the interrupt's) at `$EE:0320`; the engine's writes kill the 65816's L1-D
+- **The chunks** (librvgs `rvgs_snd_*`, `rvgs_snd_put(left, right, centre)`): 16 of each in
+  `$EE:1000`/`$EE:2000`/`$EE:3000`, counted by SND_HEAD (the program's) and SND_TAIL (the interrupt's)
+  at `$EE:0320`; the engine's writes kill the 65816's L1-D
   rows (rtl/gs/l1d.sv), so the interrupt reads them fresh. The program mixes by the ring's room - the
-  DOC's clock paces it; 11026.8 Hz is not 11025, so nothing else may.
+  DOC's clock paces it; 13160.1 Hz is nothing else's, so nothing else may.
 - **DOOM** (`apple/rvvm/doom/snd_rv.c`): doomgeneric's sound module (FEATURE_SOUND; an empty
   SDL_mixer.h for i_sound.c's include; a music module that plays nothing): eight channels of the WAD's
-  DS lumps as they are (11025 Hz, the DMX padding skipped), volume and separation by SDL's rule, the
-  mix clamped to never $00, SND_AHEAD (3) chunks ahead - from each tic's Update and from DOOM's sleeps.
-  Latency: up to ~140 ms (3 DOC segments + 3 chunks) - judged good by ear.
+  DS lumps (11025 Hz, the DMX padding skipped) stepped (nearest) to 13160 Hz, volume and separation by
+  SDL's rule, the mix clamped to never $00, SND_AHEAD (8) chunks ahead - from each tic's Update, after
+  every frame and from DOOM's sleeps. 3 ahead (58 ms) ran dry under slow frames; 8 is ~156 ms, so the
+  latency is up to ~215 ms (3 DOC segments + 8 chunks).
 - **On hardware**: generators 14 and 13 claimed, ~43 interrupts a second, the mixer 2-3 chunks ahead,
   silence only before DOOM's loop mixes (start-up); left and right as KEGS's channel bit (set = the
   right) - correct by ear, whatever Tech Note #19 says of stereo cards.
@@ -157,7 +162,7 @@ later. The mouse the IIgs's, as GS/OS keeps it.
   ROM would), SetUserSoundIRQV, ReadMouse and PosMouse; the GLU is modelled (DOC RAM and registers, auto-
   increment); while a timer runs, a shim calls the runtime's vector every 256 samples of the DOC's clock
   as the Sound Tool Set would; RVTEST mixes 12 numbered chunks and `--expect-sound` checks every
-  interrupt's 512 writes - the pages SND_LEAD ahead, the chunk whole and in order, or silence - and that
+  interrupt's 768 writes - the pages SND_LEAD ahead, the chunk whole and in order, or silence - and that
   each launch ends with the vector back, the generators given back and the timer halted.
 
 ## Music (rung MU1)
@@ -182,14 +187,41 @@ Ensoniq - so its clock is the DOC's too.
   writes the song as a MIDI file and reads it back); `compat/SDL.h`, `SDL_endian.h`, `SDL_mixer.h`
   (Chocolate Doom's own headers are found first by its files: they match doomgeneric's where it
   matters - the music module's struct identical, `boolean` 4 bytes either way).
-- **The mix** (`snd_rv.c`): the OPL's 16 bits x MUS_GAIN (20) into both sides, the effects at
-  SFX_GAIN/4 (3/4); DOOM's music volume is the player's (its channel levels). DBOPL peaks ~800-1400 at
-  the default slider (DOOM's report `$EE:FE14` writes, `$EE:FE18` the second's peak): >> 8 was
-  inaudible, x8 quiet, x20 with the effects at 3/4 a good balance by ear (user); the loudest passages
-  reach the clamp - louder needs the DOC's level at the host (docs/AUDIO.md), not more gain here.
+- **The mix** (`snd_rv.c`, as of MU2): the OPL's 16 bits x MUS_GAIN (4) into the centre stream, the
+  effects at SFX_GAIN/4 (3/4) into left and right; DOOM's music volume is the player's (its channel
+  levels). DBOPL peaks ~800-1400 on the title, 3726 in E1M1's demo (DOOM's report `$EE:FE14` writes,
+  `$EE:FE18` the second's peak).
 - **On hardware**: the title's and the demos' music heard (user). The cost: 29.5 frames a second in
   the demos against ~35 without music - DBOPL takes about a sixth of the engine. The mix is topped up
   after every frame as well as in DOOM's sleeps (a busy DOOM seldom sleeps: ~0.5% silent chunks before).
+
+## Music, second pass (rung MU2, 2026-09-27 evening)
+
+What the user heard, in order, and what each was:
+
+- **"A low note buzzes"; "the effects are very quiet"**: one 8-bit sample carried both, and the music,
+  turned up to x20 to be heard, clipped E1M1 4.6x over (3726 against 812) - its bass squared off into a
+  buzz, and an effect added to a sample pinned at the rail was lost. Why x20 was needed: the card keeps
+  the DOC's mix for 32 oscillators at full scale (`audio_sampler.sv`, `doc_l[20:5]`), so one voice at
+  $FF is ~1/32 of it on the host, ~-34 dBFS. Fixed twice over: **the music a stream of its own** (the
+  centre: its own ring and oscillators, the DOC adds it to both sides, so music and effects each have
+  all 8 bits and nothing squashes), and **the level after the DOC** - the host's `audio_ensoniq_gain`
+  (x its usual level, 1-32; default 1, rv2_doom.conf 8), never in these 8 bits.
+- **"22 kHz sounds no better, maybe worse"**: the DOC has no rate of its own - each scan (26320 Hz with
+  GS/OS's 32 oscillators) it plays whatever byte the accumulator points at, no interpolation. A stream
+  at a rate that does not divide the scan is resampled nearest: inharmonic spurs in the band. Modelled
+  (the DOC's stepping, 8-bit samples, the host's 14 kHz low-pass; a tone's SINAD): 11026.8 Hz 24.5 dB at
+  440 Hz and 10.5 dB at 2 kHz (worst spur ~9 kHz); 22053.6 Hz 29.5 / 16.4 dB (spur at ~6.3 kHz - worse
+  placed); 26320 Hz (a byte a scan) 49.9 dB at any pitch, the 8-bit floor. So: **13160.1 Hz, two scans
+  a byte**, for everything - better by ear (user). The music at 26320 (a byte a scan) was tried: DBOPL
+  twice the work, the mix ran dry about twice a second under the old 3-chunk lead, and the engine
+  trapped once (Open) - the user chose one rate, 13160.
+- **The DBOPL cost**: `apple/rvvm/doom/dbopl_rv.c` is Chocolate Doom's `opl/dbopl.c` with the channel's
+  block template and the operators' volume forced inline (the C port's generic template and indirect
+  volume calls were ~8.5% + 2.6% of DOOM's time); `sim/run_dbopl_equiv.sh` proves it bit-identical to
+  the original on the PC (6000 chunks, OPL2 and OPL3, random register writes).
+- **Next for quality**: the 8 bits. The high byte on one oscillator at volume 255 and the low on a
+  second at volume 1 sum to ~16 bits in the DOC - of which the card's `doc_l[20:5]` keeps ~11.
 
 ## Speed (2026-09-27)
 
@@ -218,6 +250,12 @@ Ensoniq - so its clock is the DOC's too.
 
 ## Open
 
+- **An engine fetch fault** (2026-09-27, bit mis3, once, music at 26320 Hz): DOOM trapped - illegal
+  instruction at `$01000C50`, the instruction after the ECALL in `rvgs_ticks` (TickCount). The word
+  executed was `$00F1E000`; memory held the right one (`bnez a0`, the host's mirror, identical to the
+  file). `$00F1E000` is `rt_loader`'s address - the value the 65816 writes to `WPC` (`$EF:FE80`) at each
+  launch, its only other copy in the 32 MB. The fetch after an ECALL's resume took a window register's
+  value, not memory: an engine bug to find (rv_pipe's resume and fetch against the window's writes).
 - How fast a sim run reaches DOOM's first frame on the application bench (the engine and the 65816
   in Verilator); a faster bring-up path - the reference model running the program with the runtime's
   services emulated at the ECALL - may be worth building for the port's iterations.

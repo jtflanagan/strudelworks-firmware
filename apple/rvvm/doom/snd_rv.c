@@ -1,15 +1,19 @@
 /* snd_rv.c - DOOM's sound effects on the IIgs's Ensoniq (docs/RVV2_DOOM.md,
    rungs S1-S3): doomgeneric's sound module (i_sound.h), a mixer on the engine.
    The effects are the WAD's DS lumps - 8-bit unsigned, $80 the middle, 11025
-   Hz, 16 bytes of padding at each end - played as they are: the DOC's rate is
-   11026.8 Hz (librvgs, RVGS_SND_RATE), too close to step.  Eight channels mix
+   Hz, 16 bytes of padding at each end - stepped (nearest) to the DOC's rate,
+   13160.1 Hz (librvgs, RVGS_SND_RATE: two DOC scans a sample).  Eight channels mix
    into 256-sample chunks, left and right by DOOM's separation (SDL's rule: 0 is
    the left), never $00 (that stops a DOC voice); the runtime's interrupt
    copies each into the DOC.  Mixed as the ring has room, SND_AHEAD chunks
    ahead of the DOC, from DOOM's per-tic Update and from its sleeps
    (snd_pump, doom_rv.c) - paced by the DOC's own clock.  The music: Chocolate
    Doom's OPL player (the music module, app.mk) on an OPL2 of our own
-   (opl_rv.c), its samples mixed into both sides. */
+   (opl_rv.c) at the same rate, in the runtime's centre stream: the DOC adds
+   it to both sides,
+   so the music and the effects each have all 8 bits and never squash each
+   other (they shared one sample until 2026-09-27: the music turned up to be
+   heard clipped, its bass a buzz, and buried the effects under the clamp). */
 #include <stdint.h>
 #include <stdio.h>
 #include "doomtype.h"
@@ -19,13 +23,13 @@
 #include "rvgs.h"
 
 #define NCH       8
-#define SND_AHEAD 3                             /* chunks mixed ahead of the DOC */
-/* The balance, in the mix's unit (1/128 of an 8-bit step): the OPL's 16 bits
-   x MUS_GAIN, the effects' samples x volume x SFX_GAIN/4.  DOOM's music on
-   DBOPL peaks ~800-1400 at the default volume (on the card, opl_rv_peak); the
-   top 8 bits alone (>> 8) were inaudible, x8 quiet beside the effects (by ear,
-   user): x20, the effects at 3/4 - the loudest passages at the clamp. */
-#define MUS_GAIN  20
+#define SND_AHEAD 8                             /* chunks mixed ahead of the DOC: 156 ms at 13160 Hz (3 ran dry under a slow frame) */
+/* Each stream's scale, in the mix's unit (1/128 of an 8-bit step): the OPL's
+   16 bits x MUS_GAIN, the effects' samples x volume x SFX_GAIN/4.  DOOM's music
+   on DBOPL peaks ~800-1400 at the default volume on the title, 3726 in E1M1's
+   demo (on the card, opl_rv_peak): x4 puts that at 116 of 127.  One effect at
+   full volume is 94; several together may clamp, in their own stream only. */
+#define MUS_GAIN  4
 #define SFX_GAIN  3
 
 void opl_rv_fill(int16_t *out, unsigned n);     /* opl_rv.c */
@@ -45,11 +49,15 @@ float libsamplerate_scale = 0.65f;
 void I_InitTimidityConfig(void) {}
 
 static void mix_chunk(void) {
-    static uint8_t l[RVGS_SND_CHUNK] __attribute__((aligned(4))), r[RVGS_SND_CHUNK] __attribute__((aligned(4)));
+    static uint8_t l[RVGS_SND_CHUNK] __attribute__((aligned(4))), r[RVGS_SND_CHUNK] __attribute__((aligned(4))),
+                   c[RVGS_SND_CHUNK] __attribute__((aligned(4)));
     static int16_t mus[RVGS_SND_CHUNK];
     opl_rv_fill(mus, RVGS_SND_CHUNK);
     for (unsigned i = 0; i < RVGS_SND_CHUNK; i++) {
-        int sl = mus[i] * MUS_GAIN, sr = sl;
+        int sc = (mus[i] * MUS_GAIN) >> 7;
+        if (sc < -127) sc = -127; else if (sc > 127) sc = 127;
+        c[i] = (uint8_t)(sc + 128);
+        int sl = 0, sr = 0;
         for (unsigned c = 0; c < NCH; c++) {
             struct chan *h = &ch[c];
             if (!h->data) continue;
@@ -65,7 +73,7 @@ static void mix_chunk(void) {
         l[i] = (uint8_t)(sl + 128);
         r[i] = (uint8_t)(sr + 128);
     }
-    rvgs_snd_put(l, r);
+    rvgs_snd_put(l, r, c);
 }
 
 void snd_pump(void) {

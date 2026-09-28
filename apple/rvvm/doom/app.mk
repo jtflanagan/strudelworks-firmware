@@ -19,7 +19,7 @@ case "${DOOM_PROFILE:-}" in             # sim/profile_doom.sh's builds
     warp)     EXTRA_CFLAGS="$EXTRA_CFLAGS -DDOOM_WARP";;       # straight into E1M1
     timedemo) EXTRA_CFLAGS="$EXTRA_CFLAGS -DDOOM_TIMEDEMO";;   # DEMO1, no cap
 esac
-EXTRA_SRCS="$choc/src/i_oplmusic.c $choc/src/midifile.c $choc/opl/opl.c $choc/opl/opl_queue.c $choc/opl/dbopl.c"
+EXTRA_SRCS="$choc/src/i_oplmusic.c $choc/src/midifile.c $choc/opl/opl.c $choc/opl/opl_queue.c"   # (dbopl_rv.c, the tuned DBOPL, is in this folder: built as one of its *.c)
 for f in dummy am_map doomdef doomstat dstrings d_event d_items d_iwad d_loop d_main d_mode d_net f_finale \
          f_wipe g_game hu_lib hu_stuff info i_cdmus i_endoom i_joystick i_scale i_sound i_system i_timer memio \
          m_argv m_bbox m_cheat m_config m_controls m_fixed m_menu m_misc m_random mus2mid p_ceilng p_doors p_enemy \

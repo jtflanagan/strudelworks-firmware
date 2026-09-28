@@ -152,20 +152,21 @@ static int adb(void) {
     return got == 4 ? 0 : 27;
 }
 
-/* Sound (S1): chunk k is k + 1 on the left and $81 + k on the right - no $00,
-   no $80 - handed over as the ring has room, until the DOC's side has taken
+/* Sound (S1): chunk k is k + 1 on the left, $81 + k on the right and $41 + k
+   in the centre - no $00, no $80 - handed over as the ring has room, until the DOC's side has taken
    them all; the bench checks each interrupt put the right chunk, or silence,
    in the right pages (sim/rvvm_run_main.cpp). */
 #define SND_CHUNKS 12
 static int sound(void) {
     if (rvgs_snd_on() != 0) return 28;
-    static uint8_t l[RVGS_SND_CHUNK] __attribute__((aligned(4))), r[RVGS_SND_CHUNK] __attribute__((aligned(4)));
+    static uint8_t l[RVGS_SND_CHUNK] __attribute__((aligned(4))), r[RVGS_SND_CHUNK] __attribute__((aligned(4))),
+                   c[RVGS_SND_CHUNK] __attribute__((aligned(4)));
     unsigned made = 0;
     const uint32_t t0 = rvgs_ticks();
     while (rvgs_snd_played() < SND_CHUNKS && rvgs_ticks() - t0 < 60) {
         if (made < SND_CHUNKS && rvgs_snd_room()) {
-            for (unsigned i = 0; i < RVGS_SND_CHUNK; i++) { l[i] = (uint8_t)(1 + made); r[i] = (uint8_t)(0x81 + made); }
-            rvgs_snd_put(l, r);
+            for (unsigned i = 0; i < RVGS_SND_CHUNK; i++) { l[i] = (uint8_t)(1 + made); r[i] = (uint8_t)(0x81 + made); c[i] = (uint8_t)(0x41 + made); }
+            rvgs_snd_put(l, r, c);
             made++;
         }
     }

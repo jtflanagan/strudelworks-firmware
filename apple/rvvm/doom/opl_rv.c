@@ -1,6 +1,7 @@
 /* opl_rv.c - an OPL2 for DOOM's music on the RISC-V engine (docs/RVV2_DOOM.md,
    rung MU1): Chocolate Doom's OPL driver (opl/opl_sdl.c, chocolate-doom-2.2.1)
-   without SDL.  DOSBox's DBOPL (opl/dbopl.c) at the DOC's rate; the callback
+   without SDL.  DOSBox's DBOPL (dbopl_rv.c) at the DOC's rate (RVGS_SND_RATE,
+   the music's own stream beside the effects'); the callback
    queue timed in the samples made - the music's clock is the DOC's, as the
    effects' is; the two timers modelled for OPL_Detect.  The mixer (snd_rv.c)
    asks for each chunk's samples (opl_rv_fill); OPL_Delay's wait runs the next

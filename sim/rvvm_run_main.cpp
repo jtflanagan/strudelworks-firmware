@@ -313,7 +313,7 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
     // of the DOC's clock the timer is running for, marked on either side so the
     // GLU's writes between are the interrupt's; everything kept for the caller.
     const unsigned SND_SHIM = TRAMPS + 0x140, SND_MARK = 0x004200;
-    const uint64_t SND_PERIOD = 2321600;            // 256 / 11026.8 Hz at 100 MHz
+    const uint64_t SND_PERIOD = 1945277;            // 256 / 13160.09 Hz at 100 MHz (the runtime's SND_RATE)
     {
         const unsigned char shim[] = {
             0x08, 0x8B, 0xC2, 0x30, 0x48, 0xDA, 0x5A,          // PHP PHB REP #$30 PHA PHX PHY
@@ -702,20 +702,22 @@ static int run_app(const char *hex, const char *vm, unsigned vm_bank, const char
                 if (gen_type[g]) { snprintf(msg, sizeof msg, "generator %u still claimed (type %u) at QuitGS\n", g, gen_type[g]); fail += msg; }
             if (snd_timer >= 0) { snprintf(msg, sizeof msg, "the sound timer (oscillator %d) still runs at QuitGS\n", snd_timer); fail += msg; }
             // each interrupt: 256 bytes into the left ring's page SND_LEAD ahead
-            // of the players, 256 into the right's - a chunk, whole, in order,
-            // or silence
+            // of the players, 256 into the right's, 256 into the centre's - a
+            // chunk, whole, in order, or silence
             if (expect_sound >= 0) {
                 unsigned next = 1, quiet = 0;
                 for (size_t i = 0; i < snd_irqs.size(); i++) {
                     const auto &q = snd_irqs[i];
-                    const unsigned pl = 0xF000 + (((i + 3) & 7) << 8), pr = pl + 0x800;
-                    bool ok = q.ram.size() == 512 && !q.carry;
-                    for (unsigned k = 0; ok && k < 512; k++)
-                        ok = q.ram[k].first == (k < 256 ? pl + k : pr + k - 256) && q.ram[k].second == q.ram[k < 256 ? 0 : 256].second;
-                    const unsigned vl = q.ram.empty() ? 0 : q.ram[0].second, vr = q.ram.size() > 256 ? q.ram[256].second : 0;
-                    if (ok && vl == 0x80 && vr == 0x80) quiet++;
-                    else if (ok && vl == next && vr == 0x80 + next) next++;
-                    else { snprintf(msg, sizeof msg, "sound interrupt %zu: %zu writes, left $%02X right $%02X%s - want chunk %u at pages $%04X/$%04X\n", i, q.ram.size(), vl, vr, q.carry ? ", carry set" : "", next, pl, pr); fail += msg; break; }
+                    const unsigned pl = 0xF000 + (((i + 3) & 7) << 8), pr = pl + 0x800, pc = pl - 0x800;
+                    const unsigned page[3] = {pl, pr, pc};
+                    bool ok = q.ram.size() == 768 && !q.carry;
+                    for (unsigned k = 0; ok && k < 768; k++)
+                        ok = q.ram[k].first == page[k / 256] + k % 256 && q.ram[k].second == q.ram[k - k % 256].second;
+                    const unsigned vl = q.ram.empty() ? 0 : q.ram[0].second, vr = q.ram.size() > 256 ? q.ram[256].second : 0,
+                                   vc = q.ram.size() > 512 ? q.ram[512].second : 0;
+                    if (ok && vl == 0x80 && vr == 0x80 && vc == 0x80) quiet++;
+                    else if (ok && vl == next && vr == 0x80 + next && vc == 0x40 + next) next++;
+                    else { snprintf(msg, sizeof msg, "sound interrupt %zu: %zu writes, left $%02X right $%02X centre $%02X%s - want chunk %u at pages $%04X/$%04X/$%04X\n", i, q.ram.size(), vl, vr, vc, q.carry ? ", carry set" : "", next, pl, pr, pc); fail += msg; break; }
                 }
                 printf("app: sound: %zu interrupts, %u chunks, %u silent\n", snd_irqs.size(), next - 1, quiet);
                 if (next - 1 < unsigned(expect_sound)) { snprintf(msg, sizeof msg, "sound: %u chunks reached the DOC, want %d\n", next - 1, expect_sound); fail += msg; }
